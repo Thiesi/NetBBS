@@ -1,0 +1,666 @@
+# NetBBS — Design Document (v0.1, draft for review)
+
+Second attempt at a modern, TCP/IP-native BBS system. First attempt got far
+(multi-user chat, file areas, message boards) but required a rewrite once
+mesh networking ("the Link") entered scope — this attempt builds the Link in
+as a foundational principle from day one instead of retrofitting it.
+
+Status: **CONFIRMED — signed off by Thiesi through 6 rounds of review
+(initial design, first-attempt-docs review, first-attempt team Q&A,
+permissions & moderation, board/channel lifecycle, phasing scope review).
+Ready for implementation.**
+
+---
+
+## 1. Naming
+
+- **NetBBS** — the project itself, named for its primary target OS.
+- **the Link** — the ad-hoc mesh network connecting NetBBS nodes.
+- **Linked boards** — message boards distributed/synced across the Link.
+- **Link messages** — personal messages routed across the Link.
+- **Board vs. Area (strict terminology, borrowed from the first attempt):**
+  "Board" always means *message* board. "Area" always means *file* area.
+  Never use "board" for files. So: **linked file areas**, not "linked file
+  boards."
+
+## 2. Philosophy / non-negotiables carried over from the first attempt
+
+- The Link is foundational, not bolted on. Every feature should be designed
+  with "could/should this work across the Link?" in mind, even if the
+  Link-wide version ships later than the local version.
+- **No node can unilaterally silence another node network-wide.** This was
+  the core design principle of the first attempt, and the thing that broke
+  under real-world testing (a single node's operator went rogue with no
+  mechanism for the rest of the Link to react). The trust/reputation system
+  in §6 exists specifically to fix that failure mode without abandoning the
+  underlying principle.
+
+## 3. Target platform & stack
+
+- **Primary deployment target:** NetBSD (via pkgsrc).
+- **Language/runtime:** Python (asyncio). Rationale: cleanest NetBSD story
+  via pkgsrc, easiest to maintain solo, and BBS-scale concurrency (dozens–
+  low hundreds of connections) is well within asyncio's comfort zone. Go and
+  Rust were considered; Rust's tier-3 NetBSD support was judged too much
+  toolchain friction for a solo-maintained project, Go was viable but Python
+  was preferred.
+- **Storage:** SQLite (WAL mode), per node. **Confirmed.** No separate DB
+  server process needed; matches BIHshare precedent.
+- **Code structure: proper modular package, not a monolithic single file.**
+  The first attempt deliberately stayed a single Python script, which made
+  sense for *them* — they started with a small, mostly-local scope and only
+  backed into the Link and its scale much later, by which point splitting
+  thousands of LOC was a bigger lift than living with the monolith. We don't
+  have that excuse: full scope (including the Link) is deliberately being
+  designed in from day one, so starting monolithic now would mean choosing
+  to inherit their retrofit problem on purpose. "Easy to deploy" doesn't
+  require "single file" — a pkgsrc package or a couple of rc.d-managed
+  processes remains trivially simple for a solo SysOp regardless of how many
+  modules are inside it.
+
+## 4. Connectivity & rendering
+
+- **Connection methods (all three, v1):** Telnet, SSH, and a web-based
+  terminal emulator (xterm.js).
+- **Screen rendering:** Hybrid — plain ANSI/VT100 menus with reflow for
+  general use, full server-side TUI treatment reserved for specific
+  heavier screens (e.g. file browser). Must degrade gracefully above
+  40x24 minimum.
+
+## 5. Identity
+
+- **Cryptographic keypairs** for both **nodes** and **individual users** —
+  not hierarchical (no FidoNet-style zone:net/node addressing), since
+  routing happens dynamically based on live Link membership rather than a
+  fixed topology.
+- **Addressing:** Matrix-federation-style human-facing addresses
+  (`user@node-fingerprint`), but using a pubkey fingerprint instead of a DNS
+  domain for the node part. This avoids DNS as a single point of
+  failure/censorship (domains can be seized; a pubkey can't be revoked by
+  anyone but its owner) while keeping addresses legible.
+- **User login/auth:** both supported — traditional password auth as a
+  simple/fallback option, and keypair-based (passwordless) auth available
+  for those who want it.
+
+## 6. Trust & reputation (the core fix for what broke last time)
+
+Root cause of the first attempt's failure: fully egalitarian nodes, zero
+reputation system, no mechanism to react when a node's operator went rogue
+during testing.
+
+- **Local, web-of-trust model** — no global reputation ledger, no
+  network-wide vote. Each node computes its own trust view from (a) direct
+  observation of a peer's behavior and (b) optionally, signals relayed from
+  *other nodes it already trusts* (PGP-web-of-trust-style). This avoids
+  reintroducing centralized power in a different shape (a "majority of
+  nodes bans you" is still the problem the project set out to avoid).
+- **Dual-layer reputation:** node-level reputation as a baseline, with
+  individual user-level reputation on top of that.
+- **New node/user probation:** starts read-only. Graduates to posting
+  (boards/Link messages) and eventually Link chat via a **hybrid model** —
+  time-based graduation by default, significantly accelerated by vouching
+  from an already-established node/user.
+- **Abuse handling:** local blocklists are the hard mechanism (each node
+  decides who *it* stops relaying to/from — no network-wide effect from a
+  unilateral decision), with shareable reputation/trust signals as a soft,
+  web-of-trust layer on top.
+- **Emergency quarantine (fast reaction at scale, without a master node).**
+  Gradual reputation decay is too slow to react to active abuse once the
+  Link has dozens/hundreds of nodes. The fix is *not* a privileged node that
+  can act unilaterally — that recreates the exact centralization the first
+  attempt's Master Node concept represented, which is our best working
+  theory for what was actually abused during their rogue-SysOp test.
+  Instead: a node enters a heavily rate-limited, time-boxed, reversible
+  quarantine once a *threshold* of independent, already-established nodes
+  each sign and broadcast their own "seeing bad behavior from X" flag.
+  Flags propagate with priority over normal Link traffic for fast
+  network-wide awareness. The threshold scales with the flagging nodes'
+  own reputation weight, so a handful of colluding low-reputation/sockpuppet
+  nodes can't manufacture a quarantine against a legitimate one. Quarantine
+  is a circuit breaker that buys time for normal local-blocklist/reputation
+  mechanisms to catch up — not a silent permanent expulsion.
+- **Known extension point: jurisdiction-bound authority keys.** Some future
+  node operator may face a legal requirement to be able to remove content/
+  nodes immediately, no independent multi-node consensus required. This is
+  retrofittable *without* changing the base protocol: a node operator can
+  locally configure a specific authority's public key to carry an
+  outsized flag-weight — high enough that one flag from that key alone
+  crosses their own node's quarantine threshold. This is opt-in per node,
+  not protocol-level, so it only takes effect for operators who choose (or
+  are legally compelled) to honor that key; it cannot force removal on
+  nodes outside that authority's actual jurisdiction, since no design can
+  promise that while remaining genuinely decentralized (true of Tor,
+  BitTorrent, and every other real decentralized network, not a NetBBS-
+  specific limitation). Not implemented now — nothing requires it before an
+  operator actually needs it — but noted here so this reasoning doesn't need
+  to be rediscovered later.
+
+## 7. Message propagation (boards & Link messages)
+
+- **Content-addressed DAG.** Every message gets a unique ID derived from a
+  hash of its content plus the ID(s) of whatever it's replying to/following
+  — same underlying idea as Git objects or Usenet/NNTP propagation.
+- **Deduplicated flood-fill gossip.** Nodes exchange "here's what message
+  IDs I have" with peers; missing messages get pulled. Content-addressing
+  means a message is never stored or re-relayed twice no matter how many
+  paths it took to arrive.
+- **Ordering:** causal via DAG parent pointers, timestamp as tiebreaker. No
+  CRDT/vector-clock conflict resolution needed, since content-addressed IDs
+  mean nodes can never disagree about what a given message *is* — only
+  about which ones they've seen yet.
+- **Signing:** DAG parent links + message signatures (via the keypair
+  identity system) make forged history very hard to inject.
+- **Store-and-forward:** full support for nodes offline for days/weeks,
+  FidoNet-style. A returning node just resumes gossip and catches up.
+- **Deduplication: persistent seen-event table, not Bloom filters** —
+  adopted from the first attempt's design (never fully implemented by them,
+  but the reasoning holds and their file-chunk detail is worth keeping
+  outright). A false positive in a Bloom filter would mean silently losing
+  a real post/file chunk/message — unacceptable for a BBS, so correctness
+  wins over memory efficiency. Each node maintains a small persistent table
+  of already-processed event IDs (our content hash serves as this ID
+  directly, unlike their composite `<origin>:<type>:<seq>` scheme, since
+  content-addressing already guarantees global uniqueness). Flow: verify
+  signature → check table → drop silently if seen, else record + process +
+  relay onward. Old entries purged after a retention window. File transfers
+  get their own two-level scheme: a chunk ID (transfer ID + chunk number)
+  for per-chunk dedup, and a separate transfer-level ID so a completed file
+  is never double-imported.
+
+## 8. Real-time chat
+
+Explicitly **not** routed through the DAG/store-and-forward system — real
+time chat needs low latency, board/PM sync doesn't need to be real-time.
+Direct relay between currently-connected nodes; if a node is offline, its
+users simply miss chat traffic until reconnect rather than the system trying
+to replay chat history through the propagation layer.
+
+## 9. File areas
+
+- **Node-local**, not replicated/synced across the Link.
+- **Discoverable and downloadable on-demand** from remote nodes — no full
+  Link-wide replication (avoids the bandwidth/storage blowup of syncing
+  potentially large files everywhere). Remote-discoverable areas are
+  referred to as **linked file areas** per the terminology rule in §1.
+
+## 10. Door games
+
+- **v1:** modern native API only, designed against NetBBS directly.
+- **Later phase:** classic DOS door compatibility (DOOR.SYS/DORINFO1.DEF-
+  style, via DOSBox/dosemu) to unlock the large existing library of legacy
+  door games.
+
+## 11. Node-to-node transport security
+
+**Confirmed: split by traffic shape, not one protocol for everything.**
+
+- **Store-and-forward Link traffic** (boards, Link messages, file chunk
+  transfer — everything in §7's DAG/gossip system): **HTTP+JSON**, carrying
+  payloads authenticated via signatures from the existing keypair identity
+  system (§5) rather than a shared-secret HMAC model. The first attempt's
+  experience showed HTTP+JSON causes essentially no firewall/NAT friction
+  on modern infrastructure, and it's a natural fit for async, queued,
+  request/response-shaped traffic. Signatures replace their bootstrap-
+  secret/per-peer-HMAC scheme, removing the shared-secret handshake
+  entirely — the thing you authenticate is the identity you already have,
+  same reasoning as originally applied to Noise.
+- **Real-time chat** (§8): **Noise Protocol Framework**, using the same
+  keypairs as Noise static keys for mutual authentication. A persistent,
+  low-latency encrypted stream is the right shape here, unlike the
+  store-and-forward path.
+
+The first attempt reportedly considered this same real-time/async split
+conceptually but never implemented it, due to developer resource
+constraints rather than a design objection.
+
+## 12. WAN rendezvous
+
+New nodes bootstrap onto the Link via a **fixed/hardcoded seed node list**
+(classic, simple approach — accepted trade-off of mild central dependency
+at the bootstrap stage only; once connected, a node operates as a full
+peer).
+
+## 13. Permissions & Moderation
+
+Covers intra-node user/board/channel permissions — a distinct layer from
+§6, which governs inter-node Link trust/abuse. Substantially informed by a
+feature request from the first attempt's architect to their lead designer,
+relayed by Thiesi; adapted to fit our architecture rather than copied
+as-is.
+
+**Design principle, stated explicitly because it echoes §2's core lesson:**
+level/permission gating must be first-class plumbing in the menu/command
+dispatch layer from Phase 1 onward, not retrofitted per-feature later —
+even though most gated features (boards, chat, moderators) don't exist
+until later phases. Same reasoning as building the Link in from day one:
+retrofitting cross-cutting infrastructure onto already-built features is
+what caused the original rewrite.
+
+**Board & file area permissions:**
+- Separate read/write access (unlike chat, where access is binary — doesn't
+  make sense to split read/write on a synchronous medium).
+- Per-board/per-area moderator roles: read, write, edit, delete, approve —
+  settable individually or combined, per board, per moderator. Moderators
+  need not be SysOps.
+- "Moderated" boards/areas: posts/uploads require designated-moderator
+  approval before becoming visible.
+- Moderator edits are flagged inline in the edited post itself.
+- All moderation actions are logged.
+
+**Chat permissions & moderation:**
+- Channels support minimum-age gating, same mechanism as existing
+  age-restriction support (§5's user model), extended to chat.
+- Channels support minimum user-level gating, optionally combined with
+  individual per-user access grants that bypass the level requirement —
+  and optionally hidden entirely (not just inaccessible) from users who
+  don't meet the requirement.
+- `mute`/`ban`/`unmute`/`unban` commands. Bare numeric argument = minutes;
+  no argument = indefinite; suffix alters unit: `s`/`m`/`h`/`d`/`w`/`y`
+  (seconds/minutes/hours/days/weeks/years). All actions logged and echoed
+  in-channel for transparency.
+- Chat moderators (non-SysOp) can `kick`/`mute`/`ban` within their scope.
+
+**Moderator scope tiers** (three levels, each reusing the same underlying
+permission primitives — a "global" moderator is just "moderator of every
+object in a category," not a different mechanism):
+1. **Per-object** — authority over one specific board/area/channel.
+2. **Local-blanket** — authority over every *local-only* board/area/channel
+   on a given node (i.e., content not carried on the Link).
+3. **Link-blanket ("global")** — authority over every Link-participating
+   board/area/channel that node carries.
+
+**Global does not imply local, by design (opinion, confirmed with
+Thiesi).** Local-only content is a single-SysOp trust domain; Link-wide
+moderator authority is a separate, multi-party trust domain governed by the
+mechanism below. Merging them automatically increases blast radius (a
+compromised global-mod identity would also inherit local keys) without a
+corresponding need, and it violates the same "no automatic power grants"
+principle already applied in §6. A SysOp wanting one person to hold both
+grants both explicitly.
+
+**Privilege separation, SysOp vs. global moderator:** SysOp remains root —
+the only role that can grant/revoke *any* moderator tier, change node
+configuration, and originate boards/channels (which is itself what creates
+the ability to grant Link-board moderator status — see below). A global
+moderator's authority is strictly content-scoped: they can moderate content
+but cannot appoint other moderators or touch node configuration. This
+prevents a compromised or bad-acting moderator identity from escalating or
+self-perpetuating — directly informed by the Master Node lesson in §2/§6.
+
+**Moderation authority on Linked boards/channels — deferred, scoped for
+later.** Ships **local-only first** (Phase 2, alongside local moderator
+tooling per §15); Linked-board/channel moderation is explicitly scoped out
+as a Phase 2/3-boundary sub-problem once §7's Link core actually exists to
+build on. Design direction already settled so it doesn't need to be
+rediscovered later: a moderator grant for a Linked board is a **signed
+event that propagates as part of that board's own DAG history** (§7),
+issued by the node that **originated** the board (same trust logic as a
+repo owner adding collaborators). A moderator *edit* to a Linked post
+can't mutate the immutable original — it's a new, signed event that
+references and amends it, verified against the granting event before other
+nodes trust it. Other nodes accept this because choosing to sync a Linked
+board already means trusting its provenance chain — same trust decision
+already being made for every post on it, not a new category of trust.
+
+**Board/channel lifecycle — creation, deletion, and maintenance
+(confirmed):**
+
+- **Creation:** global board/channel moderators and the SysOp can create
+  new Linked boards/channels. Creating a board makes you its *origin* —
+  matching the grant-authority model already defined above — which is a
+  narrow, self-contained power, not a blanket administrative one. Creation
+  propagates as a **signed announcement**, not a forced action: other
+  nodes decide whether to carry the new board (see default-carry policy,
+  below), rather than having it appear on their system without their
+  node's consent.
+- **Deletion:** a board/channel's origin can mark it **closed/archived**
+  (a signed event; no new posts accepted) — but this cannot force other
+  nodes to purge data they've already stored. Real deletion of stored
+  content remains a purely local, per-node decision (see maintenance,
+  below). Rationale: unrecoverable data loss triggered by another node's
+  action is the same shape of problem as the Master Node — a small set of
+  privileged users able to act on infrastructure they don't own — even
+  though the stakes here are lower than that original failure.
+- **Default-carry policy for Link participation:** joining the Link
+  **carries every Linked board/channel by default** — this gives the
+  "same content available on any node" guarantee automatically, with zero
+  configuration, for the overwhelming majority of SysOps who'll never want
+  to deviate from it. A SysOp retains the ability to **explicitly exclude**
+  a specific board/channel on their own node (local legal exposure, topic
+  preference, irrelevance to their community, etc.) — and that exclusion
+  is **visible**, shown as "not carried on this node" rather than silently
+  absent, so it stays an honest, discoverable local decision instead of
+  quietly fragmenting the network. Deliberately not a hard mandatory-carry
+  rule with no exceptions: that would conflict with §6's core principle
+  that no one else dictates what a node stores or serves.
+- **Maintenance/expiry:** every board/area has a configurable maximum post
+  age (default: retain indefinitely). Expiry follows the first attempt's
+  **active → expired → deleted** state machine with a **grace period**
+  between expired and deleted, rather than immediate deletion at max-age —
+  cheap insurance against an overly aggressive age setting. Moderators can
+  **exempt** specific posts from expiry and **pin** posts to the top of a
+  board/area. Expiry/deletion remains a purely local decision even for
+  Linked boards — content-addressing means a pruned post is simply
+  re-fetchable via the DAG from another node if anyone later needs it, no
+  network-wide coordination required.
+- **Pin/exempt permission mapping:** both fold under the existing `edit`
+  permission rather than becoming a sixth permission type — pinning/
+  exempting is conceptually a metadata edit, not new machinery. **Known,
+  accepted coupling, not an oversight:** this means edit rights and pin/
+  exempt rights can't currently be granted independently (e.g. no
+  "curator who pins without editing wording" role). Cheap to split into
+  its own permission bit later if that separation turns out to matter in
+  practice; not worth the complexity preemptively.
+- Users control which profile fields are public via their preferences menu.
+- vCard: short free-text bio, sensible line cap (six lines, matching the
+  first attempt's figure — reasonable default, easy to reconsider later).
+- vCard visibility independently toggleable.
+- New feature: table-style user directory listing public info.
+- `finger`-style lookup of a user's vCard, accessible from the directory,
+  main menu, and chat.
+
+## 14. Deployment scale assumptions
+
+- Primary use case: **single node**, Thiesi as sole sysop/dev.
+- Other interested parties are not expected to do meaningful multi-node
+  testing.
+- Multi-node testing will happen via **local virtualization** (spinning up
+  a second node in a VM), not a live multi-party Link, at least initially.
+- Practical implication: the architecture must be correct for multi-node
+  operation, but near-term testing/validation targets one-or-two-node
+  scenarios rather than large-scale Link behavior (partition handling under
+  real-world latency, large-N gossip overhead, etc.) — those can be
+  revisited once/if the Link actually grows.
+- **Empirical calibration from the first attempt** (their lead developer,
+  relayed via Thiesi): single-node interactive load — 20–100 concurrent
+  users reasonable on modest hardware with asyncio+SQLite, 100–250 possible
+  with care, 250+ needs real testing/refactoring. Link scale — 2–10 nodes
+  easy, 10–25 realistic with careful queue/retry handling, 25–50 possible
+  but needs dedupe/backoff/batching/monitoring, 50+ explicitly beyond their
+  original design assumptions. They never actually tested past ~15
+  concurrent Link nodes (no lag observed at that scale, but unverified
+  beyond it). Relevant to the §6 authority-key discussion: "hundreds of
+  nodes" is untested territory for anyone, not a gap specific to us.
+  Predicted first real bottleneck at scale: SQLite write contention under
+  simultaneous heavy chat fanout + Link sync writes — not CPU. Worth
+  monitoring once we're past Phase 2, not a blocker now.
+
+## 15. Feature scope & phasing
+
+Thiesi has delegated release-scope decisions — all listed features are
+wanted eventually, prioritizing shipping working increments over cramming
+one release full of unfinished features. Restructured from an original
+4-phase draft after a scope review (see round 6 sign-off notes below) found
+two phases had grown too large and one risky ordering issue. **Current
+7-phase breakdown, confirmed:**
+
+**Phase 1 — Foundation (single node, no live Link yet)**
+- Keypair identity system (node + user)
+- Telnet / SSH / web (xterm.js) connectivity
+- Hybrid ANSI/TUI rendering framework
+- Password + keypair auth
+- SQLite storage layer
+- **Permission/level-gating plumbing in the menu/command dispatch layer**
+  (§13) — built early even though most gated features ship later, per §13's
+  explicit anti-retrofit rationale
+- Local message boards (not yet linked)
+- Local file areas
+- Local real-time chat (single-node)
+- Basic local blocklist (moderation stub, pre-dates full reputation system)
+
+**Phase 2 — Local permissions & moderation**
+No Link dependency — delivers a genuinely complete standalone BBS before
+any Link work begins, matching Thiesi's actual primary deployment target.
+- **Local-only board/file-area/chat moderation** (§13): per-object and
+  local-blanket moderator tiers, read/write/edit/delete/approve
+  permissions, moderated-board approval flow, mute/ban/unmute/unban
+  command set
+- **Maintenance/expiry system** (§13): configurable max post age,
+  active → expired → deleted state machine with grace period,
+  pin/exempt (under `edit` permission)
+- **User directory & vCard/finger system** (§13)
+- SysOp admin tools (user/board/node management, beyond blocklists)
+- ANSI art support for login/welcome screens
+- Fullscreen editor (see editor implementation notes, below) — a natural
+  fit here since post/PM editing is exercised heavily once moderation and
+  boards are both fully functional
+
+**Phase 3 — Link connectivity & sync core**
+- Seed-node bootstrapping
+- Node-to-node transport: **HTTP+JSON with keypair signatures** (§11) —
+  *not* Noise, which is reserved for Phase 5's real-time chat only
+- Content-addressed DAG message format + flood-fill gossip sync
+- Persistent seen-event dedup table + file-chunk transfer ID scheme (§7)
+- Store-and-forward for offline nodes
+- Linked boards (distribution across the Link)
+- Link messages (cross-Link PMs)
+- Interim abuse defense: the local blocklist mechanism from Phase 1,
+  extended to remote nodes/traffic — acceptable given near-term testing is
+  single/VM-node scale (§14), not a live public rollout. Full reputation
+  system arrives in Phase 4, deliberately not co-developed with sync
+  mechanics.
+
+**Phase 4 — Link trust & reputation**
+Isolated as its own phase specifically because it's the hardest,
+least-precedented part of the whole design — built and tested against
+already-working Phase 3 sync mechanics rather than developed alongside
+them.
+- Full trust/reputation system: local web-of-trust, dual-layer
+  (node + user) reputation, hybrid time+vouching probation
+- Emergency quarantine mechanism (§6)
+- Jurisdiction-bound authority key extension point remains unimplemented
+  but documented (§6) — no operator needs it yet
+
+**Phase 5 — Real-time Link chat**
+Deliberately sequenced *after* Phase 4, not before: shipping live
+Link-wide chat before trust/reputation/quarantine exists would mean chat
+abuse has zero defense — too close to recreating the original incident's
+risk profile.
+- Noise Protocol Framework transport + mutual auth (§11), used only here
+- Real-time Link-wide chat (separate low-latency path per §8)
+- Who's-online (local + Link-wide)
+- On-demand cross-node file area discovery/download
+
+**Phase 6 — Linked governance & lifecycle**
+The most structurally novel part of the whole design — nothing like it
+existed in the first attempt. Isolated here specifically because everything
+it depends on (trust system, chat) is already proven by this point.
+- **Link-blanket ("global") moderator tier and Linked board/channel
+  moderation** (§13): signed grant/edit events, verified against the
+  granting event
+- **Global-moderator board/channel creation & closure** (§13): signed
+  announcement/opt-in-carry model, default-carry-with-visible-opt-out
+  policy
+
+**Phase 7 — Door games & legacy compatibility**
+- Door game native API
+- Message board threading refinements
+- Classic DOS door compatibility (legacy game support)
+
+**Editor implementation notes (relevant for Phase 2's fullscreen editor):**
+first attempt's dual-editor approach (robust line editor as universal
+fallback + nano-like fullscreen editor as a per-user-preference convenience
+layer, not the only path) is worth keeping as-is. Their hard-won lessons,
+worth revisiting at implementation time: cursor keys arrive as escape
+sequences and vary by client; insert/overwrite mode touches every
+printable-character code path; ANSI formatting makes visual width diverge
+from stored string length; line-list buffers make search/replace awkward;
+flicker-free redraw over telnet is genuinely fiddly. Their caution against
+building this "too cleverly inside the monolith" doesn't apply to us given
+§3's modular-package decision — but keeping syntax highlighting/spell-check
+as optional, separately-loadable modules (rather than baked into a core
+editor module) is still good advice regardless of overall project
+structure.
+
+---
+
+## Sign-off notes (2026-07-08)
+
+1. SQLite as storage layer — **confirmed**.
+2. Noise Protocol Framework for node-to-node encryption — **confirmed**.
+3. Phase breakdown — **confirmed as-is**. Explicitly validated rationale:
+   the first attempt's core mistake was carving out the Link's design only
+   after every other feature already existed, forcing significant
+   conceptual rework across the board. Discussing the Link fully before
+   Phase 1 (even though Phase 1 itself ships without a live Link) avoids
+   repeating that mistake — every Phase 1 feature is being built with the
+   Link already in mind, not bolted on later.
+
+## Sign-off notes, round 2 (post first-attempt-docs review)
+
+Prompted by reading the first attempt's Developer Manual and Onboarding
+Guide (both supplied by the original dev team).
+
+1. **Master Node theory confirmed by Thiesi** as the likely actual
+   mechanism behind the rogue-SysOp incident — the first attempt's
+   "Master Node" concept (authenticated network-wide administrative
+   commands honored Link-wide) was a de facto centralized point of control
+   sitting on top of an otherwise egalitarian mesh. Our design has no
+   equivalent construct anywhere; confirmed as correct by construction, not
+   by later patch.
+2. **Emergency quarantine mechanism — added to §6.** Addresses "does local
+   web-of-trust hold up at scale (dozens/hundreds of nodes)?" without
+   reintroducing a master node. See §6 for full mechanism.
+3. **Jurisdiction-bound authority key — added to §6 as a documented,
+   deliberately-not-yet-implemented extension point.** Answers "can a
+   'super SysOp' capability be added later if legally required?" Answer:
+   yes, opt-in per node, without a protocol rearchitecture — but it cannot
+   guarantee removal from nodes outside that authority's jurisdiction that
+   never opted in, since no genuinely decentralized network can promise
+   that.
+4. **Monolithic single-file design — rejected, reversing earlier hedging.**
+   Confirmed with Thiesi: the first attempt's monolith made sense for their
+   trajectory (small scope initially, Link scope arrived late, thousands of
+   LOC already existed by the time it would have mattered to split them).
+   We're deliberately not repeating that trajectory, so there's no reason to
+   inherit the same constraint. Going with a modular package from day one;
+   see §3.
+5. **Board/Area terminology — adopted** from the first attempt's docs; see
+   §1 and §9.
+6. **Bootstrapping hen-and-egg concern — no further input needed from the
+   first-attempt team.** Their manual-peering requirement (a human on both
+   ends before any node can join) was their actual pain point; our
+   seed-node auto-bootstrap (§12) already avoids it by design.
+
+## Sign-off notes, round 3 (answers from the first-attempt team)
+
+1. **Master Node theory: confirmed as fact, not just plausible theory.**
+   Root cause chain, per Thiesi (who ran the original test): flooding/spam
+   → Master Node implemented as the response → Master Node itself got
+   compromised. This was a controlled test explicitly designed to surface
+   exactly this kind of flaw; no real-world harm occurred. Strengthens
+   confidence in the quarantine mechanism (§6) as the right fix, since it
+   solves the same problem (need to react fast to abuse) without the
+   single-point-of-authority that got exploited.
+2. **Transport (§11) — confirmed.** Split by traffic shape: HTTP+JSON with
+   keypair signatures for store-and-forward Link traffic (boards/Link
+   messages/file chunks), Noise Protocol Framework reserved for real-time
+   chat. The first attempt reportedly considered this same split
+   conceptually but didn't implement it due to developer resource
+   constraints, not a design objection.
+3. Dedup mechanism — see §7, now updated with persistent seen-event table
+   + file-chunk transfer ID scheme, adopted from their (conceptual, not
+   fully implemented) design.
+4. Scale calibration — see §14, now updated with their empirical numbers.
+5. Editor implementation lessons — see §15, now placed in Phase 2 after
+   the round 6 phasing restructure.
+
+## Sign-off notes, round 4 (permissions & moderation)
+
+Prompted by a feature request from the first attempt's architect to their
+lead designer (age/level-gated channels, read/write board permissions,
+per-board moderators, mute/ban duration syntax, chat moderator tiers,
+user directory/vCard/finger), relayed by Thiesi, plus follow-up discussion
+on moderator scope tiers.
+
+1. New **§13 Permissions & Moderation** added in full — covers board/area
+   read-write split and moderator roles, chat age/level gating and
+   mute/ban/kick commands, the three-tier moderator scope model
+   (per-object / local-blanket / Link-blanket), the SysOp/global-moderator
+   privilege boundary, and the user directory/vCard/finger system.
+2. **Confirmed with Thiesi:** permission/level-gating plumbing belongs in
+   Phase 1, not retrofitted later — same anti-retrofit reasoning as the
+   Link itself. Now reflected in §15's Phase 1 bullet list.
+3. **Confirmed with Thiesi:** ship local-only board/chat moderation first
+   (originally Phase 3, now Phase 2 post-restructure — see round 6); scope
+   out Linked-board/channel moderation properly once §7's Link core is
+   mature, rather than designing it in the abstract now (now Phase 6).
+4. **"Global implies local" — rejected, by design.** Thiesi's recollection
+   of the first attempt didn't clearly confirm or contradict this, so the
+   decision was made on merit rather than precedent: merging the two tiers
+   increases blast radius without a corresponding need, and violates the
+   same "no automatic power grants" principle from §6/§2. Explicit
+   dual-grant required instead.
+5. **SysOp vs. global-moderator privilege boundary defined:** SysOp alone
+   can grant/revoke any moderator tier, change node config, and originate
+   boards/channels. Global moderators are strictly content-scoped — cannot
+   appoint moderators or touch configuration. Directly informed by the
+   Master Node lesson (§2/§6): moderator authority must not be able to
+   self-perpetuate or escalate.
+6. **Linked-board moderation mechanism specified (design only, not yet
+   implemented):** a moderator grant is a signed DAG event issued by the
+   board's originating node; a moderator edit to an immutable Linked post
+   is a new signed event that references and amends the original, verified
+   against the granting event by every receiving node.
+
+## Sign-off notes, round 5 (board/channel lifecycle)
+
+Prompted by two more requests found in the architect/designer exchange:
+global-moderator board/channel creation-deletion, and maintenance/expiry.
+
+1. **Board/channel creation — adopted with a modification.** Global
+   moderators/SysOp can create Linked boards/channels (origin-based grant
+   authority, consistent with §13's existing model) — but creation
+   propagates as a signed announcement, not a forced action on other
+   nodes.
+2. **Board/channel deletion — adopted with a modification.** Origin can
+   mark closed/archived (signed event, no new posts), but cannot force
+   deletion of already-stored content on other nodes. Real deletion stays
+   local, tied to the maintenance system.
+3. **Mandatory full-carry rule — rejected in favor of default-carry with
+   visible opt-out.** Thiesi was open to a hard mandatory-carry rule
+   ("joining the Link means carrying everything"); settled instead on
+   carry-all-by-default with an explicit, visible per-board exclusion
+   option, to stay consistent with §6's node-sovereignty principle while
+   still delivering the "same content everywhere" property for the vast
+   majority of cases.
+4. **Maintenance/expiry system — adopted**, closely matching the first
+   attempt's actual implementation: configurable max post age (default
+   indefinite), active → expired → deleted state machine with a grace
+   period, moderator-controlled pin/exempt. Expiry remains a local decision
+   even for Linked boards, enabled by content-addressing (a pruned post
+   stays re-fetchable from other nodes).
+5. **Pin/exempt permission — confirmed to fold under `edit`**, with the
+   coupling (can't grant pin/exempt independently of edit rights) explicitly
+   logged as a known, accepted limitation rather than an oversight.
+
+## Sign-off notes, round 6 (phasing scope review)
+
+Prompted by Thiesi explicitly requesting a feasibility review of the
+original 4-phase breakdown after several rounds of additions.
+
+1. **Bug found and fixed:** old Phase 2 still referenced "Noise-encrypted
+   node-to-node channel," stale since §11's later transport split (HTTP+
+   JSON+signatures for store-and-forward, Noise reserved for real-time
+   chat only). Corrected in the new Phase 3.
+2. **Restructured from 4 phases to 7.** Two phases had grown too large to
+   be a single unit of work (old Phase 2 bundled Link sync mechanics with
+   the much harder trust/reputation system; old Phase 3 bundled real-time
+   chat with the entire §13 permissions/moderation system). Full new
+   breakdown in §15 above.
+3. **Local permissions/moderation moved earlier** (now Phase 2, was
+   bundled into old Phase 3) — has no Link dependency, and delivers a
+   complete standalone BBS matching Thiesi's actual primary deployment
+   target before any Link work begins.
+4. **Trust/reputation resequenced before real-time chat** (Phase 4 before
+   Phase 5, reversing the old implicit ordering where chat and trust were
+   both loosely "Phase 3"). Rationale: shipping live Link-wide chat before
+   quarantine/reputation exists would leave chat abuse undefended,
+   uncomfortably close to the original incident's risk profile.
+5. **Linked governance/lifecycle isolated as its own phase** (Phase 6,
+   split out from old Phase 4) rather than grouped with door games/legacy
+   compatibility — it's the most structurally novel part of the design and
+   depends on both trust (Phase 4) and chat (Phase 5) already being proven.
+6. **Fullscreen editor placement moved** from a loose "likely Phase 3"
+   note to a firm home in Phase 2, since post/PM editing is exercised
+   heavily once local moderation and boards are both fully functional.

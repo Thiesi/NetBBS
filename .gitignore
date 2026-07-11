@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# NetBBS runtime data (per-node keys and databases should never be committed)
+*.db
+*.sqlite3
+identity_keys/
+node.key
+node.pub
+
+# Editors
+.vscode/
+.idea/
+*.swp
