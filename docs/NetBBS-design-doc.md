@@ -1510,3 +1510,88 @@ its own separate, not-yet-built piece of work.
    now the second time this exact class of flakiness has shown up,
    worth remembering as a standing hazard whenever a test wants two
    observably-different timestamps close together.
+
+## Sign-off notes, round 22 (SSH & web connectivity — discussion only, not implemented)
+
+The last two open pieces of Phase 1 connectivity (§15), researched and
+proposed for sign-off. Neither is implemented yet — this is the design,
+following the same "discuss and confirm before code" pattern round 19
+used for chat scrollback.
+
+1. **SSH library: confirmed `asyncssh`.** Asyncio-native (fits this
+   project directly, unlike thread-based `paramiko`), actively
+   maintained, and already packaged in NetBSD pkgsrc (updated to 2.24.0
+   as of 2026-07-01) — installable as a binary via `pkgin`.
+2. **A real trade-off against §2's PyNaCl-over-`cryptography` decision,
+   surfaced and accepted rather than silently overridden:** every viable
+   Python SSH library (asyncssh, paramiko, Twisted Conch) depends on
+   `cryptography`, which needs a Rust toolchain to build from source —
+   the exact friction PyNaCl was chosen to avoid. No pure-libsodium SSH
+   implementation exists, or realistically could: SSH's algorithm set
+   (RSA/ECDSA/DH key exchange, not just Ed25519) goes beyond what
+   libsodium covers. Accepted because NetBSD pkgsrc already builds
+   `py-cryptography` as a binary package — installing via `pkgin` needs
+   no local Rust toolchain, a materially different risk than "you must
+   compile this yourself." Scoped narrowly: PyNaCl stays canonical for
+   node identity/signing (§5/§7); `cryptography` is accepted as an
+   SSH-connectivity-specific dependency, not a reversal of the original
+   decision.
+3. **A genuine bonus, not the primary motivation: SSH public-key auth
+   can finally exercise the already-implemented Ed25519 challenge-
+   response login path.** `netbbs.net.login_flow._login`'s docstring has
+   flagged since Phase 1's early Telnet work that keypair login is
+   "fully implemented in the auth module already" but unreachable
+   because "a plain Telnet client has no way to sign a challenge... that
+   path needs a NetBBS-aware client." Standard SSH public-key auth *is*
+   exactly that challenge-response, with zero custom client software
+   needed — any real SSH client exercises it. Both password auth
+   (mapping straight onto the existing `authenticate_password`) and
+   Ed25519 pubkey auth (matching a connecting client's key against the
+   same `public_key` already stored on the user's account) are in scope
+   from day one, given how little incremental cost the second path adds
+   once the first exists.
+4. **New `Session` implementation, no changes needed elsewhere** — this
+   is exactly the abstraction boundary `netbbs.net.session.Session` was
+   designed for (its own docstring: "Telnet, SSH, and a web-based
+   terminal emulator... are all supported connection methods, landing on
+   this one interface"). An `SSHSession` implements `write`/`read_line`/
+   `read_key`/`close` against `asyncssh`'s process I/O; the whole
+   login/menu/boards/chat/file-area layer needs no awareness that a
+   connection arrived over SSH rather than Telnet.
+5. **One item explicitly left to verify empirically once implementation
+   starts, not decided now:** whether `asyncssh`'s PTY channel hands
+   over raw, unechoed bytes the way Telnet's character-mode negotiation
+   does, or whether the connecting client's own terminal remains in
+   charge of local echo/line-editing by default (requiring an explicit
+   terminal-mode request to match Telnet's behavior). Round 19-style
+   "confirm before code" caution doesn't extend to guessing protocol
+   behavior that's simply checkable once the library is in hand.
+6. **Web: `aiohttp`, serving both the static terminal page and the
+   websocket endpoint from one process** — also NetBSD pkgsrc-packaged.
+   No second library/process needed just to host a static HTML/JS page
+   alongside the websocket route.
+7. **Web wire protocol: structured JSON messages
+   (`{"type":"key","data":"a"}` / `{"type":"resize","cols":...,
+   "rows":...}` from browser; `{"type":"output","data":"..."}` to
+   browser), not raw byte passthrough via xterm.js's `addon-attach`.**
+   Confirmed over the alternative after weighing both: raw passthrough
+   would reuse `TelnetSession`'s existing character-mode byte parsing
+   (backspace, CR/LF, UTF-8 continuation, escape-sequence discarding)
+   almost as-is, but that parsing exists specifically to compensate for
+   *raw terminal byte* ambiguity — a problem a browser's `keydown` event
+   has already resolved before anything reaches the websocket. Structured
+   messages also make terminal resize a first-class message instead of a
+   bolted-on side channel `addon-attach` has no native way to carry.
+   `WebSession` implements `Session` directly against these messages, no
+   byte-level parsing at all.
+8. **xterm.js is vendored into the repo as static assets
+   (`src/netbbs/web/static/`), not loaded from a CDN.** Consistent with
+   this project's self-hosted, NetBSD-friendly posture (the same
+   reasoning behind avoiding a runtime Rust dependency for crypto) — no
+   external network dependency at connect time, works on an offline/
+   airgapped node. A small custom JS shim (also vendored, not npm-built
+   at install time) speaks the structured-message protocol from point 7.
+9. **Sequencing: SSH before web.** SSH reuses more of what already
+   exists (raw byte I/O, the existing character-mode parsing patterns);
+   web additionally needs a new static-asset story and a genuinely new
+   wire protocol. Building the smaller, more-precedented piece first.
