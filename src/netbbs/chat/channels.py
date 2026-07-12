@@ -33,6 +33,8 @@ class Channel:
     name: str
     description: str | None
     min_level: int
+    category_id: int | None
+    pinned: bool
     created_at: str
 
 
@@ -42,11 +44,17 @@ def create_channel(
     *,
     description: str | None = None,
     min_level: int = 0,
+    category_id: int | None = None,
+    pinned: bool = False,
     creator: User,
 ) -> Channel:
     """Create a new local channel. No permission check on creation here —
     same reasoning as `netbbs.boards.create_board`: an admin-level action
-    with no SysOp/moderator concept defined yet in Phase 1."""
+    with no SysOp/moderator concept defined yet in Phase 1.
+
+    `category_id` optionally places the channel under a
+    `netbbs.chat.categories.Category`. `pinned` channels always sort
+    first — see `list_channels`."""
     created_at = utc_now_iso()
     channel_id = compute_content_id(
         {
@@ -60,10 +68,11 @@ def create_channel(
     try:
         db.connection.execute(
             """
-            INSERT INTO channels (channel_id, name, description, min_level, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO channels
+                (channel_id, name, description, min_level, category_id, pinned, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (channel_id, name, description, min_level, created_at),
+            (channel_id, name, description, min_level, category_id, int(pinned), created_at),
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
@@ -80,10 +89,26 @@ def get_channel_by_name(db: Database, name: str) -> Channel:
 
 
 def list_channels(db: Database) -> list[Channel]:
-    """List all channels, in creation order. Same "caller filters by
-    level" pattern as `netbbs.boards.list_boards` — see that function's
-    docstring for why filtering isn't baked in here."""
-    rows = db.connection.execute("SELECT * FROM channels ORDER BY created_at").fetchall()
+    """
+    List all channels, pinned first, then alphabetically.
+
+    Deliberately doesn't offer an "activity" sort here the way
+    `netbbs.boards.boards.list_boards` does — chat messages aren't
+    persisted (see `netbbs.chat.hub`'s module docstring), so there's no
+    stored history to compute "most recent activity" from. That signal
+    exists only in-memory, via `netbbs.chat.hub.ChatHub.last_activity`,
+    which the caller (see `netbbs.net.chat_flow`) combines with this
+    function's output — keeping this module free of any dependency on
+    the in-memory hub, a cleaner separation than threading `ChatHub`
+    through the storage layer.
+
+    Same "caller filters by level" pattern as
+    `netbbs.boards.boards.list_boards` — see that function's docstring
+    for why filtering isn't baked in here either.
+    """
+    rows = db.connection.execute(
+        "SELECT * FROM channels ORDER BY pinned DESC, name COLLATE NOCASE ASC"
+    ).fetchall()
     return [_row_to_channel(row) for row in rows]
 
 
@@ -94,5 +119,7 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         name=row["name"],
         description=row["description"],
         min_level=row["min_level"],
+        category_id=row["category_id"],
+        pinned=bool(row["pinned"]),
         created_at=row["created_at"],
     )

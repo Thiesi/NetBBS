@@ -158,4 +158,50 @@ MIGRATIONS = [
             ON blocklist(local_user_id) WHERE local_user_id IS NOT NULL;
         """,
     ),
+    Migration(
+        description="Board categories — two levels max (a category with a "
+        "parent cannot itself have children), enforced in application "
+        "code in netbbs.boards.categories rather than here, since SQLite "
+        "can't express a self-join depth constraint as a CHECK.",
+        sql="""
+        CREATE TABLE board_categories (
+            id                  INTEGER PRIMARY KEY,
+            name                TEXT NOT NULL UNIQUE,
+            description         TEXT,
+            parent_category_id  INTEGER REFERENCES board_categories(id),
+            created_at          TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description="Board pinning and categorization — a board can "
+        "optionally belong to a category, and be pinned to always sort "
+        "first regardless of chosen sort order.",
+        sql="""
+        ALTER TABLE boards ADD COLUMN category_id INTEGER REFERENCES board_categories(id);
+        ALTER TABLE boards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
+    Migration(
+        description="Channel categories — same two-level design as board "
+        "categories, kept as a separate table rather than one shared "
+        "polymorphic table, consistent with boards and channels already "
+        "being fully independent subsystems elsewhere in the schema.",
+        sql="""
+        CREATE TABLE channel_categories (
+            id                  INTEGER PRIMARY KEY,
+            name                TEXT NOT NULL UNIQUE,
+            description         TEXT,
+            parent_category_id  INTEGER REFERENCES channel_categories(id),
+            created_at          TEXT NOT NULL
+        );
+        """,
+    ),
+    Migration(
+        description="Channel pinning and categorization, mirroring boards.",
+        sql="""
+        ALTER TABLE channels ADD COLUMN category_id INTEGER REFERENCES channel_categories(id);
+        ALTER TABLE channels ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]

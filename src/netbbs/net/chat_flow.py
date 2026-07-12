@@ -11,6 +11,7 @@ import asyncio
 
 from netbbs.auth.users import User
 from netbbs.chat import Channel, ChatHub, list_channels
+from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -19,28 +20,77 @@ from netbbs.storage.database import Database
 
 
 async def browse_channels(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+    """Entry point: browse from the top level (no category selected yet)."""
+    await _browse_channels_in_category(session, db, hub, user, category_id=None)
+
+
+async def _browse_channels_in_category(
+    session: Session, db: Database, hub: ChatHub, user: User, *, category_id: int | None
+) -> None:
     """
-    Channel selection via the shared paginated picker
-    (`netbbs.net.picker`), matching how board selection already works —
-    same reasoning: typing out a full channel name shouldn't be
-    required, especially given channel names can be long/descriptive
-    (e.g. "channel party all day long on Monday - come and say hi", the
-    exact kind of name that prompted building the picker in the first
-    place).
+    Browse channels within a category (or the top level), mirroring
+    `netbbs.net.login_flow._browse_boards_in_category` exactly — same
+    reasoning, same two-level cap, same category/item ID-namespace
+    disambiguation trick (negated category IDs). See that function's
+    docstring for the full rationale; not repeated here to avoid the two
+    copies drifting out of sync in what they claim rather than just in
+    what they say.
     """
-    joinable = [c for c in list_channels(db) if meets_level(user, c.min_level)]
-    channel = await pick_item(
+    all_channels = [c for c in list_channels(db) if meets_level(user, c.min_level)]
+    # Activity-sort applied before splitting by category, so ordering
+    # within each category's channel list is still most-recent-first —
+    # same node-wide default as boards (design doc round 17).
+    all_channels.sort(key=lambda c: hub.last_activity(c.name) or c.created_at, reverse=True)
+    all_channels.sort(key=lambda c: not c.pinned)
+    channels_here = [c for c in all_channels if c.category_id == category_id]
+
+    categories_here = (
+        list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
+    )
+
+    if not categories_here:
+        channel = await pick_item(
+            session,
+            channels_here,
+            name_of=lambda c: c.name,
+            stable_id_of=lambda c: c.id,
+            description_of=lambda c: _channel_description(hub, c),
+            title="Available channels",
+            empty_message="No chat channels are available to you yet.",
+        )
+        if channel is not None:
+            await _chat_loop(session, hub, channel, user)
+        return
+
+    mixed: list[Category | Channel] = [*categories_here, *channels_here]
+
+    def render_name(item: Category | Channel) -> str:
+        return f"[{item.name}]" if isinstance(item, Category) else item.name
+
+    def render_description(item: Category | Channel) -> str | None:
+        if isinstance(item, Category):
+            return item.description or "(category)"
+        return _channel_description(hub, item)
+
+    def stable_id(item: Category | Channel) -> int:
+        return item.id if isinstance(item, Channel) else -item.id
+
+    selected = await pick_item(
         session,
-        joinable,
-        name_of=lambda c: c.name,
-        description_of=lambda c: _channel_description(hub, c),
+        mixed,
+        name_of=render_name,
+        stable_id_of=stable_id,
+        description_of=render_description,
         title="Available channels",
         empty_message="No chat channels are available to you yet.",
     )
-    if channel is None:
+    if selected is None:
         return
 
-    await _chat_loop(session, hub, channel, user)
+    if isinstance(selected, Category):
+        await _browse_channels_in_category(session, db, hub, user, category_id=selected.id)
+    else:
+        await _chat_loop(session, hub, selected, user)
 
 
 def _channel_description(hub: ChatHub, channel: Channel) -> str:

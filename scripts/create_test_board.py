@@ -7,7 +7,10 @@ No board-creation UI exists yet (that's admin/SysOp tooling, not built
 in Phase 1) — this exists purely to unblock manual testing.
 
 Usage:
-    python scripts/create_test_board.py <db_path> <board_name> [description]
+    python scripts/create_test_board.py <db_path> <board_name> [description] [category_name] [pinned:yes/no]
+
+Run scripts/create_test_category.py first if you want to assign a
+category — this script looks it up by name, it doesn't create one.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from netbbs.auth.users import get_user_by_username  # noqa: E402
 from netbbs.boards import create_board, create_post  # noqa: E402
+from netbbs.boards.categories import CategoryError, get_category_by_name  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
@@ -30,6 +34,8 @@ def main() -> None:
     db_path = Path(sys.argv[1])
     board_name = sys.argv[2]
     description = sys.argv[3] if len(sys.argv) > 3 else None
+    category_name = sys.argv[4] if len(sys.argv) > 4 else None
+    pinned = len(sys.argv) > 5 and sys.argv[5].lower() in ("yes", "true", "1")
 
     db = Database(db_path)
 
@@ -43,8 +49,24 @@ def main() -> None:
         sys.exit(1)
     creator = get_user_by_username(db, row["username"])
 
-    board = create_board(db, board_name, description=description, creator=creator)
-    print(f"Created board {board.name!r} (board_id {board.board_id[:16]}...) in {db_path}")
+    category_id = None
+    if category_name is not None:
+        try:
+            category_id = get_category_by_name(db, category_name).id
+        except CategoryError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
+
+    board = create_board(
+        db,
+        board_name,
+        description=description,
+        category_id=category_id,
+        pinned=pinned,
+        creator=creator,
+    )
+    pinned_note = " (pinned)" if board.pinned else ""
+    print(f"Created board {board.name!r} (board_id {board.board_id[:16]}...){pinned_note} in {db_path}")
 
     post = create_post(
         db,

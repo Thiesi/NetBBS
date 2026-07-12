@@ -410,7 +410,14 @@ two phases had grown too large and one risky ordering issue. **Current
   explicit anti-retrofit rationale
 - Local message boards (not yet linked)
 - Local file areas
-- Local real-time chat (single-node)
+- Local real-time chat (single-node), including **bounded, disk-backed
+  scrollback per channel** (last N messages, count-based not time-based
+  — predictable storage/scrollback length regardless of how chatty a
+  given channel is) — revisits round 10's "no persistence" decision
+  specifically to solve chat looking empty after a node restart, per
+  round 19's discussion. Deliberately scoped to *this* problem only —
+  see Phase 5 for the separate, harder "new Link node catch-up" question
+  this does not attempt to answer.
 - Basic local blocklist (moderation stub, pre-dates full reputation system)
 
 **Phase 2 — Local permissions & moderation**
@@ -465,6 +472,15 @@ risk profile.
 - Real-time Link-wide chat (separate low-latency path per §8)
 - Who's-online (local + Link-wide)
 - On-demand cross-node file area discovery/download
+- **Open question, deliberately deferred to whenever this phase actually
+  starts:** should a newly-joining Link node be fed recent scrollback
+  from peers (e.g. the last 50–200 messages per channel) so Link-wide
+  chat doesn't look empty on first join? Distinct from — and harder
+  than — Phase 1's local, single-node scrollback (round 19): propagated
+  scrollback crosses trust boundaries between nodes, raising questions
+  Phase 1's version doesn't (does it need signing/provenance like DAG
+  events do? how does it interact with the Phase 6 Link activity feed?).
+  Not decided now; flagged so the question doesn't need rediscovering.
 
 **Phase 6 — Linked governance & lifecycle**
 The most structurally novel part of the whole design — nothing like it
@@ -1214,3 +1230,134 @@ further refinements.
    passing tests. `chat_flow.py`'s actual self-color wiring (imports
    `netbbs.auth`) remains unverified by Claude; manual two-terminal
    testing is the way to confirm it end-to-end.
+
+## Sign-off notes, round 18 (sort order, stable-ID goto, pinning, categories)
+
+Prompted by Thiesi's own review of the picker/sort work, raising a
+concrete example (vintage-computing boards with a single politics board
+created in between them, sitting awkwardly in the middle under creation-
+order) that surfaced several related design gaps at once.
+
+1. **Creation-order sorting rejected as a real user-facing default** —
+   confirmed as a pure implementation convenience (trivially stable,
+   append-only) that was never actually chosen *for* the user. Three
+   sort orders now supported for boards: **activity** (most recent post,
+   confirmed as the default), **alphabetical**, and **volume** (total
+   post count — a deliberately different signal from activity: a board
+   with one post today but otherwise dead ranks high on activity, low on
+   volume; the reverse is also possible). Channels support activity
+   (in-memory, via `ChatHub.last_activity` — see point 4) and
+   alphabetical; no volume sort, since channel messages aren't persisted
+   at all. Per-user sort preference remains real future scope, pending a
+   user-preferences system that doesn't exist yet — these are node-wide
+   defaults in the meantime.
+2. **A genuine technical tension identified and resolved: configurable
+   sort order breaks `goto`'s whole premise.** `goto`'s value is a
+   number you can remember and return to — that only holds if the
+   underlying order never reshuffles existing items. Creation-order
+   happens to guarantee this (append-only); alphabetical doesn't (insert
+   one new item and everything after it shifts); activity-based
+   sorting actively guarantees instability (changes on every new post).
+   Resolved by decoupling entirely: `pick_item` now takes a
+   `stable_id_of` callable (database ID, typically) supplying each
+   item's permanent identity, fully independent of whatever order the
+   caller's list happens to be sorted in for browsing. Confirmed with
+   Thiesi over the alternative (accepting `goto` as only stable within
+   one sort choice). Verified with genuinely non-positional, non-
+   sequential stable IDs (not just IDs that happen to equal list
+   position, which wouldn't have proven the decoupling actually works).
+3. **Favorites — designed for, not built.** A per-user favorites list is
+   just another list through the same picker with the same stable IDs,
+   once user-scoped storage exists (it doesn't yet). Deliberately called
+   out as deferred rather than silently dropped.
+4. **Channel "activity" tracked in-memory (`ChatHub.last_activity`), not
+   in the database.** Chat messages themselves aren't persisted (design
+   doc §15/round 10) — adding a persisted "last activity" column would
+   need a database write on every single chat message, working directly
+   against that same ephemeral-by-design reasoning. `netbbs.chat.
+   channels.list_channels` stays free of any dependency on the in-memory
+   hub (pinned + alphabetical only, both genuinely DB-queryable); the
+   caller (`netbbs.net.chat_flow`) combines both sources via two stable
+   Python-level sorts.
+5. **Pinning added for both boards and channels** — a boolean column,
+   always sorting first regardless of the chosen order otherwise. Direct
+   parallel to the post-pinning already designed in §13 (folds under the
+   `edit` permission); no new mechanism needed, matching Thiesi's own
+   instinct that explicit manual ordering wasn't necessary beyond this.
+6. **Two-level categories added for both boards and channels** — a
+   category, optionally containing sub-categories, capped there
+   (checked with Thiesi explicitly: arbitrary depth wasn't wanted, but
+   two levels were worth having if not overly complex to add; judged
+   cheap enough to include). Enforced in application code at creation
+   time (SQLite can't express "does this row's parent itself have a
+   parent" as a plain CHECK) — verified directly that a third-level
+   attempt is correctly rejected. Separate `board_categories`/
+   `channel_categories` tables rather than one shared polymorphic table,
+   consistent with boards and channels already being fully independent
+   subsystems everywhere else in the schema.
+7. **A real correctness detail surfaced by mixing categories and boards/
+   channels in one picker call, caught before shipping, not after:**
+   `Category` and `Board`/`Channel` rows come from different tables, so
+   their raw database IDs can collide (both start at 1) — mixed into one
+   picker call so a user can pick either a category to drill into or an
+   item directly, that collision would make `goto` ambiguous between two
+   different things sharing the same displayed number. Resolved by
+   negating category IDs for picker purposes only (`-item.id`); board/
+   channel IDs stay unchanged, so no existing `goto` numbers were
+   affected. Verified directly with genuinely colliding IDs (a category
+   and a board both assigned raw id=1), confirming `goto` resolves to
+   the correct one.
+8. **Browsing is now recursive, capped naturally at two levels**: pick a
+   category to drill in (recursing into the same function scoped to that
+   category), or a board/channel to open it directly. A level with no
+   categories falls back to the exact flat picker experience from
+   before categories existed — most nodes with few boards will likely
+   never see the category UI at all, which is the right default.
+9. **Testing note:** `netbbs.boards.categories`/`netbbs.chat.categories`
+   have no PyNaCl dependency (only need `netbbs.storage`), so the full
+   depth-cap enforcement, CRUD operations, and the category/board ID-
+   collision disambiguation were all genuinely executed against real
+   databases and real sockets, not just syntax-checked — including
+   reproducing the exact three-level-rejection and colliding-ID
+   scenarios directly before writing the corresponding formal tests.
+   `netbbs.boards.boards`/`netbbs.chat.channels`'s actual sort-order SQL
+   (activity/alphabetical/volume, combined with pinning) was verified by
+   executing the raw queries against a real database seeded with
+   realistic data (mirroring Thiesi's own vintage-computing/politics
+   example), confirming pinned-first ordering and all three sort modes
+   produce the expected order. `login_flow.py`/`chat_flow.py`'s actual
+   recursive category-browsing wiring (imports `netbbs.auth`) remains
+   unverified by Claude; manual testing (see README) is the way to
+   confirm the full experience end-to-end.
+
+## Sign-off notes, round 19 (chat scrollback — discussion only, not implemented)
+
+Prompted by Thiesi asking for a genuine opinion on the first attempt's
+short-term chat persistence, explicitly not requesting implementation.
+
+1. **Split into two distinct problems, not one decision:** (a) chat
+   looking empty after a *local* node restart — a real, low-risk, purely
+   local UX problem — versus (b) a newly-joining *Link* node needing
+   catch-up scrollback from peers — a much bigger question entangled
+   with trust/provenance and Phase 5/6 machinery that doesn't exist yet.
+   Treating these as one question risked either over-scoping Phase 1 or
+   under-thinking the harder Link version.
+2. **Confirmed with Thiesi: solve (a) only, defer (b) explicitly** to
+   whenever Phase 5 actually starts, rather than attempt to resolve it
+   now — added as an open question there (§15) instead of a decision.
+3. **This is round 10's "no persistence" decision being revisited, not
+   reversed** — that note explicitly said "revisit if local chat
+   history/scrollback turns out to be wanted later." This is that
+   revisit.
+4. **Design landed on: disk-backed, bounded by message count (not time
+   window)** — count gives predictable storage size and predictable
+   scrollback length regardless of a channel's chat volume, unlike a
+   time window (huge buffer for an active channel, nearly empty for a
+   quiet one). Added to Phase 1's scope (§15).
+5. **A privacy-posture point raised and worth carrying forward, not
+   silently absorbed:** even short/bounded persistence is a different
+   promise to users than pure ephemeral chat — someone typing something
+   impulsively today reasonably expects it to vanish on disconnect under
+   the current design. Worth a visible note to users once this is
+   actually built (e.g. in a channel-join message), not just an internal
+   implementation detail.

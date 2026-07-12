@@ -52,10 +52,15 @@ netbbs/
 │   │                     selection, and (once built) file areas
 │   ├── boards/           Local message boards + posts, content-addressed
 │   │                     IDs from day one (§7) so Linked-board support
-│   │                     later needs no ID-scheme migration
+│   │                     later needs no ID-scheme migration. Two-level
+│   │                     categories, pinning, and configurable sort
+│   │                     order (activity/alphabetical/volume) in
+│   │                     `categories.py`/`boards.py`
 │   ├── chat/             Local real-time chat: channels (content-
 │   │                     addressed IDs, same reasoning as boards) + an
-│   │                     in-memory per-node broadcast hub
+│   │                     in-memory per-node broadcast hub. Same
+│   │                     categories/pinning as boards; "activity" sort
+│   │                     is in-memory only (chat isn't persisted)
 │   ├── moderation/       Local blocklist (moderation stub, pre-dates the
 │   │                     full reputation system)
 │   ├── rendering/        The "ANSI half" of the hybrid rendering
@@ -74,9 +79,13 @@ netbbs/
 │   │                          login flow with (no self-registration UI
 │   │                          exists yet)
 │   ├── create_test_board.py   Dev utility: create a board (+ seed post)
-│   │                          to test board browsing with
+│   │                          to test board browsing with. Optional
+│   │                          category name and pinned flag
 │   ├── create_test_channel.py Dev utility: create a chat channel to
-│   │                          test real-time chat with
+│   │                          test real-time chat with. Optional
+│   │                          category name and pinned flag
+│   ├── create_test_category.py Dev utility: create a board or channel
+│   │                          category, optionally as a sub-category
 │   ├── block_user.py          Dev/admin utility: block a user from
 │   │                          logging in
 │   ├── unblock_user.py        Dev/admin utility: remove a user from the
@@ -139,6 +148,24 @@ by substring (auto-selects if there's a unique match), `[G]oto #` to
 jump straight to a stable absolute index shown as `(#N)` next to every
 item — that number stays valid regardless of paging or an active search
 filter.
+
+**Categories, pinning, and sort order:** boards and channels can now be
+organized into categories (at most two levels — a category and,
+optionally, sub-categories under it), pinned to always sort first, and
+sort by activity (default), alphabetically, or by post volume (boards
+only). Try it:
+
+```sh
+python scripts/create_test_category.py netbbs.db board "Vintage Computing"
+python scripts/create_test_category.py netbbs.db board "Commodore" "Vintage Computing"
+python scripts/create_test_board.py netbbs.db c64 "Commodore 64 talk" Commodore
+python scripts/create_test_board.py netbbs.db announcements "" "" yes
+```
+
+Browsing boards should now show "Vintage Computing" as a category to
+drill into (revealing "Commodore" as a sub-category, then `c64` inside
+that), while `announcements` (pinned, uncategorized) appears at the top
+level, ahead of anything else.
 
 To test the blocklist:
 

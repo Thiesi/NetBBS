@@ -63,7 +63,7 @@ def test_empty_list_shows_message_and_returns_none():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, [], name_of=lambda x: x, title="Test", empty_message="Nothing here."
+            session, [], name_of=lambda x: x, stable_id_of=lambda x: 0, title="Test", empty_message="Nothing here."
         )
 
     async def scenario():
@@ -88,7 +88,7 @@ def test_select_by_two_digit_number():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -115,7 +115,7 @@ def test_quit_returns_none():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -142,7 +142,7 @@ def test_invalid_two_digit_selection_shows_error_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -173,7 +173,7 @@ def test_unknown_command_letter_shows_error_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -207,7 +207,7 @@ def test_search_unique_match_auto_selects():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -237,7 +237,7 @@ def test_search_multiple_matches_then_select():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -270,7 +270,7 @@ def test_search_no_matches_reports_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -304,7 +304,7 @@ def test_empty_search_clears_active_filter():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -338,7 +338,7 @@ def test_search_matches_name_case_insensitively():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -371,7 +371,7 @@ def test_goto_absolute_index():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -401,7 +401,7 @@ def test_goto_out_of_range_reports_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -435,7 +435,7 @@ def test_goto_non_numeric_input_reports_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -481,7 +481,7 @@ def test_pagination_adapts_to_negotiated_terminal_height():
         # dummy read is what makes that true in the test too.
         await session.read_line()
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -521,7 +521,7 @@ def test_prev_on_first_page_shows_notice_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -552,7 +552,7 @@ def test_next_on_last_page_shows_notice_and_stays_in_picker():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="I", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
         )
 
     async def scenario():
@@ -589,6 +589,7 @@ def test_description_shown_alongside_name():
             session,
             items,
             name_of=lambda x: x[0],
+            stable_id_of=lambda x: items.index(x) + 1,
             description_of=lambda x: x[1],
             title="Boards",
             empty_message="none",
@@ -633,7 +634,7 @@ def test_goto_after_search_uses_stable_original_index_not_filtered_position():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -679,7 +680,7 @@ def test_stable_absolute_index_is_displayed_alongside_page_relative_number():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -711,7 +712,7 @@ def test_stable_index_correct_on_second_page():
 
     async def handler(session: Session):
         result["value"] = await pick_item(
-            session, items, name_of=lambda x: x, title="Items", empty_message="none"
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="Items", empty_message="none"
         )
 
     async def scenario():
@@ -738,3 +739,251 @@ def test_stable_index_correct_on_second_page():
     # so page 2 starts at item19: absolute index 19, not restarted at 1.
     assert b"01. (#19) item19" in data
     assert b"02. (#20) item20" in data
+
+
+# -- genuine stable-ID/position decoupling (not just index-based IDs) -----
+
+
+def test_goto_uses_caller_supplied_stable_id_not_list_position():
+    """
+    Real proof of decoupling, not just re-confirming index-based IDs
+    still work: items here have deliberately non-sequential,
+    non-positional stable IDs (as real database IDs would be), and goto
+    must resolve by that ID, never by position in the list.
+    """
+    result = {}
+    # (stable_id, name) pairs, stable IDs deliberately out of order and
+    # non-sequential -- position 1 has ID 205, position 2 has ID 7, etc.
+    items = [(205, "gamma"), (7, "alpha"), (999, "delta"), (42, "beta")]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session,
+            items,
+            name_of=lambda x: x[1],
+            stable_id_of=lambda x: x[0],
+            title="Items",
+            empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"g")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"42\r\n")  # goto stable ID 42, which is "beta", at position 4
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] == (42, "beta")
+
+
+def test_display_shows_caller_supplied_stable_id_not_position():
+    result = {}
+    items = [(205, "gamma"), (7, "alpha")]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session,
+            items,
+            name_of=lambda x: x[1],
+            stable_id_of=lambda x: x[0],
+            title="Items",
+            empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            data = await _read_until_quiet(reader)
+            # Position 1 on screen ("01.") shows stable ID 205, not "1" —
+            # and position 2 ("02.") shows stable ID 7, not "2".
+            assert b"01. (#205) gamma" in data
+            assert b"02. (#7) alpha" in data
+            writer.write(b"q")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] is None
+
+
+def test_goto_ignores_current_search_filter_with_non_positional_ids():
+    """Combines both properties at once: goto by permanent stable ID,
+    unaffected by an active search filter, using IDs that don't match
+    position — the real-world shape of the scenario this whole redesign
+    was for."""
+    result = {}
+    items = [(205, "gamma"), (7, "alpha widget"), (999, "delta"), (42, "beta widget")]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session,
+            items,
+            name_of=lambda x: x[1],
+            stable_id_of=lambda x: x[0],
+            title="Items",
+            empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+
+            # Search narrows to the two "widget" items first.
+            writer.write(b"s")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"widget\r\n")
+            await writer.drain()
+            await _read_until_quiet(reader)
+
+            # goto 205 ("gamma") isn't even among the search matches --
+            # must still resolve correctly against the full original list.
+            writer.write(b"g")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"205\r\n")
+            await writer.drain()
+            await _read_until_quiet(reader)
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] == (205, "gamma")
+
+
+# -- mixed-type lists (category + item sharing one picker call) -----------
+
+
+def test_mixed_category_and_item_list_disambiguates_colliding_ids():
+    """
+    Real usage pattern from netbbs.net.login_flow/chat_flow: categories
+    and boards/channels come from different database tables, so their
+    raw IDs can collide (both start at 1). Mixed into one picker call
+    (so a user can pick either a category to drill into, or a board/
+    channel directly), that collision would make `goto` ambiguous
+    between two different things showing the same number, unless
+    disambiguated — verified here with genuinely colliding IDs (a
+    category id=1 and a board id=1 both present), using the actual
+    disambiguation scheme login_flow.py/chat_flow.py use: negate the
+    category's ID for picker purposes only.
+    """
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class FakeCategory:
+        id: int
+        name: str
+
+    @dataclass(frozen=True)
+    class FakeBoard:
+        id: int
+        name: str
+
+    result = {}
+    categories = [FakeCategory(id=1, name="Vintage Computing"), FakeCategory(id=2, name="Politics")]
+    boards = [FakeBoard(id=1, name="general"), FakeBoard(id=2, name="offtopic")]
+    mixed = [*categories, *boards]
+
+    def render_name(item):
+        return f"[{item.name}]" if isinstance(item, FakeCategory) else item.name
+
+    def stable_id(item):
+        return item.id if isinstance(item, FakeBoard) else -item.id
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, mixed, name_of=render_name, stable_id_of=stable_id,
+            title="Mixed", empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"g")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"-1\r\n")  # goto the category with raw id=1
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert isinstance(result["value"], FakeCategory)
+    assert result["value"].id == 1  # the category, not the board sharing the same raw id
+
+
+def test_mixed_list_two_digit_selection_unaffected_by_id_disambiguation():
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class FakeCategory:
+        id: int
+        name: str
+
+    @dataclass(frozen=True)
+    class FakeBoard:
+        id: int
+        name: str
+
+    result = {}
+    categories = [FakeCategory(id=1, name="Vintage Computing")]
+    boards = [FakeBoard(id=1, name="general"), FakeBoard(id=2, name="offtopic")]
+    mixed = [*categories, *boards]  # page positions: 01=category, 02=general, 03=offtopic
+
+    def render_name(item):
+        return f"[{item.name}]" if isinstance(item, FakeCategory) else item.name
+
+    def stable_id(item):
+        return item.id if isinstance(item, FakeBoard) else -item.id
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, mixed, name_of=render_name, stable_id_of=stable_id,
+            title="Mixed", empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"02")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] == FakeBoard(id=1, name="general")

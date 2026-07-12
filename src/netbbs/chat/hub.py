@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 
+from netbbs.timeutil import utc_now_iso
+
 
 class ChatHub:
     """
@@ -31,6 +33,14 @@ class ChatHub:
 
     def __init__(self) -> None:
         self._channels: dict[str, dict[str, asyncio.Queue]] = defaultdict(dict)
+        # In-memory only, not persisted — consistent with chat messages
+        # themselves not being persisted (see module docstring). A
+        # dedicated "last activity" DB column on the channels table would
+        # need a write on every single message, working against the same
+        # ephemeral-by-design reasoning that kept chat history out of the
+        # database in the first place. Resets on node restart, same as
+        # every other piece of in-memory ChatHub state.
+        self._last_activity: dict[str, str] = {}
 
     def join(self, channel_name: str, participant_id: str) -> asyncio.Queue:
         """Register `participant_id` as present in `channel_name`,
@@ -68,6 +78,18 @@ class ChatHub:
             if participant_id in exclude:
                 continue
             await queue.put(message)
+        # Recorded even if there were zero participants to actually
+        # deliver to (e.g. the system-generated join/leave notices) —
+        # any broadcast attempt counts as activity on the channel,
+        # matching what a user browsing by "most recent activity" would
+        # intuitively expect.
+        self._last_activity[channel_name] = utc_now_iso()
 
     def participant_count(self, channel_name: str) -> int:
         return len(self._channels[channel_name])
+
+    def last_activity(self, channel_name: str) -> str | None:
+        """Timestamp of the most recent broadcast to `channel_name` since
+        this node started, or `None` if there hasn't been one yet (e.g. a
+        freshly created channel, or simply no node restart since)."""
+        return self._last_activity.get(channel_name)

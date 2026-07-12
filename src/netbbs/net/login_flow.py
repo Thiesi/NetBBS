@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from netbbs.auth.users import AuthError, User, authenticate_password
 from netbbs.boards import Board, create_post, list_boards, list_posts
+from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub
 from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
@@ -168,26 +169,87 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
 
 
 async def _browse_boards(session: Session, db: Database, user: User) -> None:
+    """Entry point: browse from the top level (no category selected yet)."""
+    await _browse_boards_in_category(session, db, user, category_id=None)
+
+
+async def _browse_boards_in_category(
+    session: Session, db: Database, user: User, *, category_id: int | None
+) -> None:
     """
-    Board selection via the shared paginated picker (`netbbs.net.picker`)
-    instead of typing a board's exact name — see design doc phasing
-    sign-off notes for why: long/arbitrary board names shouldn't have to
-    be typed out, and a plain alphabetical list doesn't scale past a
-    couple dozen entries anyway.
+    Browse boards within a category (or the top level, if `category_id`
+    is `None`), picking via the shared picker (`netbbs.net.picker`)
+    instead of typing exact names — see design doc phasing sign-off notes
+    for why. Directly answers a real usability problem: a flat list mixes
+    unrelated topics together (e.g. one politics board sitting in the
+    middle of a dozen vintage-computing boards under any sort order),
+    which categories are meant to fix.
+
+    Categories and boards are shown together in one mixed list — pick a
+    category to drill in (recursing into this same function, naturally
+    capped at two levels since a sub-category has no further
+    sub-categories to recurse into), or pick a board directly to open it.
+    Falls back to a flat board-only list at any level with no categories,
+    identical to the pre-category browsing experience.
+
+    One correctness detail: `Category` and `Board` rows come from
+    different tables, so their database IDs can collide (both start at
+    1) — mixed into one picker call, that would make `goto` ambiguous
+    between two different things sharing the same displayed number.
+    Disambiguated by negating category IDs for picker purposes only
+    (`-item.id`) — boards keep their real, positive ID unchanged, so
+    existing board `goto` numbers aren't affected by this at all.
     """
-    readable_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level)]
-    board = await pick_item(
+    all_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level)]
+    boards_here = [b for b in all_boards if b.category_id == category_id]
+
+    categories_here = (
+        list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
+    )
+
+    if not categories_here:
+        board = await pick_item(
+            session,
+            boards_here,
+            name_of=lambda b: b.name,
+            stable_id_of=lambda b: b.id,
+            description_of=lambda b: b.description,
+            title="Available boards",
+            empty_message="No boards are available to you yet.",
+        )
+        if board is not None:
+            await _show_board(session, db, board, user)
+        return
+
+    mixed: list[Category | Board] = [*categories_here, *boards_here]
+
+    def render_name(item: Category | Board) -> str:
+        return f"[{item.name}]" if isinstance(item, Category) else item.name
+
+    def render_description(item: Category | Board) -> str | None:
+        if isinstance(item, Category):
+            return item.description or "(category)"
+        return item.description
+
+    def stable_id(item: Category | Board) -> int:
+        return item.id if isinstance(item, Board) else -item.id
+
+    selected = await pick_item(
         session,
-        readable_boards,
-        name_of=lambda b: b.name,
-        description_of=lambda b: b.description,
+        mixed,
+        name_of=render_name,
+        stable_id_of=stable_id,
+        description_of=render_description,
         title="Available boards",
         empty_message="No boards are available to you yet.",
     )
-    if board is None:
+    if selected is None:
         return
 
-    await _show_board(session, db, board, user)
+    if isinstance(selected, Category):
+        await _browse_boards_in_category(session, db, user, category_id=selected.id)
+    else:
+        await _show_board(session, db, selected, user)
 
 
 async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:

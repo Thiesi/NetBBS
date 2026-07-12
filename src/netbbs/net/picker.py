@@ -19,8 +19,22 @@ like this module's own N/P/S/G/Q). Landed on: always-exactly-2-digit
 page-relative selection (matches the single-keystroke immediacy of the
 main menu) + a free-text search command (subsumes what tab completion
 would have offered, without redraw/cycling complexity) + a free-text
-"go to absolute index" command (the one thing neither of the two
-original proposals solved on its own).
+"go to #" command referencing each item's own permanent stable ID (the
+one thing neither of the two original proposals solved on its own).
+
+`goto`'s number is deliberately *not* a position in the current list —
+it's whatever permanent identifier the caller supplies (`stable_id_of`,
+typically a database ID). This was a real design correction: an earlier
+version derived the number from list position, which broke the moment
+sort order became configurable (alphabetical/most-recent-activity
+reorder existing items, unlike creation-order's append-only stability) —
+the same number would then mean a different item depending on current
+sort order, defeating the entire point of a memorable reference. Display
+order (whatever the caller's list is sorted by) and item identity
+(`stable_id_of`) are now fully independent: paging through an
+alphabetically-sorted list might show `(#7)`, `(#23)`, `(#4)` in that
+order — visually non-sequential, but each number is permanent regardless
+of how the list is currently sorted or filtered.
 """
 
 from __future__ import annotations
@@ -53,6 +67,7 @@ async def pick_item(
     items: Sequence[T],
     *,
     name_of: Callable[[T], str],
+    stable_id_of: Callable[[T], int],
     description_of: Callable[[T], str | None] = lambda item: None,
     title: str,
     empty_message: str,
@@ -68,23 +83,16 @@ async def pick_item(
     what `search` matches against; `description_of` is optional
     secondary text shown alongside the name but never searched — search
     matching only the name is more predictable than also matching
-    free-text descriptions.
+    free-text descriptions. `stable_id_of` supplies each item's
+    permanent identifier (typically a database ID) — see the module
+    docstring for why this is deliberately independent of the item's
+    position in `items`.
     """
     if not items:
         await session.write_line(f"\r\n{empty_message}")
         return None
 
-    # Carried through search filtering as (stable_absolute_index, item)
-    # pairs, so an item's displayed/goto-able number always reflects its
-    # position in the original, unfiltered list — never renumbered
-    # relative to whatever a search happens to have narrowed the view
-    # to. Without this, the same item could show (and require) a
-    # different number depending on transient search state, and "goto
-    # #N" would mean a different item depending on what was searched for
-    # moments earlier — silently wrong in a way a user would have no way
-    # to notice until they landed on the wrong item.
-    indexed_items = list(enumerate(items, start=1))
-    working_set: Sequence[tuple[int, T]] = indexed_items
+    working_set: Sequence[T] = items
     page_index = 0
 
     while True:
@@ -100,15 +108,16 @@ async def pick_item(
             bold=True,
         )
         await session.write_line(f"\r\n{header}")
-        for position, (absolute_index, item) in enumerate(page_items, start=1):
+        for position, item in enumerate(page_items, start=1):
             # Two numbers shown per line, deliberately: the 2-digit
             # prefix is what to press to select *this item, right now,
-            # on this page*; the "(#N)" is its stable reference for
-            # `goto` — usable later, from anywhere, regardless of paging
-            # or search state. Without showing this second number
-            # somewhere, `goto` would be nearly undiscoverable — nothing
-            # else on screen reveals what number to type for it.
-            line = f"  {position:02d}. (#{absolute_index}) {name_of(item)}"
+            # on this page*; the "(#N)" is its permanent stable_id_of
+            # reference for `goto` — usable later, from anywhere,
+            # regardless of paging, search state, or sort order. Without
+            # showing this second number somewhere, `goto` would be
+            # nearly undiscoverable — nothing else on screen reveals what
+            # number to type for it.
+            line = f"  {position:02d}. (#{stable_id_of(item)}) {name_of(item)}"
             description = description_of(item)
             if description:
                 line += f" - {description}"
@@ -159,17 +168,15 @@ async def pick_item(
                 # (a no-op in that case) and "clear filter" when a
                 # previous search narrowed working_set, without needing
                 # two separate commands for what's really one action.
-                working_set = indexed_items
+                working_set = items
                 page_index = 0
                 continue
-            matches = [
-                (idx, item) for idx, item in indexed_items if query.lower() in name_of(item).lower()
-            ]
+            matches = [item for item in items if query.lower() in name_of(item).lower()]
             if not matches:
                 await session.write_line("No matches.")
                 continue
             if len(matches) == 1:
-                return matches[0][1]
+                return matches[0]
             working_set = matches
             page_index = 0
             continue
@@ -179,16 +186,21 @@ async def pick_item(
             await session.write("Go to #: ")
             raw = (await session.read_line()).strip()
             try:
-                index = int(raw)
+                target_id = int(raw)
             except ValueError:
                 await session.write_line("Not a number.")
                 continue
-            # Deliberately indexes into `items` (the stable original
-            # list), not `working_set` — a goto number always means the
-            # same item regardless of any active search filter, matching
-            # what's now shown as "(#N)" next to every displayed item.
-            if 1 <= index <= len(items):
-                return items[index - 1]
+            # Always searches `items` (the full original list) by
+            # stable_id_of, never `working_set` — a goto number means the
+            # same item regardless of any active search filter or sort
+            # order, matching the "(#N)" shown next to every displayed
+            # item. A linear scan, not a lookup table, since the caller's
+            # list is expected to be reasonably sized (boards/channels/
+            # areas on one node, not the whole Link) — acceptable here,
+            # revisit if that assumption stops holding.
+            for item in items:
+                if stable_id_of(item) == target_id:
+                    return item
             await session.write_line("Out of range.")
             continue
 
@@ -200,8 +212,7 @@ async def pick_item(
                 continue
             number = int(key + second)
             if 1 <= number <= len(page_items):
-                _, selected_item = page_items[number - 1]
-                return selected_item
+                return page_items[number - 1]
             await session.write_line("Invalid selection.")
             continue
 
