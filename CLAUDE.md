@@ -65,10 +65,18 @@ Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
 breakdown and current status — it will be more current than anything
 written here. As of this update, Phase 1 (local single-node BBS —
 boards, chat (including bounded, disk-backed scrollback per channel —
-design doc round 19/20), permissions, blocklist, ANSI rendering,
-character-mode Telnet input, a shared paginated picker with categories/
-pinning/sort order) is substantially built; file areas and SSH/web
-connectivity are the remaining pieces open within Phase 1 — file areas
-planned next, connectivity last (it pulls in new dependencies and
-deserves its own design-before-code pass, e.g. checking an SSH library
-is as NetBSD/pkgsrc-friendly as PyNaCl was for crypto).
+design doc round 19/20), file areas (browsable, level-gated core —
+design doc round 21; upload/download transfer not yet built, see below),
+permissions, blocklist, ANSI rendering, character-mode Telnet input, a
+shared paginated picker with categories/pinning/sort order) is
+substantially built. Two pieces remain open within Phase 1:
+
+- **Real Zmodem support** for file upload/download (design doc round
+  21) — a generic Telnet client can't drive a custom raw-byte transfer
+  protocol on its own, so this needs the actual Zmodem packet
+  framing/state machine, not something to improvise inline. Deserves its
+  own design pass against the real spec before implementation.
+- **SSH/web connectivity** — Telnet-only so far. Also deserves its own
+  design-before-code pass (new dependencies: an SSH library, a
+  websocket/xterm.js frontend), e.g. checking an SSH library is as
+  NetBSD/pkgsrc-friendly as PyNaCl was for crypto.

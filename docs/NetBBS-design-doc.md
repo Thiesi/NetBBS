@@ -1430,3 +1430,83 @@ target (see below) before this round's chat work began.
    change, and it's the reason this repo's tests should periodically
    actually be run on NetBSD, not just Windows — the environment split
    this project already has to account for.
+
+## Sign-off notes, round 21 (file area core — implemented; upload/download transfer deferred)
+
+Phase 1's file areas, split deliberately into two pieces after a real
+design gap surfaced mid-discussion (point 3 below): browsable, level-
+gated file area core shipped now; actual upload/download transfer is
+its own separate, not-yet-built piece of work.
+
+1. **Schema mirrors `netbbs.boards` closely** — `file_area_categories`/
+   `file_areas`/`files`, content-addressed IDs (§7), separate read/write
+   level-gating (confirmed already in §13: "Board & file area
+   permissions... separate read/write access"). Strict §1 terminology
+   followed: "area," never "board," anywhere in code, tables, or
+   messages.
+2. **Categories, pinning, and sort order (activity/alphabetical/volume)
+   built in from the start**, unlike boards/channels, which got this
+   shape retrofitted in round 18 after shipping without it. Confirmed as
+   the right call given the project's own stated anti-retrofit principle
+   (§2/§13) — no reason to knowingly repeat a migration already done
+   twice.
+3. **A real design gap found and resolved through two rounds of
+   back-and-forth, not decided casually:** the first proposed transfer
+   mechanism (a simple length-prefixed raw-byte protocol layered
+   directly on the Telnet byte stream, IAC-doubled per RFC 854) was
+   initially confirmed, but turned out to assume a NetBBS-aware client
+   driving it — a generic Telnet client (PuTTY, Windows Telnet, `nc`)
+   has no way to stream a local file's bytes through a raw-byte protocol
+   a human can't type. Classic BBSes solved exactly this with
+   client-side protocols like Zmodem that terminal *emulators*
+   auto-detect and drive; nothing analogous exists here. Presented as a
+   three-way fork (companion CLI tool / real Zmodem / defer transfer
+   entirely) — **confirmed: real Zmodem support**, authentic to the BBS
+   tradition, but explicitly scoped as its own separate task (packet
+   framing, CRC16/CRC32, the ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN
+   handshake state machine, retry/error recovery) rather than
+   improvised inline here, given its size and correctness risk.
+4. **File area core ships now without live upload/download**, exactly
+   the same bootstrap sequencing boards and channels already went
+   through — both existed, browsable and level-gated, well before any
+   admin/SysOp creation UI existed for them; files reach a node today via
+   `scripts/create_test_file.py`, mirroring `create_test_board.py`/
+   `create_test_channel.py`.
+5. **Storage: filesystem, not SQLite blobs** — content-addressed by
+   sha256, sharded two hex characters deep (`netbbs.files.storage`,
+   `<root>/<aa>/<aabbccdd...>`, the same pattern git's own object store
+   uses), rooted at `<db_path>_files` alongside the node's database file.
+   A deliberate side effect, not the primary motivation: two uploads
+   with byte-identical content share one stored blob regardless of
+   filename/area/uploader.
+6. **A file's content-addressed `file_id` is computed from its sha256
+   *and* upload metadata (area, filename, uploader, timestamp) — not a
+   pure content hash.** Two uploads of byte-identical content are still
+   distinct events (distinct `file_id`s, sharing only the underlying
+   stored bytes) — matches how two boards created by the same creator
+   already get different `board_id`s despite otherwise-similar content.
+7. **`upload_file` takes a complete file as one in-memory `bytes`
+   buffer, not a stream** — appropriate at this project's stated scale
+   (§14) and for how files reach it today (a dev script reading a local
+   file whole). Revisit once real Zmodem transfer (point 3) exists and
+   actually streams bytes incrementally rather than handing over a
+   complete buffer.
+8. **Verified directly over a real Telnet connection**, not just
+   pytest: logged in, opened the new `[F]ile areas` main-menu option
+   (added alongside `[B]oards`/`[C]hat`), picked an area seeded via
+   `scripts/create_test_file_area.py`/`create_test_file.py`, and
+   confirmed the file listing (name, human-readable size, uploader,
+   upload time, description) renders correctly.
+9. **A real, same-class bug caught while writing tests, not shipped:**
+   a test asserting two identical-content uploads get different
+   `file_id`s initially flaked — two `upload_file` calls close enough
+   together landed on the exact same microsecond-resolution timestamp,
+   colliding on `file_id` and raising the same "identical content
+   uploaded twice in the same instant" error `netbbs.boards.posts.
+   create_post` already documents as an accepted edge case. Fixed by
+   patching `utc_now_iso` to guaranteed-distinct values in that specific
+   test, the same "don't rely on wall-clock timing between two nearby
+   calls" lesson round 20's point 7 already surfaced for board listing —
+   now the second time this exact class of flakiness has shown up,
+   worth remembering as a standing hazard whenever a test wants two
+   observably-different timestamps close together.

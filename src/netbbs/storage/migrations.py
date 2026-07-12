@@ -234,4 +234,65 @@ MIGRATIONS = [
         CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
         """,
     ),
+    Migration(
+        description="File areas (design doc §1 terminology: 'area' always "
+        "means file area, never 'board'; §9). Categories/pinning/sort "
+        "order are included from the start, unlike boards/channels (which "
+        "got them retrofitted in round 18) — same anti-retrofit reasoning "
+        "as building level-gating plumbing early (§13).",
+        sql="""
+        CREATE TABLE file_area_categories (
+            id                  INTEGER PRIMARY KEY,
+            name                TEXT NOT NULL UNIQUE,
+            description         TEXT,
+            parent_category_id  INTEGER REFERENCES file_area_categories(id),
+            created_at          TEXT NOT NULL
+        );
+
+        CREATE TABLE file_areas (
+            id                       INTEGER PRIMARY KEY,
+            -- Content-addressed (design doc §7), same reasoning as
+            -- boards.board_id/channels.channel_id.
+            area_id                  TEXT NOT NULL UNIQUE,
+            name                     TEXT NOT NULL UNIQUE,
+            description              TEXT,
+            -- Nullable, populated once node identity exists at runtime
+            -- (Phase 3) — same as boards.origin_node_fingerprint.
+            origin_node_fingerprint  TEXT,
+            min_read_level           INTEGER NOT NULL DEFAULT 0,
+            min_write_level          INTEGER NOT NULL DEFAULT 0,
+            category_id              INTEGER REFERENCES file_area_categories(id),
+            pinned                   INTEGER NOT NULL DEFAULT 0,
+            created_at               TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_file_areas_area_id ON file_areas(area_id);
+
+        CREATE TABLE files (
+            id                    INTEGER PRIMARY KEY,
+            -- Content-addressed (design doc §7) from metadata *and* the
+            -- uploaded bytes' sha256 -- see netbbs.files.entries.
+            file_id               TEXT NOT NULL UNIQUE,
+            area_id               INTEGER NOT NULL REFERENCES file_areas(id),
+            filename              TEXT NOT NULL,
+            description           TEXT,
+            size_bytes            INTEGER NOT NULL,
+            sha256                TEXT NOT NULL,
+            -- Filesystem path bytes are actually stored at (see
+            -- netbbs.files.storage) -- not a DB blob, keeping the
+            -- database itself small and letting the filesystem handle
+            -- what it already does well.
+            storage_path          TEXT NOT NULL,
+            uploader_user_id      INTEGER NOT NULL REFERENCES users(id),
+            -- Denormalized, same reasoning as posts.author_label: history
+            -- still reads correctly even if the account is later renamed
+            -- or removed.
+            uploader_label        TEXT NOT NULL,
+            uploader_fingerprint  TEXT,
+            created_at            TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_files_area_id ON files(area_id);
+        """,
+    ),
 ]

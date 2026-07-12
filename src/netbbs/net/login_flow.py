@@ -23,6 +23,7 @@ from netbbs.boards.categories import Category, list_subcategories, list_top_leve
 from netbbs.chat import ChatHub
 from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
+from netbbs.net.file_flow import browse_file_areas
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -85,6 +86,7 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
             [
                 menu_key("B", "oards"),
                 menu_key("C", "hat"),
+                menu_key("F", "ile areas"),
                 menu_key("Q", "uit"),
             ]
         )
@@ -99,6 +101,8 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
             await _browse_boards(session, db, user)
         elif choice == "c":
             await browse_channels(session, db, hub, user)
+        elif choice == "f":
+            await browse_file_areas(session, db, user)
         else:
             await session.write_line("Unknown choice.")
 
