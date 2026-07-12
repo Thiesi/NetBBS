@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from netbbs.storage.database import Database
 
 
@@ -58,8 +62,6 @@ def test_context_manager_closes_connection(tmp_path):
     with Database(db_path) as db:
         db.connection.execute("SELECT 1")
     # Connection should now be closed; using it should raise.
-    import sqlite3
-
     try:
         db.connection.execute("SELECT 1")
         assert False, "expected connection to be closed"
@@ -68,8 +70,6 @@ def test_context_manager_closes_connection(tmp_path):
 
 
 def test_users_table_requires_password_or_public_key(tmp_path):
-    import sqlite3
-
     db = Database(tmp_path / "node.db")
     try:
         db.connection.execute(
@@ -82,3 +82,41 @@ def test_users_table_requires_password_or_public_key(tmp_path):
         pass
     finally:
         db.close()
+
+
+def test_database_rejects_newer_schema_version(tmp_path):
+    db_path = tmp_path / "node.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA user_version = 999")
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="newer than this NetBBS build supports"):
+        Database(db_path)
+
+
+def test_failed_migration_rolls_back_all_statements_and_version(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import Migration
+
+    failing_migration = Migration(
+        """
+        CREATE TABLE should_be_rolled_back (id INTEGER PRIMARY KEY);
+        INSERT INTO table_that_does_not_exist VALUES (1);
+        """
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", [failing_migration])
+
+    db_path = tmp_path / "node.db"
+    with pytest.raises(sqlite3.OperationalError):
+        Database(db_path)
+
+    connection = sqlite3.connect(db_path)
+    table = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("should_be_rolled_back",),
+    ).fetchone()
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    connection.close()
+
+    assert table is None
+    assert version == 0
