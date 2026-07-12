@@ -1,18 +1,22 @@
 """
-Minimal login flow, tying a Session to the auth and permissions modules.
+Login flow and top-level main menu, tying a Session to the auth,
+permissions, boards, and chat modules.
 
-This is deliberately not a real menu system yet — boards, chat, and file
-areas don't exist as Phase 1 features to route to. It exists to prove the
-whole path end-to-end (connect -> authenticate -> permission-gated
-action) actually works together, which is exactly the kind of
-integration check worth having at this point rather than only unit tests
-per module (see the earlier discussion on iterative-vs-end testing).
+The main menu itself is intentionally minimal — a plain numbered/lettered
+loop, not the hybrid ANSI/TUI rendering framework (still a separate,
+not-yet-built Phase 1 piece). It exists now, rather than staying purely
+linear the way the board-only version of this file was, because there
+are genuinely two independent things to route between (boards, chat) —
+adding real menu structure now that it's actually needed is not the same
+as building it prematurely.
 """
 
 from __future__ import annotations
 
 from netbbs.auth.users import AuthError, User, authenticate_password
 from netbbs.boards import Board, BoardError, create_post, get_board_by_name, list_boards, list_posts
+from netbbs.chat import ChatHub
+from netbbs.net.chat_flow import browse_channels
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
 from netbbs.storage.database import Database
@@ -33,7 +37,7 @@ _DEMO_ELEVATED_LEVEL = 100
 _MAX_LOGIN_ATTEMPTS = 3
 
 
-async def handle_session(session: Session, db: Database) -> None:
+async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
     await session.write_line(WELCOME_BANNER)
 
     user = await _login(session, db)
@@ -46,9 +50,25 @@ async def handle_session(session: Session, db: Database) -> None:
     if meets_level(user, _DEMO_ELEVATED_LEVEL):
         await session.write_line("(You have elevated access.)")
 
-    await _browse_boards(session, db, user)
+    await _main_menu(session, db, hub, user)
 
     await session.write_line("\r\nGoodbye!")
+
+
+async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+    while True:
+        await session.write_line("\r\nMain menu: [B]oards  [C]hat  [Q]uit")
+        await session.write("Choice: ")
+        choice = (await session.read_line()).strip().lower()
+
+        if choice in ("q", "quit"):
+            return
+        elif choice in ("b", "boards"):
+            await _browse_boards(session, db, user)
+        elif choice in ("c", "chat"):
+            await browse_channels(session, db, hub, user)
+        else:
+            await session.write_line("Unknown choice.")
 
 
 async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_ATTEMPTS) -> User | None:
@@ -94,13 +114,6 @@ async def _browse_boards(session: Session, db: Database, user: User) -> None:
     Minimal linear board-browsing flow: list boards the user can read,
     let them pick one, show its posts, offer to post if they have write
     access.
-
-    Deliberately not a real menu system — there's no menu/command
-    dispatch architecture designed yet, and inventing one as a side
-    effect of testing boards would be scope creep. This exists purely to
-    prove boards work end-to-end over a real connection, the same way
-    `_login` proves auth does, per the project's iterative-testing
-    approach.
     """
     readable_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level)]
     if not readable_boards:

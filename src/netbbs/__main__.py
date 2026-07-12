@@ -16,6 +16,7 @@ import logging
 import sys
 from pathlib import Path
 
+from netbbs.chat import ChatHub
 from netbbs.net.login_flow import handle_session
 from netbbs.net.telnet import TelnetServer
 from netbbs.storage.database import Database
@@ -37,8 +38,13 @@ async def main() -> None:
     db_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("netbbs.db")
     db = Database(db_path)
 
+    # One hub for the whole node's lifetime, shared across every
+    # connected session — this is what makes cross-session real-time
+    # chat possible at all (see netbbs.chat.hub.ChatHub).
+    hub = ChatHub()
+
     async def session_handler(session):
-        await handle_session(session, db)
+        await handle_session(session, db, hub)
 
     server = TelnetServer(host=DEFAULT_HOST, port=DEFAULT_PORT, session_handler=session_handler)
     await server.start()

@@ -476,6 +476,36 @@ it depends on (trust system, chat) is already proven by this point.
 - **Global-moderator board/channel creation & closure** (§13): signed
   announcement/opt-in-carry model, default-carry-with-visible-opt-out
   policy
+- **Link governance log (board) + Link activity feed (channel)** — a
+  capstone deliverable, deliberately placed last in this phase since it
+  depends on everything else already existing (Link chat transport from
+  Phase 5; quarantine flags from Phase 4; board/channel creation, closure,
+  and moderator grants from earlier in this phase). Two complementary
+  views over the same underlying governance/activity data, not two
+  separate features:
+  - A **Linked board** (uses existing board infrastructure, no new
+    mechanism — just a convention of posting governance events as
+    content) serving as the **curated, persistent audit trail**:
+    board/channel creation and closure, moderator grants, quarantine
+    flags. Worth reading days later, not just in the moment.
+  - A **Linked, Link-wide chat channel** (uses existing Phase 1 chat
+    infrastructure, extended by Phase 5's Link-wide transport) serving as
+    a **live, ephemeral "tail -f" feed** of Link activity — including
+    automatic/mechanical events with no human intervention, not just the
+    curated governance actions the board tracks. Genuinely disposable;
+    nobody's expected to have read every line.
+  - **Access control on both defaults to the same restricted audience**
+    (SysOps, optionally global moderators, configurable) — deliberately
+    not more permissive for the channel just because it's "only"
+    operational noise, since that noise plausibly includes
+    governance-sensitive content like quarantine flags firing.
+  - **Open questions, deliberately left for whenever this is actually
+    built** rather than guessed at now: whether the channel should offer
+    a small amount of scrollback on join (ordinary chat channels don't,
+    but a pure "nothing until the next event fires" experience may be
+    worth avoiding here specifically); and exactly which mechanical
+    events are "interesting" enough to include vs. too granular — not
+    decidable without real Link traffic to calibrate against.
 
 **Phase 7 — Door games & legacy compatibility**
 - Door game native API
@@ -774,3 +804,96 @@ independent axes, and only the first had been built.
    licensing the repo directly on GitHub. No LICENSE file added from this
    side, deliberately, to avoid duplicating/conflicting with whatever
    GitHub's own license picker already added.
+
+## Sign-off notes, round 10 (implementation: local real-time chat)
+
+1. **New architectural piece: `netbbs.chat.hub.ChatHub`.** Everything
+   built before this was pure per-session request/response; chat is the
+   first feature requiring a session to *receive* a message while idle,
+   waiting for its own next input. Solved with a per-node, in-memory,
+   queue-per-participant broadcast hub and two concurrent asyncio tasks
+   per chat session (one reading input, one draining the queue),
+   stopping — with cleanup — as soon as either finishes.
+2. **Real, verified concurrency bug caught and fixed before shipping,
+   not just reasoned about:** `broadcast()`'s first draft iterated the
+   live participant dict while awaiting inside the loop
+   (`queue.put`), which yields control back to the event loop between
+   iterations. Confirmed directly (a minimal reproduction, then again
+   against the real `ChatHub` class) that another coroutine calling
+   `leave()` mid-broadcast raises `RuntimeError: dictionary changed size
+   during iteration`. Fixed by iterating a snapshot of the participant
+   list instead. Covered by a regression test
+   (`test_broadcast_survives_concurrent_leave_mid_iteration`) so this
+   can't silently regress.
+3. **Channels mirror boards' content-addressing** (§7) for the same
+   forward-compatibility reason, but with a single `min_level` rather
+   than a read/write pair — chat access has no meaningful read/write
+   split, confirmed explicitly during the earlier permissions design
+   discussion.
+4. **Chat messages are not persisted.** Ephemeral by design for Phase 1;
+   revisit if local chat history/scrollback turns out to be wanted later.
+5. **Known, deliberate UX limitation, not a bug:** because Telnet stays
+   in the client's default line-editing mode (a decision made when the
+   transport layer was first built, deferring character-at-a-time input
+   to the hybrid ANSI/TUI rendering framework), an incoming chat message
+   can land on screen while a user is mid-typing their own line,
+   interleaving with it — the same behavior classic line-mode chat tools
+   (Unix `talk`, `wall`) have always had. Fixing this properly needs the
+   character-mode/redraw machinery the rendering framework is meant to
+   provide.
+6. **Main menu introduced** (`[B]oards [C]hat [Q]uit`) — the first real
+   menu-loop structure in `login_flow.py`, replacing the previous purely
+   linear "log in, browse boards, goodbye" flow, since there are now
+   genuinely two independent things to route between.
+7. **Testing note:** `ChatHub` has no PyNaCl dependency and its 11 tests
+   (including the concurrency regression test) were actually executed,
+   not just syntax-checked — worked around `netbbs.chat`'s package
+   `__init__.py` pulling in the (nacl-dependent) `channels`/`auth` chain
+   by loading `hub.py` directly via `importlib`, bypassing the package
+   init for verification purposes only; the shipped code imports
+   normally. `channels.py` and the full `chat_flow.py` two-task
+   interleaving behavior over a real connection remain unverified by
+   Claude — manual two-terminal testing (see README) is the most direct
+   way to confirm the real-time behavior actually works end-to-end.
+
+## Sign-off notes, round 11 (Link governance log + activity feed)
+
+Discussion only — nothing implemented yet, deliberately, since almost
+none of this feature's prerequisites exist before Phase 6. Captured now
+so the reasoning doesn't need to be rediscovered when Phase 6 actually
+starts.
+
+1. **Feature proposed by Thiesi:** visibility into Link-wide
+   administrative/control activity (new Linked boards/channels being
+   created, etc.), restricted to SysOps and optionally global moderators.
+2. **Refined from a single mechanism into two complementary ones, per
+   Thiesi:** a persistent board (curated audit trail — human-relevant
+   governance actions, worth reading later) plus an ephemeral chat
+   channel (live "tail -f" feed — includes automatic/mechanical Link
+   activity too, genuinely disposable). This resolves an initial concern
+   Claude raised about the single-mechanism version becoming too noisy at
+   large Link scale, without needing any future mitigation — the firehose
+   simply has an ephemeral home nobody's obligated to read, from day one.
+3. **Neither needs new infrastructure.** Both reuse existing
+   board/channel/chat mechanisms as-is; the "feature" is a convention
+   (governance and Link-activity events get posted as content by
+   automated system actions, not typed by a human) layered on top,
+   consistent with how boards/channels were always meant to extend to
+   Link participation.
+4. **Access control: same restricted audience on both**, deliberately —
+   not more permissive for the channel just because it's framed as
+   "noise," since that noise plausibly includes governance-sensitive
+   content (e.g. quarantine flags firing).
+5. **Phase placement: Phase 6, as a capstone deliverable, not earlier.**
+   Every real content source this feature depends on — Link-wide chat
+   transport (Phase 5), quarantine flags (Phase 4), board/channel
+   creation/closure and moderator grants (Phase 6 itself) — only exists
+   by Phase 6. Building it earlier would mean designing against events
+   and APIs that don't exist yet, the exact retrofit risk this whole
+   design process exists to avoid.
+6. **Two open questions deliberately left unresolved** for whenever
+   Phase 6 actually starts, rather than guessed at now: whether the
+   channel should have a small amount of join-time scrollback (ordinary
+   chat channels don't), and exactly which mechanical events are
+   "interesting" enough to include — neither is answerable without real
+   Link traffic to calibrate against.

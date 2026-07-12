@@ -111,4 +111,23 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description="Chat channels (real-time messages are not persisted — "
+        "see netbbs.chat.hub).",
+        sql="""
+        CREATE TABLE channels (
+            id          INTEGER PRIMARY KEY,
+            -- Content-addressed (design doc §7), same reasoning as
+            -- boards.board_id — ready for NetBBS Link Channels later
+            -- without needing an ID-scheme migration.
+            channel_id  TEXT NOT NULL UNIQUE,
+            name        TEXT NOT NULL UNIQUE,
+            description TEXT,
+            -- Single threshold, not a read/write pair like boards —
+            -- chat access has no meaningful read/write split.
+            min_level   INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+        """,
+    ),
 ]
