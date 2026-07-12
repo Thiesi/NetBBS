@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuses to commit if any staged file still contains unresolved git
+# merge conflict markers. Cheap insurance against exactly the class of
+# mistake that broke passwords.py — a conflict that got "resolved" by
+# committing the markers themselves instead of actually editing them out.
+if git diff --cached --check; then
+    exit 0
+else
+    echo "Commit aborted: unresolved conflict markers or whitespace errors detected above." >&2
+    exit 1
+fi
