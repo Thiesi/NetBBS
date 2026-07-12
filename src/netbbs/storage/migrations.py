@@ -102,4 +102,13 @@ MIGRATIONS = [
         CREATE INDEX idx_posts_board_id ON posts(board_id);
         """,
     ),
+    Migration(
+        description="Node-wide configuration key-value store.",
+        sql="""
+        CREATE TABLE node_config (
+            key    TEXT PRIMARY KEY,
+            value  TEXT NOT NULL
+        );
+        """,
+    ),
 ]

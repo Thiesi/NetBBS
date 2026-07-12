@@ -16,6 +16,7 @@ from netbbs.boards import Board, BoardError, create_post, get_board_by_name, lis
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
 from netbbs.storage.database import Database
+from netbbs.timeutil import format_for_display
 
 WELCOME_BANNER = """\
 ================================================
@@ -135,7 +136,8 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     else:
         await session.write_line(f"\r\n[{board.name}]")
         for post in posts:
-            await session.write_line(f"\r\n{post.subject} -- {post.author_label} ({post.created_at})")
+            when = format_for_display(post.created_at, db)
+            await session.write_line(f"\r\n{post.subject} -- {post.author_label} ({when})")
             await session.write_line(post.body)
 
     if not meets_level(user, board.min_write_level):

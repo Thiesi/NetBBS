@@ -48,14 +48,19 @@ netbbs/
 │   ├── boards/           Local message boards + posts, content-addressed
 │   │                     IDs from day one (§7) so Linked-board support
 │   │                     later needs no ID-scheme migration
+│   ├── config.py         Node-wide key-value settings (currently just
+│   │                     display timestamp format)
 │   ├── __main__.py       Minimal runnable entry point for manual testing
-│   └── timeutil.py       Shared deterministic timestamp formatting
+│   └── timeutil.py       Storage-format timestamps (utc_now_iso) and
+│                         user-facing display formatting, kept separate
 ├── scripts/
 │   ├── create_test_user.py   Dev utility: create an account to test the
 │   │                         login flow with (no self-registration UI
 │   │                         exists yet)
-│   └── create_test_board.py  Dev utility: create a board (+ seed post)
-│                              to test board browsing with
+│   ├── create_test_board.py  Dev utility: create a board (+ seed post)
+│   │                         to test board browsing with
+│   └── set_node_config.py    Dev/admin utility: set a node-wide config
+│                              value, e.g. the display timestamp format
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
 ├── pyproject.toml

@@ -703,3 +703,39 @@ Prompted by starting actual implementation of local message boards
    this rather than replacing it. Presented as an assumption rather than
    a full stop-and-ask, since the cost of being wrong is low — the
    column is additive, not something Phase 2 would need to remove.
+
+## Sign-off notes, round 8 (display formatting)
+
+Prompted by Thiesi noticing raw microsecond-precision timestamps leaking
+into user-facing board post displays.
+
+1. **Storage vs. display timestamps formally split.** `utc_now_iso()`
+   (microsecond-precision, for storage/content-ID hashing) is untouched;
+   a new `format_for_display()` in the same module handles what a user
+   actually sees, and never includes sub-second precision regardless of
+   configuration.
+2. **Configurability level, confirmed with Thiesi:** node-wide default
+   (SysOp-configurable) now; per-user preference later, once a user
+   preferences system exists (no such system exists yet — see §13/§15
+   phasing). `format_for_display()`'s resolution order (future per-user
+   override > node config > hardcoded default) is built in now
+   specifically so adding per-user preferences later needs no changes to
+   this function, only a caller passing the user's stored value through.
+3. **New `netbbs.config` module**: a generic node-wide key-value store
+   backed by a new `node_config` table, not a single hardcoded setting —
+   more node-wide settings are inevitable as the project grows.
+4. **European-style default** (`%d.%m.%Y %H:%M`, 24-hour clock) per
+   Thiesi's preference, fully overridable.
+5. **Real bug caught by actually running the code, not just syntax-
+   checking it:** the first implementation used `try/except ValueError`
+   around `strftime()` to detect a malformed custom format and fall back
+   to the default. Verified directly that this doesn't work reliably —
+   glibc's `strftime` does not raise for an unknown directive (e.g.
+   `%Q`), it returns the directive back out literally instead, and
+   behavior for invalid directives is undefined by the C standard and
+   platform-dependent (NetBSD's libc could differ again). Replaced with
+   upfront allowlist validation of directive characters before ever
+   calling `strftime`, which is deterministic regardless of platform.
+   Invalid formats are now rejected at set-time (`set_display_format`,
+   with an immediate error) rather than silently discovered later at
+   display time.
