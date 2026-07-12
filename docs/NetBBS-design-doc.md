@@ -897,3 +897,46 @@ starts.
    chat channels don't), and exactly which mechanical events are
    "interesting" enough to include — neither is answerable without real
    Link traffic to calibrate against.
+
+## Sign-off notes, round 12 (implementation: local blocklist)
+
+1. **New `netbbs.moderation` package**, the natural home for the richer
+   §13 moderation model (mute/ban/kick, board moderator roles) once
+   that's built in Phase 2 — started now with just the blocklist rather
+   than waiting, since a dedicated package was clearly right regardless
+   of how much lives in it yet.
+2. **Entries key on fingerprint when possible, local user ID otherwise**
+   — mirrors the same keypair-vs-password-only duality already handled
+   in `posts.author_fingerprint` and `users.fingerprint`. Fingerprint-
+   based entries are the exact form design doc §15's Phase 3 extends to
+   remote nodes/users ("the local blocklist mechanism from Phase 1,
+   extended to remote nodes/traffic"); local-user-ID entries exist
+   specifically for password-only accounts, which have no fingerprint.
+3. **Verified directly, not assumed:** the SQLite `CHECK ((fingerprint IS
+   NOT NULL) != (local_user_id IS NOT NULL))` XOR constraint and the
+   partial unique indexes (`WHERE fingerprint IS NOT NULL`) both actually
+   work as intended — tested standalone first, then again against the
+   real migrated schema, including a rejection test for a row with both
+   fields set.
+4. **Blocklist enforcement lives in the login flow, not inside
+   `netbbs.auth`.** Authentication ("are these credentials correct") and
+   this kind of authorization ("is this correctly-authenticated account
+   allowed to proceed") are different concerns — same layering principle
+   already applied to keep `netbbs.permissions` separate from
+   `netbbs.auth`.
+5. **Edge case identified and handled defensively:** a user blocked while
+   password-only (by local user ID) could theoretically later gain a
+   keypair and no longer show as blocked under a naive fingerprint-only
+   check. Not reachable today — there's no "add a keypair to an existing
+   account" feature yet — but `is_blocked` checks both fields whenever a
+   fingerprint is present, closing the gap now rather than leaving it for
+   whenever that feature exists.
+6. **Testing note:** `netbbs.moderation.blocklist` needs `netbbs.auth`
+   (for `User`), which needs PyNaCl — unavailable in Claude's sandbox, so
+   the 15 tests in `test_blocklist.py` are syntax-checked only. The
+   schema itself (migration, XOR constraint, partial unique indexes) was
+   verified against a real `Database` instance, since `netbbs.storage`
+   has no PyNaCl dependency — all 5 migrations apply cleanly and the
+   constraint correctly rejects an invalid row when tested directly
+   against the actual migrated table, not just a standalone
+   reproduction.

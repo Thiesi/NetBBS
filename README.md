@@ -51,6 +51,8 @@ netbbs/
 │   ├── chat/             Local real-time chat: channels (content-
 │   │                     addressed IDs, same reasoning as boards) + an
 │   │                     in-memory per-node broadcast hub
+│   ├── moderation/       Local blocklist (moderation stub, pre-dates the
+│   │                     full reputation system)
 │   ├── config.py         Node-wide key-value settings (currently just
 │   │                     display timestamp format)
 │   ├── __main__.py       Minimal runnable entry point for manual testing
@@ -64,6 +66,10 @@ netbbs/
 │   │                          to test board browsing with
 │   ├── create_test_channel.py Dev utility: create a chat channel to
 │   │                          test real-time chat with
+│   ├── block_user.py          Dev/admin utility: block a user from
+│   │                          logging in
+│   ├── unblock_user.py        Dev/admin utility: remove a user from the
+│   │                          blocklist
 │   └── set_node_config.py     Dev/admin utility: set a node-wide config
 │                               value, e.g. the display timestamp format
 ├── tests/                Test suite (pytest; conftest.py speeds up
@@ -93,6 +99,16 @@ For real-time chat specifically, open two separate `telnet localhost
 console testing solo won't show the broadcast effect) and join the same
 channel from both — messages sent from one should appear in the other
 immediately.
+
+To test the blocklist:
+
+```sh
+python scripts/block_user.py netbbs.db thiesi "testing the blocklist"
+```
+
+Then try logging in as `thiesi` — you should see "Your access to this
+system has been revoked." instead of reaching the main menu. Reverse with
+`python scripts/unblock_user.py netbbs.db thiesi`.
 
 Then, from another terminal:
 

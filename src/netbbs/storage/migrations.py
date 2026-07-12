@@ -130,4 +130,32 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description="Local blocklist — moderation stub, pre-dates the full "
+        "reputation system (design doc §6/§13/§15).",
+        sql="""
+        CREATE TABLE blocklist (
+            id                  INTEGER PRIMARY KEY,
+            -- Exactly one of these two is set. Fingerprint-based entries
+            -- are the form design doc §15's Phase 3 extends to remote
+            -- nodes/users once the Link exists ("the local blocklist
+            -- mechanism from Phase 1, extended to remote nodes/
+            -- traffic"). local_user_id exists specifically for
+            -- password-only local accounts, which have no fingerprint to
+            -- block by.
+            fingerprint         TEXT,
+            local_user_id       INTEGER REFERENCES users(id),
+            reason              TEXT,
+            blocked_by_user_id  INTEGER NOT NULL REFERENCES users(id),
+            created_at          TEXT NOT NULL,
+
+            CHECK ((fingerprint IS NOT NULL) != (local_user_id IS NOT NULL))
+        );
+
+        CREATE UNIQUE INDEX idx_blocklist_fingerprint
+            ON blocklist(fingerprint) WHERE fingerprint IS NOT NULL;
+        CREATE UNIQUE INDEX idx_blocklist_local_user_id
+            ON blocklist(local_user_id) WHERE local_user_id IS NOT NULL;
+        """,
+    ),
 ]

@@ -16,6 +16,7 @@ from __future__ import annotations
 from netbbs.auth.users import AuthError, User, authenticate_password
 from netbbs.boards import Board, BoardError, create_post, get_board_by_name, list_boards, list_posts
 from netbbs.chat import ChatHub
+from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -86,6 +87,15 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
     lockout/ban mechanism belongs to §13's mute/ban system, which is
     Phase 2. This is just enough to stop a single connection from
     hammering the password check in a tight loop.
+
+    The blocklist check happens *here*, after successful authentication,
+    not inside `authenticate_password` itself — authentication ("are
+    these credentials correct") and this kind of authorization ("is this
+    correctly-authenticated account allowed to proceed") are different
+    concerns, kept separate the same way `netbbs.permissions` is kept
+    separate from `netbbs.auth`. It also can't happen any earlier: we
+    need to know *who* successfully authenticated before we can check
+    whether they're blocked.
     """
     for attempt in range(max_attempts):
         await session.write("\r\nUsername: ")
@@ -98,13 +108,26 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
         await session.write_line("")  # move to a fresh line after the hidden input
 
         try:
-            return authenticate_password(db, username, password)
+            user = authenticate_password(db, username, password)
         except AuthError:
             remaining = max_attempts - attempt - 1
             if remaining > 0:
                 await session.write_line(f"Login failed. {remaining} attempt(s) remaining.")
             else:
                 await session.write_line("Login failed.")
+            continue
+
+        if is_blocked(db, user):
+            # A distinct message from the generic "Login failed" above is
+            # deliberate, not an information leak: this user has already
+            # proven who they are via successful authentication, unlike
+            # an anonymous prober still guessing passwords, so there's no
+            # username-enumeration concern in telling them specifically
+            # why they can't proceed.
+            await session.write_line("Your access to this system has been revoked.")
+            return None
+
+        return user
 
     return None
 
