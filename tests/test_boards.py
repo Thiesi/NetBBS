@@ -62,11 +62,90 @@ def test_get_nonexistent_board_fails(db):
         get_board_by_name(db, "nope")
 
 
-def test_list_boards_returns_all_in_creation_order(db, alice):
+def test_list_boards_default_order_is_by_last_activity_most_recent_first(db, alice):
+    # Creation-order sorting was explicitly rejected as the default (design
+    # doc round 18) in favor of "activity". With no posts on either board,
+    # activity falls back to each board's own created_at, so the more
+    # recently *created* board should sort first. Timestamps are set
+    # explicitly (rather than relying on two back-to-back create_board()
+    # calls landing on distinct wall-clock values) because on a coarse
+    # clock they can tie, and the resulting tie-break order is whatever the
+    # table scan happens to produce — that's exactly what let a since-fixed
+    # stale test (asserting creation order) pass on Windows by accident
+    # while failing on NetBSD's finer-grained clock.
     create_board(db, "first", creator=alice)
     create_board(db, "second", creator=alice)
+    db.connection.execute(
+        "UPDATE boards SET created_at = ? WHERE name = ?",
+        ("2026-01-01T00:00:00.000000Z", "first"),
+    )
+    db.connection.execute(
+        "UPDATE boards SET created_at = ? WHERE name = ?",
+        ("2026-01-02T00:00:00.000000Z", "second"),
+    )
+    db.connection.commit()
+
+    boards = list_boards(db)
+    assert [b.name for b in boards] == ["second", "first"]
+
+
+def test_list_boards_activity_order_uses_latest_post_not_creation_time(db, alice):
+    first = create_board(db, "first", creator=alice)
+    create_board(db, "second", creator=alice)
+    db.connection.execute(
+        "UPDATE boards SET created_at = ? WHERE name = ?",
+        ("2026-01-01T00:00:00.000000Z", "first"),
+    )
+    db.connection.execute(
+        "UPDATE boards SET created_at = ? WHERE name = ?",
+        ("2026-01-02T00:00:00.000000Z", "second"),
+    )
+    db.connection.commit()
+
+    post = create_post(db, first, alice, "New activity", "bumps first board to the top")
+    db.connection.execute(
+        "UPDATE posts SET created_at = ? WHERE id = ?",
+        ("2026-01-03T00:00:00.000000Z", post.id),
+    )
+    db.connection.commit()
+
     boards = list_boards(db)
     assert [b.name for b in boards] == ["first", "second"]
+
+
+def test_list_boards_alphabetical_order_is_case_insensitive(db, alice):
+    create_board(db, "Zebra", creator=alice)
+    create_board(db, "apple", creator=alice)
+    create_board(db, "Banana", creator=alice)
+
+    boards = list_boards(db, order_by="alphabetical")
+    assert [b.name for b in boards] == ["apple", "Banana", "Zebra"]
+
+
+def test_list_boards_volume_order_is_by_post_count_descending(db, alice):
+    quiet = create_board(db, "quiet", creator=alice)
+    medium = create_board(db, "medium", creator=alice)
+    create_board(db, "empty", creator=alice)
+    create_post(db, quiet, alice, "Only post", "body")
+    for i in range(3):
+        create_post(db, medium, alice, f"Post {i}", "body")
+
+    boards = list_boards(db, order_by="volume")
+    assert [b.name for b in boards] == ["medium", "quiet", "empty"]
+
+
+def test_list_boards_pinned_boards_sort_first_regardless_of_order_by(db, alice):
+    create_board(db, "apple", creator=alice)
+    create_board(db, "banana", creator=alice)
+    create_board(db, "zzz-pinned", pinned=True, creator=alice)
+
+    boards = list_boards(db, order_by="alphabetical")
+    assert [b.name for b in boards] == ["zzz-pinned", "apple", "banana"]
+
+
+def test_list_boards_rejects_unknown_order_by(db):
+    with pytest.raises(ValueError):
+        list_boards(db, order_by="nonsense")
 
 
 def test_two_boards_have_different_content_ids_even_with_same_creator(db, alice):

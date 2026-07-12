@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from netbbs.identity import format_address, parse_address
@@ -79,6 +81,12 @@ def test_save_and_load_roundtrip_unencrypted(tmp_path):
     assert loaded.verify(message, original.sign(message))
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="os.chmod cannot express owner-only permission bits on Windows "
+    "(no POSIX permission model); this test is only meaningful on the "
+    "project's actual POSIX targets (NetBSD/Linux).",
+)
 def test_save_sets_owner_only_permissions(tmp_path):
     identity = Identity.generate(IdentityKind.NODE, "roanoke")
     path = tmp_path / "node.identity.json"
