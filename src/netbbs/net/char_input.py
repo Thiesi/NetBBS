@@ -50,6 +50,12 @@ _FOLLOWUP_BYTE_TIMEOUT = 0.05
 # appended (but Backspace and Enter still work normally).
 _MAX_LINE_LENGTH = 4096
 
+# One-byte lookahead pushback is stored on the source itself so both Telnet
+# and SSH get identical behavior without duplicating buffering machinery in
+# each transport. The source implementations are ordinary mutable session
+# objects, and only this module reads/writes the private attribute.
+_PUSHBACK_ATTR = "_netbbs_char_input_pushback"
+
 
 class ByteSource(Protocol):
     """What a transport must supply for `read_line`/`read_key` below to
@@ -87,6 +93,35 @@ class ByteSource(Protocol):
 WriteFunc = Callable[[str], Awaitable[None]]
 
 
+def _push_back(source: ByteSource, byte: int) -> None:
+    pending = getattr(source, _PUSHBACK_ATTR, None)
+    if pending is None:
+        pending = []
+        setattr(source, _PUSHBACK_ATTR, pending)
+    pending.append(byte)
+
+
+def _pop_pushed_back(source: ByteSource) -> int | None:
+    pending = getattr(source, _PUSHBACK_ATTR, None)
+    if not pending:
+        return None
+    return pending.pop()
+
+
+async def _read_byte(source: ByteSource) -> int | None:
+    pushed = _pop_pushed_back(source)
+    if pushed is not None:
+        return pushed
+    return await source.read_byte()
+
+
+async def _read_byte_with_timeout(source: ByteSource, timeout: float) -> int | None:
+    pushed = _pop_pushed_back(source)
+    if pushed is not None:
+        return pushed
+    return await source.read_byte_with_timeout(timeout)
+
+
 async def read_line(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
     """
     Read one line of input, character by character, echoing (or masking,
@@ -99,7 +134,7 @@ async def read_line(source: ByteSource, write: WriteFunc, echo: bool = True) -> 
     """
     line: list[str] = []
     while True:
-        b = await source.read_byte()
+        b = await _read_byte(source)
         if b is None:
             continue  # pure transport-level action, no data produced
 
@@ -156,7 +191,7 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
     the very next keystroke, immediately.
     """
     while True:
-        b = await source.read_byte()
+        b = await _read_byte(source)
         if b is None:
             continue  # pure transport-level action, no data produced
 
@@ -205,7 +240,7 @@ async def _read_utf8_continuation(source: ByteSource, lead_byte: int) -> str | N
 
     raw = bytearray([lead_byte])
     for _ in range(extra):
-        cb = await source.read_byte()
+        cb = await _read_byte(source)
         if cb is None or not (0x80 <= cb <= 0xBF):
             return None
         raw.append(cb)
@@ -224,15 +259,12 @@ async def _consume_optional_lf_or_nul(source: ByteSource) -> None:
     Bounded by a short timeout rather than an unbounded read: a client in
     true character mode may send a lone CR with nothing immediately
     following it, and blocking indefinitely for a byte that isn't coming
-    would hang the whole session.
+    would hang the whole session. If the lookahead is ordinary input, it
+    is saved for the next logical read instead of being discarded.
     """
-    peek = await source.read_byte_with_timeout(_FOLLOWUP_BYTE_TIMEOUT)
+    peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     if peek is not None and peek not in (_LF, _NUL):
-        # Not part of the line terminator. There's no "unread" operation
-        # available here, so this byte is lost from this read rather than
-        # mis-attributed to it — an accepted, narrow edge case rather
-        # than a silent correctness bug.
-        pass
+        _push_back(source, peek)
 
 
 async def _discard_escape_sequence(source: ByteSource) -> None:
@@ -253,18 +285,18 @@ async def _discard_escape_sequence(source: ByteSource) -> None:
     hang waiting for bytes that aren't coming, the same reasoning as
     `_consume_optional_lf_or_nul`.
     """
-    next_byte = await source.read_byte_with_timeout(_FOLLOWUP_BYTE_TIMEOUT)
+    next_byte = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     if next_byte is None:
         return
 
     if next_byte == 0x5B:  # '[' — CSI sequence
         while True:
-            b = await source.read_byte_with_timeout(_FOLLOWUP_BYTE_TIMEOUT)
+            b = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
             if b is None:
                 return
             if 0x40 <= b <= 0x7E:
                 return  # final byte of the CSI sequence
     elif next_byte == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte
-        await source.read_byte_with_timeout(_FOLLOWUP_BYTE_TIMEOUT)
+        await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     # else: some other/unrecognized shape — just the ESC itself was
     # consumed; nothing more to do.
