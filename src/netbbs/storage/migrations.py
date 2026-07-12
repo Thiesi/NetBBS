@@ -50,4 +50,56 @@ MIGRATIONS = [
         CREATE INDEX idx_users_fingerprint ON users(fingerprint);
         """,
     ),
+    Migration(
+        description="Message boards and posts, with content-addressed IDs.",
+        sql="""
+        CREATE TABLE boards (
+            id                       INTEGER PRIMARY KEY,
+            -- Content-addressed (design doc §7) — see
+            -- netbbs.boards.content_id. Computed now, ahead of any
+            -- actual Link networking, specifically so a board doesn't
+            -- need its ID scheme migrated when it later becomes Linked.
+            board_id                 TEXT NOT NULL UNIQUE,
+            name                     TEXT NOT NULL UNIQUE,
+            description              TEXT,
+            -- Nullable: no node identity is loaded/available at runtime
+            -- yet (that's Phase 3 work). Populated once that exists.
+            origin_node_fingerprint  TEXT,
+            -- Simple coarse level-gate for Phase 1. The richer §13
+            -- moderator/permission model (named read/write/edit/delete/
+            -- approve grants) is Phase 2 scope and layers on top of
+            -- this, rather than replacing it.
+            min_read_level           INTEGER NOT NULL DEFAULT 0,
+            min_write_level          INTEGER NOT NULL DEFAULT 0,
+            created_at               TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_boards_board_id ON boards(board_id);
+
+        CREATE TABLE posts (
+            id                  INTEGER PRIMARY KEY,
+            post_id             TEXT NOT NULL UNIQUE,
+            board_id            INTEGER NOT NULL REFERENCES boards(id),
+            -- Content-addressed reference to the post being replied to,
+            -- forming the DAG structure design doc §7 describes — even
+            -- though there's no actual DAG sync yet, the parent-pointer
+            -- shape is already correct.
+            parent_post_id      TEXT REFERENCES posts(post_id),
+            author_user_id      INTEGER NOT NULL REFERENCES users(id),
+            -- Denormalized username at post time, so history still reads
+            -- correctly even if the account is later renamed or removed.
+            author_label        TEXT NOT NULL,
+            -- Nullable: only present if the author has a keypair. A
+            -- password-only user's posts are still fully valid — see
+            -- the node-vouching decision in the design doc's phasing
+            -- sign-off notes.
+            author_fingerprint  TEXT,
+            subject             TEXT NOT NULL,
+            body                TEXT NOT NULL,
+            created_at          TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_posts_board_id ON posts(board_id);
+        """,
+    ),
 ]

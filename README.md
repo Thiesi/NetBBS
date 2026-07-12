@@ -1,7 +1,7 @@
 # NetBBS
 
 A modern, TCP/IP-native BBS package: not stuck at 80x24, not stuck on an
-EOL operating system, and built around **the Link** — an ad-hoc mesh
+EOL operating system, and built around **NetBBS Link** — an ad-hoc mesh
 network that lets independent NetBBS nodes discover each other, exchange
 message boards and personal messages, and (later) real-time chat, without
 requiring any central authority.
@@ -17,8 +17,8 @@ is in **Phase 1 (Foundation)**.
 
 This is a second attempt at this project. The first attempt got a long way
 (multi-user chat, file areas, message boards) but needed a significant
-rewrite once mesh networking entered scope, because the Link wasn't
-designed in from the start. This attempt builds the Link in as a
+rewrite once mesh networking entered scope, because NetBBS Link wasn't
+designed in from the start. This attempt builds NetBBS Link in as a
 foundational principle from day one — see the design doc for the full
 history and the lessons carried forward.
 
@@ -45,12 +45,17 @@ netbbs/
 │   ├── net/              Telnet transport + Session abstraction, login
 │   │                     flow (SSH/web to follow on the same Session
 │   │                     abstraction)
+│   ├── boards/           Local message boards + posts, content-addressed
+│   │                     IDs from day one (§7) so Linked-board support
+│   │                     later needs no ID-scheme migration
 │   ├── __main__.py       Minimal runnable entry point for manual testing
 │   └── timeutil.py       Shared deterministic timestamp formatting
 ├── scripts/
-│   └── create_test_user.py  Dev utility: create an account to test the
-│                             login flow with (no self-registration UI
-│                             exists yet)
+│   ├── create_test_user.py   Dev utility: create an account to test the
+│   │                         login flow with (no self-registration UI
+│   │                         exists yet)
+│   └── create_test_board.py  Dev utility: create a board (+ seed post)
+│                              to test board browsing with
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
 ├── pyproject.toml
@@ -67,6 +72,7 @@ single monolithic script.
 
 ```sh
 python scripts/create_test_user.py netbbs.db thiesi hunter2 100
+python scripts/create_test_board.py netbbs.db general "General discussion"
 python -m netbbs netbbs.db
 ```
 

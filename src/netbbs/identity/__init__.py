@@ -5,7 +5,7 @@ See design doc §5 (Identity) and §11 (Node-to-node transport security).
 
 Both nodes and individual users get a long-term Ed25519 signing keypair.
 The fingerprint derived from a signing key's public half *is* that node's
-or user's identity on the Link — there is no separate hierarchical
+or user's identity on NetBBS Link — there is no separate hierarchical
 addressing scheme (see design doc §5 for why FidoNet-style zone:net/node
 addressing was explicitly rejected).
 

@@ -52,7 +52,7 @@ def fingerprint_from_verify_key(verify_key: nacl.signing.VerifyKey) -> str:
 
     Standalone (not just `Identity.fingerprint`) because naming/looking up
     *other* identities — the common case once accounts are stored with
-    just a public key, or once the Link exists — only ever requires their
+    just a public key, or once NetBBS Link exists — only ever requires their
     public key, never a full local `Identity` with private key material.
     """
     raw_pubkey = bytes(verify_key)
@@ -103,7 +103,7 @@ class Identity:
     A single Ed25519 signing identity — either a node or a user.
 
     The fingerprint (derived from the public key) *is* the identity's
-    address on the Link; see design doc §5. This class deliberately does
+    address on NetBBS Link; see design doc §5. This class deliberately does
     not know about node-vs-user addressing format — that's
     `netbbs.identity.addressing`.
     """

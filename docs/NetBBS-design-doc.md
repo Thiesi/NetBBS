@@ -2,7 +2,7 @@
 
 Second attempt at a modern, TCP/IP-native BBS system. First attempt got far
 (multi-user chat, file areas, message boards) but required a rewrite once
-mesh networking ("the Link") entered scope — this attempt builds the Link in
+mesh networking ("NetBBS Link") entered scope — this attempt builds NetBBS Link in
 as a foundational principle from day one instead of retrofitting it.
 
 Status: **CONFIRMED — signed off by Thiesi through 6 rounds of review
@@ -15,9 +15,14 @@ Ready for implementation.**
 ## 1. Naming
 
 - **NetBBS** — the project itself, named for its primary target OS.
-- **the Link** — the ad-hoc mesh network connecting NetBBS nodes.
-- **Linked boards** — message boards distributed/synced across the Link.
-- **Link messages** — personal messages routed across the Link.
+- **NetBBS Link** — the ad-hoc mesh network connecting NetBBS nodes.
+  Formal name used throughout this document and all user-facing text;
+  "the Link" is expected and fine as informal shorthand in speech and
+  casual conversation, the same way "FidoNet" got called just "Fido" —
+  but the written/official form stays "NetBBS Link" everywhere it's
+  introduced or referenced formally.
+- **Linked boards** — message boards distributed/synced across NetBBS Link.
+- **Link messages** — personal messages routed across NetBBS Link.
 - **Board vs. Area (strict terminology, borrowed from the first attempt):**
   "Board" always means *message* board. "Area" always means *file* area.
   Never use "board" for files. So: **linked file areas**, not "linked file
@@ -25,13 +30,13 @@ Ready for implementation.**
 
 ## 2. Philosophy / non-negotiables carried over from the first attempt
 
-- The Link is foundational, not bolted on. Every feature should be designed
-  with "could/should this work across the Link?" in mind, even if the
+- NetBBS Link is foundational, not bolted on. Every feature should be designed
+  with "could/should this work across NetBBS Link?" in mind, even if the
   Link-wide version ships later than the local version.
 - **No node can unilaterally silence another node network-wide.** This was
   the core design principle of the first attempt, and the thing that broke
   under real-world testing (a single node's operator went rogue with no
-  mechanism for the rest of the Link to react). The trust/reputation system
+  mechanism for the rest of NetBBS Link to react). The trust/reputation system
   in §6 exists specifically to fix that failure mode without abandoning the
   underlying principle.
 
@@ -49,9 +54,9 @@ Ready for implementation.**
 - **Code structure: proper modular package, not a monolithic single file.**
   The first attempt deliberately stayed a single Python script, which made
   sense for *them* — they started with a small, mostly-local scope and only
-  backed into the Link and its scale much later, by which point splitting
+  backed into NetBBS Link and its scale much later, by which point splitting
   thousands of LOC was a bigger lift than living with the monolith. We don't
-  have that excuse: full scope (including the Link) is deliberately being
+  have that excuse: full scope (including NetBBS Link) is deliberately being
   designed in from day one, so starting monolithic now would mean choosing
   to inherit their retrofit problem on purpose. "Easy to deploy" doesn't
   require "single file" — a pkgsrc package or a couple of rc.d-managed
@@ -177,7 +182,7 @@ to replay chat history through the propagation layer.
 
 ## 9. File areas
 
-- **Node-local**, not replicated/synced across the Link.
+- **Node-local**, not replicated/synced across NetBBS Link.
 - **Discoverable and downloadable on-demand** from remote nodes — no full
   Link-wide replication (avoids the bandwidth/storage blowup of syncing
   potentially large files everywhere). Remote-discoverable areas are
@@ -215,7 +220,7 @@ constraints rather than a design objection.
 
 ## 12. WAN rendezvous
 
-New nodes bootstrap onto the Link via a **fixed/hardcoded seed node list**
+New nodes bootstrap onto NetBBS Link via a **fixed/hardcoded seed node list**
 (classic, simple approach — accepted trade-off of mild central dependency
 at the bootstrap stage only; once connected, a node operates as a full
 peer).
@@ -232,7 +237,7 @@ as-is.
 level/permission gating must be first-class plumbing in the menu/command
 dispatch layer from Phase 1 onward, not retrofitted per-feature later —
 even though most gated features (boards, chat, moderators) don't exist
-until later phases. Same reasoning as building the Link in from day one:
+until later phases. Same reasoning as building NetBBS Link in from day one:
 retrofitting cross-cutting infrastructure onto already-built features is
 what caused the original rewrite.
 
@@ -265,7 +270,7 @@ permission primitives — a "global" moderator is just "moderator of every
 object in a category," not a different mechanism):
 1. **Per-object** — authority over one specific board/area/channel.
 2. **Local-blanket** — authority over every *local-only* board/area/channel
-   on a given node (i.e., content not carried on the Link).
+   on a given node (i.e., content not carried on NetBBS Link).
 3. **Link-blanket ("global")** — authority over every Link-participating
    board/area/channel that node carries.
 
@@ -321,7 +326,7 @@ already being made for every post on it, not a new category of trust.
   action is the same shape of problem as the Master Node — a small set of
   privileged users able to act on infrastructure they don't own — even
   though the stakes here are lower than that original failure.
-- **Default-carry policy for Link participation:** joining the Link
+- **Default-carry policy for Link participation:** joining NetBBS Link
   **carries every Linked board/channel by default** — this gives the
   "same content available on any node" guarantee automatically, with zero
   configuration, for the overwhelming majority of SysOps who'll never want
@@ -370,7 +375,7 @@ already being made for every post on it, not a new category of trust.
   operation, but near-term testing/validation targets one-or-two-node
   scenarios rather than large-scale Link behavior (partition handling under
   real-world latency, large-N gossip overhead, etc.) — those can be
-  revisited once/if the Link actually grows.
+  revisited once/if NetBBS Link actually grows.
 - **Empirical calibration from the first attempt** (their lead developer,
   relayed via Thiesi): single-node interactive load — 20–100 concurrent
   users reasonable on modest hardware with asyncio+SQLite, 100–250 possible
@@ -432,7 +437,7 @@ any Link work begins, matching Thiesi's actual primary deployment target.
 - Content-addressed DAG message format + flood-fill gossip sync
 - Persistent seen-event dedup table + file-chunk transfer ID scheme (§7)
 - Store-and-forward for offline nodes
-- Linked boards (distribution across the Link)
+- Linked boards (distribution across NetBBS Link)
 - Link messages (cross-Link PMs)
 - Interim abuse defense: the local blocklist mechanism from Phase 1,
   extended to remote nodes/traffic — acceptable given near-term testing is
@@ -499,9 +504,9 @@ structure.
 1. SQLite as storage layer — **confirmed**.
 2. Noise Protocol Framework for node-to-node encryption — **confirmed**.
 3. Phase breakdown — **confirmed as-is**. Explicitly validated rationale:
-   the first attempt's core mistake was carving out the Link's design only
+   the first attempt's core mistake was carving out NetBBS Link's design only
    after every other feature already existed, forcing significant
-   conceptual rework across the board. Discussing the Link fully before
+   conceptual rework across the board. Discussing NetBBS Link fully before
    Phase 1 (even though Phase 1 itself ships without a live Link) avoids
    repeating that mistake — every Phase 1 feature is being built with the
    Link already in mind, not bolted on later.
@@ -619,7 +624,7 @@ global-moderator board/channel creation-deletion, and maintenance/expiry.
    local, tied to the maintenance system.
 3. **Mandatory full-carry rule — rejected in favor of default-carry with
    visible opt-out.** Thiesi was open to a hard mandatory-carry rule
-   ("joining the Link means carrying everything"); settled instead on
+   ("joining NetBBS Link means carrying everything"); settled instead on
    carry-all-by-default with an explicit, visible per-board exclusion
    option, to stay consistent with §6's node-sovereignty principle while
    still delivering the "same content everywhere" property for the vast
@@ -664,3 +669,37 @@ original 4-phase breakdown after several rounds of additions.
 6. **Fullscreen editor placement moved** from a loose "likely Phase 3"
    note to a firm home in Phase 2, since post/PM editing is exercised
    heavily once local moderation and boards are both fully functional.
+
+## Sign-off notes, round 7 (implementation: boards)
+
+Prompted by starting actual implementation of local message boards
+(§15 Phase 1), which surfaced a real design fork not previously discussed.
+
+1. **Post/board IDs are content-addressed starting in Phase 1**, per §7,
+   even though no actual Link networking or signing exists yet — computed
+   now specifically so a board's ID scheme never needs migrating when it
+   later becomes Linked. Implemented in `netbbs.boards.content_id`: a
+   deterministic BLAKE2b hash (32 bytes, hex-encoded) over
+   sorted-key-JSON-canonicalized content, distinct from the shorter
+   base32 identity fingerprints (§5), which are optimized for being
+   human-typable rather than for network-scale collision resistance.
+2. **Node-vouching for password-only users' posts — confirmed.** §5
+   allows password-only accounts with no keypair, but §7/§11's signing
+   model implicitly assumed every author has one. Resolved: the *node*
+   (which already has its own keypair identity for §11 transport auth)
+   signs/vouches for posts from its local password-only users when
+   relaying to the Link, rather than requiring every user to hold a
+   personal keypair just to post. Accepted tradeoff: a password-only
+   user's posts are attributable to "some user on this node," not
+   personally non-repudiable the way a keypair holder's are. Actual
+   signing/vouching is Phase 3 scope (needs node identity loaded at
+   runtime, not yet wired up); Phase 1 only needed the schema to be
+   ready for it, via the nullable `author_fingerprint` column.
+3. **Board permission model boundary, flagged rather than asked:** Phase
+   1 boards get a simple coarse `min_read_level`/`min_write_level`
+   (reusing the Phase 1 level-gating plumbing from §13). The richer §13
+   moderator model (named read/write/edit/delete/approve grants,
+   moderated-board approval) remains Phase 2 scope, layering on top of
+   this rather than replacing it. Presented as an assumption rather than
+   a full stop-and-ask, since the cost of being wrong is low — the
+   column is additive, not something Phase 2 would need to remove.
