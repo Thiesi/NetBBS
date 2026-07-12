@@ -64,7 +64,6 @@ def fingerprint_from_verify_key(verify_key: nacl.signing.VerifyKey) -> str:
     return _encode_fingerprint(digest)
 
 
-<<<<<<< HEAD
 # Argon2id cost parameters for identity file encryption. SENSITIVE tier is
 # appropriate for something as long-lived and high-value as a node's or
 # user's master identity keypair. Deliberately module-level (not inlined
@@ -75,8 +74,6 @@ _SAVE_OPSLIMIT = nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE
 _SAVE_MEMLIMIT = nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE
 
 
-=======
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
 class IdentityKind(str, Enum):
     """Whether an Identity represents a node or an individual user.
 
@@ -180,13 +177,8 @@ class Identity:
                 nacl.secret.SecretBox.KEY_SIZE,
                 passphrase,
                 salt,
-<<<<<<< HEAD
                 opslimit=_SAVE_OPSLIMIT,
                 memlimit=_SAVE_MEMLIMIT,
-=======
-                opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
-                memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE,
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
             )
             box = nacl.secret.SecretBox(key)
             encrypted = box.encrypt(raw_private)
@@ -210,7 +202,6 @@ class Identity:
                 "encrypted": True,
                 "salt": base64.b64encode(salt).decode("ascii"),
                 "ciphertext": base64.b64encode(encrypted).decode("ascii"),
-<<<<<<< HEAD
                 # Recorded per-file rather than assumed from whatever the
                 # module constants currently are, so a file saved under
                 # one cost tier stays correctly loadable even if the
@@ -220,8 +211,6 @@ class Identity:
                 # aren't just informational.
                 "opslimit": _SAVE_OPSLIMIT,
                 "memlimit": _SAVE_MEMLIMIT,
-=======
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
             }
         else:
             raw_b64 = base64.b64encode(raw_private).decode("ascii")
@@ -278,26 +267,18 @@ class Identity:
             if passphrase is None:
                 raise IdentityError(f"identity file {path} is encrypted; passphrase required")
             salt = base64.b64decode(private_field["salt"])
-<<<<<<< HEAD
             # Use the cost parameters recorded in the file itself, not
             # whatever the current _SAVE_OPSLIMIT/_SAVE_MEMLIMIT happen to
             # be — Argon2id needs the exact parameters used at encryption
             # time to re-derive the same key, and those could differ from
             # today's defaults (a production tier change, or a test run
             # with monkeypatched values) without this file being touched.
-=======
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
             key = nacl.pwhash.argon2id.kdf(
                 nacl.secret.SecretBox.KEY_SIZE,
                 passphrase,
                 salt,
-<<<<<<< HEAD
                 opslimit=private_field["opslimit"],
                 memlimit=private_field["memlimit"],
-=======
-                opslimit=nacl.pwhash.argon2id.OPSLIMIT_SENSITIVE,
-                memlimit=nacl.pwhash.argon2id.MEMLIMIT_SENSITIVE,
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
             )
             box = nacl.secret.SecretBox(key)
             ciphertext = base64.b64decode(private_field["ciphertext"])

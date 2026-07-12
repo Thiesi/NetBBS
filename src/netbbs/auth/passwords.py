@@ -13,7 +13,6 @@ from __future__ import annotations
 import nacl.pwhash
 from nacl.exceptions import InvalidkeyError
 
-<<<<<<< HEAD
 # INTERACTIVE tier: appropriate for something checked on every login
 # rather than a long-lived identity file at rest (see identity/keys.py's
 # SENSITIVE-tier choice for that case) — still real Argon2id cost, just
@@ -27,15 +26,12 @@ from nacl.exceptions import InvalidkeyError
 _PASSWORD_OPSLIMIT = nacl.pwhash.argon2id.OPSLIMIT_INTERACTIVE
 _PASSWORD_MEMLIMIT = nacl.pwhash.argon2id.MEMLIMIT_INTERACTIVE
 
-=======
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
 
 def hash_password(password: str) -> str:
     """
     Hash a password for storage.
 
     Returns a self-contained encoded string (includes the salt and
-<<<<<<< HEAD
     Argon2id parameters actually used), safe to store directly in the
     `users.password_hash` column — no separate salt/params columns
     needed, and `verify_password` doesn't need to be told which
@@ -46,12 +42,6 @@ def hash_password(password: str) -> str:
         opslimit=_PASSWORD_OPSLIMIT,
         memlimit=_PASSWORD_MEMLIMIT,
     )
-=======
-    Argon2id parameters), safe to store directly in the `users.password_hash`
-    column — no separate salt column needed.
-    """
-    hashed = nacl.pwhash.argon2id.str(password.encode("utf-8"))
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
     return hashed.decode("ascii")
 
 

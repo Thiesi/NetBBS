@@ -38,7 +38,6 @@ netbbs/
 ├── docs/                 Design documentation
 ├── src/netbbs/           Main package (modular, not monolithic — see
 │                         design doc §3 for why)
-<<<<<<< HEAD
 │   ├── identity/         Keypair generation, storage, addressing (§5)
 │   ├── storage/          SQLite connection + schema migrations (§3)
 │   ├── auth/             Account creation, password + keypair login (§5)
@@ -46,25 +45,15 @@ netbbs/
 │   └── timeutil.py       Shared deterministic timestamp formatting
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
-=======
-│   └── identity/         Keypair generation, storage, addressing (§5)
-├── tests/                Test suite
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
 ├── pyproject.toml
 └── README.md
 ```
 
 As phases progress, expect new top-level modules under `src/netbbs/`
 roughly mirroring the design doc's sections: `transport/`, `link/`
-<<<<<<< HEAD
 (DAG/gossip/sync), `boards/`, `areas/` (files), `chat/`, etc. Each stays a
 separate, testable module — see design doc §3 for the reasoning against a
 single monolithic script.
-=======
-(DAG/gossip/sync), `boards/`, `areas/` (files), `chat/`, `permissions/`,
-etc. Each stays a separate, testable module — see design doc §3 for the
-reasoning against a single monolithic script.
->>>>>>> 990e1ebcd3991edd8236e769d1f86bb3a15d2bb9
 
 ## Development
 
