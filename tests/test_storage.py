@@ -99,10 +99,11 @@ def test_failed_migration_rolls_back_all_statements_and_version(tmp_path, monkey
     from netbbs.storage.migrations import Migration
 
     failing_migration = Migration(
-        """
+        description="Deliberately failing migration for rollback coverage.",
+        sql="""
         CREATE TABLE should_be_rolled_back (id INTEGER PRIMARY KEY);
         INSERT INTO table_that_does_not_exist VALUES (1);
-        """
+        """,
     )
     monkeypatch.setattr(database_module, "MIGRATIONS", [failing_migration])
 
