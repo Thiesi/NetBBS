@@ -1,16 +1,26 @@
 """
-Minimal Telnet transport (RFC 854 basics), plus NAWS (RFC 1073) window-
-size negotiation.
+Telnet transport (RFC 854 basics), NAWS (RFC 1073) window-size
+negotiation, and server-driven character-mode input.
 
-Deliberately stays in the client's default line mode — the client's own
-OS-level terminal driver handles local echo and local line editing
-(backspace, etc.), and we just read complete CRLF/LF-terminated lines.
-This is a scoping decision, not an oversight: character-at-a-time mode
-(needed for the fullscreen editor and any per-keystroke TUI screens) is
-the "TUI half" of the hybrid rendering framework, deliberately deferred
-until a real screen needs it (see design doc phasing sign-off notes) —
-this module still only needs to prove the connectivity/rendering-support
-layer works, not build a TUI.
+Originally this module stayed in the client's default line mode (client
+handles its own local echo/backspace, we just read complete CRLF-
+terminated lines) — deliberately deferred, documented as a scoping
+decision, not an oversight. That deferral was reversed after real testing
+showed client-side line editing behaving inconsistently across clients:
+Backspace not working, and Enter's CR byte showing up literally as `^M`
+instead of a proper line break. Both are symptoms of relying on each
+client's own local line-editing implementation, which varies. The fix is
+what's implemented here: the server takes over completely — every
+keystroke arrives immediately, and we handle echo, Backspace/Delete, and
+Enter detection ourselves, uniformly, for the whole session.
+
+Explicitly out of scope for this pass: full cursor-addressable line
+editing (arrow keys, Home/End, mid-line insertion). Escape sequences for
+keys we don't support are consumed and discarded as a complete unit
+(never leaking raw escape bytes into the input buffer), not implemented.
+That's meaningfully more complex — arguably the actual "fullscreen
+editor" territory — and not what was needed to fix the Backspace/^M
+problem.
 
 Terminal width/height (via NAWS) is the one piece of the rendering
 framework that lives here rather than in `netbbs.rendering`, since
@@ -41,6 +51,30 @@ ECHO = 0x01
 SUPPRESS_GO_AHEAD = 0x03
 NAWS = 0x1F  # Negotiate About Window Size (RFC 1073)
 
+# Control byte values relevant to character-mode line building.
+_CR = 0x0D
+_LF = 0x0A
+_NUL = 0x00
+_BS = 0x08  # Backspace
+_DEL = 0x7F  # Delete — many terminals send this for the Backspace key
+_ESC = 0x1B
+
+# Bounded waits used when we need to check for a byte that might not be
+# coming (a following LF after a lone CR; the rest of an escape
+# sequence) — short enough to be imperceptible when the byte does
+# arrive (which happens essentially instantly for a real client sending
+# a CRLF pair or a real escape sequence in one write), long enough to
+# never falsely time out on a real, if slightly slow, connection.
+_FOLLOWUP_BYTE_TIMEOUT = 0.05
+
+# Defensive cap on a single line's length. Not a meaningful limit for any
+# real use (post subjects/bodies, chat messages, usernames are all far
+# shorter), just cheap insurance against a broken or malicious client
+# sending unbounded data with no Enter — without this, the line buffer
+# would grow without bound. Once hit, further characters are silently
+# not appended (but Backspace and Enter still work normally).
+_MAX_LINE_LENGTH = 4096
+
 _logger = logging.getLogger(__name__)
 
 
@@ -60,28 +94,37 @@ class TelnetSession(Session):
 
     async def negotiate_initial_options(self) -> None:
         """
-        Ask the client to suppress "go ahead" turn-taking signaling, and
-        request window-size reporting (NAWS).
+        Ask the client to suppress "go ahead" turn-taking signaling,
+        take over echoing ourselves (character mode — see module
+        docstring), and request window-size reporting (NAWS).
 
-        Both fire-and-forget — we don't wait for or require a response.
+        All fire-and-forget — we don't wait for or require a response.
+        WILL ECHO is now sent once, persistently, for the whole session,
+        rather than toggled per-read around password prompts the way an
+        earlier version of this module did: once the client has stopped
+        doing its own local echo, password masking becomes purely a
+        local rendering choice (echo `*` instead of the real character —
+        see `read_line`), not something that needs further protocol-level
+        negotiation.
+
         For NAWS specifically: the client's WILL/WONT reply and (if
         supported) its actual width/height subnegotiation will naturally
-        be consumed and processed by `_read_raw_line`'s existing IAC-
-        handling the next time we call `read_line()` (i.e., when
-        prompting for a username) — see `_handle_subnegotiation`. This
-        deliberately avoids a separate blocking wait-for-negotiation-
-        response step, which would need to distinguish "the client's
-        negotiation reply" from "the client already sending real data"
-        with no reliable way to un-read a byte from an
-        `asyncio.StreamReader` if that distinction is guessed wrong. The
-        cost of this simpler approach: the very first thing we send (the
-        welcome banner) is always written before we know the real
-        terminal width, using the 80-column default. Accepted — the
-        banner is short, static text that doesn't meaningfully benefit
-        from reflow, unlike board post bodies shown well after login, by
-        which point NAWS negotiation has always already resolved.
+        be consumed and processed the next time we call `read_line()`
+        (i.e., when prompting for a username) — see
+        `_handle_subnegotiation`. This deliberately avoids a separate
+        blocking wait-for-negotiation-response step, which would need to
+        distinguish "the client's negotiation reply" from "the client
+        already sending real data" with no reliable way to un-read a byte
+        from an `asyncio.StreamReader` if that distinction is guessed
+        wrong. The cost: the very first thing we send (the welcome
+        banner) is always written before we know the real terminal
+        width, using the 80-column default — accepted, since the banner
+        is short, static text that doesn't meaningfully benefit from
+        reflow, unlike board post bodies shown well after login, by which
+        point NAWS negotiation has always already resolved.
         """
         self._writer.write(bytes([IAC, WILL, SUPPRESS_GO_AHEAD]))
+        self._writer.write(bytes([IAC, WILL, ECHO]))
         self._writer.write(bytes([IAC, DO, NAWS]))
         await self._writer.drain()
 
@@ -105,10 +148,6 @@ class TelnetSession(Session):
         # No IAC-escaping needed here: text is UTF-8 encoded, and byte
         # value 0xFF (== IAC) never appears in valid UTF-8 output — bytes
         # 0xF5-0xFF are unused by the UTF-8 encoding scheme entirely.
-        # (Worth stating explicitly rather than leaving as an unexplained
-        # absence — an earlier draft of this method escaped IAC
-        # defensively, which turned out to be dead code once traced
-        # through: it could never actually trigger.)
         data = normalized.encode("utf-8", errors="replace")
         try:
             self._writer.write(data)
@@ -117,19 +156,63 @@ class TelnetSession(Session):
             raise SessionClosedError("client disconnected during write") from exc
 
     async def read_line(self, echo: bool = True) -> str:
-        if not echo:
-            self._writer.write(bytes([IAC, WILL, ECHO]))
-            await self._writer.drain()
+        """
+        Read one line of input, character by character, echoing (or
+        masking, if `echo=False`) each character ourselves as it
+        arrives — see the module docstring for why this replaced relying
+        on the client's own local line editing.
+
+        `echo=False` no longer means "no visual feedback at all" the way
+        it originally did; it means each typed character is masked with
+        `*` instead of shown as typed, matching common modern password-
+        field UX (revealing length, not content) rather than the more
+        conservative "reveal nothing" alternative.
+        """
+        line: list[str] = []
         try:
-            try:
-                line_bytes = await self._read_raw_line()
-            except asyncio.IncompleteReadError as exc:
-                raise SessionClosedError("client disconnected during read") from exc
-        finally:
-            if not echo:
-                self._writer.write(bytes([IAC, WONT, ECHO]))
-                await self._writer.drain()
-        return line_bytes.decode("utf-8", errors="replace")
+            while True:
+                b = await self._read_byte()
+                if b is None:
+                    continue  # pure negotiation action, no data produced
+
+                if b in (_CR, _LF):
+                    if b == _CR:
+                        await self._consume_optional_lf_or_nul()
+                    break
+
+                if b in (_BS, _DEL):
+                    if line:
+                        line.pop()
+                        await self.write("\b \b")
+                    continue
+
+                if b == _ESC:
+                    await self._discard_escape_sequence()
+                    continue
+
+                if b < 0x20:
+                    # Any other control byte (Tab, Ctrl+C, Ctrl+D, etc.)
+                    # — not supported in this pass; discard rather than
+                    # corrupt the line or echo something meaningless.
+                    continue
+
+                if b < 0x80:
+                    char = chr(b)
+                else:
+                    char = await self._read_utf8_continuation(b)
+                    if char is None:
+                        continue  # malformed/interrupted multi-byte sequence
+
+                if len(line) < _MAX_LINE_LENGTH:
+                    line.append(char)
+                    await self.write(char if echo else "*")
+                # else: silently drop the character but keep reading —
+                # Backspace and Enter still work normally past the cap.
+        except asyncio.IncompleteReadError as exc:
+            raise SessionClosedError("client disconnected during read") from exc
+
+        await self.write("\r\n")
+        return "".join(line)
 
     async def close(self) -> None:
         if not self._writer.is_closing():
@@ -141,51 +224,143 @@ class TelnetSession(Session):
 
     # -- byte-level reading -------------------------------------------------
 
-    async def _read_raw_line(self) -> bytes:
-        line = bytearray()
-        while True:
-            b = (await self._reader.readexactly(1))[0]
+    async def _read_byte(self) -> int | None:
+        """
+        Read and return the next actual DATA byte from the client, or
+        `None` if what was read was purely a Telnet negotiation action
+        (option negotiation, NAWS subnegotiation, etc.) with no data
+        significance — callers should just loop and call this again.
 
-            if b == IAC:
-                next_byte = (await self._reader.readexactly(1))[0]
-                if next_byte == IAC:
-                    # Client sent an escaped literal 0xFF as actual data
-                    # (the RFC 854 escaping rule, mirroring what write()
-                    # would do if it ever needed to — see the note there
-                    # on why our own output never needs it).
-                    line.append(0xFF)
-                    continue
-                if next_byte in (WILL, WONT, DO, DONT):
-                    await self._reader.readexactly(1)  # option byte, ignored
-                    continue
-                if next_byte == SB:
-                    await self._handle_subnegotiation()
-                    continue
-                # Other bare commands (NOP, AYT, GA, etc.) carry no
-                # further bytes — nothing more to consume.
-                continue
+        Centralizes all IAC/negotiation handling in one place, used by
+        every higher-level read in this class.
+        """
+        b = (await self._reader.readexactly(1))[0]
 
-            if b == 0x0D:  # CR
-                # Standard Telnet line ending is CRLF; a following NUL is
-                # also an RFC 854-permitted variant. Consume either if
-                # present.
-                peek = await self._reader.read(1)
-                if peek and peek[0] not in (0x0A, 0x00):
-                    # A real client sending something other than LF/NUL
-                    # immediately after a bare CR would be very unusual.
-                    # asyncio.StreamReader has no "unread" operation, so
-                    # the byte is lost from this line rather than
-                    # mis-attributed to it — an accepted, narrow edge
-                    # case rather than a silent correctness bug.
-                    pass
-                break
+        if b == IAC:
+            next_byte = (await self._reader.readexactly(1))[0]
+            if next_byte == IAC:
+                # Client sent an escaped literal 0xFF as actual data
+                # (the RFC 854 escaping rule).
+                return 0xFF
+            if next_byte in (WILL, WONT, DO, DONT):
+                await self._reader.readexactly(1)  # option byte, ignored
+                return None
+            if next_byte == SB:
+                await self._handle_subnegotiation()
+                return None
+            # Other bare commands (NOP, AYT, GA, etc.) carry no further
+            # bytes — nothing more to consume.
+            return None
 
-            if b == 0x0A:  # bare LF also terminates a line
-                break
+        return b
 
-            line.append(b)
+    async def _read_utf8_continuation(self, lead_byte: int) -> str | None:
+        """
+        Given a UTF-8 multi-byte lead byte already read, read the
+        appropriate number of continuation bytes (per the UTF-8 encoding
+        scheme's lead-byte ranges) and decode the complete character.
 
-        return bytes(line)
+        Matters concretely for this project: umlauts and other non-ASCII
+        characters are everyday input, not an edge case, and a naive
+        byte-at-a-time decode would corrupt every one of them. Returns
+        `None` (discarding the partial character) if the sequence is
+        malformed or interrupted by a negotiation action rather than
+        risking a wrong decode.
+        """
+        if 0xC2 <= lead_byte <= 0xDF:
+            extra = 1
+        elif 0xE0 <= lead_byte <= 0xEF:
+            extra = 2
+        elif 0xF0 <= lead_byte <= 0xF4:
+            extra = 3
+        else:
+            return None  # not a valid UTF-8 lead byte
+
+        raw = bytearray([lead_byte])
+        for _ in range(extra):
+            cb = await self._read_byte()
+            if cb is None or not (0x80 <= cb <= 0xBF):
+                return None
+            raw.append(cb)
+
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    async def _consume_optional_lf_or_nul(self) -> None:
+        """
+        After a CR, consume a following LF or NUL if present — both are
+        valid Telnet line-ending continuations (CRLF or CR-NUL).
+
+        Bounded by a short timeout rather than an unbounded read: a
+        client in true character mode may send a lone CR with nothing
+        immediately following it, and an earlier version of this method
+        (inherited from the original line-mode reader) could have hung
+        indefinitely waiting for a byte that wasn't coming. A real CRLF
+        pair, sent together in one client-side write, arrives well within
+        this window regardless of connection latency, since it's one
+        send hitting our receive buffer, not a further round trip.
+        """
+        try:
+            peek = await asyncio.wait_for(self._reader.read(1), timeout=_FOLLOWUP_BYTE_TIMEOUT)
+        except asyncio.TimeoutError:
+            return
+        if peek and peek[0] not in (_LF, _NUL):
+            # Not part of the line terminator. asyncio.StreamReader has
+            # no "unread" operation, so this byte is lost from this read
+            # rather than mis-attributed to it — an accepted, narrow edge
+            # case rather than a silent correctness bug.
+            pass
+
+    async def _discard_escape_sequence(self) -> None:
+        """
+        Consume and discard a terminal escape sequence following an ESC
+        byte (arrow keys, function keys, Home/End, etc.) as a complete
+        unit — not supported in this pass (see module docstring).
+        Handles the two common shapes real terminals use for special
+        keys:
+
+        - CSI sequences: ESC [ ... <final byte in 0x40-0x7E> (the vast
+          majority of arrow/function/navigation keys)
+        - SS3 sequences: ESC O <single letter> (some terminals'
+          "application cursor key mode" encoding for arrow keys)
+
+        Anything else after a lone ESC (a real Escape keypress with
+        nothing following, or a shape we don't recognize) is left alone
+        after discarding just the ESC itself, on a short timeout — so we
+        can never hang waiting for bytes that aren't coming, the same
+        reasoning as `_consume_optional_lf_or_nul`.
+        """
+        try:
+            next_byte = await asyncio.wait_for(self._reader.read(1), timeout=_FOLLOWUP_BYTE_TIMEOUT)
+        except asyncio.TimeoutError:
+            return
+        if not next_byte:
+            return
+        nb = next_byte[0]
+
+        if nb == 0x5B:  # '[' — CSI sequence
+            while True:
+                try:
+                    b = (
+                        await asyncio.wait_for(
+                            self._reader.readexactly(1), timeout=_FOLLOWUP_BYTE_TIMEOUT
+                        )
+                    )[0]
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    return
+                if 0x40 <= b <= 0x7E:
+                    return  # final byte of the CSI sequence
+        elif nb == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte
+            try:
+                await asyncio.wait_for(
+                    self._reader.readexactly(1), timeout=_FOLLOWUP_BYTE_TIMEOUT
+                )
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                return
+        # else: some other/unrecognized shape — just the ESC itself was
+        # consumed; nothing more to do.
 
     async def _handle_subnegotiation(self) -> None:
         """
@@ -198,9 +373,7 @@ class TelnetSession(Session):
         specifically for NAWS, whose width/height bytes are arbitrary
         16-bit values: a terminal that's, say, 255 columns wide would
         have a literal 0xFF byte in its NAWS payload, which per RFC 854
-        must arrive doubled (IAC IAC) same as any other data byte. Naively
-        scanning for the first "IAC SE" without un-escaping first would
-        misparse that case.
+        must arrive doubled (IAC IAC) same as any other data byte.
         """
         option = (await self._reader.readexactly(1))[0]
         body = await self._read_subnegotiation_body()
@@ -221,11 +394,6 @@ class TelnetSession(Session):
         """
         Read and return the raw, un-escaped body of a subnegotiation,
         stopping at (and consuming) the terminating IAC SE.
-
-        A literal 0xFF byte within the body arrives doubled (IAC IAC) per
-        RFC 854 and is un-escaped back to a single 0xFF here — without
-        this, a subnegotiation body that happens to contain 0xFF (e.g.
-        NAWS reporting a 255-column-wide terminal) could be misparsed.
         """
         body = bytearray()
         while True:

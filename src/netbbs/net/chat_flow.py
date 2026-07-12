@@ -13,6 +13,7 @@ from netbbs.auth.users import User
 from netbbs.chat import Channel, ChannelError, ChatHub, get_channel_by_name, list_channels
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key
 from netbbs.storage.database import Database
 
 
@@ -22,10 +23,12 @@ async def browse_channels(session: Session, db: Database, hub: ChatHub, user: Us
         await session.write_line("\r\nNo chat channels are available to you yet.")
         return
 
-    await session.write_line("\r\nAvailable channels:")
+    header = colored("Available channels:", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
     for channel in joinable:
         online = hub.participant_count(channel.name)
-        await session.write_line(f"  #{channel.name} - {channel.description or ''} ({online} online)")
+        name = colored(f"#{channel.name}", fg_color=ACCENT_COLOR)
+        await session.write_line(f"  {name} - {channel.description or ''} ({online} online)")
 
     await session.write("\r\nJoin which channel? (or press Enter to skip): ")
     choice = (await session.read_line()).strip()
@@ -59,22 +62,28 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
     finishes: the user typing /quit, or the connection dropping out from
     under either task.
 
-    Known, deliberate limitation: because we stay in the client's default
-    line-editing mode (see `netbbs.net.telnet` — character-at-a-time
-    input is explicitly deferred to the hybrid ANSI/TUI rendering
-    framework work), an incoming message can land on a user's screen
-    while they're mid-typing their own line, interleaving with it. This
-    is the same behavior classic line-mode chat tools (Unix `talk`,
-    `wall`, and most textmode BBS chat of this era) have always had;
-    fixing it properly needs the character-mode/redraw machinery that
-    rendering framework is meant to provide, not something to solve here.
+    Known limitation as of this writing: because we still stay in the
+    client's default line-editing mode (see `netbbs.net.telnet`), an
+    incoming message can land on a user's screen while they're mid-typing
+    their own line, interleaving with it — the same behavior classic
+    line-mode chat tools (Unix `talk`, `wall`) have always had.
+    Character-at-a-time server-side input handling, which would fix this
+    properly, was originally deferred but has since been pulled forward
+    (see design doc phasing sign-off notes) after real testing showed
+    client-side line editing behaving inconsistently (backspace not
+    working, `^M` displayed literally) — this docstring will need
+    updating once that work actually lands here.
     """
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
 
-    await session.write_line(f"\r\nJoined #{channel.name}. Type /quit to leave.")
+    channel_label = colored(f"#{channel.name}", fg_color=ACCENT_COLOR, bold=True)
+    quit_hint = menu_key("/quit", " to leave")
+    await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
     await hub.broadcast(
-        channel.name, f"*** {user.username} has joined the channel.", exclude={participant_id}
+        channel.name,
+        colored(f"*** {user.username} has joined the channel.", fg_color=MUTED_COLOR),
+        exclude={participant_id},
     )
 
     async def receive_loop() -> None:
@@ -91,13 +100,16 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
                 return
             # Broadcast to everyone including the sender (not excluded).
             # The alternative — excluding the sender since they already
-            # see their own typed line via the client's local echo —
-            # would mean only the sender's own messages look different
+            # saw their own characters echoed back while typing (now via
+            # our own character-mode echo in netbbs.net.telnet, not the
+            # client's local echo the way it worked before that existed)
+            # — would mean only the sender's own messages look different
             # (unformatted) from everyone else's on their own screen.
             # Seeing your own line echoed back in the same "<user> text"
             # format everyone else sees is a minor, accepted redundancy,
             # not a bug.
-            await hub.broadcast(channel.name, f"<{user.username}> {line}")
+            username_label = colored(f"<{user.username}>", fg_color=ACCENT_COLOR)
+            await hub.broadcast(channel.name, f"{username_label} {line}")
 
     receive_task = asyncio.create_task(receive_loop())
     send_task = asyncio.create_task(send_loop())
@@ -118,5 +130,7 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
     finally:
         hub.leave(channel.name, participant_id)
         await hub.broadcast(
-            channel.name, f"*** {user.username} has left the channel.", exclude={participant_id}
+            channel.name,
+            colored(f"*** {user.username} has left the channel.", fg_color=MUTED_COLOR),
+            exclude={participant_id},
         )

@@ -949,7 +949,12 @@ starts.
    existing screen immediately. The "TUI half" (character-mode input,
    screen-buffer diffing) remains deliberately deferred until a real
    heavy screen (fullscreen editor, a future file browser) needs it —
-   confirmed with Thiesi rather than assumed.
+   confirmed with Thiesi rather than assumed. **Superseded in part by
+   round 14:** character-mode input specifically was pulled forward
+   after real testing surfaced client-side line-editing problems
+   (Backspace not working, `^M` instead of a newline) — see round 14.
+   Screen-buffer diffing for full heavy-screen TUI rendering remains
+   deferred; character-mode *input* alone doesn't require it.
 2. **256-color/extended ANSI**, confirmed with Thiesi over classic
    16-color — richer, at the accepted cost of some old/dumb clients not
    rendering it correctly. No 16-color fallback/downgrade path built.
@@ -996,3 +1001,107 @@ starts.
    the full chain together rather than each piece independently. Only
    `netbbs.net.login_flow`'s actual color/reflow wiring (which imports
    `netbbs.auth`) remains unverified by Claude.
+
+## Sign-off notes, round 14 (color consistency + character-mode input)
+
+Prompted by two things Thiesi raised after testing round 13: color
+hadn't been applied consistently (chat/channel listings, valid menu
+inputs weren't highlighted), and — separately — real testing surfaced
+Backspace not working and Enter's CR showing literally as `^M`.
+
+**Color consistency:**
+1. New `netbbs.rendering.theme` — the actual palette (header/accent/
+   muted/menu-key colors) in one place, replacing local color constants
+   that had started drifting independently between `login_flow.py` and
+   what would have become `chat_flow.py`'s own copies.
+2. New `netbbs.rendering.menu.menu_key()` — highlights the actual valid
+   keystroke in a menu option (e.g. the `B` in `[B]oards`), directly
+   answering "valid inputs should stand out." Applied to the main menu
+   and to `/quit` in chat.
+3. Chat now matches boards' existing color treatment: channel listing,
+   join/leave system notices (muted color, distinct from actual chat
+   content), and colored usernames on each message.
+
+**Character-mode input — a genuine architectural reversal, not an
+incremental addition:**
+4. **Root cause explained to Thiesi:** both symptoms traced to the
+   Phase-1-era decision to stay in the client's default line-editing
+   mode — the client's own terminal driver, not the server, was
+   responsible for local echo, Backspace, and Enter display. Different
+   clients implement that inconsistently. Asked whether to keep deferring
+   character-mode input (the actual fix) or pull it forward now — Thiesi
+   chose to pull it forward, reversing the earlier deferral decision from
+   when the rendering framework was first scoped.
+5. **Scope confirmed with Thiesi before implementation:** whole-session
+   character mode (not mixed per-prompt), Backspace/Delete-only editing
+   (both `0x08` and `0x7F` byte values treated as backspace), no arrow-
+   key/cursor-movement support — full cursor-addressable editing remains
+   out of scope, arguably actual fullscreen-editor territory. Password
+   masking changed from "no visual feedback" to `*` per character
+   (Thiesi's choice), now purely a local rendering decision rather than a
+   protocol-level toggle, since the server controls all echo persistently
+   from connection start.
+6. **`netbbs.net.telnet` rewritten**: `IAC WILL ECHO` now sent once,
+   persistently, at connection start (alongside SGA and NAWS) rather than
+   toggled per-read. `read_line()` replaced entirely — reads one byte at
+   a time via a new `_read_byte()` primitive (centralizing all IAC/
+   negotiation handling in one place, reused by every higher-level read),
+   builds the line itself, echoes/masks each character, and handles
+   Backspace/Delete (erase sequence `\b \b`), Enter (CR/LF/CRLF, all
+   correctly collapsed to one terminator), and unsupported escape
+   sequences (CSI `ESC [ ... <final byte>` and SS3 `ESC O <letter>`
+   forms both consumed and discarded as complete units, never leaking
+   raw escape bytes into the line).
+7. **A correctness detail identified during design, not discovered as a
+   bug later:** multi-byte UTF-8 characters (umlauts, the Euro sign,
+   etc. — everyday input, not an edge case, given the project's context)
+   need explicit continuation-byte handling once reading byte-by-byte;
+   a naive per-byte decode would have corrupted every non-ASCII
+   character. Implemented via `_read_utf8_continuation`, using the
+   standard UTF-8 lead-byte ranges to determine how many continuation
+   bytes to read.
+8. **A real latent bug fixed as a side effect, present since the
+   original line-mode implementation:** the old CR-handling code did an
+   unbounded `await self._reader.read(1)` to check for a following LF —
+   if a client ever sent a bare CR with nothing immediately after it,
+   this could have hung indefinitely. Never surfaced because typical
+   line-mode clients always send CRLF together. Replaced with a bounded
+   50ms timeout (`_consume_optional_lf_or_nul`), verified directly to
+   resolve correctly within that window rather than hanging.
+9. **Defensive line-length cap added** (4096 chars) — cheap insurance
+   against unbounded memory growth from a client that never sends Enter.
+   Verified that characters beyond the cap are neither stored nor
+   echoed (not just "doesn't crash") — echoing what gets silently
+   dropped would show a complete line on screen while actually storing a
+   truncated one, a worse failure mode than the truncation itself.
+10. **A real bug in `login_flow.py` caught during review, not testing:**
+    the password-prompt code had an explicit `write_line("")` to move to
+    a fresh line after masked input, needed because the old line-mode
+    `read_line()` never wrote anything itself. The new character-mode
+    `read_line()` always writes its own trailing CRLF after Enter,
+    regardless of echo — left unchanged, that explicit call would have
+    produced a duplicate blank line. Removed, with the reasoning
+    documented in place. A similar stale comment in `chat_flow.py`
+    (attributing the "you see your own message twice" tradeoff to "the
+    client's local echo," no longer accurate now that the server does
+    the echoing) was corrected — the underlying design decision was
+    still correct, only the attribution needed fixing.
+11. **Testing note — the most extensively verified single piece of work
+    in this project so far:** `netbbs.net.telnet` has no PyNaCl
+    dependency, so all 22 tests (a near-total rewrite of the previous
+    suite, given how fundamentally `read_line()`'s contract changed)
+    were genuinely executed against real loopback sockets, alongside
+    extensive ad-hoc verification before formalizing each test —
+    including basic echo, password masking, Backspace/Delete, bare-CR
+    timeout behavior, CRLF-pair handling, two- and three-byte UTF-8
+    characters, both escape-sequence shapes (CSI and SS3), negotiation
+    sequences arriving mid-input, NAWS continuing to work correctly
+    inside character mode, and the line-length cap. This rigor caught
+    two more real issues before Thiesi saw them: a test-scenario design
+    mistake (attempting to fix a mid-word typo with too few backspaces,
+    not accounting for end-only editing — itself a good illustration of
+    the Backspace-only limitation) and the `login_flow.py` double-
+    blank-line regression described above. A full end-to-end smoke test
+    (character-mode typing with a real backspace correction, NAWS
+    negotiation, and reflow, all together) was run and passed before
+    this was considered done.

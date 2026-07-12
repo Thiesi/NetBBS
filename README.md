@@ -42,7 +42,8 @@ netbbs/
 │   ├── storage/          SQLite connection + schema migrations (§3)
 │   ├── auth/             Account creation, password + keypair login (§5)
 │   ├── permissions/      User-level gating plumbing (§13)
-│   ├── net/              Telnet transport (incl. NAWS window-size
+│   ├── net/              Telnet transport (character-mode input: server-
+│   │                     driven echo, Backspace/Delete, NAWS window-size
 │   │                     negotiation) + Session abstraction, login flow
 │   │                     (SSH/web to follow on the same Session
 │   │                     abstraction)
@@ -112,6 +113,15 @@ narrower (e.g. ~40 columns) *before* connecting — most Telnet clients
 report their window size via NAWS on connect, and post bodies should
 wrap to match. A client that doesn't support NAWS falls back to an
 80-column assumption.
+
+**Line editing:** the server now handles all echo and Backspace/Delete
+itself (character mode), not the client — this fixed the `^M`-instead-
+of-newline and non-working-Backspace issues seen with client-side line
+editing. Known limitation: Backspace only removes from the *end* of what
+you've typed — there's no cursor movement (arrow keys, Home/End), so
+fixing a mid-word typo means backspacing past everything after it and
+retyping, not editing in place. Full cursor-addressable editing is out of
+scope for this pass; see design doc phasing notes.
 
 To test the blocklist:
 

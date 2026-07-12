@@ -66,11 +66,14 @@ class Session(ABC):
         """
         Read one line of input from the client.
 
-        `echo=False` suppresses the client's own local echo for the
-        duration of this call (used for password prompts). *How* it's
-        suppressed is transport-specific — Telnet: IAC WILL/WONT ECHO;
-        SSH: the pty's own echo flag; web: JS-side masking — which is
-        exactly why this is abstract rather than shared logic here.
+        `echo=False` masks each typed character (e.g. with `*`) instead
+        of showing it as typed — used for password prompts. This reveals
+        length but not content, a deliberate choice over showing nothing
+        at all. *How* characters are echoed/masked is transport-specific
+        — for Telnet (see `netbbs.net.telnet`), the server takes over
+        echoing entirely and handles this itself, character by character;
+        other transports may differ — which is exactly why this is
+        abstract rather than shared logic here.
         """
 
     @abstractmethod

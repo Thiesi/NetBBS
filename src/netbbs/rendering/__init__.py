@@ -18,7 +18,9 @@ from netbbs.rendering.ansi import (
     fg,
     move_cursor,
 )
+from netbbs.rendering.menu import menu_key
 from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow
+from netbbs.rendering.theme import ACCENT_COLOR, HEADER_COLOR, MENU_KEY_COLOR, MUTED_COLOR
 
 __all__ = [
     "BOLD",
@@ -29,6 +31,11 @@ __all__ = [
     "colored",
     "fg",
     "move_cursor",
+    "menu_key",
     "DEFAULT_WIDTH",
     "reflow",
+    "ACCENT_COLOR",
+    "HEADER_COLOR",
+    "MENU_KEY_COLOR",
+    "MUTED_COLOR",
 ]

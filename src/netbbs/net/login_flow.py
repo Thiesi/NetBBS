@@ -24,25 +24,16 @@ from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import colored, reflow
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
-
-# A modest, deliberately restrained color scheme — this is meant to make
-# the BBS feel less like a plain text dump without turning into a
-# color-soup demo. 51 (bright cyan) for headers/banners, 220 (gold) for
-# board/channel names, matching classic BBS ANSI conventions of "bright
-# header, warm accent for navigable items" without needing a full theming
-# system, which doesn't exist yet.
-_HEADER_COLOR = 51
-_ACCENT_COLOR = 220
 
 WELCOME_BANNER = colored(
     "================================================\r\n"
     "  Welcome to NetBBS\r\n"
     "  NetBBS Link -- coming soon\r\n"
     "================================================",
-    fg_color=_HEADER_COLOR,
+    fg_color=HEADER_COLOR,
     bold=True,
 )
 
@@ -75,8 +66,15 @@ async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
 
 async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -> None:
     while True:
-        header = colored("Main menu:", fg_color=_HEADER_COLOR, bold=True)
-        await session.write_line(f"\r\n{header} [B]oards  [C]hat  [Q]uit")
+        header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
+        options = "  ".join(
+            [
+                menu_key("B", "oards"),
+                menu_key("C", "hat"),
+                menu_key("Q", "uit"),
+            ]
+        )
+        await session.write_line(f"\r\n{header} {options}")
         await session.write("Choice: ")
         choice = (await session.read_line()).strip().lower()
 
@@ -123,7 +121,12 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
 
         await session.write("Password: ")
         password = await session.read_line(echo=False)
-        await session.write_line("")  # move to a fresh line after the hidden input
+        # No explicit blank-line write needed here anymore — read_line()
+        # now writes its own trailing CRLF after Enter unconditionally
+        # (part of character-mode input; see netbbs.net.telnet), whereas
+        # the original line-mode implementation relied on the client's
+        # own local echo to show that newline and needed this line to
+        # compensate. Leaving it in would now print an extra blank line.
 
         try:
             user = authenticate_password(db, username, password)
@@ -163,7 +166,7 @@ async def _browse_boards(session: Session, db: Database, user: User) -> None:
 
     await session.write_line("\r\nAvailable boards:")
     for board in readable_boards:
-        name = colored(board.name, fg_color=_ACCENT_COLOR)
+        name = colored(board.name, fg_color=ACCENT_COLOR)
         await session.write_line(f"  {name} - {board.description or ''}")
 
     await session.write("\r\nEnter a board name to view (or press Enter to skip): ")
@@ -189,12 +192,12 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     if not posts:
         await session.write_line(f"\r\n[{board.name}] has no posts yet.")
     else:
-        header = colored(f"[{board.name}]", fg_color=_HEADER_COLOR, bold=True)
+        header = colored(f"[{board.name}]", fg_color=HEADER_COLOR, bold=True)
         await session.write_line(f"\r\n{header}")
         for post in posts:
             when = format_for_display(post.created_at, db)
             post_header = colored(
-                f"{post.subject} -- {post.author_label} ({when})", fg_color=_ACCENT_COLOR
+                f"{post.subject} -- {post.author_label} ({when})", fg_color=ACCENT_COLOR
             )
             await session.write_line(f"\r\n{post_header}")
             # Reflowed to this specific session's actual detected width
