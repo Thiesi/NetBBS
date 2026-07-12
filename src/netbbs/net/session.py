@@ -96,3 +96,36 @@ class Session(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Close the underlying connection."""
+
+    @abstractmethod
+    async def read_byte(self) -> int | None:
+        """
+        Read and return the next raw data byte from the client, blocking
+        until one arrives, or `None` if what was read was a pure
+        transport-level action with no data significance (a Telnet
+        negotiation sequence, an SSH terminal-resize notification) —
+        callers should just loop and call this again. Raises
+        `SessionClosedError` if the connection closes while waiting.
+
+        The lower-level primitive `read_line`/`read_key` are built on
+        (see `netbbs.net.char_input`), also usable directly by anything
+        that needs genuinely raw bytes rather than character-mode
+        line/key semantics — currently `netbbs.net.zmodem`, which
+        ZDLE-decodes its own framing and has no use for backspace/UTF-8/
+        escape-sequence handling built for human keyboard input.
+        """
+
+    @abstractmethod
+    async def write_raw(self, data: bytes) -> None:
+        """
+        Send raw bytes to the client exactly as given — no CRLF
+        normalization, no UTF-8 encoding (the caller already has bytes),
+        no line terminator added.
+
+        Deliberately separate from `write`, which exists for human-
+        readable text and performs both of those transforms — a binary
+        protocol like ZMODEM (`netbbs.net.zmodem`) needs bytes to arrive
+        completely unmodified, including any 0x0A/0x0D/0xFF values that
+        happen to appear in a ZDLE-escaped frame or raw file content,
+        which `write` would otherwise corrupt.
+        """

@@ -100,6 +100,17 @@ class SSHSession(Session):
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
+    async def write_raw(self, data: bytes) -> None:
+        # No escaping needed, unlike TelnetSession.write_raw's IAC
+        # doubling — an SSH channel in binary mode (see this module's
+        # docstring re: encoding=None) is already 8-bit clean with no
+        # transport-level byte reserved for anything.
+        try:
+            self._process.stdout.write(data)
+            await self._process.stdout.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            raise SessionClosedError("client disconnected during write") from exc
+
     async def read_line(self, echo: bool = True) -> str:
         return await char_input.read_line(self, self.write, echo)
 

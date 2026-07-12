@@ -1,34 +1,42 @@
 """
-File area browsing.
+File area browsing, upload, and download.
 
 Kept in its own module rather than growing login_flow.py indefinitely —
 matches the project's modular-package approach (design doc §3), same
 reasoning as chat_flow.py.
 
-Read-only for now: lists files (name, size, uploader, description) in a
-level-gated area, but doesn't offer an in-session upload prompt the way
-`netbbs.net.login_flow._show_board` offers posting a reply. Unlike board
-posts, there's no way to actually move file bytes over a Telnet session
-yet — that's real Zmodem support, deliberately scoped as its own,
-separate piece of work rather than improvised here. Files reach a node
-today via a dev script (`scripts/create_test_file.py`), the same
-bootstrap-only path boards/channels used before any of this browsing UI
-existed.
+Upload/download (design doc round 21/22/24) go over real ZMODEM
+(`netbbs.net.zmodem`), not a NetBBS-specific scheme — the whole point
+being that a real Zmodem-capable terminal (SyncTERM, lrzsz) can drive
+this without any custom client software. `/upload`/`/download` take
+over the session's raw byte stream for the duration of the transfer,
+then hand control back to normal character-mode text I/O once it
+finishes (or aborts — see `netbbs.net.zmodem`'s module docstring on
+error handling: a failed transfer doesn't crash the session, it reports
+the error and returns to browsing).
 """
 
 from __future__ import annotations
 
 from netbbs.auth.users import User
-from netbbs.files import FileArea, list_file_areas, list_files
+from netbbs.files import (
+    FileArea,
+    FileEntry,
+    download_file,
+    list_file_areas,
+    list_files,
+    upload_file,
+)
 from netbbs.files.categories import (
     FileAreaCategory,
     list_subcategories,
     list_top_level_categories,
 )
+from netbbs.net import zmodem
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -117,17 +125,74 @@ def _format_size(size_bytes: int) -> str:
 
 async def _show_area(session: Session, db: Database, area: FileArea, user: User) -> None:
     files = list_files(db, area, user)
+    can_write = meets_level(user, area.min_write_level)
+
     if not files:
         await session.write_line(f"\r\n[{area.name}] has no files yet.")
+    else:
+        header = colored(f"[{area.name}]", fg_color=HEADER_COLOR, bold=True)
+        await session.write_line(f"\r\n{header}")
+        for entry in files:
+            when = format_for_display(entry.created_at, db)
+            size = _format_size(entry.size_bytes)
+            name_line = colored(f"{entry.filename} ({size})", fg_color=ACCENT_COLOR)
+            await session.write_line(f"\r\n{name_line}")
+            await session.write_line(f"  uploaded by {entry.uploader_label} ({when})")
+            if entry.description:
+                await session.write_line(f"  {entry.description}")
+
+    if not files and not can_write:
         return
 
-    header = colored(f"[{area.name}]", fg_color=HEADER_COLOR, bold=True)
-    await session.write_line(f"\r\n{header}")
-    for entry in files:
-        when = format_for_display(entry.created_at, db)
-        size = _format_size(entry.size_bytes)
-        name_line = colored(f"{entry.filename} ({size})", fg_color=ACCENT_COLOR)
-        await session.write_line(f"\r\n{name_line}")
-        await session.write_line(f"  uploaded by {entry.uploader_label} ({when})")
-        if entry.description:
-            await session.write_line(f"  {entry.description}")
+    hints = []
+    if files:
+        hints.append(menu_key("/download <filename>", " — receive via Zmodem"))
+    if can_write:
+        hints.append(menu_key("/upload", " — send via Zmodem"))
+    await session.write_line(f"\r\n{'  '.join(hints)}")
+    await session.write("Command (or press Enter to go back): ")
+    command = (await session.read_line()).strip()
+
+    if not command:
+        return
+    elif command.lower() == "/upload" and can_write:
+        await _handle_upload(session, db, area, user)
+    elif command.lower().startswith("/download "):
+        filename = command[len("/download ") :].strip()
+        await _handle_download(session, files, filename)
+    else:
+        await session.write_line("Unknown command.")
+
+
+async def _handle_upload(session: Session, db: Database, area: FileArea, user: User) -> None:
+    await session.write_line(
+        "\r\nStart your terminal's Zmodem send (sz) now. Waiting for the transfer to begin..."
+    )
+    try:
+        received = await zmodem.receive_file(session)
+        entry = upload_file(db, area, user, received.filename, received.data)
+    except zmodem.ZmodemError as exc:
+        await session.write_line(f"\r\nUpload failed: {exc}")
+        return
+    await session.write_line(
+        f"\r\nUploaded {entry.filename!r} ({entry.size_bytes} bytes) to [{area.name}]."
+    )
+
+
+async def _handle_download(session: Session, files: list[FileEntry], filename: str) -> None:
+    matches = [entry for entry in files if entry.filename == filename]
+    if not matches:
+        await session.write_line(f"\r\nNo file named {filename!r} in this area.")
+        return
+
+    entry = matches[0]
+    await session.write_line(
+        f"\r\nStarting Zmodem send of {entry.filename!r} — accept the transfer in your terminal."
+    )
+    try:
+        data = download_file(entry)
+        await zmodem.send_file(session, entry.filename, data)
+    except zmodem.ZmodemError as exc:
+        await session.write_line(f"\r\nDownload failed: {exc}")
+        return
+    await session.write_line(f"\r\nSent {entry.filename!r}.")

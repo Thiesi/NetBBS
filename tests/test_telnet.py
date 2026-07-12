@@ -791,3 +791,59 @@ def test_server_port_property_before_start_raises():
     server = TelnetServer(host="127.0.0.1", port=0, session_handler=handler)
     with pytest.raises(RuntimeError):
         _ = server.port
+
+
+# -- raw byte I/O (netbbs.net.zmodem's transport, not character-mode) --
+
+
+def test_write_raw_doubles_literal_iac_bytes_per_rfc_854():
+    """write_raw carries arbitrary binary data (netbbs.net.zmodem's
+    actual use), unlike write()'s UTF-8 text -- a literal 0xFF byte can
+    genuinely appear and must be doubled so a real Telnet client doesn't
+    misinterpret it as an IAC command byte."""
+
+    async def handler(session: Session):
+        await session.write_raw(bytes([0x01, 0xFF, 0x02, 0xFF, 0xFF, 0x03]))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)  # initial negotiation
+            data = await reader.readexactly(9)  # 6 bytes + 3 doubled IACs
+            assert data == bytes([0x01, IAC, IAC, 0x02, IAC, IAC, IAC, IAC, 0x03])
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_read_byte_undoubles_iac_and_roundtrips_all_byte_values():
+    """The receiving half of the same RFC 854 rule, exercised through
+    every byte value 0-255 (not just 0xFF) -- read_byte is the same
+    primitive netbbs.net.zmodem reads raw protocol/file bytes with."""
+    received = []
+
+    async def handler(session: Session):
+        for _ in range(256):
+            received.append(await session.read_byte())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            payload = bytes(range(256))
+            escaped = payload.replace(bytes([IAC]), bytes([IAC, IAC]))
+            writer.write(escaped)
+            await writer.drain()
+            await asyncio.sleep(0.3)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == list(range(256))

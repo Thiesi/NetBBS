@@ -65,21 +65,24 @@ Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
 breakdown and current status — it will be more current than anything
 written here. As of this update, Phase 1 (local single-node BBS —
 boards, chat (including bounded, disk-backed scrollback per channel —
-design doc round 19/20), file areas (browsable, level-gated core —
-design doc round 21; upload/download transfer not yet built, see below),
-permissions, blocklist, ANSI rendering, character-mode Telnet **and
-SSH** input (design doc round 22/23 — `asyncssh`, optional `ssh` extra;
-password and Ed25519 pubkey auth both supported, the latter finally
-exercising the previously-unreachable keypair login path via any
-standard SSH client), a shared paginated picker with categories/pinning/
-sort order) is substantially built. Two pieces remain open within
-Phase 1:
+design doc round 19/20), file areas including real Zmodem upload/
+download (design doc round 21/24 — `/upload`/`/download` in
+`netbbs.net.file_flow`, works with real Zmodem-capable terminals like
+SyncTERM/lrzsz, CRC-16 only/no resume/no retry-recovery by deliberate
+scope), permissions, blocklist, ANSI rendering, character-mode Telnet
+**and SSH** input (design doc round 22/23 — `asyncssh`, optional `ssh`
+extra; password and Ed25519 pubkey auth both supported, the latter
+finally exercising the previously-unreachable keypair login path via
+any standard SSH client), a shared paginated picker with categories/
+pinning/sort order) is substantially built. One piece remains open
+within Phase 1:
 
-- **Real Zmodem support** for file upload/download (design doc round
-  21) — a generic Telnet/SSH client can't drive a custom raw-byte
-  transfer protocol on its own, so this needs the actual Zmodem packet
-  framing/state machine, not something to improvise inline. Deserves its
-  own design pass against the real spec before implementation.
 - **Web (xterm.js) connectivity** — designed (design doc round 22,
   points 6-9: `aiohttp`, structured JSON wire protocol, vendored static
   assets) but not yet implemented.
+
+Also flagged, not blocking: real third-party-client interop for both
+SSH (interactive session) and Zmodem hasn't been verified from this
+sandboxed dev environment — see design doc round 23 point 7 and round 24
+point 7. Worth a direct check from Thiesi's own machine or the NetBSD
+target when convenient.

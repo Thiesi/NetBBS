@@ -1686,3 +1686,88 @@ Implements round 22's SSH design (points 1-5). Web connectivity (round
    interactive `ssh` session directly from a POSIX shell (Thiesi's
    NetBSD target, or any Linux/macOS machine) as a final sanity check,
    not re-litigating the protocol-level work already verified here.
+
+## Sign-off notes, round 24 (real Zmodem support — implemented)
+
+Implements the file-transfer piece deferred out of round 21 and further
+scoped in this round's own discussion (below) before any code was
+written.
+
+1. **Build-vs-buy checked before writing anything, per Thiesi's
+   question.** Three existing options surveyed: `modem` (PyPI) — ports
+   XMODEM/YMODEM/ZMODEM to Python, but abandoned since 2011, Python-2-
+   era, synchronous/callback-based (would need as much adaptation work
+   to fit this project's asyncio `Session` abstraction as writing fresh
+   code, while inheriting 15 years of unaudited code); `trzsz` — not
+   actually ZMODEM, a different proprietary protocol incompatible with
+   real Zmodem terminals (SyncTERM, lrzsz), which would have defeated
+   the entire point; `xmodem` (actively maintained) — XMODEM only, not
+   ZMODEM. None viable; confirmed writing this from scratch.
+2. **Scope, confirmed with Thiesi before writing the state machine:**
+   CRC-16 only (the mandatory baseline, not the negotiated CRC-32
+   enhancement); no resume/crash-recovery (every transfer starts at
+   offset 0); no batch mode (one file per transfer, matching the
+   file-area upload/download model); **no retry/timeout resync state
+   machine** — classic ZMODEM's retries exist for a noisy serial line
+   dropping/corrupting bytes, a failure mode that essentially doesn't
+   happen over Telnet/SSH's TCP transport. A CRC mismatch or malformed
+   frame raises `ZmodemError` and aborts immediately rather than
+   attempting recovery.
+3. **One deliberate, narrow exception to "no timeouts," added during
+   implementation, not part of the original ask:** every point waiting
+   on the peer's *next expected response* (not mid-transfer bulk data,
+   which has no fixed duration) is bounded by a 15-second timeout. Without
+   it, invoking `/upload` or `/download` against a terminal that simply
+   doesn't support Zmodem — the most likely real failure mode, not data
+   corruption — would hang the whole session forever. A bounded
+   wait-then-abort is still "abort on error, don't attempt recovery,"
+   not a retry loop.
+4. **`netbbs.net.session.Session` gained two new abstract methods,
+   `read_byte`/`write_raw`**, formalizing raw byte I/O both
+   `TelnetSession` and `SSHSession` already had the pieces for (Telnet's
+   IAC-transparent `read_byte` already existed from the char_input
+   extraction in round 23; `write_raw` is new — IAC-doubles literal
+   0xFF bytes for Telnet, since ZMODEM's own framing can genuinely
+   produce them, unlike `write()`'s UTF-8 text where 0xFF never
+   appears). SSH's `write_raw` needs no escaping — a binary-mode SSH
+   channel is already 8-bit clean. `netbbs.net.zmodem` works against
+   either transport uniformly through this, the same abstraction
+   boundary the rest of the networking code already relies on.
+5. **A real desync bug found and fixed while testing, not shipped:** the
+   receiver initially sent `ZRINIT` twice — once proactively at start,
+   then again upon seeing the sender's `ZRQINIT` (mirroring the spec's
+   literal wording, "if the receiving program receives a ZRQINIT header,
+   it resends the ZRINIT header," applied too literally). Since both
+   sides in this implementation always send their opening frame
+   unconditionally, the second `ZRINIT` was always redundant and
+   desynced the header stream — the sender's next `_wait_for_header`
+   (expecting `ZRPOS`) picked up the extra `ZRINIT` instead. Caught
+   immediately by the round-trip test suite (every `test_round_trip_*`
+   test failed identically), not discovered later.
+6. **Verified at three levels**, escalating in realism: (a) 15 unit/
+   round-trip tests in `tests/test_zmodem.py`, including this module's
+   own sender talking to its own receiver over an in-memory duplex
+   pipe — covering CRC-16, ZDLE escaping (including all 256 byte
+   values and every reserved protocol byte appearing in file content),
+   multi-chunk transfers, corruption detection, cancel-signal handling,
+   and the handshake timeout; (b) 2 new integration tests confirming
+   `write_raw`/`read_byte` correctly IAC-double/undouble through the
+   *real* `TelnetServer` over an actual loopback socket, not just the
+   in-memory fake; (c) a full manual run against a real, running node:
+   logged in over actual Telnet, navigated to a file area, ran
+   `/download` and `/upload` through the genuine menu flow
+   (`netbbs.net.file_flow`), with a client-side test harness re-using
+   `netbbs.net.zmodem`'s own `send_file`/`receive_file` as the *client*
+   role — proving the full server ↔ real-socket ↔ client path round-trips
+   file bytes byte-for-byte, including a payload deliberately packed
+   with every reserved protocol byte (ZDLE, ZPAD, XON/XOFF, IAC, CR/LF).
+7. **What (c) does *not* prove, flagged honestly rather than glossed
+   over:** genuine interoperability with an actual external Zmodem-
+   capable terminal client (SyncTERM, lrzsz) — no such client is
+   available in this sandboxed dev environment. The framing/CRC/
+   escaping logic is now thoroughly exercised and matches the spec as
+   researched, but a real third-party client is the only thing that can
+   confirm actual interop. Worth a direct test from Thiesi's own
+   machine or NetBSD target once convenient — the same "verify with a
+   real client, not just your own code talking to itself" gap round 23
+   flagged for interactive SSH, now flagged here for the same reason.

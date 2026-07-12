@@ -140,6 +140,19 @@ class TelnetSession(Session):
         except (ConnectionResetError, BrokenPipeError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
+    async def write_raw(self, data: bytes) -> None:
+        # Unlike write(), this data isn't guaranteed UTF-8 — it's
+        # arbitrary bytes (ZMODEM framing, raw file content), so 0xFF
+        # (IAC) really can appear and must be doubled per RFC 854's
+        # escaping rule, the same way TelnetSession.read_byte already
+        # un-doubles it on the way in.
+        escaped = data.replace(bytes([IAC]), bytes([IAC, IAC]))
+        try:
+            self._writer.write(escaped)
+            await self._writer.drain()
+        except (ConnectionResetError, BrokenPipeError) as exc:
+            raise SessionClosedError("client disconnected during write") from exc
+
     async def read_line(self, echo: bool = True) -> str:
         """
         Read one line of input, character by character, echoing (or
