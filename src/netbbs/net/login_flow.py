@@ -17,6 +17,8 @@ needs it.
 
 from __future__ import annotations
 
+from enum import Enum, auto
+
 from netbbs.auth.users import AuthError, User, authenticate_password
 from netbbs.boards import Board, create_post, list_boards, list_posts
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
@@ -49,14 +51,24 @@ _DEMO_ELEVATED_LEVEL = 100
 _MAX_LOGIN_ATTEMPTS = 3
 
 
+class LoginOutcome(Enum):
+    """Terminal outcomes from the interactive login flow."""
+
+    ATTEMPTS_EXHAUSTED = auto()
+    BLOCKED = auto()
+
+
 async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
     await session.write_line(WELCOME_BANNER)
 
-    user = await _login(session, db)
-    if user is None:
+    login_result = await _login(session, db)
+    if login_result is LoginOutcome.ATTEMPTS_EXHAUSTED:
         await session.write_line("Too many failed attempts. Goodbye.")
         return
+    if login_result is LoginOutcome.BLOCKED:
+        return
 
+    user = login_result
     await session.write_line(f"\r\nWelcome, {user.username}! You are level {user.user_level}.")
 
     if meets_level(user, _DEMO_ELEVATED_LEVEL):
@@ -107,9 +119,15 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
             await session.write_line("Unknown choice.")
 
 
-async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_ATTEMPTS) -> User | None:
+async def _login(
+    session: Session, db: Database, max_attempts: int = _MAX_LOGIN_ATTEMPTS
+) -> User | LoginOutcome:
     """
     Prompt for username/password up to `max_attempts` times.
+
+    Returns the authenticated `User` on success, otherwise a named
+    `LoginOutcome` so the caller can distinguish exhausted attempts from
+    a successfully-authenticated account which is blocked.
 
     Password-only for now: keypair (challenge-response) login is fully
     implemented in the auth module already, but a plain Telnet client has
@@ -165,11 +183,11 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
             # username-enumeration concern in telling them specifically
             # why they can't proceed.
             await session.write_line("Your access to this system has been revoked.")
-            return None
+            return LoginOutcome.BLOCKED
 
         return user
 
-    return None
+    return LoginOutcome.ATTEMPTS_EXHAUSTED
 
 
 async def _browse_boards(session: Session, db: Database, user: User) -> None:
