@@ -171,7 +171,11 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
     try:
         received = await zmodem.receive_file(session)
         entry = upload_file(db, area, user, received.filename, received.data)
-    except zmodem.ZmodemError as exc:
+    except (zmodem.ZmodemError, NotImplementedError) as exc:
+        # NotImplementedError: some transports (netbbs.net.web) can't
+        # carry raw bytes at all -- see WebSession's docstring. Handled
+        # the same as any other failed transfer rather than crashing
+        # the session.
         await session.write_line(f"\r\nUpload failed: {exc}")
         return
     await session.write_line(
@@ -192,7 +196,7 @@ async def _handle_download(session: Session, files: list[FileEntry], filename: s
     try:
         data = download_file(entry)
         await zmodem.send_file(session, entry.filename, data)
-    except zmodem.ZmodemError as exc:
+    except (zmodem.ZmodemError, NotImplementedError) as exc:
         await session.write_line(f"\r\nDownload failed: {exc}")
         return
     await session.write_line(f"\r\nSent {entry.filename!r}.")

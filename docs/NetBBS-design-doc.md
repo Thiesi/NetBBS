@@ -1771,3 +1771,76 @@ written.
    machine or NetBSD target once convenient — the same "verify with a
    real client, not just your own code talking to itself" gap round 23
    flagged for interactive SSH, now flagged here for the same reason.
+
+## Sign-off notes, round 25 (web/xterm.js connectivity — implemented)
+
+Implements round 22's web design (points 6-9), the last open piece of
+Phase 1 connectivity.
+
+1. **`netbbs.net.web`: `aiohttp`-based, mirroring `TelnetServer`/
+   `SSHServer`'s shape exactly** (`WebServer` with `start`/
+   `serve_forever`/`stop`/`port`; `WebSession` implementing the same
+   `Session` ABC) — confirms the abstraction boundary `netbbs.net.
+   session.Session` was designed for actually holds across a third,
+   structurally very different transport (request/response HTTP plus a
+   push-based websocket, not a persistent byte stream).
+2. **`WebSession` does *not* reuse `netbbs.net.char_input`'s byte-level
+   `ByteSource` protocol** — confirmed deliberate, not an oversight.
+   That abstraction exists to reconstruct UTF-8 characters from a raw
+   byte stream one byte at a time; a browser's `onData` event already
+   hands over complete, decoded Unicode characters (and can hand over
+   *several at once* — a paste, or a multi-byte escape sequence — unlike
+   Telnet/SSH's strictly one-byte-at-a-time delivery). `WebSession`
+   instead queues individual characters fed by a background task
+   draining the websocket, with its own character-level (not
+   byte-level) `read_line`/`read_key`, escape-sequence stripping, and
+   backspace handling — structurally parallel to `char_input` in what
+   it does, deliberately not sharing code with it, since the underlying
+   unit (a byte vs. an already-decoded character) genuinely differs.
+3. **File transfer is explicitly not available over this transport —
+   decided during implementation, not part of round 22's original
+   scope, but a direct consequence of it.** Real Zmodem interop
+   (`netbbs.net.zmodem`) depends on the *terminal client* auto-detecting
+   and driving the protocol — a capability of native terminal emulators
+   (SyncTERM, lrzsz), not of a JS widget in a browser tab. Building a
+   from-scratch in-browser Zmodem implementation (or any alternative
+   web-native transfer mechanism, e.g. a plain HTTP upload/download
+   endpoint) was explicitly out of scope for "connectivity" and would
+   need its own design pass if ever wanted. `WebSession.read_byte`/
+   `write_raw` exist only to satisfy the `Session` ABC and raise
+   `NotImplementedError`; `netbbs.net.file_flow`'s upload/download
+   handlers now catch that alongside `ZmodemError`, so a user on the
+   web transport sees a clear in-session "not available" message
+   rather than a crashed session.
+4. **xterm.js 6.0.0 + the official fit addon vendored into the repo**
+   (`netbbs/web/static/` — a separate top-level package from `netbbs.
+   net`, per round 22 point 8, holding only static assets; the actual
+   `WebSession`/`WebServer` code lives in `netbbs.net.web` alongside
+   the other transports), MIT-licensed (`static/xterm-LICENSE.txt`
+   included), fetched directly rather than via `npm` (not a dependency
+   this project needs at install or build time). `aiohttp` serves both
+   the static assets and the websocket endpoint from one process, and
+   is its own optional `web` extra in `pyproject.toml` — same "a
+   Telnet/SSH-only node shouldn't need this installed" reasoning as
+   the `ssh` extra, though `aiohttp` itself has no Rust dependency
+   chain the way `cryptography` does, so this is a lighter-weight
+   opt-in.
+5. **Verified at multiple levels, with one honest, explicitly-flagged
+   gap:** 15 new integration tests spin up a real `WebServer` and
+   connect a real `aiohttp` client websocket — covering the structured
+   JSON protocol, character echo, backspace, escape-sequence stripping,
+   resize, disconnect handling, the `NotImplementedError` file-transfer
+   guard, and static-asset/index-page serving; a real running node was
+   also smoke-tested via `curl` for HTTP-layer delivery (correct
+   content-type, correct byte-for-byte file sizes matching the vendored
+   assets). **What could not be verified: actual browser rendering and
+   interaction** — no browser-automation tool is available in this
+   sandboxed environment. Mitigated as far as possible without one: every
+   xterm.js API the custom JS shim (`static/netbbs-terminal.js`) calls
+   (`Terminal`, `cursorBlink`, `scrollback`, the `background` theme key,
+   `onData`, `loadAddon`, `FitAddon.FitAddon`) was directly grepped for
+   and confirmed present in the actual vendored bundle, not just
+   assumed from memory — but this is not a substitute for opening the
+   page in a real browser. Worth a direct check from Thiesi (or a
+   future session with browser tooling) before considering this fully
+   done, the same standard round 23/24 already held SSH/Zmodem to.

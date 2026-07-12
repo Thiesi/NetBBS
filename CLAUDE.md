@@ -63,26 +63,26 @@ order and are the most information-dense part of the document.
 
 Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
 breakdown and current status — it will be more current than anything
-written here. As of this update, Phase 1 (local single-node BBS —
-boards, chat (including bounded, disk-backed scrollback per channel —
-design doc round 19/20), file areas including real Zmodem upload/
-download (design doc round 21/24 — `/upload`/`/download` in
+written here. As of this update, **Phase 1 is feature-complete** —
+local single-node BBS with boards, chat (including bounded, disk-backed
+scrollback per channel — round 19/20), file areas including real
+Zmodem upload/download (round 21/24 — `/upload`/`/download` in
 `netbbs.net.file_flow`, works with real Zmodem-capable terminals like
 SyncTERM/lrzsz, CRC-16 only/no resume/no retry-recovery by deliberate
-scope), permissions, blocklist, ANSI rendering, character-mode Telnet
-**and SSH** input (design doc round 22/23 — `asyncssh`, optional `ssh`
-extra; password and Ed25519 pubkey auth both supported, the latter
-finally exercising the previously-unreachable keypair login path via
-any standard SSH client), a shared paginated picker with categories/
-pinning/sort order) is substantially built. One piece remains open
-within Phase 1:
+scope), permissions, blocklist, ANSI rendering, and all three planned
+connectivity methods: character-mode Telnet, SSH (round 22/23 —
+`asyncssh`, optional `ssh` extra; password and Ed25519 pubkey auth,
+the latter finally exercising the previously-unreachable keypair login
+path via any standard SSH client), and web/xterm.js (round 22/25 —
+`aiohttp`, optional `web` extra, structured JSON wire protocol,
+vendored static assets at `netbbs/web/static/`) — plus a shared
+paginated picker with categories/pinning/sort order.
 
-- **Web (xterm.js) connectivity** — designed (design doc round 22,
-  points 6-9: `aiohttp`, structured JSON wire protocol, vendored static
-  assets) but not yet implemented.
-
-Also flagged, not blocking: real third-party-client interop for both
-SSH (interactive session) and Zmodem hasn't been verified from this
-sandboxed dev environment — see design doc round 23 point 7 and round 24
-point 7. Worth a direct check from Thiesi's own machine or the NetBSD
-target when convenient.
+Flagged, not blocking further work: real third-party-client/browser
+verification hasn't been done from this sandboxed dev environment for
+three things — interactive SSH sessions (design doc round 23 point 7),
+real Zmodem-client interop like SyncTERM/lrzsz (round 24 point 7), and
+actual browser rendering of the xterm.js terminal (round 25 point 5, no
+browser-automation tool available here). All three are worth a direct
+check from Thiesi's own machine, or a future session with the right
+tooling, before considering Phase 1 fully closed out.

@@ -17,6 +17,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "asyncssh>=2.24",
+    "aiohttp>=3.9",
 ]
 # Fallback IANA timezone database for systems that don't ship one as part
 # of the base OS. NetBSD's base system should have its own
@@ -39,9 +40,20 @@ tzdata = [
 ssh = [
     "asyncssh>=2.24",
 ]
+# Web (xterm.js) connectivity (design doc round 22/25). Also a separate
+# extra, same "only pay for what you use" reasoning as ssh above -- a
+# Telnet/SSH-only node doesn't need a web server stack pulled in.
+# aiohttp itself has no Rust dependency (unlike the ssh extra's
+# cryptography), so this is a lighter-weight opt-in than ssh is.
+web = [
+    "aiohttp>=3.9",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"netbbs.web" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

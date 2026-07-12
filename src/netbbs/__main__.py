@@ -28,9 +28,11 @@ from netbbs.storage.database import Database
 # reverse proxy / port-forward rule (e.g. via the same kind of Apache
 # setup already used elsewhere), or an inetd-style super-server — a
 # decision for actual node-startup work, not this script. Same reasoning
-# for SSH's port (2222, not 22).
+# for SSH's port (2222, not 22) and the web server's (8080, an
+# unprivileged default rather than 80).
 DEFAULT_TELNET_PORT = 2323
 DEFAULT_SSH_PORT = 2222
+DEFAULT_WEB_PORT = 8080
 DEFAULT_HOST = "0.0.0.0"
 
 
@@ -77,6 +79,18 @@ async def main() -> None:
         await ssh_server.start()
         logging.info("NetBBS listening on %s:%d (SSH)", DEFAULT_HOST, DEFAULT_SSH_PORT)
         servers.append(ssh_server)
+
+    # Web is likewise an optional extra (design doc round 22/25's `web`
+    # extra) — aiohttp isn't needed at all for a Telnet/SSH-only node.
+    try:
+        from netbbs.net.web import WebServer
+    except ImportError:
+        logging.info("aiohttp not installed — skipping web listener (pip install netbbs[web])")
+    else:
+        web_server = WebServer(host=DEFAULT_HOST, port=DEFAULT_WEB_PORT, session_handler=session_handler)
+        await web_server.start()
+        logging.info("NetBBS listening on %s:%d (web)", DEFAULT_HOST, DEFAULT_WEB_PORT)
+        servers.append(web_server)
 
     await asyncio.gather(*(server.serve_forever() for server in servers))
 
