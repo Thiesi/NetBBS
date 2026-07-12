@@ -10,7 +10,14 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.auth.users import User
-from netbbs.chat import Channel, ChatHub, list_channels
+from netbbs.chat import (
+    Channel,
+    ChannelMessage,
+    ChatHub,
+    get_scrollback,
+    list_channels,
+    record_message,
+)
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
@@ -59,7 +66,7 @@ async def _browse_channels_in_category(
             empty_message="No chat channels are available to you yet.",
         )
         if channel is not None:
-            await _chat_loop(session, hub, channel, user)
+            await _chat_loop(session, db, hub, channel, user)
         return
 
     mixed: list[Category | Channel] = [*categories_here, *channels_here]
@@ -90,7 +97,7 @@ async def _browse_channels_in_category(
     if isinstance(selected, Category):
         await _browse_channels_in_category(session, db, hub, user, category_id=selected.id)
     else:
-        await _chat_loop(session, hub, selected, user)
+        await _chat_loop(session, db, hub, selected, user)
 
 
 def _channel_description(hub: ChatHub, channel: Channel) -> str:
@@ -99,7 +106,28 @@ def _channel_description(hub: ChatHub, channel: Channel) -> str:
     return f"{base} ({online} online)".strip()
 
 
-async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: User) -> None:
+def _render_scrollback_message(message: ChannelMessage) -> str:
+    """
+    Render a persisted `ChannelMessage` for replay on join, matching the
+    live formatting `_chat_loop` itself uses for the same kind of event —
+    a replay should look exactly like the original moment did, just
+    delayed. Unlike live messages, no message here is ever "self"-colored
+    (`netbbs.rendering.theme.SELF_COLOR`): that's a live-typing affordance
+    ("this is what I just sent"), which doesn't carry any meaning when
+    reading back history, possibly from a different session than whichever
+    one originally sent it.
+    """
+    if message.kind == "join":
+        return colored(f"*** {message.author_label} has joined the channel.", fg_color=MUTED_COLOR)
+    if message.kind == "leave":
+        return colored(f"*** {message.author_label} has left the channel.", fg_color=MUTED_COLOR)
+    label = colored(f"<{message.author_label}>", fg_color=ACCENT_COLOR)
+    return f"{label} {message.body}"
+
+
+async def _chat_loop(
+    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User
+) -> None:
     """
     Real-time chat within `channel`, until the user types /quit.
 
@@ -136,13 +164,37 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
     tools (Unix `talk`, `wall`) always had — full mid-line redraw to
     avoid that would need real cursor-addressable TUI machinery, still
     out of scope.
+
+    Scrollback (design doc round 19/20) is replayed here, before the
+    "Joined" line, using whatever was persisted *before* this join —
+    this join's own event is recorded immediately after, so it's part of
+    the next person's replay, not this one's.
     """
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
 
     channel_label = colored(f"#{channel.name}", fg_color=ACCENT_COLOR, bold=True)
     quit_hint = menu_key("/quit", " to leave")
+
+    scrollback = get_scrollback(db, channel)
+    if scrollback:
+        await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
+        for message in scrollback:
+            await session.write_line(_render_scrollback_message(message))
+        # Round 19, point 5: even bounded persistence is a different
+        # promise than pure ephemeral chat — worth surfacing explicitly
+        # rather than leaving as an internal implementation detail.
+        await session.write_line(
+            colored(
+                f"--- end scrollback (last {len(scrollback)} events retained) ---",
+                fg_color=MUTED_COLOR,
+            )
+        )
+
     await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
+    record_message(
+        db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
+    )
     await hub.broadcast(
         channel.name,
         colored(f"*** {user.username} has joined the channel.", fg_color=MUTED_COLOR),
@@ -174,6 +226,14 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
             self_label = colored(f"<{user.username}>", fg_color=SELF_COLOR, bold=True)
             others_label = colored(f"<{user.username}>", fg_color=ACCENT_COLOR)
             await session.write_line(f"{self_label} {line}")
+            record_message(
+                db,
+                channel,
+                kind="message",
+                author_label=user.username,
+                author_fingerprint=user.fingerprint,
+                body=line,
+            )
             await hub.broadcast(
                 channel.name, f"{others_label} {line}", exclude={participant_id}
             )
@@ -196,6 +256,9 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
             task.result()  # re-raise, e.g. SessionClosedError from a dropped connection
     finally:
         hub.leave(channel.name, participant_id)
+        record_message(
+            db, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint
+        )
         await hub.broadcast(
             channel.name,
             colored(f"*** {user.username} has left the channel.", fg_color=MUTED_COLOR),

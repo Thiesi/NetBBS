@@ -1361,3 +1361,72 @@ short-term chat persistence, explicitly not requesting implementation.
    the current design. Worth a visible note to users once this is
    actually built (e.g. in a channel-join message), not just an internal
    implementation detail.
+
+## Sign-off notes, round 20 (chat scrollback — implemented)
+
+Implements round 19's design. Also closes out `list_boards`' default-sort
+test coverage gap surfaced by a pytest run on the actual NetBSD deployment
+target (see below) before this round's chat work began.
+
+1. **Retention limit: 100 events per channel, node-wide, confirmed with
+   Thiesi.** Configurable via `node_config` (key
+   `chat_scrollback_limit`), same mechanism and same validate-with-
+   fallback-to-hardcoded-default pattern as `netbbs.timeutil`'s display
+   format/timezone settings (`netbbs.chat.scrollback.
+   get_scrollback_limit`/`set_scrollback_limit`).
+2. **Real design addition beyond round 19, raised by Thiesi during
+   review: join/leave presence events are persisted and replayed
+   alongside chat messages, not just message text.** Without this, a
+   replayed message from someone who has since left the channel carries
+   no indication of that — it reads as if they're still present. A
+   `kind` discriminator column (`'message' | 'join' | 'leave'`) on one
+   `channel_messages` table carries this, rather than two separate
+   tables, since both share identical channel/ordering/trimming
+   semantics and there's no case where a replay would want one without
+   the other. Trimming (count-based, per round 19) counts all three
+   kinds against the same shared budget, not a separate one per kind.
+3. **Storage is structural, not pre-rendered ANSI** — `ChannelMessage`
+   rows store `kind`/`author_label`/`author_fingerprint`/`body`, and
+   `netbbs.net.chat_flow` renders them the same way it renders live
+   events. Same storage/display separation `netbbs.boards.boards.
+   list_boards` already keeps; means a future theme change, or a
+   non-ANSI client (the web/xterm.js connectivity work later in Phase 1)
+   needs no data migration.
+4. **Replayed messages are never shown in `SELF_COLOR`** — that color is
+   a live-typing affordance ("this is what I just sent"), which doesn't
+   carry meaning when reading back history that may have originated from
+   a different session than the one now viewing it.
+5. **Round 19 point 5's privacy note implemented as literal bracketing
+   text** around the replay (`--- scrollback ---` / `--- end scrollback
+   (last N events retained) ---`, both muted-color), rather than a
+   one-line disclaimer — verified directly, over a real Telnet
+   connection with two sequential sessions, that this reads clearly:
+   session A joins an empty channel (no scrollback shown at all — a
+   channel with no history shows nothing extra), posts one message,
+   quits; session B then rejoins and sees exactly session A's join,
+   message, and leave events replayed, bracketed by the retention note,
+   followed by its own fresh join line.
+6. **Trim-on-insert, not a background job** — after every insert, delete
+   rows for that channel beyond the configured limit in the same
+   transaction. Consistent with there being no background-job machinery
+   anywhere else in Phase 1; revisit only if per-insert trimming cost
+   ever actually shows up as a real bottleneck (design doc §14 already
+   flags write contention, not CPU, as the predicted first bottleneck at
+   this project's target scale).
+7. **Unrelated fix noted here for the record, not a design decision:**
+   before this round's work began, running the existing test suite on
+   the actual NetBSD deployment target (rather than only Windows, where
+   development happens) surfaced a stale test asserting board-listing
+   creation-order — behavior round 18 had already explicitly rejected in
+   favor of activity-order-by-default. It only passed on Windows by
+   accident (two boards created back-to-back can tie on a coarse clock,
+   and the tie-break happened to match creation order); NetBSD's finer
+   clock resolution broke the tie and exposed the stale assertion. Fixed
+   by asserting the actually-confirmed round-18 behavior instead, using
+   explicit timestamps rather than relying on wall-clock timing between
+   two calls — plus added missing coverage for `alphabetical`/`volume`/
+   pinned ordering, none of which had any tests at all. No `list_boards`
+   behavior changed; this is a test-correctness fix, not a design
+   change, and it's the reason this repo's tests should periodically
+   actually be run on NetBSD, not just Windows — the environment split
+   this project already has to account for.

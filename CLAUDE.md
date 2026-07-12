@@ -63,8 +63,12 @@ order and are the most information-dense part of the document.
 
 Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
 breakdown and current status — it will be more current than anything
-written here. As of this file's creation, Phase 1 (local single-node
-BBS — boards, chat, permissions, blocklist, ANSI rendering,
+written here. As of this update, Phase 1 (local single-node BBS —
+boards, chat (including bounded, disk-backed scrollback per channel —
+design doc round 19/20), permissions, blocklist, ANSI rendering,
 character-mode Telnet input, a shared paginated picker with categories/
-pinning/sort order) is substantially built; file areas and SSH
-connectivity are the main pieces still open within Phase 1.
+pinning/sort order) is substantially built; file areas and SSH/web
+connectivity are the remaining pieces open within Phase 1 — file areas
+planned next, connectivity last (it pulls in new dependencies and
+deserves its own design-before-code pass, e.g. checking an SSH library
+is as NetBSD/pkgsrc-friendly as PyNaCl was for crypto).

@@ -14,6 +14,13 @@ from netbbs.chat.channels import (
     list_channels,
 )
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.scrollback import (
+    ChannelMessage,
+    get_scrollback,
+    get_scrollback_limit,
+    record_message,
+    set_scrollback_limit,
+)
 
 __all__ = [
     "Channel",
@@ -22,4 +29,9 @@ __all__ = [
     "get_channel_by_name",
     "list_channels",
     "ChatHub",
+    "ChannelMessage",
+    "get_scrollback",
+    "get_scrollback_limit",
+    "record_message",
+    "set_scrollback_limit",
 ]

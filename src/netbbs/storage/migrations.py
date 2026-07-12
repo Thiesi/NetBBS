@@ -204,4 +204,34 @@ MIGRATIONS = [
         ALTER TABLE channels ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description="Bounded, disk-backed chat scrollback (design doc round "
+        "19/20) — solves a channel looking empty after a local node "
+        "restart, not the separate/harder Link catch-up question, which "
+        "stays explicitly deferred. Join/leave events are stored "
+        "alongside messages (kind discriminator) so a replayed scrollback "
+        "reads coherently instead of showing messages from participants "
+        "with no record of them ever being present.",
+        sql="""
+        CREATE TABLE channel_messages (
+            id                  INTEGER PRIMARY KEY,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            kind                TEXT NOT NULL CHECK (kind IN ('message', 'join', 'leave')),
+            author_label        TEXT NOT NULL,
+            -- Nullable: same reasoning as posts.author_fingerprint — only
+            -- present if the author has a keypair.
+            author_fingerprint  TEXT,
+            -- Required for kind='message', NULL for 'join'/'leave' — the
+            -- kind itself carries the whole meaning of a presence event
+            -- (see netbbs.chat.scrollback), enforced in application code
+            -- rather than a CHECK, since SQLite can't easily express
+            -- "NULL iff kind != 'message'" alongside the kind allowlist
+            -- above without a much messier combined CHECK.
+            body                TEXT,
+            created_at          TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
+        """,
+    ),
 ]
