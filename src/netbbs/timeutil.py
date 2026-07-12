@@ -28,6 +28,7 @@ Two distinct concerns, deliberately kept separate:
 from __future__ import annotations
 
 import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
@@ -91,34 +92,85 @@ def set_display_format(db: Database, fmt: str) -> None:
     set_config(db, DISPLAY_FORMAT_CONFIG_KEY, fmt)
 
 
+# Config key for the node-wide default display timezone, stored via
+# netbbs.config. A separate axis from DISPLAY_FORMAT_CONFIG_KEY: format
+# controls the *shape* of the displayed string (day/month order, 12h vs
+# 24h), timezone controls *which instant* gets shown — a custom format
+# alone does not convert UTC to local time, they're independent settings
+# that both need to be right for a genuinely "correct local time" display.
+DISPLAY_TIMEZONE_CONFIG_KEY = "display_timezone"
+
+# UTC, not any particular locale's zone — a safe, unopinionated default
+# that doesn't assume where a given node's SysOp or users are. Node
+# operators are expected to set this explicitly (e.g. "Europe/Berlin")
+# via `set_display_timezone`, same as the format string.
+_DEFAULT_DISPLAY_TIMEZONE = "UTC"
+
+
+def is_valid_timezone(name: str) -> bool:
+    """
+    Check that `name` is a real, loadable IANA timezone identifier.
+
+    Unlike `is_valid_display_format`'s strftime situation, this
+    try/except *is* reliable across platforms: `zoneinfo.ZoneInfo`'s
+    failure modes are well-defined Python-level logic (does a matching
+    tzdata file exist, is the key even a well-formed relative path) —
+    verified directly, including that it correctly rejects a
+    path-traversal-shaped key (e.g. "../../../etc/passwd") with
+    `ValueError` on its own — not undefined behavior delegated to a C
+    library the way strftime's unknown-directive handling turned out to
+    be. Still depends on the system actually having IANA tzdata
+    available (NetBSD's base system should, as a standard Unix
+    installation, but this hasn't been verified on Thiesi's actual
+    machine specifically — the `tzdata` PyPI package is listed as an
+    optional dependency as a fallback, see pyproject.toml).
+    """
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def set_display_timezone(db: Database, tz_name: str) -> None:
+    """Set the node-wide display timezone, validating it first (same
+    immediate-feedback reasoning as `set_display_format`)."""
+    if not is_valid_timezone(tz_name):
+        raise ValueError(f"invalid timezone: {tz_name!r}")
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, tz_name)
+
+
 def format_for_display(
     iso_timestamp: str,
     db: Database | None = None,
     *,
     override_format: str | None = None,
+    override_timezone: str | None = None,
 ) -> str:
     """
     Format a stored UTC timestamp (as produced by `utc_now_iso()`) for
     showing to a user. Never includes sub-second precision, regardless of
     what's configured — see the docstring on `_DEFAULT_DISPLAY_FORMAT`.
 
-    Resolution order, highest priority first:
-      1. `override_format` — reserved for a future per-user preference.
-         Nothing calls this with a real per-user value yet (no user
-         preferences system exists — see design doc §13/§15 phasing), but
-         the parameter exists now specifically so wiring that in later
-         needs no changes here, only a caller passing the user's stored
-         preference through.
-      2. The node-wide default stored in `node_config` (via
-         `netbbs.config`), if `db` is given.
-      3. `_DEFAULT_DISPLAY_FORMAT`, if neither of the above apply.
+    Two independent settings are resolved here, each with its own
+    priority order (highest first): an eventual per-user value
+    (`override_format`/`override_timezone` — reserved for a future
+    preferences system, see design doc §13/§15; nothing calls these with
+    real per-user values yet, but the parameters exist now so wiring that
+    in later needs no changes here) > the node-wide default stored in
+    `node_config` (if `db` is given) > a hardcoded fallback.
 
-    Whatever format is resolved is re-validated here regardless of
-    source (see `is_valid_display_format`) and falls back to the
-    hardcoded default if it doesn't pass — defense in depth in case
-    something bypassed `set_display_format`'s own validation (writing
-    directly via `netbbs.config.set_config`, or a future per-user
-    preference path that doesn't route through validation).
+    Format and timezone are genuinely separate axes: format controls the
+    *shape* of the string, timezone controls *which instant* is shown.
+    Getting the format right without also converting to the right
+    timezone still leaves users looking at UTC clock time, just reshaped.
+
+    Whatever format/timezone are resolved are re-validated here
+    regardless of source (see `is_valid_display_format` /
+    `is_valid_timezone`) and fall back to the hardcoded defaults if
+    invalid — defense in depth in case something bypassed the validated
+    setters (writing directly via `netbbs.config.set_config`, or a future
+    per-user preference path that doesn't route through validation).
     """
     parsed = datetime.datetime.strptime(iso_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
         tzinfo=datetime.timezone.utc
@@ -134,4 +186,15 @@ def format_for_display(
     if not is_valid_display_format(fmt):
         fmt = _DEFAULT_DISPLAY_FORMAT
 
-    return parsed.strftime(fmt)
+    if override_timezone is not None:
+        tz_name = override_timezone
+    elif db is not None:
+        tz_name = get_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, default=_DEFAULT_DISPLAY_TIMEZONE)
+    else:
+        tz_name = _DEFAULT_DISPLAY_TIMEZONE
+
+    if not is_valid_timezone(tz_name):
+        tz_name = _DEFAULT_DISPLAY_TIMEZONE
+
+    localized = parsed.astimezone(ZoneInfo(tz_name))
+    return localized.strftime(fmt)

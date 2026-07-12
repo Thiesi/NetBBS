@@ -78,6 +78,7 @@ single monolithic script.
 ```sh
 python scripts/create_test_user.py netbbs.db thiesi hunter2 100
 python scripts/create_test_board.py netbbs.db general "General discussion"
+python scripts/set_node_config.py netbbs.db display_timezone Europe/Berlin
 python -m netbbs netbbs.db
 ```
 
@@ -105,7 +106,3 @@ unresolved git merge conflict markers — see `.githooks/pre-commit`):
 ```sh
 git config core.hooksPath .githooks
 ```
-
-## License
-
-TBD.

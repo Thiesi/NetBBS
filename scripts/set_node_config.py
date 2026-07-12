@@ -11,6 +11,9 @@ Usage:
 
 Example (switch to US-style month/day, 12-hour clock):
     python scripts/set_node_config.py netbbs.db display_timestamp_format "%m/%d/%Y %I:%M %p"
+
+Example (set node-wide display timezone):
+    python scripts/set_node_config.py netbbs.db display_timezone Europe/Berlin
 """
 
 from __future__ import annotations
@@ -22,7 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from netbbs.config import set_config  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
-from netbbs.timeutil import DISPLAY_FORMAT_CONFIG_KEY, set_display_format  # noqa: E402
+from netbbs.timeutil import (  # noqa: E402
+    DISPLAY_FORMAT_CONFIG_KEY,
+    DISPLAY_TIMEZONE_CONFIG_KEY,
+    set_display_format,
+    set_display_timezone,
+)
 
 
 def main() -> None:
@@ -36,19 +44,20 @@ def main() -> None:
 
     db = Database(db_path)
 
-    if key == DISPLAY_FORMAT_CONFIG_KEY:
-        # Validated: strftime's handling of an invalid directive is
-        # platform-dependent and often doesn't raise (see timeutil.py),
-        # so catching a bad format here at set-time — with an immediate,
-        # actionable error — matters more than it would for a typical
-        # string setting.
-        try:
+    # Both display settings are validated at set-time rather than
+    # silently discovered as broken later — see timeutil.py for why this
+    # matters especially for the format string (strftime's handling of
+    # bad input is platform-dependent and often doesn't raise at all).
+    try:
+        if key == DISPLAY_FORMAT_CONFIG_KEY:
             set_display_format(db, value)
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            sys.exit(1)
-    else:
-        set_config(db, key, value)
+        elif key == DISPLAY_TIMEZONE_CONFIG_KEY:
+            set_display_timezone(db, value)
+        else:
+            set_config(db, key, value)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
     print(f"Set {key!r} = {value!r} in {db_path}")
 

@@ -739,3 +739,38 @@ into user-facing board post displays.
    Invalid formats are now rejected at set-time (`set_display_format`,
    with an immediate error) rather than silently discovered later at
    display time.
+
+## Sign-off notes, round 9 (timezone conversion)
+
+Prompted by Thiesi correctly noting that a configurable format string
+alone doesn't produce correct *local* time — format and timezone are
+independent axes, and only the first had been built.
+
+1. **Timezone conversion added**, same architecture as the display
+   format work: `DISPLAY_TIMEZONE_CONFIG_KEY` in `node_config`, resolved
+   through the same priority order (future per-user override > node
+   config > hardcoded default), with the actual UTC-to-target-zone
+   conversion now happening in `format_for_display` before `strftime`
+   runs (previously it only reshaped the string, never converted the
+   instant).
+2. **Default is UTC, not any assumed locale** — deliberately
+   unopinionated; node operators are expected to set this explicitly via
+   `set_display_timezone`.
+3. **Validation approach differs from the format-string case, and that
+   difference was verified, not assumed:** `zoneinfo.ZoneInfo`'s failure
+   modes are well-defined Python-level logic (does a matching tzdata file
+   exist), unlike `strftime`'s platform-dependent C-library delegation —
+   confirmed directly, including that it independently guards against a
+   path-traversal-shaped key. `try/except` is a reliable validation
+   mechanism here, in deliberate contrast to round 8's finding that it
+   wasn't for format strings.
+4. **Open item, not yet confirmed:** whether NetBSD's base system ships
+   IANA tzdata that Python's `zoneinfo` can find. Verified working in a
+   Linux sandbox only. `tzdata` is listed as an optional dependency
+   fallback in `pyproject.toml`; if `is_valid_timezone("Europe/Berlin")`
+   returns `False` on the actual NetBSD deployment, that's the fix.
+5. **Housekeeping:** README's License section removed and
+   `pyproject.toml`'s license field set to BSD-2-Clause, per Thiesi
+   licensing the repo directly on GitHub. No LICENSE file added from this
+   side, deliberately, to avoid duplicating/conflicting with whatever
+   GitHub's own license picker already added.

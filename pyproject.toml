@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A modern, TCP/IP-native BBS with an ad-hoc mesh network (NetBBS Link)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "TBD" }
+license = { text = "BSD-2-Clause" }
 dependencies = [
     "pynacl>=1.5",
 ]
@@ -16,6 +16,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+]
+# Fallback IANA timezone database for systems that don't ship one as part
+# of the base OS. NetBSD's base system should have its own
+# /usr/share/zoneinfo (verified this works via Python's zoneinfo module
+# in a Linux sandbox; not yet confirmed on Thiesi's actual NetBSD
+# machine specifically). Install this extra only if
+# `netbbs.timeutil.is_valid_timezone` rejects known-good zone names like
+# "Europe/Berlin" on your system.
+tzdata = [
+    "tzdata; sys_platform == 'win32' or sys_platform == 'unknown'",
 ]
 
 [tool.setuptools.packages.find]

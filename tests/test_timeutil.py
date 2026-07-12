@@ -8,9 +8,12 @@ from netbbs.config import set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import (
     DISPLAY_FORMAT_CONFIG_KEY,
+    DISPLAY_TIMEZONE_CONFIG_KEY,
     format_for_display,
     is_valid_display_format,
+    is_valid_timezone,
     set_display_format,
+    set_display_timezone,
     utc_now_iso,
 )
 
@@ -134,4 +137,72 @@ def test_set_display_format_rejects_invalid_format(tmp_path):
     db = Database(tmp_path / "node.db")
     with pytest.raises(ValueError):
         set_display_format(db, "%Q garbage")
+    db.close()
+
+
+# -- timezone conversion ----------------------------------------------------
+
+
+def test_default_timezone_is_utc_when_nothing_configured():
+    stamp = "2026-07-09T14:32:07.123456Z"
+    # With no db and the European default format, UTC 14:32 should stay
+    # 14:32 (no conversion) when no timezone is configured at all.
+    assert format_for_display(stamp) == "09.07.2026 14:32"
+
+
+def test_timezone_conversion_via_node_config(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_display_timezone(db, "Europe/Berlin")
+    # In July, Berlin is UTC+2 (CEST) -- 14:32 UTC becomes 16:32 local.
+    stamp = "2026-07-09T14:32:07.123456Z"
+    assert format_for_display(stamp, db) == "09.07.2026 16:32"
+    db.close()
+
+
+def test_timezone_override_takes_priority_over_node_config(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_display_timezone(db, "Europe/Berlin")
+    stamp = "2026-07-09T14:32:07.123456Z"
+    # America/New_York is UTC-4 in July (EDT) -- 14:32 UTC becomes 10:32.
+    result = format_for_display(stamp, db, override_timezone="America/New_York")
+    assert result == "09.07.2026 10:32"
+    db.close()
+
+
+def test_is_valid_timezone_accepts_real_zones():
+    assert is_valid_timezone("UTC") is True
+    assert is_valid_timezone("Europe/Berlin") is True
+    assert is_valid_timezone("America/New_York") is True
+
+
+def test_is_valid_timezone_rejects_garbage():
+    assert is_valid_timezone("not_a_real_zone") is False
+    assert is_valid_timezone("") is False
+
+
+def test_is_valid_timezone_rejects_path_traversal_attempt():
+    # zoneinfo itself guards against this (raises ValueError), verified
+    # directly -- this test exists to confirm is_valid_timezone doesn't
+    # accidentally let that ValueError propagate instead of returning
+    # False like it's supposed to for any invalid input.
+    assert is_valid_timezone("../../../etc/passwd") is False
+
+
+def test_set_display_timezone_rejects_invalid_zone(tmp_path):
+    import pytest
+
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError):
+        set_display_timezone(db, "not_a_real_zone")
+    db.close()
+
+
+def test_malformed_timezone_config_falls_back_to_utc(tmp_path):
+    db = Database(tmp_path / "node.db")
+    # Bypass the validated setter to simulate a corrupted/hand-edited
+    # config value, same defense-in-depth reasoning as the malformed
+    # format test above.
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, "not_a_real_zone")
+    stamp = "2026-07-09T14:32:07.123456Z"
+    assert format_for_display(stamp, db) == "09.07.2026 14:32"
     db.close()
