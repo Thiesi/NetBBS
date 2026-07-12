@@ -46,7 +46,10 @@ netbbs/
 │   │                     driven echo, Backspace/Delete, NAWS window-size
 │   │                     negotiation) + Session abstraction, login flow
 │   │                     (SSH/web to follow on the same Session
-│   │                     abstraction)
+│   │                     abstraction). `picker.py`: shared paginated
+│   │                     list selector (2-digit select, search, goto by
+│   │                     stable index) used by both board and channel
+│   │                     selection, and (once built) file areas
 │   ├── boards/           Local message boards + posts, content-addressed
 │   │                     IDs from day one (§7) so Linked-board support
 │   │                     later needs no ID-scheme migration
@@ -122,6 +125,20 @@ you've typed — there's no cursor movement (arrow keys, Home/End), so
 fixing a mid-word typo means backspacing past everything after it and
 retyping, not editing in place. Full cursor-addressable editing is out of
 scope for this pass; see design doc phasing notes.
+
+The main menu now dispatches immediately on a single keystroke — no
+Enter needed for `B`/`C`/`Q`. Real behavior change: the old "b" or
+"boards" (full word) alternative no longer works, only the single letter.
+
+Your own chat messages now show in a distinct color (magenta) from
+everyone else's (gold), so they stand out in the conversation.
+
+**Board and channel selection** now uses a shared paginated picker
+instead of typing exact names: browse with 2-digit numbers, `[S]earch`
+by substring (auto-selects if there's a unique match), `[G]oto #` to
+jump straight to a stable absolute index shown as `(#N)` next to every
+item — that number stays valid regardless of paging or an active search
+filter.
 
 To test the blocklist:
 

@@ -1105,3 +1105,112 @@ incremental addition:**
     (character-mode typing with a real backspace correction, NAWS
     negotiation, and reflow, all together) was run and passed before
     this was considered done.
+
+## Sign-off notes, round 16 (shared paginated list picker)
+
+Prompted by Thiesi's dissatisfaction with typing full board/channel
+names to select them, and openly uncertain between two of his own
+proposed alternatives.
+
+1. **Two proposals evaluated, neither adopted as-is.** Pure two-digit
+   paginated numbering (Thiesi's idea) solved "don't make me type" but
+   not "jump to item #769" without still paging through everything
+   first. Tab completion (Thiesi's other idea) doesn't solve long-range
+   jumps either, and Thiesi himself flagged it as inconsistent with
+   single-key navigation elsewhere in the BBS.
+2. **Synthesis landed on and confirmed with Thiesi:** always-exactly-
+   2-digit page-relative selection (for browsing) + a search command
+   (filters by substring, subsumes what tab completion would have
+   offered, auto-selects on a unique match) + a goto command (jumps
+   directly to an absolute index). Page size adapts to the session's
+   actual negotiated terminal height (NAWS), confirmed with Thiesi over
+   a fixed size.
+3. **Built once as `netbbs.net.picker.pick_item()`, shared across
+   boards, chat channels, and (once built) file areas** — same
+   underlying problem in all three, not reimplemented per feature.
+   Board selection (`login_flow.py`) and channel selection
+   (`chat_flow.py`) both now use it, replacing their previous
+   type-the-exact-name flows.
+4. **A real design gap found and fixed during review, not by Thiesi
+   reporting it:** the initial implementation's `goto` command indexed
+   into whatever a prior search had narrowed the visible list to, not
+   the stable original list — confirmed directly with a live scenario
+   (searching "item1" against a 20-item list, then "goto 3", returned
+   "item11" — the 3rd search match — instead of "item3", the 3rd item
+   overall). Worse, no version of the display ever showed a stable
+   absolute number anywhere, so `goto` was effectively undiscoverable —
+   a user would have no way to know what number to type for it in the
+   first place. Fixed by carrying `(stable_index, item)` pairs through
+   pagination and search filtering, so `goto` always resolves against
+   the original list regardless of active filtering, and displaying that
+   stable index — `(#N)` — alongside the page-relative selection number
+   on every line. Caught a second bug fixing the first: the "clear
+   search filter" branch reset the working set to the plain item list
+   instead of the now-indexed-pairs list, a type mismatch that would
+   have broken on the very next render after clearing a filter.
+5. **Testing note:** `netbbs.net.picker` has no PyNaCl dependency, and
+   its 20 tests (17 pre-existing plus 3 new regression tests added for
+   the goto/stable-index fix) were run for real against actual loopback
+   sockets, the same rigor as `test_telnet.py` — including reproducing
+   the exact broken scenario before the fix, then confirming it resolved
+   correctly after. `chat_flow.py`'s actual picker wiring (imports
+   `netbbs.auth` via the rest of the module) remains unverified by
+   Claude; manual testing is the way to confirm boards and channels both
+   feel right end-to-end.
+
+## Sign-off notes, round 15 (self-color in chat + immediate menu keys)
+
+Prompted by Thiesi testing round 14 successfully and requesting two
+further refinements.
+
+1. **Own chat messages now visually distinct.** New `SELF_COLOR`
+   (bright magenta) in `netbbs.rendering.theme`, distinct from
+   `ACCENT_COLOR` (gold, used for everyone else's names). Required a
+   real architectural change, not just a new color constant: the sender
+   can no longer receive the identical broadcast string as everyone
+   else, since they need different formatting. `send_loop` now writes a
+   self-colored copy directly to the sender's own session and broadcasts
+   a separately-formatted, accent-colored copy to everyone else
+   (sender now excluded from that broadcast, the reverse of round 10's
+   original "include everyone" choice — that choice was about which
+   *content* to send, this one is about using two different strings
+   instead of one).
+2. **A concurrency question this raised, actually verified rather than
+   assumed:** two asyncio tasks (`send_loop`, `receive_loop`) now both
+   call `session.write()` on the same connection. Confirmed safe with a
+   real stress test (two tasks racing 20 writes each) — zero byte-level
+   interleaving, only message-level reordering (equivalent to any
+   real-time chat's inherent ordering ambiguity). Safe specifically
+   because `TelnetSession.write()` buffers its bytes with one
+   synchronous `self._writer.write()` call before ever `await`ing
+   `drain()` — documented in `_chat_loop`'s docstring with the
+   reasoning, not just the conclusion.
+3. **New `Session.read_key()`** — reads one character and returns
+   immediately, no Enter required, added to the `Session` ABC (`SSH`/
+   web transports will need their own implementations later) and
+   implemented in `TelnetSession` by reusing the same `_read_byte`/
+   `_read_utf8_continuation`/`_discard_escape_sequence` primitives
+   `read_line` already used. Deliberately scoped to genuine single-
+   choice menu selections only (the main menu) — free-text prompts
+   (board/channel names, post subjects, chat messages) correctly stay on
+   `read_line`, since they're not a small enumerable choice set.
+4. **A real, deliberate behavior loss, flagged rather than silently
+   dropped:** the main menu previously accepted the full word ("boards")
+   as an alternative to the single letter. Immediate single-key dispatch
+   can't support that — acting on the very first keystroke means there's
+   no way to know whether more characters are about to follow. Only the
+   letter works now; documented in the code and called out to Thiesi
+   directly.
+5. **A real bug caught by actually running the tests, not just writing
+   them:** the first `read_key()` implementation only echoed when
+   `echo=True` and wrote nothing at all for `echo=False`, instead of
+   masking with `*` the way `read_line()` correctly does. Caught
+   immediately by the masking test failing with an unexpected EOF/empty
+   read, fixed, then re-verified passing. Kept as a permanent regression
+   test.
+6. **Testing note:** all of this — `read_key()` (4 new tests) and the
+   concurrency stress test — was executed for real against loopback
+   sockets, same rigor as round 14, bringing `test_telnet.py` to 26
+   passing tests. `chat_flow.py`'s actual self-color wiring (imports
+   `netbbs.auth`) remains unverified by Claude; manual two-terminal
+   testing is the way to confirm it end-to-end.

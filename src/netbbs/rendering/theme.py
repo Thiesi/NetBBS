@@ -17,6 +17,9 @@ independently.
 from __future__ import annotations
 
 HEADER_COLOR = 51  # bright cyan — section headers, banners
-ACCENT_COLOR = 220  # gold — navigable items: board/channel names, usernames
+ACCENT_COLOR = 220  # gold — navigable items: board/channel names, other users' names
 MUTED_COLOR = 244  # gray — system/meta messages (join/leave notices, etc.)
 MENU_KEY_COLOR = 46  # bright green — the actual valid keystroke in a menu option
+SELF_COLOR = 201  # bright magenta — the user's own name/messages in chat, distinct
+                  # from ACCENT_COLOR (used for everyone else's), so a user's own
+                  # messages visually stand out from the rest of the conversation

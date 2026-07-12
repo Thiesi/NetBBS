@@ -77,5 +77,22 @@ class Session(ABC):
         """
 
     @abstractmethod
+    async def read_key(self, echo: bool = True) -> str:
+        """
+        Read a single character and return immediately — no Enter
+        required. The character-mode equivalent of a classic BBS hotkey
+        menu: intended for genuine single-choice menu selections (e.g.
+        "[B]oards [C]hat [Q]uit"), not free-text input (board names,
+        post subjects, chat messages), which should keep using
+        `read_line`.
+
+        Only meaningful once a transport has taken over character-mode
+        input itself (see `netbbs.net.telnet`) — a transport relying on
+        client-side line buffering has no way to return before the user
+        presses Enter, since the whole line arrives as one chunk only
+        after that.
+        """
+
+    @abstractmethod
     async def close(self) -> None:
         """Close the underlying connection."""

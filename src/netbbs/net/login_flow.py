@@ -18,10 +18,11 @@ needs it.
 from __future__ import annotations
 
 from netbbs.auth.users import AuthError, User, authenticate_password
-from netbbs.boards import Board, BoardError, create_post, get_board_by_name, list_boards, list_posts
+from netbbs.boards import Board, create_post, list_boards, list_posts
 from netbbs.chat import ChatHub
 from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
+from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow
@@ -65,6 +66,18 @@ async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
 
 
 async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+    """
+    The main menu, now dispatching immediately on a single keystroke
+    (`read_key`) rather than waiting for a full line + Enter — a direct
+    benefit of character-mode input landing in `netbbs.net.telnet`.
+
+    Real behavior change worth being explicit about: the old
+    line-based version accepted either the letter or the full word
+    ("b" or "boards") as valid input. Immediate single-key dispatch can't
+    keep that — the whole point is acting on the very first keystroke,
+    with no way to know whether more characters are about to follow.
+    Only the single letter works now.
+    """
     while True:
         header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
         options = "  ".join(
@@ -76,13 +89,14 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
         )
         await session.write_line(f"\r\n{header} {options}")
         await session.write("Choice: ")
-        choice = (await session.read_line()).strip().lower()
+        choice = (await session.read_key()).lower()
+        await session.write_line("")  # move to a fresh line after the single-key echo
 
-        if choice in ("q", "quit"):
+        if choice == "q":
             return
-        elif choice in ("b", "boards"):
+        elif choice == "b":
             await _browse_boards(session, db, user)
-        elif choice in ("c", "chat"):
+        elif choice == "c":
             await browse_channels(session, db, hub, user)
         else:
             await session.write_line("Unknown choice.")
@@ -155,33 +169,22 @@ async def _login(session: Session, db: Database, max_attempts: int = _MAX_LOGIN_
 
 async def _browse_boards(session: Session, db: Database, user: User) -> None:
     """
-    Minimal linear board-browsing flow: list boards the user can read,
-    let them pick one, show its posts, offer to post if they have write
-    access.
+    Board selection via the shared paginated picker (`netbbs.net.picker`)
+    instead of typing a board's exact name — see design doc phasing
+    sign-off notes for why: long/arbitrary board names shouldn't have to
+    be typed out, and a plain alphabetical list doesn't scale past a
+    couple dozen entries anyway.
     """
     readable_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level)]
-    if not readable_boards:
-        await session.write_line("\r\nNo boards are available to you yet.")
-        return
-
-    await session.write_line("\r\nAvailable boards:")
-    for board in readable_boards:
-        name = colored(board.name, fg_color=ACCENT_COLOR)
-        await session.write_line(f"  {name} - {board.description or ''}")
-
-    await session.write("\r\nEnter a board name to view (or press Enter to skip): ")
-    choice = (await session.read_line()).strip()
-    if not choice:
-        return
-
-    try:
-        board = get_board_by_name(db, choice)
-    except BoardError:
-        await session.write_line("No such board.")
-        return
-
-    if not meets_level(user, board.min_read_level):
-        await session.write_line("You don't have access to that board.")
+    board = await pick_item(
+        session,
+        readable_boards,
+        name_of=lambda b: b.name,
+        description_of=lambda b: b.description,
+        title="Available boards",
+        empty_message="No boards are available to you yet.",
+    )
+    if board is None:
         return
 
     await _show_board(session, db, board, user)

@@ -621,6 +621,167 @@ def test_write_normalization_is_idempotent_for_already_crlf_text():
     asyncio.run(scenario())
 
 
+# -- read_key: immediate single-keystroke dispatch (no Enter needed) ------
+
+
+def test_read_key_returns_immediately_no_enter_needed():
+    received = []
+
+    async def handler(session: Session):
+        received.append(await session.read_key())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            writer.write(b"b")  # deliberately no Enter/CR/LF sent at all
+            await writer.drain()
+            assert await reader.readexactly(1) == b"b"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["b"]
+
+
+def test_read_key_skips_backspace_and_enter_bytes():
+    """
+    Junk control bytes (Backspace, CR, LF) sent before a real key press
+    are silently skipped, not returned as "the key" — there's no line
+    being built here to backspace within, and Enter has no special
+    meaning when already responding to the very next keystroke.
+    """
+    received = []
+
+    async def handler(session: Session):
+        received.append(await session.read_key())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            writer.write(bytes([0x08, 0x0D, 0x0A]))
+            await writer.drain()
+            await asyncio.sleep(0.05)
+            writer.write(b"q")
+            await writer.drain()
+            assert await reader.readexactly(1) == b"q"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["q"]
+
+
+def test_read_key_echo_false_masks_with_asterisk():
+    """
+    Regression test for a real bug caught while building this: the first
+    implementation only echoed when echo=True and wrote nothing at all
+    for echo=False, instead of masking with '*' the way read_line does.
+    Caught by actually running this exact test before it was formalized.
+    """
+    received = []
+
+    async def handler(session: Session):
+        received.append(await session.read_key(echo=False))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            writer.write(b"x")
+            await writer.drain()
+            echoed = await reader.readexactly(1)
+            assert echoed == b"*"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["x"]
+
+
+def test_read_key_ignores_negotiation_sequences():
+    received = []
+
+    async def handler(session: Session):
+        received.append(await session.read_key())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            writer.write(bytes([IAC, DO, ECHO]))
+            await writer.drain()
+            await asyncio.sleep(0.05)
+            writer.write(b"z")
+            await writer.drain()
+            assert await reader.readexactly(1) == b"z"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert received == ["z"]
+
+
+def test_concurrent_writes_from_two_tasks_do_not_interleave_bytes():
+    """
+    Stress test backing the concurrency-safety claim documented in
+    netbbs.net.chat_flow._chat_loop (two asyncio tasks — send_loop and
+    receive_loop — both call session.write()/write_line() on the same
+    connection). Confirms TelnetSession.write()'s single synchronous
+    self._writer.write() call before any await means one logical message
+    can never be interleaved mid-write by another concurrently-running
+    task, only reordered relative to it — verified here, not assumed.
+    """
+    async def handler(session: Session):
+        async def writer_a():
+            for _ in range(20):
+                await session.write_line("A" * 50)
+
+        async def writer_b():
+            for _ in range(20):
+                await session.write_line("B" * 50)
+
+        await asyncio.gather(writer_a(), writer_b())
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            chunks = []
+            try:
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=0.5)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except asyncio.TimeoutError:
+                pass
+            data = b"".join(chunks)
+            lines = [line for line in data.decode().split("\r\n") if line]
+            assert len(lines) == 40
+            assert all(line == "A" * 50 or line == "B" * 50 for line in lines)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_server_port_property_before_start_raises():
     import pytest
 

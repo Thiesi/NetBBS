@@ -10,42 +10,43 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.auth.users import User
-from netbbs.chat import Channel, ChannelError, ChatHub, get_channel_by_name, list_channels
+from netbbs.chat import Channel, ChatHub, list_channels
+from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key
+from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key
 from netbbs.storage.database import Database
 
 
 async def browse_channels(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+    """
+    Channel selection via the shared paginated picker
+    (`netbbs.net.picker`), matching how board selection already works —
+    same reasoning: typing out a full channel name shouldn't be
+    required, especially given channel names can be long/descriptive
+    (e.g. "channel party all day long on Monday - come and say hi", the
+    exact kind of name that prompted building the picker in the first
+    place).
+    """
     joinable = [c for c in list_channels(db) if meets_level(user, c.min_level)]
-    if not joinable:
-        await session.write_line("\r\nNo chat channels are available to you yet.")
-        return
-
-    header = colored("Available channels:", fg_color=HEADER_COLOR, bold=True)
-    await session.write_line(f"\r\n{header}")
-    for channel in joinable:
-        online = hub.participant_count(channel.name)
-        name = colored(f"#{channel.name}", fg_color=ACCENT_COLOR)
-        await session.write_line(f"  {name} - {channel.description or ''} ({online} online)")
-
-    await session.write("\r\nJoin which channel? (or press Enter to skip): ")
-    choice = (await session.read_line()).strip()
-    if not choice:
-        return
-
-    try:
-        channel = get_channel_by_name(db, choice)
-    except ChannelError:
-        await session.write_line("No such channel.")
-        return
-
-    if not meets_level(user, channel.min_level):
-        await session.write_line("You don't have access to that channel.")
+    channel = await pick_item(
+        session,
+        joinable,
+        name_of=lambda c: c.name,
+        description_of=lambda c: _channel_description(hub, c),
+        title="Available channels",
+        empty_message="No chat channels are available to you yet.",
+    )
+    if channel is None:
         return
 
     await _chat_loop(session, hub, channel, user)
+
+
+def _channel_description(hub: ChatHub, channel: Channel) -> str:
+    online = hub.participant_count(channel.name)
+    base = channel.description or ""
+    return f"{base} ({online} online)".strip()
 
 
 async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: User) -> None:
@@ -62,17 +63,29 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
     finishes: the user typing /quit, or the connection dropping out from
     under either task.
 
-    Known limitation as of this writing: because we still stay in the
-    client's default line-editing mode (see `netbbs.net.telnet`), an
-    incoming message can land on a user's screen while they're mid-typing
-    their own line, interleaving with it — the same behavior classic
-    line-mode chat tools (Unix `talk`, `wall`) have always had.
-    Character-at-a-time server-side input handling, which would fix this
-    properly, was originally deferred but has since been pulled forward
-    (see design doc phasing sign-off notes) after real testing showed
-    client-side line editing behaving inconsistently (backspace not
-    working, `^M` displayed literally) — this docstring will need
-    updating once that work actually lands here.
+    Both tasks can call `session.write()`/`write_line()` concurrently
+    (`send_loop` writes the sender's own self-colored message directly;
+    `receive_loop` writes whatever arrives from other participants) —
+    this is safe: `TelnetSession.write()` buffers its bytes with a single
+    synchronous `self._writer.write()` call before ever `await`ing
+    `drain()`, so one logical message can never be interleaved
+    mid-write by the other task. The only effect of the two tasks racing
+    is which complete message lands on the wire first, which is exactly
+    the ordering ambiguity any real-time chat already has (you might see
+    someone else's message arrive while still composing your own).
+
+    Character-mode input (server-driven echo, working Backspace, no more
+    `^M` instead of a newline) landed in `netbbs.net.telnet` after real
+    testing surfaced the problems client-side line editing was causing —
+    an earlier version of this docstring described that as still
+    deferred; it isn't anymore. The remaining scope limitation is
+    narrower: no cursor-addressable line editing (arrow keys, Home/End)
+    — Backspace/Delete only remove from the end of what's typed. So an
+    incoming message can still land mid-typing and interleave visually
+    with a user's own in-progress line, same as classic line-mode chat
+    tools (Unix `talk`, `wall`) always had — full mid-line redraw to
+    avoid that would need real cursor-addressable TUI machinery, still
+    out of scope.
     """
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
@@ -98,18 +111,22 @@ async def _chat_loop(session: Session, hub: ChatHub, channel: Channel, user: Use
                 continue
             if line.lower() in ("/quit", "/leave"):
                 return
-            # Broadcast to everyone including the sender (not excluded).
-            # The alternative — excluding the sender since they already
-            # saw their own characters echoed back while typing (now via
-            # our own character-mode echo in netbbs.net.telnet, not the
-            # client's local echo the way it worked before that existed)
-            # — would mean only the sender's own messages look different
-            # (unformatted) from everyone else's on their own screen.
-            # Seeing your own line echoed back in the same "<user> text"
-            # format everyone else sees is a minor, accepted redundancy,
-            # not a bug.
-            username_label = colored(f"<{user.username}>", fg_color=ACCENT_COLOR)
-            await hub.broadcast(channel.name, f"{username_label} {line}")
+            # Two differently-colored copies of the same message, not
+            # one broadcast to everyone: the sender gets a direct write
+            # using SELF_COLOR so their own messages visually stand out
+            # from the rest of the conversation, while everyone else
+            # receives the normal ACCENT_COLOR-formatted version via the
+            # broadcast (sender excluded this time, unlike before —
+            # they're getting their own copy directly instead). This
+            # can't be done as a single shared broadcast string the way
+            # join/leave notices are, since it's genuinely different
+            # text per recipient.
+            self_label = colored(f"<{user.username}>", fg_color=SELF_COLOR, bold=True)
+            others_label = colored(f"<{user.username}>", fg_color=ACCENT_COLOR)
+            await session.write_line(f"{self_label} {line}")
+            await hub.broadcast(
+                channel.name, f"{others_label} {line}", exclude={participant_id}
+            )
 
     receive_task = asyncio.create_task(receive_loop())
     send_task = asyncio.create_task(send_loop())

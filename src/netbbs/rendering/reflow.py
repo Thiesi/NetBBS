@@ -37,3 +37,21 @@ def reflow(text: str, width: int = DEFAULT_WIDTH) -> str:
         for paragraph in paragraphs
     ]
     return "\n\n".join(wrapped_paragraphs)
+
+
+def truncate(text: str, width: int, *, ellipsis: str = "...") -> str:
+    """
+    Truncate `text` to fit within `width` columns, appending `ellipsis`
+    if truncation actually occurred.
+
+    Unlike `reflow`, this always produces a single line, never wrapping
+    — for contexts like a one-line list entry (e.g. `netbbs.net.picker`)
+    where multi-line wrapping would break the list's visual structure.
+    """
+    if width < 1:
+        raise ValueError(f"width must be >= 1, got {width}")
+    if len(text) <= width:
+        return text
+    if width <= len(ellipsis):
+        return ellipsis[:width]
+    return text[: width - len(ellipsis)] + ellipsis

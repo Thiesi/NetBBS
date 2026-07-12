@@ -19,8 +19,8 @@ from netbbs.rendering.ansi import (
     move_cursor,
 )
 from netbbs.rendering.menu import menu_key
-from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow
-from netbbs.rendering.theme import ACCENT_COLOR, HEADER_COLOR, MENU_KEY_COLOR, MUTED_COLOR
+from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow, truncate
+from netbbs.rendering.theme import ACCENT_COLOR, HEADER_COLOR, MENU_KEY_COLOR, MUTED_COLOR, SELF_COLOR
 
 __all__ = [
     "BOLD",
@@ -34,8 +34,10 @@ __all__ = [
     "menu_key",
     "DEFAULT_WIDTH",
     "reflow",
+    "truncate",
     "ACCENT_COLOR",
     "HEADER_COLOR",
     "MENU_KEY_COLOR",
     "MUTED_COLOR",
+    "SELF_COLOR",
 ]

@@ -214,6 +214,47 @@ class TelnetSession(Session):
         await self.write("\r\n")
         return "".join(line)
 
+    async def read_key(self, echo: bool = True) -> str:
+        """
+        Read a single character and return immediately — see the
+        `Session.read_key` docstring for the intended use (menu hotkeys,
+        not free-text input).
+
+        Control bytes with no meaning as a standalone "key" — Backspace/
+        Delete, CR/LF, unsupported escape sequences — are silently
+        skipped and reading continues, rather than being returned as a
+        key in their own right: there's no line being built here to
+        backspace within, and Enter doesn't mean anything special when
+        we're already responding to the very next keystroke, immediately.
+        """
+        try:
+            while True:
+                b = await self._read_byte()
+                if b is None:
+                    continue  # pure negotiation action, no data produced
+
+                if b in (_CR, _LF, _BS, _DEL):
+                    continue
+
+                if b == _ESC:
+                    await self._discard_escape_sequence()
+                    continue
+
+                if b < 0x20:
+                    continue
+
+                if b < 0x80:
+                    char = chr(b)
+                else:
+                    char = await self._read_utf8_continuation(b)
+                    if char is None:
+                        continue
+
+                await self.write(char if echo else "*")
+                return char
+        except asyncio.IncompleteReadError as exc:
+            raise SessionClosedError("client disconnected during read") from exc
+
     async def close(self) -> None:
         if not self._writer.is_closing():
             self._writer.close()
