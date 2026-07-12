@@ -155,6 +155,38 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     return _touch_last_login(db, row)
 
 
+def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.VerifyKey) -> User:
+    """
+    Look up `username` and confirm `verify_key` matches their registered
+    public key — no challenge/signature involved, unlike
+    `authenticate_keypair`.
+
+    Distinct from `authenticate_keypair` on purpose: that function exists
+    for a hypothetical NetBBS-aware client driving our own bespoke
+    challenge/signature exchange over a raw connection, which nothing
+    actually uses yet (see `netbbs.net.login_flow._login`'s docstring).
+    SSH public-key auth is different — proof of private-key possession
+    already happens inside the SSH protocol itself, verified by the SSH
+    library before this is ever called (see `netbbs.net.ssh`). Calling
+    `authenticate_keypair` here would mean asking for a second,
+    redundant signature over a challenge nothing generated. This
+    function only checks *authorization* ("is this key registered to
+    this username"), trusting the transport layer's already-completed
+    proof of possession.
+    """
+    row = db.connection.execute(
+        "SELECT * FROM users WHERE username = ?", (username,)
+    ).fetchone()
+    if row is None or row["public_key"] is None:
+        raise AuthError("login failed")
+
+    stored_key = base64.b64decode(row["public_key"])
+    if stored_key != bytes(verify_key):
+        raise AuthError("login failed")
+
+    return _touch_last_login(db, row)
+
+
 def _touch_last_login(db: Database, row: sqlite3.Row) -> User:
     now = utc_now_iso()
     db.connection.execute(

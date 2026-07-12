@@ -9,6 +9,7 @@ from netbbs.auth.users import (
     AuthError,
     authenticate_keypair,
     authenticate_password,
+    authorize_public_key,
     create_user,
     generate_challenge,
     get_user_by_username,
@@ -154,3 +155,50 @@ def test_generate_challenge_is_random(db):
     a = generate_challenge()
     b = generate_challenge()
     assert a != b
+
+
+# -- public key authorization (SSH pubkey auth — no challenge/signature) ----
+
+
+def test_authorize_public_key_succeeds_with_registered_key(db):
+    """Unlike authenticate_keypair, this doesn't verify a signature over
+    a challenge -- see the function's docstring for why (SSH's own
+    protocol already proved possession before this is ever called)."""
+    signing_key = nacl.signing.SigningKey.generate()
+    create_user(db, "thiesi", verify_key=signing_key.verify_key)
+
+    user = authorize_public_key(db, "thiesi", signing_key.verify_key)
+    assert user.username == "thiesi"
+
+
+def test_authorize_public_key_fails_with_wrong_key(db):
+    signing_key = nacl.signing.SigningKey.generate()
+    wrong_key = nacl.signing.SigningKey.generate()
+    create_user(db, "thiesi", verify_key=signing_key.verify_key)
+
+    with pytest.raises(AuthError):
+        authorize_public_key(db, "thiesi", wrong_key.verify_key)
+
+
+def test_authorize_public_key_fails_for_password_only_account(db):
+    create_user(db, "thiesi", password="hunter2")
+    signing_key = nacl.signing.SigningKey.generate()
+
+    with pytest.raises(AuthError):
+        authorize_public_key(db, "thiesi", signing_key.verify_key)
+
+
+def test_authorize_public_key_fails_for_nonexistent_user(db):
+    signing_key = nacl.signing.SigningKey.generate()
+    with pytest.raises(AuthError):
+        authorize_public_key(db, "nobody", signing_key.verify_key)
+
+
+def test_authorize_public_key_updates_last_login_at(db):
+    signing_key = nacl.signing.SigningKey.generate()
+    create_user(db, "thiesi", verify_key=signing_key.verify_key)
+    before = get_user_by_username(db, "thiesi")
+    assert before.last_login_at is None
+
+    after = authorize_public_key(db, "thiesi", signing_key.verify_key)
+    assert after.last_login_at is not None

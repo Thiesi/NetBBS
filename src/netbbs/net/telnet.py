@@ -29,6 +29,14 @@ PTY window-size channel request; a future web terminal: JS reporting the
 xterm.js viewport) — see `netbbs.net.session.Session` for the
 transport-agnostic `terminal_width`/`terminal_height` attributes every
 transport populates however it can.
+
+Character-mode line/key reading itself (backspace handling, UTF-8
+continuation bytes, escape-sequence discarding, the CR/LF dance) moved to
+`netbbs.net.char_input` once `netbbs.net.ssh` needed the exact same
+logic against a completely different byte source — see that module's
+docstring. `TelnetSession` supplies raw bytes via `read_byte`/
+`read_byte_with_timeout` below (satisfying `char_input.ByteSource`); the
+actual line/key-building logic isn't duplicated here anymore.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable
 
+from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073).
@@ -50,30 +59,6 @@ SE = 0xF0  # end subnegotiation
 ECHO = 0x01
 SUPPRESS_GO_AHEAD = 0x03
 NAWS = 0x1F  # Negotiate About Window Size (RFC 1073)
-
-# Control byte values relevant to character-mode line building.
-_CR = 0x0D
-_LF = 0x0A
-_NUL = 0x00
-_BS = 0x08  # Backspace
-_DEL = 0x7F  # Delete — many terminals send this for the Backspace key
-_ESC = 0x1B
-
-# Bounded waits used when we need to check for a byte that might not be
-# coming (a following LF after a lone CR; the rest of an escape
-# sequence) — short enough to be imperceptible when the byte does
-# arrive (which happens essentially instantly for a real client sending
-# a CRLF pair or a real escape sequence in one write), long enough to
-# never falsely time out on a real, if slightly slow, connection.
-_FOLLOWUP_BYTE_TIMEOUT = 0.05
-
-# Defensive cap on a single line's length. Not a meaningful limit for any
-# real use (post subjects/bodies, chat messages, usernames are all far
-# shorter), just cheap insurance against a broken or malicious client
-# sending unbounded data with no Enter — without this, the line buffer
-# would grow without bound. Once hit, further characters are silently
-# not appended (but Backspace and Enter still work normally).
-_MAX_LINE_LENGTH = 4096
 
 _logger = logging.getLogger(__name__)
 
@@ -160,100 +145,20 @@ class TelnetSession(Session):
         Read one line of input, character by character, echoing (or
         masking, if `echo=False`) each character ourselves as it
         arrives — see the module docstring for why this replaced relying
-        on the client's own local line editing.
-
-        `echo=False` no longer means "no visual feedback at all" the way
-        it originally did; it means each typed character is masked with
-        `*` instead of shown as typed, matching common modern password-
-        field UX (revealing length, not content) rather than the more
-        conservative "reveal nothing" alternative.
+        on the client's own local line editing. Actual character-by-
+        character logic lives in `netbbs.net.char_input`, shared with
+        SSH; this method just supplies the byte source.
         """
-        line: list[str] = []
-        try:
-            while True:
-                b = await self._read_byte()
-                if b is None:
-                    continue  # pure negotiation action, no data produced
-
-                if b in (_CR, _LF):
-                    if b == _CR:
-                        await self._consume_optional_lf_or_nul()
-                    break
-
-                if b in (_BS, _DEL):
-                    if line:
-                        line.pop()
-                        await self.write("\b \b")
-                    continue
-
-                if b == _ESC:
-                    await self._discard_escape_sequence()
-                    continue
-
-                if b < 0x20:
-                    # Any other control byte (Tab, Ctrl+C, Ctrl+D, etc.)
-                    # — not supported in this pass; discard rather than
-                    # corrupt the line or echo something meaningless.
-                    continue
-
-                if b < 0x80:
-                    char = chr(b)
-                else:
-                    char = await self._read_utf8_continuation(b)
-                    if char is None:
-                        continue  # malformed/interrupted multi-byte sequence
-
-                if len(line) < _MAX_LINE_LENGTH:
-                    line.append(char)
-                    await self.write(char if echo else "*")
-                # else: silently drop the character but keep reading —
-                # Backspace and Enter still work normally past the cap.
-        except asyncio.IncompleteReadError as exc:
-            raise SessionClosedError("client disconnected during read") from exc
-
-        await self.write("\r\n")
-        return "".join(line)
+        return await char_input.read_line(self, self.write, echo)
 
     async def read_key(self, echo: bool = True) -> str:
         """
         Read a single character and return immediately — see the
         `Session.read_key` docstring for the intended use (menu hotkeys,
-        not free-text input).
-
-        Control bytes with no meaning as a standalone "key" — Backspace/
-        Delete, CR/LF, unsupported escape sequences — are silently
-        skipped and reading continues, rather than being returned as a
-        key in their own right: there's no line being built here to
-        backspace within, and Enter doesn't mean anything special when
-        we're already responding to the very next keystroke, immediately.
+        not free-text input). See `read_line` re: where the actual logic
+        now lives.
         """
-        try:
-            while True:
-                b = await self._read_byte()
-                if b is None:
-                    continue  # pure negotiation action, no data produced
-
-                if b in (_CR, _LF, _BS, _DEL):
-                    continue
-
-                if b == _ESC:
-                    await self._discard_escape_sequence()
-                    continue
-
-                if b < 0x20:
-                    continue
-
-                if b < 0x80:
-                    char = chr(b)
-                else:
-                    char = await self._read_utf8_continuation(b)
-                    if char is None:
-                        continue
-
-                await self.write(char if echo else "*")
-                return char
-        except asyncio.IncompleteReadError as exc:
-            raise SessionClosedError("client disconnected during read") from exc
+        return await char_input.read_key(self, self.write, echo)
 
     async def close(self) -> None:
         if not self._writer.is_closing():
@@ -263,9 +168,9 @@ class TelnetSession(Session):
             except (ConnectionResetError, BrokenPipeError):
                 pass
 
-    # -- byte-level reading -------------------------------------------------
+    # -- char_input.ByteSource ------------------------------------------
 
-    async def _read_byte(self) -> int | None:
+    async def read_byte(self) -> int | None:
         """
         Read and return the next actual DATA byte from the client, or
         `None` if what was read was purely a Telnet negotiation action
@@ -273,18 +178,28 @@ class TelnetSession(Session):
         significance — callers should just loop and call this again.
 
         Centralizes all IAC/negotiation handling in one place, used by
-        every higher-level read in this class.
+        every higher-level read in this class (via
+        `netbbs.net.char_input`).
         """
-        b = (await self._reader.readexactly(1))[0]
+        try:
+            b = (await self._reader.readexactly(1))[0]
+        except asyncio.IncompleteReadError as exc:
+            raise SessionClosedError("client disconnected during read") from exc
 
         if b == IAC:
-            next_byte = (await self._reader.readexactly(1))[0]
+            try:
+                next_byte = (await self._reader.readexactly(1))[0]
+            except asyncio.IncompleteReadError as exc:
+                raise SessionClosedError("client disconnected during read") from exc
             if next_byte == IAC:
                 # Client sent an escaped literal 0xFF as actual data
                 # (the RFC 854 escaping rule).
                 return 0xFF
             if next_byte in (WILL, WONT, DO, DONT):
-                await self._reader.readexactly(1)  # option byte, ignored
+                try:
+                    await self._reader.readexactly(1)  # option byte, ignored
+                except asyncio.IncompleteReadError as exc:
+                    raise SessionClosedError("client disconnected during read") from exc
                 return None
             if next_byte == SB:
                 await self._handle_subnegotiation()
@@ -295,113 +210,22 @@ class TelnetSession(Session):
 
         return b
 
-    async def _read_utf8_continuation(self, lead_byte: int) -> str | None:
+    async def read_byte_with_timeout(self, timeout: float) -> int | None:
         """
-        Given a UTF-8 multi-byte lead byte already read, read the
-        appropriate number of continuation bytes (per the UTF-8 encoding
-        scheme's lead-byte ranges) and decode the complete character.
-
-        Matters concretely for this project: umlauts and other non-ASCII
-        characters are everyday input, not an edge case, and a naive
-        byte-at-a-time decode would corrupt every one of them. Returns
-        `None` (discarding the partial character) if the sequence is
-        malformed or interrupted by a negotiation action rather than
-        risking a wrong decode.
+        Peek a single raw byte within `timeout` seconds, or `None` if
+        nothing arrives or the connection closes — used by
+        `netbbs.net.char_input` for bounded lookahead (the LF half of a
+        CRLF pair; the rest of an escape sequence). Deliberately doesn't
+        go through the IAC/negotiation interpretation `read_byte` does —
+        this is a narrow, bounded peek, not a full protocol read; a
+        pre-existing limitation carried over unchanged from before this
+        module's character-mode logic moved to `char_input`.
         """
-        if 0xC2 <= lead_byte <= 0xDF:
-            extra = 1
-        elif 0xE0 <= lead_byte <= 0xEF:
-            extra = 2
-        elif 0xF0 <= lead_byte <= 0xF4:
-            extra = 3
-        else:
-            return None  # not a valid UTF-8 lead byte
-
-        raw = bytearray([lead_byte])
-        for _ in range(extra):
-            cb = await self._read_byte()
-            if cb is None or not (0x80 <= cb <= 0xBF):
-                return None
-            raw.append(cb)
-
         try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
+            peek = await asyncio.wait_for(self._reader.read(1), timeout=timeout)
+        except asyncio.TimeoutError:
             return None
-
-    async def _consume_optional_lf_or_nul(self) -> None:
-        """
-        After a CR, consume a following LF or NUL if present — both are
-        valid Telnet line-ending continuations (CRLF or CR-NUL).
-
-        Bounded by a short timeout rather than an unbounded read: a
-        client in true character mode may send a lone CR with nothing
-        immediately following it, and an earlier version of this method
-        (inherited from the original line-mode reader) could have hung
-        indefinitely waiting for a byte that wasn't coming. A real CRLF
-        pair, sent together in one client-side write, arrives well within
-        this window regardless of connection latency, since it's one
-        send hitting our receive buffer, not a further round trip.
-        """
-        try:
-            peek = await asyncio.wait_for(self._reader.read(1), timeout=_FOLLOWUP_BYTE_TIMEOUT)
-        except asyncio.TimeoutError:
-            return
-        if peek and peek[0] not in (_LF, _NUL):
-            # Not part of the line terminator. asyncio.StreamReader has
-            # no "unread" operation, so this byte is lost from this read
-            # rather than mis-attributed to it — an accepted, narrow edge
-            # case rather than a silent correctness bug.
-            pass
-
-    async def _discard_escape_sequence(self) -> None:
-        """
-        Consume and discard a terminal escape sequence following an ESC
-        byte (arrow keys, function keys, Home/End, etc.) as a complete
-        unit — not supported in this pass (see module docstring).
-        Handles the two common shapes real terminals use for special
-        keys:
-
-        - CSI sequences: ESC [ ... <final byte in 0x40-0x7E> (the vast
-          majority of arrow/function/navigation keys)
-        - SS3 sequences: ESC O <single letter> (some terminals'
-          "application cursor key mode" encoding for arrow keys)
-
-        Anything else after a lone ESC (a real Escape keypress with
-        nothing following, or a shape we don't recognize) is left alone
-        after discarding just the ESC itself, on a short timeout — so we
-        can never hang waiting for bytes that aren't coming, the same
-        reasoning as `_consume_optional_lf_or_nul`.
-        """
-        try:
-            next_byte = await asyncio.wait_for(self._reader.read(1), timeout=_FOLLOWUP_BYTE_TIMEOUT)
-        except asyncio.TimeoutError:
-            return
-        if not next_byte:
-            return
-        nb = next_byte[0]
-
-        if nb == 0x5B:  # '[' — CSI sequence
-            while True:
-                try:
-                    b = (
-                        await asyncio.wait_for(
-                            self._reader.readexactly(1), timeout=_FOLLOWUP_BYTE_TIMEOUT
-                        )
-                    )[0]
-                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
-                    return
-                if 0x40 <= b <= 0x7E:
-                    return  # final byte of the CSI sequence
-        elif nb == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte
-            try:
-                await asyncio.wait_for(
-                    self._reader.readexactly(1), timeout=_FOLLOWUP_BYTE_TIMEOUT
-                )
-            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
-                return
-        # else: some other/unrecognized shape — just the ESC itself was
-        # consumed; nothing more to do.
+        return peek[0] if peek else None
 
     async def _handle_subnegotiation(self) -> None:
         """

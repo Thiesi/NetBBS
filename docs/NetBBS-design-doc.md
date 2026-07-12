@@ -1595,3 +1595,94 @@ used for chat scrollback.
    exists (raw byte I/O, the existing character-mode parsing patterns);
    web additionally needs a new static-asset story and a genuinely new
    wire protocol. Building the smaller, more-precedented piece first.
+
+## Sign-off notes, round 23 (SSH connectivity — implemented)
+
+Implements round 22's SSH design (points 1-5). Web connectivity (round
+22 points 6-9) remains unimplemented.
+
+1. **A real architectural finding, not anticipated in round 22: Telnet's
+   character-mode line/key-reading logic (`netbbs.net.telnet`) needed to
+   move to a new shared module, `netbbs.net.char_input`, rather than
+   being duplicated in `netbbs.net.ssh`.** Once `asyncssh`'s own
+   client-visible line editor is disabled (`line_editor=False` at server
+   construction — the SSH equivalent of Telnet's character-mode
+   negotiation), it hands over exactly the same kind of raw,
+   un-echoed byte stream Telnet does, needing the exact same backspace/
+   UTF-8-continuation/escape-sequence-discarding/CR-LF handling.
+   Duplicating ~250 lines of that logic would have meant two copies
+   free to drift out of sync on subtle correctness properties (e.g. the
+   CSI-vs-SS3 escape-sequence shapes). Extracted behind a small
+   `ByteSource` protocol (`read_byte`/`read_byte_with_timeout`) that
+   each transport implements against its own primitives; verified
+   directly that the extraction was behavior-preserving by running
+   `TelnetSession`'s full existing test suite unchanged afterward — all
+   27 tests passed with zero modifications needed, and 15 new
+   transport-agnostic unit tests were added directly against
+   `char_input` using a fake `ByteSource`.
+2. **`asyncssh` configuration confirmed empirically, not just from
+   docs:** `line_editor=False` (server-wide) plus `encoding=None`
+   (binary mode, both directions) reproduces Telnet's character-mode
+   contract exactly — verified with a real loopback `asyncssh` client
+   before writing `SSHSession` itself, then again through the actual
+   `SSHSession`/`SSHServer` classes. Binary mode specifically avoids
+   `asyncssh` decoding UTF-8 one raw byte at a time itself, which would
+   corrupt multi-byte characters the same way a naive byte-at-a-time
+   decode would anywhere else in this codebase.
+3. **Terminal resize delivered as an exception (`asyncssh.
+   TerminalSizeChanged`) raised out of `stdin.read()`,** not a callback
+   — confirmed directly against a real client resizing mid-session.
+   `SSHSession.read_byte` catches it, updates `terminal_width`/
+   `terminal_height` in place, and returns `None` (a transport-level
+   action with no data, exactly matching how `TelnetSession.read_byte`
+   already treats a Telnet NAWS subnegotiation) — `char_input`'s shared
+   reading loop needed no changes to handle this uniformly.
+4. **A new auth entry point, `netbbs.auth.users.authorize_public_key`,
+   added alongside the existing `authenticate_keypair`, not reusing
+   it.** `authenticate_keypair` expects a caller-generated challenge and
+   a signature over it — built for a hypothetical NetBBS-aware client
+   that doesn't exist. SSH's own protocol already proves private-key
+   possession before `SSHServer.validate_public_key` is ever called;
+   calling `authenticate_keypair` there would mean demanding a second,
+   redundant signature over a challenge nothing generated.
+   `authorize_public_key` only checks authorization (does this key
+   belong to this username), trusting the transport's already-completed
+   proof of possession.
+5. **A dedicated SSH host key, not the node's `netbbs.identity`
+   keypair** — generated on first use and persisted at
+   `<db_path>_ssh_host_key`, mirroring `netbbs.files.storage`'s
+   `<db_path>_files` convention for keeping a node's data predictably
+   co-located. Reusing the node's Link identity keypair as its SSH host
+   key was considered and rejected: it would tie two independent
+   concerns together (this node's eventual Link identity vs. its SSH
+   host identity) for no real benefit, and SSH host keys have their own
+   file-format/rotation conventions separate from `netbbs.identity`'s.
+6. **`asyncssh` (and therefore `cryptography`) kept as a separate `ssh`
+   extra in `pyproject.toml`, not a core dependency** — confirming round
+   22 point 2's scoping. `netbbs.__main__` starts the SSH listener only
+   if `asyncssh` is importable, logging a one-line note and continuing
+   Telnet-only otherwise, rather than failing the whole node startup —
+   a Telnet-only deployment genuinely never needs to install
+   `cryptography`/Rust's build chain at all.
+7. **Verified at three levels, not just pytest:** (a) 12 new integration
+   tests in `tests/test_ssh.py`, spinning up a real `SSHServer` and
+   connecting with `asyncssh`'s own client — covering password auth,
+   Ed25519 pubkey auth (success, wrong key, and each auth method
+   correctly rejected for an account that doesn't support it),
+   terminal size/resize, character echo, and abrupt-disconnect handling;
+   (b) manual probe scripts against the real `SSHSession`/`SSHServer`
+   classes confirming the same; (c) the actual, unmodified OpenSSH
+   client (not `asyncssh`'s client library) — `ssh -o BatchMode=yes -i
+   <ed25519 key> bob@host whoami` — completing a full handshake,
+   authenticating via Ed25519 pubkey alone with no password fallback,
+   and receiving the exact NetBBS welcome banner and login prompt.
+   Fully-interactive verification via the real `ssh` CLI (typing through
+   a live session, not a single batch command) was attempted but ran
+   into Windows-specific PTY/pipe semantics scripting an interactive
+   subprocess reliably — a platform quirk of the Windows dev environment
+   piping to a real terminal client, not a NetBBS or protocol issue
+   (the identical interactive flows already passed against asyncssh's
+   own client, which implements the same wire protocol). Worth a real
+   interactive `ssh` session directly from a POSIX shell (Thiesi's
+   NetBSD target, or any Linux/macOS machine) as a final sanity check,
+   not re-litigating the protocol-level work already verified here.

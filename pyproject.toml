@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "asyncssh>=2.24",
 ]
 # Fallback IANA timezone database for systems that don't ship one as part
 # of the base OS. NetBSD's base system should have its own
@@ -26,6 +27,17 @@ dev = [
 # "Europe/Berlin" on your system.
 tzdata = [
     "tzdata; sys_platform == 'win32' or sys_platform == 'unknown'",
+]
+# SSH connectivity (design doc round 21/22). Kept as a separate extra
+# rather than a core dependency deliberately: asyncssh pulls in
+# `cryptography`, which needs a Rust toolchain to build from source --
+# exactly the friction PyNaCl was chosen to avoid for the core identity
+# system (see this file's header comment / CLAUDE.md). A node that only
+# wants Telnet never needs to install this at all; NetBSD pkgsrc ships a
+# prebuilt `py-cryptography` binary for nodes that do want SSH, so no
+# local Rust build is actually required in practice either way.
+ssh = [
+    "asyncssh>=2.24",
 ]
 
 [tool.setuptools.packages.find]

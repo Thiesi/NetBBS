@@ -4,9 +4,9 @@
 Not the final node-startup story: no config file, no node identity
 loading, no daemonization, no rc.d integration. This exists so Phase 1
 work can actually be connected to and manually tested over a real Telnet
-session, rather than only exercised through pytest. Those production
-concerns belong with later Phase 1/connectivity work, once there's an
-actual daemon lifecycle to design around.
+or SSH session, rather than only exercised through pytest. Those
+production concerns belong with later Phase 1/connectivity work, once
+there's an actual daemon lifecycle to design around.
 """
 
 from __future__ import annotations
@@ -27,8 +27,10 @@ from netbbs.storage.database import Database
 # would either run this behind a privilege-dropping wrapper, use a
 # reverse proxy / port-forward rule (e.g. via the same kind of Apache
 # setup already used elsewhere), or an inetd-style super-server — a
-# decision for actual node-startup work, not this script.
-DEFAULT_PORT = 2323
+# decision for actual node-startup work, not this script. Same reasoning
+# for SSH's port (2222, not 22).
+DEFAULT_TELNET_PORT = 2323
+DEFAULT_SSH_PORT = 2222
 DEFAULT_HOST = "0.0.0.0"
 
 
@@ -39,17 +41,44 @@ async def main() -> None:
     db = Database(db_path)
 
     # One hub for the whole node's lifetime, shared across every
-    # connected session — this is what makes cross-session real-time
-    # chat possible at all (see netbbs.chat.hub.ChatHub).
+    # connected session, regardless of which transport it arrived
+    # through — this is what makes cross-session real-time chat possible
+    # at all (see netbbs.chat.hub.ChatHub).
     hub = ChatHub()
 
     async def session_handler(session):
         await handle_session(session, db, hub)
 
-    server = TelnetServer(host=DEFAULT_HOST, port=DEFAULT_PORT, session_handler=session_handler)
-    await server.start()
-    logging.info("NetBBS listening on %s:%d (database: %s)", DEFAULT_HOST, DEFAULT_PORT, db_path)
-    await server.serve_forever()
+    telnet_server = TelnetServer(
+        host=DEFAULT_HOST, port=DEFAULT_TELNET_PORT, session_handler=session_handler
+    )
+    await telnet_server.start()
+    logging.info(
+        "NetBBS listening on %s:%d (Telnet, database: %s)",
+        DEFAULT_HOST,
+        DEFAULT_TELNET_PORT,
+        db_path,
+    )
+
+    servers = [telnet_server]
+
+    # SSH is an optional extra (design doc round 22: asyncssh pulls in
+    # `cryptography`, deliberately not a core dependency — see
+    # pyproject.toml's `ssh` extra) — a Telnet-only node should still
+    # start normally without it installed, just without an SSH listener.
+    try:
+        from netbbs.net.ssh import SSHServer
+    except ImportError:
+        logging.info("asyncssh not installed — skipping SSH listener (pip install netbbs[ssh])")
+    else:
+        ssh_server = SSHServer(
+            host=DEFAULT_HOST, port=DEFAULT_SSH_PORT, db=db, session_handler=session_handler
+        )
+        await ssh_server.start()
+        logging.info("NetBBS listening on %s:%d (SSH)", DEFAULT_HOST, DEFAULT_SSH_PORT)
+        servers.append(ssh_server)
+
+    await asyncio.gather(*(server.serve_forever() for server in servers))
 
 
 if __name__ == "__main__":
