@@ -1,14 +1,18 @@
 """
 Login flow and top-level main menu, tying a Session to the auth,
-permissions, boards, and chat modules.
+permissions, boards, chat, and rendering modules.
 
-The main menu itself is intentionally minimal — a plain numbered/lettered
-loop, not the hybrid ANSI/TUI rendering framework (still a separate,
-not-yet-built Phase 1 piece). It exists now, rather than staying purely
-linear the way the board-only version of this file was, because there
-are genuinely two independent things to route between (boards, chat) —
-adding real menu structure now that it's actually needed is not the same
-as building it prematurely.
+The main menu itself is intentionally minimal structurally — a plain
+lettered loop, not a real menu-dispatch architecture. It exists now,
+rather than staying purely linear the way the board-only version of this
+file was, because there are genuinely two independent things to route
+between (boards, chat) — adding real menu structure now that it's
+actually needed is not the same as building it prematurely. Output now
+uses the "ANSI half" of the hybrid rendering framework (color, and
+reflow to each session's actual detected terminal width) — the "TUI
+half" (character-mode input, screen-buffer diffing) remains deferred
+until a real heavy screen (the fullscreen editor, a future file browser)
+needs it.
 """
 
 from __future__ import annotations
@@ -20,14 +24,27 @@ from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
+from netbbs.rendering import colored, reflow
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
-WELCOME_BANNER = """\
-================================================
-  Welcome to NetBBS
-  NetBBS Link -- coming soon
-================================================"""
+# A modest, deliberately restrained color scheme — this is meant to make
+# the BBS feel less like a plain text dump without turning into a
+# color-soup demo. 51 (bright cyan) for headers/banners, 220 (gold) for
+# board/channel names, matching classic BBS ANSI conventions of "bright
+# header, warm accent for navigable items" without needing a full theming
+# system, which doesn't exist yet.
+_HEADER_COLOR = 51
+_ACCENT_COLOR = 220
+
+WELCOME_BANNER = colored(
+    "================================================\r\n"
+    "  Welcome to NetBBS\r\n"
+    "  NetBBS Link -- coming soon\r\n"
+    "================================================",
+    fg_color=_HEADER_COLOR,
+    bold=True,
+)
 
 # Arbitrary placeholder threshold demonstrating that level-gating works
 # end-to-end over a real connection. Not a real SysOp-level constant yet
@@ -58,7 +75,8 @@ async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
 
 async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -> None:
     while True:
-        await session.write_line("\r\nMain menu: [B]oards  [C]hat  [Q]uit")
+        header = colored("Main menu:", fg_color=_HEADER_COLOR, bold=True)
+        await session.write_line(f"\r\n{header} [B]oards  [C]hat  [Q]uit")
         await session.write("Choice: ")
         choice = (await session.read_line()).strip().lower()
 
@@ -145,7 +163,8 @@ async def _browse_boards(session: Session, db: Database, user: User) -> None:
 
     await session.write_line("\r\nAvailable boards:")
     for board in readable_boards:
-        await session.write_line(f"  {board.name} - {board.description or ''}")
+        name = colored(board.name, fg_color=_ACCENT_COLOR)
+        await session.write_line(f"  {name} - {board.description or ''}")
 
     await session.write("\r\nEnter a board name to view (or press Enter to skip): ")
     choice = (await session.read_line()).strip()
@@ -170,11 +189,20 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     if not posts:
         await session.write_line(f"\r\n[{board.name}] has no posts yet.")
     else:
-        await session.write_line(f"\r\n[{board.name}]")
+        header = colored(f"[{board.name}]", fg_color=_HEADER_COLOR, bold=True)
+        await session.write_line(f"\r\n{header}")
         for post in posts:
             when = format_for_display(post.created_at, db)
-            await session.write_line(f"\r\n{post.subject} -- {post.author_label} ({when})")
-            await session.write_line(post.body)
+            post_header = colored(
+                f"{post.subject} -- {post.author_label} ({when})", fg_color=_ACCENT_COLOR
+            )
+            await session.write_line(f"\r\n{post_header}")
+            # Reflowed to this specific session's actual detected width
+            # (NAWS-negotiated, or the 80-column default — see
+            # netbbs.net.session.Session.terminal_width), not a fixed
+            # assumption, per the design doc's "must degrade gracefully
+            # above 40x24 minimum" requirement.
+            await session.write_line(reflow(post.body, width=session.terminal_width))
 
     if not meets_level(user, board.min_write_level):
         return

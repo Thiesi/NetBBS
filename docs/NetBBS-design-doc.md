@@ -940,3 +940,59 @@ starts.
    constraint correctly rejects an invalid row when tested directly
    against the actual migrated table, not just a standalone
    reproduction.
+
+## Sign-off notes, round 13 (implementation: ANSI rendering framework)
+
+1. **Scoped to the "ANSI half" only, per discussion:** color/cursor
+   helpers (`netbbs.rendering.ansi`) and text reflow
+   (`netbbs.rendering.reflow`), both built now since they benefit every
+   existing screen immediately. The "TUI half" (character-mode input,
+   screen-buffer diffing) remains deliberately deferred until a real
+   heavy screen (fullscreen editor, a future file browser) needs it —
+   confirmed with Thiesi rather than assumed.
+2. **256-color/extended ANSI**, confirmed with Thiesi over classic
+   16-color — richer, at the accepted cost of some old/dumb clients not
+   rendering it correctly. No 16-color fallback/downgrade path built.
+3. **Terminal width: NAWS negotiation with an 80-column fallback**,
+   confirmed with Thiesi. Implemented in `netbbs.net.telnet` (the one
+   piece of the rendering framework that's inherently transport-specific,
+   hence not living in `netbbs.rendering` — see that module's docstring).
+   `Session.terminal_width`/`terminal_height` added as a transport-
+   agnostic interface every `Session` implementation populates however
+   its transport allows.
+4. **A genuine protocol correctness detail, verified rather than
+   assumed:** NAWS subnegotiation bodies need the same IAC-escaping as
+   regular data — a terminal reporting a width whose byte value happens
+   to equal `0xFF` must have that byte doubled per RFC 854. Verified
+   directly with a constructed test case (a simulated 255-column-wide
+   terminal) that the un-escaping in `_read_subnegotiation_body` handles
+   this correctly, not just small width/height values that never
+   collide with the IAC byte value.
+5. **A second, unrelated protocol gap found and fixed while verifying
+   the framework end-to-end, not while building any single piece in
+   isolation:** `netbbs.rendering.reflow` correctly produces multi-line
+   text using plain `\n` (it's transport-agnostic, so hardcoding `\r\n`
+   into it would itself be a layering mistake) — but
+   `Session.write_line()` only appends `\r\n` once, at the end. Without
+   normalization, every internal line break in reflowed text (e.g. a
+   wrapped post body) would reach the wire as a bare LF: tolerated by
+   lenient modern terminals (they auto-CR on LF) but not correct Telnet
+   per RFC 854. Fixed by normalizing all line endings to CRLF at the
+   transport boundary (`TelnetSession.write()`), not by changing
+   `reflow()` — line-ending convention is a transport concern, not a
+   text-utility one.
+6. **Testing note — the most thoroughly executed piece of work so far,
+   not just syntax-checked:** none of `netbbs.rendering` or the NAWS
+   additions to `netbbs.net.telnet` have any PyNaCl dependency. All 23
+   ANSI/reflow tests, all 13 telnet tests (including 5 new NAWS-specific
+   tests and 2 new CRLF-normalization regression tests), and a full
+   end-to-end smoke test (negotiate a real 40-column terminal via NAWS,
+   confirm reflowed output actually respects it, confirm no bare LF
+   reaches the wire) were all genuinely executed against real loopback
+   sockets, not assumed correct from reading the code. This caught three
+   real bugs before Thiesi ever saw them: a test that mis-constructed an
+   IAC-escaped byte sequence (tripling instead of doubling), and the
+   `write_line`/`reflow` CRLF gap described above, found only by testing
+   the full chain together rather than each piece independently. Only
+   `netbbs.net.login_flow`'s actual color/reflow wiring (which imports
+   `netbbs.auth`) remains unverified by Claude.

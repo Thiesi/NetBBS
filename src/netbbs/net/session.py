@@ -32,6 +32,19 @@ class SessionClosedError(Exception):
 class Session(ABC):
     """A single connected user's read/write channel, transport-agnostic."""
 
+    #: Best-known terminal dimensions for this session, for reflow (see
+    #: `netbbs.rendering.reflow`) and any other width-aware output.
+    #: Every transport implementation initializes these to a conservative
+    #: default (80x24 — also the design doc's "must degrade gracefully
+    #: above 40x24 minimum" floor is well below this) and updates them if
+    #: it learns the client's actual size: Telnet via NAWS negotiation
+    #: (see `netbbs.net.telnet`), SSH via its own PTY window-size channel
+    #: request, a future web terminal via JS reporting the xterm.js
+    #: viewport. Screens/output code should read these rather than
+    #: assuming a fixed width.
+    terminal_width: int = 80
+    terminal_height: int = 24
+
     @abstractmethod
     async def write(self, text: str) -> None:
         """Send raw text to the client, no trailing newline added."""

@@ -42,8 +42,9 @@ netbbs/
 │   ├── storage/          SQLite connection + schema migrations (§3)
 │   ├── auth/             Account creation, password + keypair login (§5)
 │   ├── permissions/      User-level gating plumbing (§13)
-│   ├── net/              Telnet transport + Session abstraction, login
-│   │                     flow (SSH/web to follow on the same Session
+│   ├── net/              Telnet transport (incl. NAWS window-size
+│   │                     negotiation) + Session abstraction, login flow
+│   │                     (SSH/web to follow on the same Session
 │   │                     abstraction)
 │   ├── boards/           Local message boards + posts, content-addressed
 │   │                     IDs from day one (§7) so Linked-board support
@@ -53,6 +54,12 @@ netbbs/
 │   │                     in-memory per-node broadcast hub
 │   ├── moderation/       Local blocklist (moderation stub, pre-dates the
 │   │                     full reputation system)
+│   ├── rendering/        The "ANSI half" of the hybrid rendering
+│   │                     framework (§4/§15): 256-color/cursor helpers +
+│   │                     text reflow to each session's detected width.
+│   │                     The "TUI half" (character-mode input, screen-
+│   │                     buffer diffing) is deliberately deferred until
+│   │                     a real heavy screen needs it
 │   ├── config.py         Node-wide key-value settings (currently just
 │   │                     display timestamp format)
 │   ├── __main__.py       Minimal runnable entry point for manual testing
@@ -99,6 +106,12 @@ For real-time chat specifically, open two separate `telnet localhost
 console testing solo won't show the broadcast effect) and join the same
 channel from both — messages sent from one should appear in the other
 immediately.
+
+To see terminal-width-aware reflow in action, resize your terminal
+narrower (e.g. ~40 columns) *before* connecting — most Telnet clients
+report their window size via NAWS on connect, and post bodies should
+wrap to match. A client that doesn't support NAWS falls back to an
+80-column assumption.
 
 To test the blocklist:
 
