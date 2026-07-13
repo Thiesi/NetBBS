@@ -23,6 +23,16 @@ from netbbs.timeutil import utc_now_iso
 # send over a slow telnet link without noticeable delay.
 _CHALLENGE_BYTES = 32
 
+# A fixed, valid Argon2id hash used when a password login names an account
+# which does not exist or has no password. Verifying against this hash makes
+# those failure paths perform the same dominant work as a wrong password for
+# a real password-enabled account, removing the easy timing oracle. The
+# plaintext used to generate it is irrelevant and deliberately not secret.
+_DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=2,p=1$ZFFJMU96RU91Y05idy4zdg$"
+    "Nm72fCF0ym4VXOndcrqRhBXpr/aXC+uHQ3D2nD6CUOs"
+)
+
 
 class AuthError(Exception):
     """
@@ -30,10 +40,13 @@ class AuthError(Exception):
 
     Deliberately generic for anything reaching an actual login attempt —
     doesn't distinguish "no such user" from "wrong password" or "wrong
-    signature" — to avoid username enumeration via error-message timing
-    or content. Code that legitimately needs a finer-grained reason (e.g.
-    a SysOp admin tool) should query the storage layer directly instead of
-    relying on this exception's message.
+    signature" — to avoid username enumeration via error-message content.
+    Password login also equalizes the dominant Argon2 verification work for
+    unknown, key-only, and password-enabled accounts; smaller storage and
+    key-comparison timing differences are outside this exception's scope.
+    Code that legitimately needs a finer-grained reason (e.g. a SysOp admin
+    tool) should query the storage layer directly instead of relying on this
+    exception's message.
     """
 
 
@@ -124,9 +137,15 @@ def authenticate_password(db: Database, username: str, password: str) -> User:
     row = db.connection.execute(
         "SELECT * FROM users WHERE username = ?", (username,)
     ).fetchone()
-    if row is None or row["password_hash"] is None:
-        raise AuthError("login failed")
-    if not verify_password(password, row["password_hash"]):
+
+    stored_hash = (
+        row["password_hash"]
+        if row is not None and row["password_hash"] is not None
+        else _DUMMY_PASSWORD_HASH
+    )
+    password_matches = verify_password(password, stored_hash)
+
+    if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
     return _touch_last_login(db, row)
 
