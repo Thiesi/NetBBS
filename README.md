@@ -11,9 +11,15 @@ other POSIX systems too.
 
 ## Status
 
-Design is complete and signed off — see [`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md)
-for the full architecture, rationale, and phased roadmap. Implementation
-is in **Phase 1 (Foundation)**.
+**Phase 1 (Foundation) is complete** — v1.0.0. A secure, single-node BBS:
+keypair + password auth, local message boards (paginated, content-addressed
+IDs), real-time chat with scrollback, file areas with real Zmodem transfer,
+and three connectivity methods (Telnet, SSH, web/xterm.js), all hardened
+through a post-launch security audit (secure-by-default transports,
+cross-connection login throttling, terminal-rendering sanitization). See
+[`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md) for the full
+architecture, rationale, and phased roadmap — Phase 2 (local moderation,
+fullscreen editor, user directory) is next.
 
 This is a second attempt at this project. The first attempt got a long way
 (multi-user chat, file areas, message boards) but needed a significant
