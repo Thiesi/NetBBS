@@ -10,6 +10,7 @@ import base64
 import sqlite3
 import weakref
 from dataclasses import dataclass
+from typing import Callable, TypeVar
 
 import nacl.signing
 import nacl.utils
@@ -45,6 +46,8 @@ _DUMMY_PASSWORD_HASH = (
     "$argon2id$v=19$m=65536,t=2,p=1$ZFFJMU96RU91Y05idy4zdg$"
     "Nm72fCF0ym4VXOndcrqRhBXpr/aXC+uHQ3D2nD6CUOs"
 )
+
+_T = TypeVar("_T")
 
 
 class AuthError(Exception):
@@ -82,10 +85,33 @@ def _password_work_semaphore() -> asyncio.Semaphore:
     return semaphore
 
 
-async def _run_password_work(function, *args):
-    """Run one expensive Argon2 operation off-loop under the shared bound."""
-    async with _password_work_semaphore():
-        return await asyncio.to_thread(function, *args)
+async def _run_password_work(function: Callable[..., _T], *args: object) -> _T:
+    """
+    Run one expensive Argon2 operation off-loop under the shared bound.
+
+    The slot is released by the worker's completion callback, not by the
+    awaiting session task. This matters when a client disconnects and its task
+    is cancelled: `asyncio.to_thread` cannot stop work already running in the
+    thread, so releasing the slot on caller cancellation would allow more than
+    the configured number of Argon2 operations to overlap.
+    """
+    semaphore = _password_work_semaphore()
+    await semaphore.acquire()
+    try:
+        worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    except BaseException:
+        semaphore.release()
+        raise
+
+    def release_slot(completed: asyncio.Task[_T]) -> None:
+        semaphore.release()
+        # Mark a worker exception as retrieved even if its original session
+        # task was cancelled and therefore no longer awaits the result.
+        if not completed.cancelled():
+            completed.exception()
+
+    worker.add_done_callback(release_slot)
+    return await asyncio.shield(worker)
 
 
 def create_user(
