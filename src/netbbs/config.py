@@ -35,3 +35,25 @@ def set_config(db: Database, key: str, value: str) -> None:
         (key, value),
     )
     db.connection.commit()
+
+
+# Config key for the node-wide grace period between a post/file
+# expiring and actually being deleted (design doc §13/§15, sign-off
+# round 35). Deliberately a single node-wide default rather than a
+# per-board/per-area column — nothing in the design doc asks for
+# per-object control over it, unlike max post age, which genuinely is
+# per-board (see netbbs.boards.boards.Board.max_post_age_days).
+EXPIRY_GRACE_PERIOD_CONFIG_KEY = "post_expiry_grace_period_days"
+
+_DEFAULT_EXPIRY_GRACE_PERIOD_DAYS = 7
+
+
+def get_expiry_grace_period_days(db: Database) -> int:
+    value = get_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY)
+    return int(value) if value is not None else _DEFAULT_EXPIRY_GRACE_PERIOD_DAYS
+
+
+def set_expiry_grace_period_days(db: Database, days: int) -> None:
+    if days < 0:
+        raise ValueError(f"grace period must be non-negative, got {days!r}")
+    set_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY, str(days))

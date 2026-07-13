@@ -189,7 +189,7 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
                 return
             elif choice.lower().startswith("/download "):
                 filename = choice[len("/download ") :].strip()
-                await _handle_download(session, db, area, filename)
+                await _handle_download(session, db, area, filename, user)
                 return
             else:
                 await session.write_line("Unknown choice.")
@@ -244,14 +244,18 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
     )
 
 
-async def _handle_download(session: Session, db: Database, area: FileArea, filename: str) -> None:
+async def _handle_download(session: Session, db: Database, area: FileArea, filename: str, user: User) -> None:
     # Looked up by exact name across the whole area (get_file_by_name),
     # not just the currently displayed page -- see _show_area's
     # docstring. Matched against the raw, unsanitized `filename` the
     # user actually typed -- sanitizing before comparison risks a false
     # match/miss against real stored filenames; sanitize_text is only
     # applied below, at the point this gets echoed back to the terminal.
-    entry = get_file_by_name(db, area, filename)
+    # requesting_user is passed so a still-pending upload (moderated
+    # area, design doc sign-off round 36) isn't downloadable by name
+    # before it's been approved, unless this user is its own uploader
+    # or holds approve permission on the area.
+    entry = get_file_by_name(db, area, filename, requesting_user=user)
     if entry is None:
         await session.write_line(f"\r\nNo file named {sanitize_text(filename)!r} in this area.")
         return

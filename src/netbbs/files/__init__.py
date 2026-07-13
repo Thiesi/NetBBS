@@ -1,13 +1,15 @@
 """
 Local file areas.
 
-Local-only in Phase 1 (design doc §9/§15) — no Link, no moderators yet.
-"Area" always means *file* area, never "board" (design doc §1). IDs are
-content-addressed from day one (§7), same reasoning as boards/channels.
-Categories are accessible via `netbbs.files.categories` directly, not
-re-exported here — matches the precedent set by
-`netbbs.boards`/`netbbs.chat` (their categories modules aren't re-exported
-from the package `__init__` either).
+Local-only (design doc §9/§15) — no Link yet. "Area" always means
+*file* area, never "board" (design doc §1). IDs are content-addressed
+from day one (§7), same reasoning as boards/channels. Categories are
+accessible via `netbbs.files.categories` directly, not re-exported
+here — matches the precedent set by `netbbs.boards`/`netbbs.chat`
+(their categories modules aren't re-exported from the package
+`__init__` either). Moderator/permission grants and the moderated-area
+approval/expiry lifecycle (§13, sign-off round 36) live in
+`netbbs.files.entries`.
 """
 
 from netbbs.files.areas import (
@@ -22,10 +24,16 @@ from netbbs.files.entries import (
     FileEntryCursor,
     FileEntryError,
     FileEntryPage,
+    approve_file,
+    delete_file,
     download_file,
     get_file,
     get_file_by_name,
     list_files_page,
+    list_pending_files,
+    list_pinned_files,
+    set_file_exempt,
+    set_file_pinned,
     upload_file,
 )
 
@@ -39,9 +47,15 @@ __all__ = [
     "FileEntryCursor",
     "FileEntryError",
     "FileEntryPage",
+    "approve_file",
+    "delete_file",
     "download_file",
     "get_file",
     "get_file_by_name",
     "list_files_page",
+    "list_pending_files",
+    "list_pinned_files",
+    "set_file_exempt",
+    "set_file_pinned",
     "upload_file",
 ]

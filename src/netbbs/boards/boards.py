@@ -1,8 +1,12 @@
 """
-Message boards: local-only in Phase 1 — no Link, no moderators yet (see
-design doc §15 phasing). Board IDs are already content-addressed (see
-`netbbs.boards.content_id`) so a board doesn't need an ID-scheme
-migration when Linked-board support arrives later.
+Message boards: local-only — no Link yet (see design doc §15 phasing).
+Board IDs are already content-addressed (see `netbbs.boards.content_id`)
+so a board doesn't need an ID-scheme migration when Linked-board support
+arrives later. Moderator/permission grants (`netbbs.moderation.roles`)
+and per-board moderation settings (`moderated`, `max_post_age_days`)
+layer on top of the coarse `min_read_level`/`min_write_level` gate here
+— see `netbbs.boards.posts` for where those settings actually change
+post behavior.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ class Board:
     category_id: int | None
     pinned: bool
     created_at: str
+    moderated: bool
+    max_post_age_days: int | None
 
 
 def create_board(
@@ -56,6 +62,8 @@ def create_board(
     min_write_level: int = 0,
     category_id: int | None = None,
     pinned: bool = False,
+    moderated: bool = False,
+    max_post_age_days: int | None = None,
     creator: User,
 ) -> Board:
     """
@@ -63,17 +71,21 @@ def create_board(
 
     `min_read_level`/`min_write_level` are a simple, coarse level-gate —
     the finer-grained per-board moderator/permission model from design
-    doc §13 (named read/write/edit/delete/approve grants, moderated-board
-    approval flows) is explicitly Phase 2 scope and is meant to layer on
-    top of this later, not replace it — so this isn't the final word on
-    board permissions, just a Phase-1-appropriate default Phase 2 can
-    extend without a migration.
+    doc §13 (named read/write/edit/delete/approve grants) layers on top
+    of this rather than replacing it — see `netbbs.moderation.roles`.
 
     `category_id` optionally places the board under a
     `netbbs.boards.categories.Category` (top-level or sub-category — this
     function doesn't care which, that distinction only matters to the
     category itself). `pinned` boards always sort first, in whatever
     order is otherwise chosen — see `list_boards`.
+
+    `moderated` gates whether new posts start `'pending'` (requiring a
+    holder of `BoardPermission.APPROVE` to approve them before other
+    users can see them) or go straight to `'approved'` — see
+    `netbbs.boards.posts.create_post`. `max_post_age_days` is this
+    board's own maintenance/expiry threshold (design doc §13); `None`
+    means retain indefinitely, the default.
 
     No permission check on *creating* a board here — board creation is an
     admin-level action with no SysOp/moderator concept defined yet in
@@ -95,8 +107,8 @@ def create_board(
             """
             INSERT INTO boards
                 (board_id, name, description, min_read_level, min_write_level,
-                 category_id, pinned, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 category_id, pinned, created_at, moderated, max_post_age_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 board_id,
@@ -107,6 +119,8 @@ def create_board(
                 category_id,
                 int(pinned),
                 created_at,
+                int(moderated),
+                max_post_age_days,
             ),
         )
         db.connection.commit()
@@ -183,4 +197,6 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         category_id=row["category_id"],
         pinned=bool(row["pinned"]),
         created_at=row["created_at"],
+        moderated=bool(row["moderated"]),
+        max_post_age_days=row["max_post_age_days"],
     )

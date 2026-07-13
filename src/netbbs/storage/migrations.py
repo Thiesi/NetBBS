@@ -333,4 +333,151 @@ MIGRATIONS = [
             ON files(area_id, created_at, file_id);
         """,
     ),
+    Migration(
+        description=(
+            "Moderator grants (design doc §13/round 34): the "
+            "read/write/edit/delete/approve (boards/file areas) and "
+            "edit/moderate/manage_members (channels) permission model, "
+            "plus a generic moderation-action audit log shared by grants "
+            "now and mute/ban/kick/approve once those exist."
+        ),
+        sql="""
+        CREATE TABLE moderator_grants (
+            id                  INTEGER PRIMARY KEY,
+            user_id             INTEGER NOT NULL REFERENCES users(id),
+            object_type         TEXT NOT NULL CHECK (object_type IN ('board', 'file_area', 'channel')),
+            -- NULL = local-blanket grant over every local object of
+            -- object_type (design doc §13's three moderator scope
+            -- tiers). Link-blanket ("global") is Phase 6 scope and
+            -- deliberately not modeled by a third sentinel here --
+            -- see netbbs.moderation.roles' module docstring.
+            object_id           INTEGER,
+            -- Bitmask over netbbs.moderation.roles.BoardPermission or
+            -- ChannelPermission, chosen by object_type. A single
+            -- integer column rather than one row per permission, per
+            -- §13's own "settable individually or combined" phrasing
+            -- (design doc round 34).
+            permissions         INTEGER NOT NULL,
+            granted_by_user_id  INTEGER NOT NULL REFERENCES users(id),
+            created_at          TEXT NOT NULL
+        );
+
+        -- Two partial unique indexes rather than one compound UNIQUE,
+        -- same reasoning as the blocklist table above: SQLite's
+        -- UNIQUE treats every NULL as distinct, so a single
+        -- UNIQUE(user_id, object_type, object_id) would not stop the
+        -- same user from getting two separate local-blanket
+        -- (object_id IS NULL) grant rows for the same object_type.
+        CREATE UNIQUE INDEX idx_moderator_grants_per_object
+            ON moderator_grants(user_id, object_type, object_id)
+            WHERE object_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_moderator_grants_blanket
+            ON moderator_grants(user_id, object_type)
+            WHERE object_id IS NULL;
+        CREATE INDEX idx_moderator_grants_object
+            ON moderator_grants(object_type, object_id);
+
+        CREATE TABLE moderation_log (
+            id                INTEGER PRIMARY KEY,
+            actor_user_id     INTEGER NOT NULL REFERENCES users(id),
+            -- Free-text action label ("grant", "revoke", and later
+            -- "mute"/"ban"/"kick"/"approve"/etc.) rather than a
+            -- CHECK-constrained allowlist -- this table is
+            -- deliberately generic so later tracks' actions reuse it
+            -- without a schema change, and a CHECK would need editing
+            -- a shipped migration (disallowed per this file's own
+            -- module docstring) every time a new action type is added.
+            action            TEXT NOT NULL,
+            object_type       TEXT,
+            object_id         INTEGER,
+            target_user_id    INTEGER REFERENCES users(id),
+            detail            TEXT,
+            created_at        TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_moderation_log_object ON moderation_log(object_type, object_id, created_at);
+        CREATE INDEX idx_moderation_log_target_user ON moderation_log(target_user_id, created_at);
+        """,
+    ),
+    Migration(
+        description=(
+            "Moderated-board approval flow and the post maintenance/"
+            "expiry state machine (design doc §13/§15, round 35). Boards "
+            "gain a moderated flag and a per-board max post age; posts "
+            "gain an approval/expiry status plus independent pin and "
+            "exempt-from-expiry flags."
+        ),
+        sql="""
+        -- Whether new posts on this board need moderator approval
+        -- (netbbs.moderation.roles.BoardPermission.APPROVE) before
+        -- other users can see them, and this board's own maximum post
+        -- age (NULL = retain indefinitely, matching design doc §13's
+        -- own "default: retain indefinitely" phrasing). The grace
+        -- period between a post expiring and actually being deleted
+        -- is deliberately a single node-wide default (see
+        -- netbbs.config) rather than a per-board column -- nothing in
+        -- the design doc asks for per-board control over it.
+        ALTER TABLE boards ADD COLUMN moderated INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE boards ADD COLUMN max_post_age_days INTEGER;
+
+        -- 'pending' posts are only visible to their author and to
+        -- users holding APPROVE on this board (see
+        -- netbbs.boards.posts.list_pending_posts); 'expired' posts are
+        -- delisted from normal browsing (list_posts_page) but still
+        -- individually reachable (reply-parent lookup, direct-by-ID)
+        -- until the grace period elapses and the row is actually
+        -- deleted -- there is no 'deleted' status value because that
+        -- state is the row's absence, not a value it holds.
+        --
+        -- pinned here is a different concept from boards.pinned
+        -- (which board sorts first in the board list) -- this is
+        -- post-level, sorting a post first within its own board's
+        -- listing. pinned and exempt_from_expiry are independent
+        -- flags (design doc §13 lists "exempt... and pin..." as two
+        -- separate moderator actions), both gated by the same `edit`
+        -- permission bit per the existing pin/exempt sign-off note.
+        ALTER TABLE posts ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'
+            CHECK (status IN ('pending', 'approved', 'expired'));
+        ALTER TABLE posts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE posts ADD COLUMN exempt_from_expiry INTEGER NOT NULL DEFAULT 0;
+
+        -- Supports list_posts_page's new `status = 'approved'` filter
+        -- (a plain equality, not an OR, so this stays a clean index
+        -- range scan) as well as the expiry sweep's own board-scoped
+        -- UPDATE/DELETE statements.
+        CREATE INDEX idx_posts_board_id_status_created_at_post_id
+            ON posts(board_id, status, created_at, post_id);
+        """,
+    ),
+    Migration(
+        description=(
+            "File-area mirror of round 35's board/post moderation "
+            "lifecycle (design doc §13/§15, round 36): moderated-area "
+            "approval flow and the file maintenance/expiry state "
+            "machine, structurally identical to boards/posts."
+        ),
+        sql="""
+        -- Mirrors boards.moderated/boards.max_post_age_days exactly --
+        -- see that migration's comments for the full reasoning, not
+        -- repeated here. Named max_file_age_days rather than
+        -- max_post_age_days for this table -- "post" doesn't fit a
+        -- file the way it fits a board entry, even though design doc
+        -- §13 itself loosely says "post age" for both.
+        ALTER TABLE file_areas ADD COLUMN moderated INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE file_areas ADD COLUMN max_file_age_days INTEGER;
+
+        -- Mirrors posts.status/posts.pinned/posts.exempt_from_expiry
+        -- exactly -- see that migration's comments for the full
+        -- reasoning, not repeated here. files.pinned is a distinct
+        -- concept from file_areas.pinned, same as posts.pinned vs.
+        -- boards.pinned.
+        ALTER TABLE files ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'
+            CHECK (status IN ('pending', 'approved', 'expired'));
+        ALTER TABLE files ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE files ADD COLUMN exempt_from_expiry INTEGER NOT NULL DEFAULT 0;
+
+        CREATE INDEX idx_files_area_id_status_created_at_file_id
+            ON files(area_id, status, created_at, file_id);
+        """,
+    ),
 ]

@@ -1,15 +1,21 @@
 """
-File areas: local-only in Phase 1 (design doc §9, §15 phasing) — no
-Link, no moderators yet. "Area" always means *file* area, never "board"
-(design doc §1's strict terminology rule). Area IDs are content-addressed
-(§7) for the same reason board/channel IDs are: no ID-scheme migration
-needed when file areas can become Linked in a later phase.
+File areas: local-only (design doc §9, §15 phasing) — no Link yet.
+"Area" always means *file* area, never "board" (design doc §1's strict
+terminology rule). Area IDs are content-addressed (§7) for the same
+reason board/channel IDs are: no ID-scheme migration needed when file
+areas can become Linked in a later phase.
 
 Categories, pinning, and sort order are built in from the start here,
 unlike boards/channels — those got this shape retrofitted in design doc
 round 18, after shipping without it first. Doing it up front for file
 areas avoids repeating that same later migration, consistent with the
 project's broader anti-retrofit principle (§2/§13).
+
+Moderator/permission grants (`netbbs.moderation.roles`) and per-area
+moderation settings (`moderated`, `max_file_age_days`) layer on top of
+the coarse `min_read_level`/`min_write_level` gate here, mirroring
+`netbbs.boards.boards` — see `netbbs.files.entries` for where those
+settings actually change file behavior (design doc sign-off round 36).
 """
 
 from __future__ import annotations
@@ -43,6 +49,8 @@ class FileArea:
     category_id: int | None
     pinned: bool
     created_at: str
+    moderated: bool
+    max_file_age_days: int | None
 
 
 def create_file_area(
@@ -54,6 +62,8 @@ def create_file_area(
     min_write_level: int = 0,
     category_id: int | None = None,
     pinned: bool = False,
+    moderated: bool = False,
+    max_file_age_days: int | None = None,
     creator: User,
 ) -> FileArea:
     """
@@ -63,7 +73,13 @@ def create_file_area(
     create_board`'s coarse level-gate exactly — design doc §13 confirms
     file areas get the same separate read/write split as boards (unlike
     chat, where access is binary). The richer per-area moderator model
-    is Phase 2 scope, same as boards.
+    (`netbbs.moderation.roles`) layers on top, same as boards.
+
+    `moderated` gates whether new uploads start `'pending'` (requiring a
+    holder of `BoardPermission.APPROVE` to approve them) or go straight
+    to `'approved'` — see `netbbs.files.entries.upload_file`.
+    `max_file_age_days` is this area's own maintenance/expiry threshold;
+    `None` means retain indefinitely, the default.
 
     No permission check on *creating* an area here — same reasoning as
     board/channel creation: an admin-level action with no SysOp/moderator
@@ -84,8 +100,8 @@ def create_file_area(
             """
             INSERT INTO file_areas
                 (area_id, name, description, min_read_level, min_write_level,
-                 category_id, pinned, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 category_id, pinned, created_at, moderated, max_file_age_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 area_id,
@@ -96,6 +112,8 @@ def create_file_area(
                 category_id,
                 int(pinned),
                 created_at,
+                int(moderated),
+                max_file_age_days,
             ),
         )
         db.connection.commit()
@@ -172,4 +190,6 @@ def _row_to_file_area(row: sqlite3.Row) -> FileArea:
         category_id=row["category_id"],
         pinned=bool(row["pinned"]),
         created_at=row["created_at"],
+        moderated=bool(row["moderated"]),
+        max_file_age_days=row["max_file_age_days"],
     )

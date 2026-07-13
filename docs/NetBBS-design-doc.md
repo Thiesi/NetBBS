@@ -2640,3 +2640,244 @@ Prompted by a second post-Phase-1 chat-design round covering IRC-style command a
 12. **Linked-channel membership governance belongs in Phase 6.** Invitations, acceptances, membership grants, removals, and revocations become signed events verified against the inviter's or moderator's authority. This extends the existing signed-governance model rather than creating a parallel trust mechanism.
 
 13. **Access restriction is not end-to-end confidentiality.** Invite-only Linked channels may restrict authorized membership, but participating node operators can still observe or retain relayed content. True confidential group chat would require a separate design covering group-key distribution, key rotation, history access, membership changes, compromised members, and multi-session key handling. It is deliberately not implied by the word “private.”
+
+## Sign-off notes, round 34 (moderator/permission grant model — implemented)
+
+Prompted by sequencing Phase 2 into separable tracks (foundation-first,
+confirmed with Thiesi) and starting on the first one: the §13
+moderator/permission model everything else in Phase 2 depends on —
+board/file moderation and expiry, chat mute/ban/kick, `/topic` editing,
+and invite-only channels' `manage_members` all needed this to exist
+first, and nothing beyond a numeric `user_level` did.
+
+1. **Bitmask (`IntFlag`) representation, not a junction table.** A
+   single integer `permissions` column per grant row, chosen because it
+   matches §13's own phrasing directly — "settable individually or
+   combined" — and avoids a join table for what's a small, closed set
+   per object type.
+2. **Two permission enums, not one shared set.** `BoardPermission`
+   (`READ/WRITE/EDIT/DELETE/APPROVE`) is shared by boards and file
+   areas, matching their existing identical shape elsewhere in the
+   schema (`min_read_level`/`min_write_level` on both). `ChannelPermission`
+   (`EDIT/MODERATE/MANAGE_MEMBERS`) is deliberately smaller and
+   different: chat access itself has no read/write split (existing
+   `Channel.min_level`), and `MODERATE` bundles kick/mute/ban into one
+   bit rather than three separately-grantable ones, since §13 describes
+   them as one bundled capability of being a chat moderator, not as
+   independently combinable permissions the way board permissions are.
+3. **Local-blanket grants (`object_id IS NULL`) are all-or-nothing —
+   no partial-exception carve-outs** (e.g. "blanket edit except board
+   Z"). Nothing in §13 asks for this, and it would turn every
+   permission check into "blanket AND NOT excluded" instead of a single
+   lookup. Cheap to add later if a real case surfaces — same shape as
+   the existing pin/exempt-under-`edit` coupling, already documented
+   elsewhere in §13 as "known, accepted... cheap to split later if it
+   matters in practice."
+4. **Link-blanket ("global") is deliberately not modeled yet.** Only
+   per-object and local-blanket grants exist in the schema today —
+   the third tier is unreachable until Phase 6's Link-wide moderation
+   exists; its shape (a third `object_id` sentinel? a separate scope
+   column?) is left to be decided then, against real Phase 6
+   requirements, rather than guessed now.
+5. **A generic `moderation_log` audit table was built now**, ahead of
+   most of its consumers — this round's grant/revoke actions are the
+   only thing writing to it today, but it's designed to also carry
+   mute/ban/kick and moderated-board approval once those later tracks
+   land, rather than have each track invent its own logging. Same
+   anti-retrofit reasoning `netbbs.permissions.levels` was already
+   built on in Phase 1 ("built before there's a menu/command dispatch
+   layer to plug into"). Free-text `action`/`detail` columns rather
+   than a `CHECK`-constrained action allowlist, specifically so later
+   action types don't require editing an already-shipped migration
+   (disallowed per `storage/migrations.py`'s own rule).
+6. **Grants are additive, revokes are subtractive, both by bit.**
+   Calling `grant_permissions` again for the same (user, object_type,
+   object_id) ORs the new bits into whatever's already granted;
+   `revoke_permissions` ANDs the complement in, deleting the row
+   entirely once its mask reaches zero. Chosen so callers never need to
+   fetch-then-recompute-then-write the existing mask themselves.
+7. **Two partial unique indexes, not one compound `UNIQUE`** —
+   `moderator_grants` needed the exact same fix as the existing
+   `blocklist` table: SQLite treats every `NULL` in a `UNIQUE`
+   constraint as distinct from every other `NULL`, so a single
+   `UNIQUE(user_id, object_type, object_id)` would not stop a user
+   acquiring two separate local-blanket grants for the same
+   `object_type`. Mirrors `blocklist`'s existing
+   `fingerprint`/`local_user_id` partial-index pattern exactly.
+8. **New module homes: `netbbs.moderation.roles` (both permission
+   enums, plus grant/revoke/query functions) and `netbbs.moderation.log`
+   (the audit table), not `netbbs.permissions`.** `netbbs.permissions.
+   levels` is left untouched — still pure `user_level` gating, exactly
+   matching what its own docstring already promised ("the finer-grained
+   per-board permissions... build on top of this in Phase 2; they are a
+   different, richer permission model, not a replacement"). The richer
+   model instead landed in `netbbs.moderation`, whose own docstring had
+   already earmarked it as "the natural home for the richer §13
+   moderation model... once that's built in Phase 2."
+9. **Deliberately not wired into any existing call site this round.**
+   `boards/posts.py`, `files/entries.py`, and chat's `ChatHub`/
+   `chat_flow.py` still only call `require_level`/`meets_level` — none
+   of them consult these new grants yet. This round ships the grant
+   model as standalone plumbing with no consumer, the same precedent
+   `netbbs.permissions.levels` itself set. Actual enforcement is each
+   later track's own job: moderated-board approval and expiry need
+   `APPROVE`/`EDIT`; chat mute/ban/kick, `/topic` editing, and
+   invite-only `manage_members` need `MODERATE`/`EDIT`/
+   `MANAGE_MEMBERS`.
+10. **Testing:** `tests/test_moderator_roles.py` and
+    `tests/test_moderation_log.py`, following the existing
+    one-file-per-module convention. Full suite re-run after adding
+    both (568 passed, 1 skipped) — actually run, not just
+    syntax-checked, per this project's own standing rule.
+
+## Sign-off notes, round 35 (moderated-board approval + post maintenance/expiry — implemented)
+
+Track 2 of the foundation-first Phase 2 sequencing plan, built on
+round 34's grants. **Scope: posts + boards only** — files/file areas
+are a structurally identical mirror, deliberately deferred to its own
+follow-up pass rather than doubling this round's diff.
+
+A codebase survey ahead of this round confirmed there is no scheduled/
+background-task mechanism anywhere in this codebase, which directly
+shaped point 3 below. Three forks were raised and confirmed with
+Thiesi before implementation:
+
+1. **Expiry applies only to `'approved'` content.** A `'pending'`
+   post's age doesn't count toward expiry — a stale unreviewed post is
+   a moderation-queue hygiene problem, not an expiry one. Deliberately
+   not solved this round; revisit only if a real need for auto-expiring
+   stale pending items shows up.
+2. **`'expired'` content stays individually reachable** — as a
+   reply-parent, and (once files land) via `/download <filename>` —
+   even though it's delisted from normal paginated browsing. Only
+   `'pending'` is a genuine access gate; the grace period is real
+   insurance against an overly aggressive age setting, not a second
+   soft-block.
+3. **The moderation queue is a separate, simple function
+   (`list_pending_posts`)**, not a mode bolted onto the existing
+   cursor-paginated `list_posts_page` — keeps round 30's already
+   five-query-site pagination logic untouched.
+
+Further decisions made during design and implementation:
+
+4. **No separate `'rejected'` status.** `delete_post` (requires
+   `BoardPermission.DELETE`) is also how a pending post gets rejected —
+   avoids inventing a state nothing asked for. It logs `action=
+   "reject"` when the post's status was `'pending'` at the moment of
+   deletion, else `action="delete"`, so the audit trail still
+   distinguishes the two without new API surface.
+5. **Expiry mechanism: lazy sweep-on-access, not a background job.**
+   `_sweep_expired_posts` runs at the top of `list_posts_page` (the
+   natural "someone is looking at this board" trigger) and does two
+   plain SQL statements — age `'approved'` posts past
+   `board.max_post_age_days` into `'expired'`, then hard-delete any
+   already-`'expired'` post whose grace period has also elapsed.
+   Not logged to `moderation_log` — that log is for explicit human
+   moderation decisions, not mechanical time-based housekeeping.
+6. **Grace period is a single node-wide default** (`netbbs.config.
+   get_expiry_grace_period_days`/`set_expiry_grace_period_days`,
+   default 7 days), not a per-board column — nothing in the design doc
+   asks for per-board control over it, unlike max post age, which
+   genuinely is per-board (`Board.max_post_age_days`, nullable = retain
+   indefinitely).
+7. **Post-level `pinned` and `exempt_from_expiry` are independent
+   flags**, both gated by the existing `BoardPermission.EDIT` bit
+   (matching the already-settled §13 pin/exempt-under-`edit` note).
+   `Post.pinned` is a distinct concept from the existing
+   `Board.pinned` (which board sorts first among *all* boards) —
+   same word, different table, different meaning entirely.
+8. **Pinned posts do not reorder `list_posts_page`'s feed — caught
+   during implementation, not fully resolved in the original plan.**
+   Sorting pinned posts first, the way `Board.pinned`/`FileArea.pinned`
+   already do in their own (non-paginated) listing functions, would
+   have broken keyset pagination's stability guarantee: a pinned old
+   post would reappear on every "newest page" fetch, and the
+   `has_older`/`has_newer` boundary math (built entirely around
+   `(created_at, post_id)` comparisons) would no longer hold. Resolved
+   the same way the moderation queue was: a separate, small, non-
+   paginated `list_pinned_posts` function instead of reordering the
+   cursor-paginated feed. `list_posts_page` itself needed only one new
+   filter: `AND status = 'approved'`, backed by a new composite index
+   `(board_id, status, created_at, post_id)` — a plain equality, not
+   an `OR`, so it stays a clean index range scan.
+9. **`get_post` (unbounded by-ID lookup) is left unfiltered** — used
+   for `create_post`'s own return path and reply-parent lookup.
+   Reaching a `'pending'` post this way requires already knowing its
+   exact `post_id`, which isn't discoverable through any listing a
+   non-author, non-moderator would see — accepted as a practically
+   unreachable gap rather than adding complexity for it.
+10. **Testing:** new `tests/test_post_lifecycle.py` (28 cases:
+    initial status by `moderated`, the pending queue's visibility
+    rules, approve/delete/reject logging, pin/exempt permission
+    checks, the expiry sweep at multiple ages, grace-period boundaries,
+    and replying to an expired parent), reusing the existing
+    direct-SQL `created_at` backdating approach from `test_boards.py`
+    rather than introducing a new clock-mocking mechanism for post
+    age. Full suite re-run after adding it (596 passed, 1 skipped) —
+    actually run, not just syntax-checked.
+
+**Deferred, explicitly:** the files/file-area mirror of this entire
+round (identical shape — `list_files_page` already duplicates
+`list_posts_page` "byte for byte" per this project's existing
+precedent of fully parallel, non-shared board/file implementations).
+
+## Sign-off notes, round 36 (moderated-area approval + file maintenance/expiry — implemented)
+
+The files/file-areas mirror of round 35, deferred there explicitly.
+Structurally identical: `file_areas` gains `moderated`/
+`max_file_age_days` (named for files rather than reusing
+`max_post_age_days`, even though §13 itself loosely says "post age"
+for both — "post" doesn't fit a file); `files` gains the same
+`status`/`pinned`/`exempt_from_expiry` columns as `posts`; the same
+lazy sweep-on-access mechanism (`_sweep_expired_files`, mirroring
+`_sweep_expired_posts` exactly, including the "no background
+scheduler exists anywhere in this codebase" reasoning); the same
+`approve_file`/`delete_file` (doubling as reject)/`set_file_pinned`/
+`set_file_exempt`/`list_pending_files`/`list_pinned_files` set,
+gated by the identical `BoardPermission` bits (shared between boards
+and file areas since §13 already gives both the same
+read/write/edit/delete/approve permission surface).
+
+One genuine difference from posts, not just a mechanical rename:
+
+1. **`get_file_by_name` needed its own pending-visibility check,
+   which `get_post` doesn't.** Posts have exactly one unbounded lookup
+   path (`get_post`, by ID) — reaching a pending post through it
+   requires already knowing its exact content-addressed `post_id`,
+   effectively unreachable in practice. Files have a *second* unbounded
+   path, `get_file_by_name`, added in round 31 specifically so
+   `/download <filename>` works by a name a user might simply already
+   know or guess — a real, practical route to a pending file, not a
+   theoretical one. So `get_file_by_name` gained an optional
+   `requesting_user` parameter: a `'pending'` match is only returned to
+   its own uploader or a holder of `BoardPermission.APPROVE` on the
+   area; passing no `requesting_user` is treated the same as an
+   unauthorized one (the safe default), and an `'expired'` match is
+   always returned regardless, consistent with round 35's "expired is
+   delisted, not access-blocked" decision. `net.file_flow._handle_download`
+   was updated to pass its session's `user` through.
+2. **`delete_file` only removes the database row, not the underlying
+   bytes in `netbbs.files.storage`.** Storage-level garbage collection
+   of orphaned content-addressed blobs (a different file entry could
+   in principle share the same bytes) is out of scope for this round —
+   noted explicitly since it's a real gap this mirror pass introduces
+   that round 35 has no equivalent of (posts have no separate
+   byte-storage layer to leave behind).
+3. **Testing:** new `tests/test_file_lifecycle.py` (32 cases —
+   round 35's 28-case shape plus 5 covering `get_file_by_name`'s new
+   pending-visibility branches specifically). Full suite re-run after
+   adding it (628 passed, 1 skipped) — actually run, not just
+   syntax-checked.
+4. **Bug found and fixed, spanning both rounds:** neither
+   `netbbs.boards.__init__` nor `netbbs.files.__init__` had been
+   updated with round 35/36's new functions — both package `__init__`s
+   still only re-exported the original create/get/list surface.
+   Existing tests never caught this because they import directly from
+   `netbbs.boards.posts`/`netbbs.files.entries`, not the package root.
+   Fixed for both packages in this round.
+
+Nothing else diverges from round 35's decisions or reasoning — see
+that round for the full rationale behind the status model, the
+sweep-on-access mechanism, the grace-period config, and the
+separate-function resolution for both the moderation queue and pinned
+views.
