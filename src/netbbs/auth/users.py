@@ -5,9 +5,12 @@ login.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import sqlite3
+import weakref
 from dataclasses import dataclass
+from typing import Callable, TypeVar
 
 import nacl.signing
 import nacl.utils
@@ -23,6 +26,17 @@ from netbbs.timeutil import utc_now_iso
 # send over a slow telnet link without noticeable delay.
 _CHALLENGE_BYTES = 32
 
+# Argon2id's memory cost is deliberately high. Limit simultaneous password
+# hashing/verifications so moving the work off the event loop cannot turn an
+# authentication burst into unbounded CPU and memory use. Semaphores are kept
+# per event loop: this module is exercised by tests using multiple
+# asyncio.run() calls, and asyncio synchronization primitives must not be
+# reused across loops after they have been contended.
+_MAX_CONCURRENT_PASSWORD_WORK = 2
+_PASSWORD_WORK_SEMAPHORES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
+
 # A fixed, valid Argon2id hash used when a password login names an account
 # which does not exist or has no password. Verifying against this hash makes
 # those failure paths perform the same dominant work as a wrong password for
@@ -32,6 +46,8 @@ _DUMMY_PASSWORD_HASH = (
     "$argon2id$v=19$m=65536,t=2,p=1$ZFFJMU96RU91Y05idy4zdg$"
     "Nm72fCF0ym4VXOndcrqRhBXpr/aXC+uHQ3D2nD6CUOs"
 )
+
+_T = TypeVar("_T")
 
 
 class AuthError(Exception):
@@ -60,6 +76,44 @@ class User:
     last_login_at: str | None
 
 
+def _password_work_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _PASSWORD_WORK_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_PASSWORD_WORK)
+        _PASSWORD_WORK_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+async def _run_password_work(function: Callable[..., _T], *args: object) -> _T:
+    """
+    Run one expensive Argon2 operation off-loop under the shared bound.
+
+    The slot is released by the worker's completion callback, not by the
+    awaiting session task. This matters when a client disconnects and its task
+    is cancelled: `asyncio.to_thread` cannot stop work already running in the
+    thread, so releasing the slot on caller cancellation would allow more than
+    the configured number of Argon2 operations to overlap.
+    """
+    semaphore = _password_work_semaphore()
+    await semaphore.acquire()
+    try:
+        worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    except BaseException:
+        semaphore.release()
+        raise
+
+    def release_slot(completed: asyncio.Task[_T]) -> None:
+        semaphore.release()
+        # Mark a worker exception as retrieved even if its original session
+        # task was cancelled and therefore no longer awaits the result.
+        if not completed.cancelled():
+            completed.exception()
+
+    worker.add_done_callback(release_slot)
+    return await asyncio.shield(worker)
+
+
 def create_user(
     db: Database,
     username: str,
@@ -69,21 +123,61 @@ def create_user(
     user_level: int = 0,
 ) -> User:
     """
-    Register a new local user account.
+    Register a new local user account synchronously.
 
-    At least one of `password` / `verify_key` must be given, matching the
-    users table's CHECK constraint (design doc §5: password and keypair
-    auth are both supported, either usable alone). Passing a `verify_key`
-    rather than a raw fingerprint is deliberate — the table needs the
-    actual public key to verify future login signatures against; the
-    fingerprint stored alongside it is a derived display/lookup value,
-    never independently trusted for verification.
+    This API remains synchronous for command-line/admin callers. Async callers
+    must use `create_user_async`, which performs the expensive password hash in
+    the bounded worker path before returning to the event-loop thread for all
+    SQLite work.
     """
     if password is None and verify_key is None:
         raise AuthError("a new account needs a password, a keypair, or both")
 
     password_hash = hash_password(password) if password is not None else None
+    return _create_user_with_password_hash(
+        db,
+        username,
+        password_hash=password_hash,
+        verify_key=verify_key,
+        user_level=user_level,
+    )
 
+
+async def create_user_async(
+    db: Database,
+    username: str,
+    *,
+    password: str | None = None,
+    verify_key: nacl.signing.VerifyKey | None = None,
+    user_level: int = 0,
+) -> User:
+    """Async account creation with bounded off-loop Argon2 hashing."""
+    if password is None and verify_key is None:
+        raise AuthError("a new account needs a password, a keypair, or both")
+
+    password_hash = (
+        await _run_password_work(hash_password, password)
+        if password is not None
+        else None
+    )
+    return _create_user_with_password_hash(
+        db,
+        username,
+        password_hash=password_hash,
+        verify_key=verify_key,
+        user_level=user_level,
+    )
+
+
+def _create_user_with_password_hash(
+    db: Database,
+    username: str,
+    *,
+    password_hash: str | None,
+    verify_key: nacl.signing.VerifyKey | None,
+    user_level: int,
+) -> User:
+    """Persist an account after any expensive password hashing is complete."""
     if verify_key is not None:
         public_key_b64 = base64.b64encode(bytes(verify_key)).decode("ascii")
         fingerprint = fingerprint_from_verify_key(verify_key)
@@ -132,22 +226,46 @@ def generate_challenge() -> bytes:
     return nacl.utils.random(_CHALLENGE_BYTES)
 
 
-def authenticate_password(db: Database, username: str, password: str) -> User:
-    """Log in with a username/password pair."""
+def _password_login_row(db: Database, username: str) -> tuple[sqlite3.Row | None, str]:
     row = db.connection.execute(
         "SELECT * FROM users WHERE username = ?", (username,)
     ).fetchone()
-
     stored_hash = (
         row["password_hash"]
         if row is not None and row["password_hash"] is not None
         else _DUMMY_PASSWORD_HASH
     )
-    password_matches = verify_password(password, stored_hash)
+    return row, stored_hash
 
+
+def _finish_password_login(
+    db: Database, row: sqlite3.Row | None, password_matches: bool
+) -> User:
     if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
     return _touch_last_login(db, row)
+
+
+def authenticate_password(db: Database, username: str, password: str) -> User:
+    """Log in synchronously with a username/password pair."""
+    row, stored_hash = _password_login_row(db, username)
+    password_matches = verify_password(password, stored_hash)
+    return _finish_password_login(db, row, password_matches)
+
+
+async def authenticate_password_async(
+    db: Database, username: str, password: str
+) -> User:
+    """
+    Log in without blocking the asyncio event loop on Argon2.
+
+    SQLite lookup/update operations deliberately stay on the event-loop thread
+    because the current Database owns one synchronous connection. Only the
+    CPU- and memory-intensive password verification runs in a worker thread.
+    """
+    row, stored_hash = _password_login_row(db, username)
+    password_matches = await _run_password_work(verify_password, password, stored_hash)
+    return _finish_password_login(db, row, password_matches)
 
 
 def authenticate_keypair(db: Database, username: str, challenge: bytes, signature: bytes) -> User:

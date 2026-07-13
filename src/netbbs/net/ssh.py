@@ -39,7 +39,7 @@ from typing import Awaitable, Callable
 import asyncssh
 import nacl.signing
 
-from netbbs.auth.users import AuthError, authenticate_password, authorize_public_key
+from netbbs.auth.users import AuthError, authenticate_password_async, authorize_public_key
 from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.storage.database import Database
@@ -179,8 +179,13 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         return True
 
     async def validate_password(self, username: str, password: str) -> bool:
+        # asyncssh awaits this directly on the event loop during the SSH
+        # handshake, same as netbbs.net.login_flow's Telnet/web login —
+        # must go through the bounded off-loop path too, or a burst of SSH
+        # password attempts blocks the loop on Argon2 just as much as the
+        # Telnet path used to (issue #2).
         try:
-            authenticate_password(self._db, username, password)
+            await authenticate_password_async(self._db, username, password)
         except AuthError:
             return False
         return True

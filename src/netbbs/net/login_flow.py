@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
-from netbbs.auth.users import AuthError, User, authenticate_password
+from netbbs.auth.users import AuthError, User, authenticate_password_async
 from netbbs.boards import Board, create_post, list_boards, list_posts
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub
@@ -142,7 +142,7 @@ async def _login(
     hammering the password check in a tight loop.
 
     The blocklist check happens *here*, after successful authentication,
-    not inside `authenticate_password` itself — authentication ("are
+    not inside `authenticate_password_async` itself — authentication ("are
     these credentials correct") and this kind of authorization ("is this
     correctly-authenticated account allowed to proceed") are different
     concerns, kept separate the same way `netbbs.permissions` is kept
@@ -166,7 +166,7 @@ async def _login(
         # compensate. Leaving it in would now print an extra blank line.
 
         try:
-            user = authenticate_password(db, username, password)
+            user = await authenticate_password_async(db, username, password)
         except AuthError:
             remaining = max_attempts - attempt - 1
             if remaining > 0:

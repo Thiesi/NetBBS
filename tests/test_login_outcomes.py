@@ -41,7 +41,10 @@ def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
         last_login_at=None,
     )
 
-    monkeypatch.setattr(login_flow, "authenticate_password", lambda db, username, password: user)
+    async def authenticate(db, username, password):
+        return user
+
+    monkeypatch.setattr(login_flow, "authenticate_password_async", authenticate)
     monkeypatch.setattr(login_flow, "is_blocked", lambda db, authenticated_user: True)
 
     async def scenario() -> None:
@@ -55,10 +58,10 @@ def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
 
 
 def test_exhausted_attempts_receive_failed_attempt_message(monkeypatch):
-    def reject(db, username, password):
+    async def reject(db, username, password):
         raise AuthError("login failed")
 
-    monkeypatch.setattr(login_flow, "authenticate_password", reject)
+    monkeypatch.setattr(login_flow, "authenticate_password_async", reject)
 
     async def scenario() -> None:
         session = FakeSession(
