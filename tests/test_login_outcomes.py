@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.auth.users import AuthError, User
-from netbbs.chat import ChatHub
+from netbbs.chat import ChatHub, PresenceRegistry
 from netbbs.net import login_flow
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.throttle import LoginThrottle
@@ -70,7 +70,7 @@ def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
 
     async def scenario() -> None:
         session = FakeSession(["blocked", "correct-password"])
-        await login_flow.handle_session(session, object(), ChatHub(), _throttle(), _throttle_config())
+        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), _throttle(), _throttle_config())
         assert "Your access to this system has been revoked." in session.output
         assert "Too many failed attempts" not in session.output
         assert "Welcome, blocked" not in session.output
@@ -95,7 +95,7 @@ def test_exhausted_attempts_receive_failed_attempt_message(monkeypatch):
                 "wrong-3",
             ]
         )
-        await login_flow.handle_session(session, object(), ChatHub(), _throttle(), _throttle_config())
+        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), _throttle(), _throttle_config())
         assert "Too many failed attempts. Goodbye." in session.output
         assert "Your access to this system has been revoked." not in session.output
 

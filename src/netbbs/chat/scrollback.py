@@ -35,7 +35,7 @@ from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-MessageKind = Literal["message", "join", "leave", "mute", "unmute", "ban", "unban", "kick"]
+MessageKind = Literal["message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action"]
 
 # Config key for the node-wide scrollback retention limit, stored via
 # netbbs.config — same pattern as netbbs.timeutil's display format/

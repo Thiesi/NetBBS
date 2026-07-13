@@ -14,7 +14,7 @@ import asyncio
 
 from netbbs.auth.users import create_user
 from netbbs.boards import create_board, create_post
-from netbbs.chat import ChatHub, create_channel, get_scrollback, record_message
+from netbbs.chat import ChatHub, PresenceRegistry, create_channel, get_scrollback, record_message
 from netbbs.files import create_file_area, upload_file
 from netbbs.net.chat_flow import _chat_loop, _render_scrollback_message
 from netbbs.net.file_flow import _show_area
@@ -171,7 +171,7 @@ def test_chat_scrollback_replay_sanitizes_author_and_body(tmp_path):
         db, channel, kind="message", author_label=HOSTILE, author_fingerprint=None, body=HOSTILE
     )
 
-    rendered = _render_scrollback_message(get_scrollback(db, channel)[0])
+    rendered = _render_scrollback_message(db, get_scrollback(db, channel)[0])
 
     _assert_hostile_payload_neutralized(rendered)
     db.close()
@@ -183,6 +183,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     recipient = create_user(db, "bob", password="hunter2", user_level=10)
     channel = create_channel(db, "lobby", creator=sender)
     hub = ChatHub()
+    presence = PresenceRegistry()
 
     sender_session = FakeSession(lines=[HOSTILE, "/quit"])
     received: list[str] = []
@@ -196,7 +197,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
             received.append(await queue.get())  # sender's leave notice
 
         collector = asyncio.create_task(collect_one())
-        await _chat_loop(sender_session, db, hub, channel, sender)
+        await _chat_loop(sender_session, db, hub, presence, channel, sender)
         await collector
         hub.leave(channel.name, "bob-participant")
 

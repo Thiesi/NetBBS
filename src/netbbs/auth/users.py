@@ -214,6 +214,19 @@ def get_user_by_username(db: Database, username: str) -> User:
     return _row_to_user(row)
 
 
+def list_users(db: Database) -> list[User]:
+    """
+    Every registered account, ordered by username — the user
+    directory's underlying listing (design doc §13, sign-off round
+    38). Not paginated, unlike `netbbs.boards.posts.list_posts_page`:
+    total registered users is naturally bounded at this project's
+    declared scale (§14, dozens-low hundreds), unlike posts/files,
+    which can grow unboundedly over time.
+    """
+    rows = db.connection.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE").fetchall()
+    return [_row_to_user(row) for row in rows]
+
+
 def generate_challenge() -> bytes:
     """
     Generate a random nonce for keypair-based login challenge-response.

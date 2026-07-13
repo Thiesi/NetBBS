@@ -2987,3 +2987,420 @@ send attempt); kick and ban do.
     lets a kick notice — not the target's own `/quit` — be the thing
     that ends their loop). Full suite re-run after adding both (663
     passed, 1 skipped) — actually run, not just syntax-checked.
+
+## Sign-off notes, round 38 (user directory & vCard/finger — implemented)
+
+Track 4 of the foundation-first Phase 2 sequencing plan. §13's own
+spec is terse here — "users control which profile fields are public
+via their preferences menu... vCard: short free-text bio (6-line
+cap)... vCard visibility independently toggleable... table-style user
+directory listing public info... finger-style lookup... accessible
+from the directory, main menu, and chat." Confirmed with Thiesi before
+implementing:
+
+1. **This is also the first per-user (not node-wide) settings storage
+   this codebase would have** — `config.py`'s own docstring already
+   anticipated "per-user overrides" as a future layer. Built as a
+   generic, reusable mechanism now (`user_preferences(user_id, key,
+   value)` + `netbbs.user_preferences.get_user_preference`/
+   `set_user_preference`, mirroring `netbbs.config` exactly) rather
+   than a narrow vCard-only table, specifically so Track 5's planned
+   per-user chat timestamp preference (round 32 sign-off note) doesn't
+   need to invent its own storage later — the same anti-retrofit
+   reasoning already behind several earlier rounds' plumbing-first
+   decisions.
+2. **vCard fields: bio only**, matching what §13 concretely names —
+   not inventing real-name/location/contact fields it doesn't ask for.
+   Cheap to extend later: each additional field is just another
+   preference key, no schema change.
+3. **Bio visibility defaults to hidden**, not shown, until the owner
+   explicitly opts in — matches this project's consistent
+   privacy-safe-by-default posture elsewhere (hidden channels, no
+   automatic power grants, §6/§2's core lesson).
+4. **New `netbbs.directory` module**, not nested in `auth` or
+   `moderation` — a distinct concern from both, same layering already
+   used to keep those two separate. `get_vcard(db, target, *,
+   requesting_user)` always shows the bio to its own owner regardless
+   of visibility (hiding your own profile from yourself would be a
+   bug, not a feature); anyone else sees it only if the owner has made
+   it visible.
+5. **`auth.users.list_users`** (ordered by username, case-insensitive)
+   is the directory's underlying listing — deliberately not
+   paginated, unlike `list_posts_page`/`list_files_page`: total
+   registered users is naturally bounded at this project's declared
+   scale (§14), unlike posts/files, which is exactly why those needed
+   round 30/31's cursor pagination.
+6. **Full vertical slice, matching Tracks 1-3's precedent**: `net.
+   login_flow`'s main menu gained `[D]irectory` (browse via the
+   existing `pick_item` picker, description line showing "member
+   since X, bio: public/private"; selecting an entry shows the full
+   finger detail) and `[P]rofile` (view current bio/visibility, then
+   `[E]dit bio`/`[V]isibility` sub-choices); `net.chat_flow` gained a
+   `/finger <user>` command (same ad hoc command-branch style Track 3
+   already established for `/mute`/`/ban`/`/kick`) — satisfies §13's
+   "accessible from... chat" explicitly.
+7. **Confirmed directly: there is no multi-line text-input mechanism
+   anywhere in this codebase** — even a board post's `body` is
+   collected via one single `read_line()` call today. Bio entry
+   therefore loops over `read_line` up to 6 times, a blank line ending
+   it early — not a new terminal capability, the same repeated-single-
+   line-read shape every other multi-step prompt here already uses. A
+   blank *first* line clears the bio entirely (choosing not to edit at
+   all is what the profile screen's own `[B]ack` option is for).
+8. **Bug found while writing tests, not before:** an early version of
+   the directory UI test suite included a test asserting a
+   registered-but-otherwise-empty directory "never prompts," passing a
+   `FakeSession` with zero scripted keys. Wrong premise — a directory
+   with even one registered account (the viewer themselves) is a
+   *non-empty* list, so `pick_item` correctly enters its interactive
+   loop and calls `read_key()`, which the fake session answers with an
+   endless stream of empty strings once its scripted list runs out —
+   an infinite loop, not a crash, since `pick_item`'s unrecognized-key
+   branch just re-prompts. Caught only because the test run visibly
+   hung rather than finishing; fixed by correcting the test's premise
+   (a directory of one still needs a `"q"` to quit cleanly) rather
+   than changing any production code, since the code's behavior was
+   correct throughout — same "verify the test's assumption, not just
+   the code" lesson as round 37's schema-constraint miss, a different
+   shape of the same underlying discipline.
+9. **Testing:** `tests/test_user_preferences.py` (5 cases),
+   `tests/test_directory.py` (16 cases, library-level), `tests/
+   test_directory_ui.py` (11 cases, the directory/profile screens via
+   the same lightweight duck-typed `FakeSession` `tests/
+   test_board_pagination_ui.py` already established — no need to
+   subclass the `Session` ABC the way round 37's chat test needed to,
+   since `pick_item`/these screens don't need genuinely concurrent
+   sessions), plus 3 new `/finger` cases added to `tests/
+   test_chat_flow_moderation.py`. Full suite re-run after adding all
+   four (697 passed, 1 skipped) — actually run, not just
+   syntax-checked.
+
+## Sign-off notes, round 39 (chat command dispatch infrastructure — implemented)
+
+Track 5a of the Phase 2 sequencing plan — Track 5 (rounds 32-33's full
+chat command surface) is by far the largest remaining block, so it's
+being split into sub-pieces the same way Track 2 was split into
+posts-then-files. This slice is the dispatch mechanism itself:
+everything else in Track 5 (presence/identity, discovery, channel
+switching, private messaging, completion, invite-only channels) needs
+this to exist first, and rounds 37/38 had already bolted
+`/mute`/`/ban`/`/unmute`/`/unban`/`/kick`/`/finger` onto an
+`if line.lower().startswith(...)` chain one at a time.
+
+1. **A small `ChatCommandContext` dataclass** (`session`, `db`, `hub`,
+   `channel`, `user`, `participant_id`) replaces what used to be a
+   different ad hoc positional-argument list per handler — most took
+   `session, db, hub, channel, user, args_str`, but `/finger` omitted
+   `hub` entirely. All six existing handlers were migrated to the new
+   `(ctx, args)` signature; no test called any of them directly
+   (confirmed by grep before starting), so this was a safe,
+   behavior-preserving refactor — the existing round 37/38 test suites
+   pass unchanged against it.
+2. **Handler contract: `async def handler(ctx, args) -> bool | None`.**
+   A truthy return means "exit the chat loop after this command" —
+   only `/quit`/`/leave`'s handler returns `True`; every other handler
+   returns `None` implicitly. Chosen over a control-flow exception for
+   quitting: an explicit return value reads more plainly here than
+   exception-driven flow would for what is, after all, the ordinary
+   way to leave.
+3. **Explicit dict registry (`_COMMANDS: dict[str, CommandHandler]`),
+   not a decorator-registration pattern** — a plain literal built once
+   after every handler is defined, `/quit` and `/leave` both mapping
+   to the same handler. Matches this codebase's existing preference
+   for explicit, greppable structures over registration magic (e.g.
+   `storage/migrations.py`'s plain ordered list, not auto-discovery).
+4. **Real bug fixed as a natural side effect of building a real
+   dispatcher, not a separate round:** any line starting with `/` is
+   now always treated as a command attempt — looked up in
+   `_COMMANDS`, and "Unknown command: /x" shown if not found, with
+   nothing broadcast. Previously, an unrecognized `/x` line fell all
+   the way through the old ad hoc `if` chain to being sent as an
+   ordinary chat message — a typo'd command (`/mtue bob`) silently
+   became public chat text. Standard behavior for slash-command chat
+   systems generally (IRC/Discord/Slack all reserve leading `/` the
+   same way).
+5. **The existing mute check deliberately stays exactly where it
+   was** — gating only the plain-message fallthrough after dispatch,
+   not `_dispatch_command` itself, so a muted moderator can still,
+   say, unmute themselves. Not a new decision, just confirmed
+   unchanged during the refactor.
+6. **`/quit`/`/leave` keep their exact current meaning this round**
+   (both fully exit the chat loop) — deliberately not redesigning
+   `/leave` into "leave the current channel, stay in chat," since
+   that's Track 5d's (channel-switching) scope, not this one's.
+   Flagged explicitly so it doesn't get silently redecided piecemeal
+   across rounds.
+7. **A `/help` command was added**, listing every registered command
+   name — small, essentially free once a real registry exists, so
+   not deferred to a later round.
+8. **Testing:** new `tests/test_chat_dispatch.py` (8 cases: unknown
+   commands rejected and not broadcast, including the exact `/mtue`
+   typo scenario that motivated point 4; plain messages unaffected;
+   `/quit`/`/leave` both still exit; `/help` lists known commands and
+   needs no special permission), reusing `tests/
+   test_chat_flow_moderation.py`'s `FakeSession` directly via a
+   cross-file import (`tests/__init__.py` already makes `tests` a
+   real package). All ten existing round 37/38 chat command tests
+   re-run and pass unchanged against the refactored dispatcher — the
+   regression check for point 1's signature migration. Full suite
+   re-run after adding the new file (705 passed, 1 skipped) — actually
+   run, not just syntax-checked.
+
+## Sign-off notes, round 40 (/me action events — implemented)
+
+The first slice of Track 5b (presence/identity). `/nick` and `/away`
+were deliberately not attempted in this same round: `/nick` needs
+rendering changes across every chat display path (join/leave/message/
+action all need to show alias+canonical together, per round 32's
+spec), and `/away` needs a new node-wide session-count tracking
+mechanism ("clears only when the account's final session
+disconnects") that doesn't exist anywhere yet and crosses into
+`net.login_flow`'s session lifecycle, not just `chat_flow.py` — both
+genuinely larger design surfaces than `/me`, which is small and
+mechanical, following round 37's exact precedent for adding a new
+message kind + command handler.
+
+1. **New `channel_messages.kind` value: `'action'`.** Same standard
+   SQLite table-rebuild as round 37's widening (still no `ALTER TABLE`
+   for changing a `CHECK` in place). Deliberately widened only for
+   what this round needs, not speculatively for `/nick`'s not-yet-
+   designed event kind too — consistent with this project's "don't
+   build for hypothetical future requirements" stance, even though it
+   means another rebuild migration is a known, accepted cost whenever
+   `/nick` actually lands.
+2. **`/me <action>` renders identically for the actor and everyone
+   else** (`* alice waves`) — unlike an ordinary chat message, there's
+   no "my own words" distinction worth making for a shared narrative-
+   style action, so it skips the self-color/others-color split
+   `send_loop` uses for plain messages.
+3. **Registered in the round 39 dispatcher** (`_COMMANDS["me"] =
+   _handle_me`) — no new dispatch mechanism needed, confirming 5a's
+   infrastructure was built correctly ahead of its consumers.
+4. **Testing:** new `tests/test_chat_action.py` (5 cases: shown to the
+   actor, broadcast to others, recorded with the right kind/body,
+   usage message on empty action text, correct scrollback replay).
+   Full suite re-run after adding it (710 passed, 1 skipped) —
+   actually run, not just syntax-checked.
+
+**Remaining Track 5b scope, explicitly deferred:** `/nick` (transparent
+display aliases, needs a rendering-wide change), `/away` (needs new
+session-lifecycle presence tracking), and the per-user chat timestamp
+preference (round 32, point 3) — each merits its own dedicated round.
+
+## Sign-off notes, round 41 (/nick transparent display aliases — implemented)
+
+The second slice of Track 5b, per design doc round 32, points 7-10.
+
+1. **New module `netbbs.chat.nick`**, not folded into
+   `netbbs.directory` — round 32 discusses `/nick` alongside `/me`/
+   `/away` as chat presentation, a different concern from the user-
+   directory/vCard feature even though both sit on the same generic
+   `netbbs.user_preferences` store underneath (round 38).
+2. **Validation**: a 32-character length cap (not specified exactly by
+   §13; a reasonable default in line with typical IRC/Discord nick
+   limits, easy to reconsider later, same spirit as the bio's 6-line
+   cap being "a reasonable default, easy to reconsider" in round 38),
+   and a case-insensitive check against every other account's
+   canonical username (round 32, point 8: "may not exactly match
+   another account's canonical username" — checked case-insensitively
+   for actual anti-impersonation effect, since a same-cased-only check
+   would let `ALICE` masquerade as `alice`). Setting your own username
+   as your own nick is explicitly allowed — harmless, not
+   impersonation. Character content itself isn't validated at set
+   time, matching this codebase's consistent "sanitize on output, not
+   storage" convention already used for bios, post bodies, and chat
+   messages.
+3. **`/nick off` clears the alias; `/nick` alone shows the current
+   one.** Chosen over accepting a bare blank line as "clear" (which
+   `/mute`-style commands don't need to disambiguate, but this one
+   does) — an explicit reserved word avoids the ambiguity of "did they
+   mean to clear it, or did they just hit enter by mistake."
+4. **Nickname changes are their own scrollback event kind (`'nick'`)**,
+   per round 32 point 10 — another `channel_messages.kind` CHECK
+   widening via the same standard SQLite table-rebuild as rounds 37/40
+   (still no `ALTER TABLE` for changing a `CHECK` in place; this is
+   the third such rebuild this phase, a known, accepted friction of
+   the "add a new event kind" pattern rather than something worth
+   over-engineering around by pre-widening for hypothetical future
+   kinds).
+5. **Live rendering shows the *current* alias, computed fresh at each
+   point of use — not cached from channel-join time** — so a nick
+   change via `/nick` mid-session is reflected immediately in the very
+   next message/action, not just after a rejoin. This applies to join,
+   leave, regular messages, and `/me` actions.
+6. **Scrollback replay also shows the *current* alias, not whatever
+   was set at the original moment** — there's no per-message nick
+   snapshot; a new `_resolve_display_label` helper re-resolves
+   `ChannelMessage.author_label` (the stored canonical username) back
+   to a `User` and looks up their alias live. Falls back to the bare
+   canonical label if the account can no longer be found (defensive;
+   nothing can actually delete an account yet). `_render_scrollback_
+   message` therefore now takes `db: Database` — its only call site
+   (the scrollback-replay loop in `_chat_loop`) was updated, and one
+   existing direct-call test (`tests/test_terminal_sanitization.py`)
+   needed a matching one-line update, caught immediately by the full
+   suite re-run rather than missed.
+7. **Moderation notices and command targeting deliberately stay
+   canonical-only, unchanged** — `_announce_moderation`/
+   `_moderation_detail`/`_resolve_target` still use `user.username`/
+   `target.username` directly, never `display_label`. Matches round
+   32 point 7 explicitly ("moderation, permissions, blocking,
+   reputation, auditing, and addressing always operate on canonical
+   identity") — confirmed with a dedicated test
+   (`test_moderation_notices_stay_canonical_only`) rather than left as
+   an unverified assumption.
+8. **Resolving a *nick* to a canonical identity for command targeting
+   (round 32 point 9: "an alias may be accepted only when it resolves
+   uniquely") is explicitly out of scope for this round** — `/mute`,
+   `/ban`, `/kick`, `/finger` etc. still only resolve canonical
+   usernames via `_resolve_target`, unchanged. That's addressing/
+   completion scope (Track 5e/5f), not this round's.
+9. **Testing:** `tests/test_chat_nick.py` (11 cases, library-level:
+   validation, case-insensitive collision, clearing) and `tests/
+   test_chat_flow_nick.py` (12 cases: the command itself, and that the
+   alias actually shows up across every live/replay rendering path,
+   plus the canonical-only moderation-notice guarantee). Full suite
+   re-run after adding both, catching and fixing the
+   `test_terminal_sanitization.py` call-site break from point 6 in the
+   same pass (733 passed, 1 skipped) — actually run, not just
+   syntax-checked.
+
+## Sign-off notes, round 42 (/away node-wide presence — implemented)
+
+The third and final slice of Track 5b, per design doc round 32,
+points 5-6. This closes out Track 5b entirely — `/me` (round 40),
+`/nick` (round 41), and now `/away` are all implemented; the per-user
+chat timestamp preference from round 32 point 3 was folded into this
+round too (see point 6 below), since it turned out to need no new
+mechanism beyond what `/away` already required.
+
+1. **New `PresenceRegistry` class (`netbbs.chat.presence`), separate
+   from `ChatHub`** — `ChatHub` tracks per-*channel* participants;
+   this tracks per-*account* state that has nothing to do with which
+   channel, or whether the account is in a channel at all. A user
+   just browsing boards is just as "online" as one actively chatting.
+   One instance per node, constructed in `netbbs.__main__` alongside
+   `ChatHub`.
+2. **The real plumbing question this round had to answer**: round
+   32's "clears only when the account's final session disconnects"
+   means "session" is a *login connection*, not a chat-channel visit —
+   nothing in the codebase tracked that before. Solved by threading
+   `PresenceRegistry` through `handle_session` (`netbbs.net.
+   login_flow`, the actual per-connection entry point) →
+   `_main_menu` → `browse_channels`/`_browse_channels_in_category` →
+   `_chat_loop` → `ChatCommandContext`. `presence.enter(username)`/
+   `presence.leave(username)` wrap the `_main_menu` call in
+   `handle_session`, `leave()` inside a `finally` so an exception
+   during the authenticated portion can't leak an "online forever"
+   session count — verified directly with a test that makes
+   `_main_menu` raise and confirms `leave()` still ran.
+3. **`/away [message]` sets; `/away` alone clears** — matching §13's
+   literal wording exactly ("`/away [message]` sets... `/away`
+   without an argument clears it"), not a toggle. There's no "away
+   with an empty message" path via bare `/away` — typing nothing *is*
+   the clear command.
+4. **Not written to scrollback or broadcast** — round 32 explicitly
+   scopes away-status visibility to "local presence views and
+   private-message feedback," neither of which exists yet (Track
+   5c's `/who`/`/names`, Track 5e's `/msg`). This round only builds
+   the state + a private confirmation to the user themselves; nothing
+   else consumes `PresenceRegistry.is_away`/`get_away_message` yet,
+   the same "ship plumbing ahead of its consumer" shape as several
+   earlier rounds.
+5. **Sending a message while away reminds, doesn't clear** (round 32,
+   point 6) — `send_loop` checks `presence.is_away` immediately after
+   a message is sent (not before, and not blocking the send) and
+   writes "(You are still marked away.)" if so.
+6. **Per-user chat timestamp preference (round 32, point 3) — found
+   to need no new work this round.** On inspection, `format_for_
+   display` (`netbbs.timeutil`) already accepts an `override_format`/
+   `override_timezone` parameter reserved for exactly this, per that
+   function's own docstring: "an eventual per-user value... nothing
+   calls these with real per-user values yet, but the parameters
+   exist now so wiring that in later needs no changes here." Wiring a
+   real per-user value through (via `netbbs.user_preferences`, round
+   38's generic store) is a small follow-up left for whenever
+   Track 5's UI actually needs a `/timestamps` command — not blocking
+   anything else in Track 5b, so not done speculatively here.
+7. **Testing:** `tests/test_chat_presence.py` (15 cases, library-level
+   `PresenceRegistry`: session counting, multi-session away sharing,
+   away clearing only on the *final* leave), `tests/test_chat_flow_
+   away.py` (8 cases: the command, scrollback/broadcast silence, the
+   send-while-away reminder), and `tests/test_login_presence.py` (2
+   cases: `handle_session` actually calls `enter`/`leave` around the
+   main menu, including the exception-safety path). Full suite
+   re-run after adding all three, catching and fixing two more
+   direct `_chat_loop`/`handle_session` call-site breaks across seven
+   existing test files from threading the new `presence` parameter
+   through (`test_chat_dispatch.py`, `test_chat_flow_moderation.py`,
+   `test_chat_action.py`, `test_chat_flow_nick.py`,
+   `test_terminal_sanitization.py`, `test_login_outcomes.py`,
+   `test_login_throttling.py`) — all caught immediately by the full
+   suite re-run, not left for later discovery (758 passed, 1
+   skipped) — actually run, not just syntax-checked.
+
+**Track 5b is now complete.** Track 5c (discovery: `/who`, `/names`,
+`/list`, `/whois`) is next per the sequencing plan.
+
+## Sign-off notes, round 43 (discovery commands — implemented)
+
+Track 5c: `/who`, `/names`, `/list`, `/whois`, per design doc rounds
+32/33. No new storage needed — Track 4's `get_vcard` and Track 5b's
+`PresenceRegistry` already provide everything this round reads from;
+this is purely new views over existing state.
+
+1. **`/names`/`/who` both operate on `ctx.channel`'s roster**, via a
+   new `_roster_usernames` helper that parses `ChatHub.participant_
+   ids`' opaque `"username:id(session)"` strings back into
+   deduplicated, sorted canonical usernames — the one place that
+   parsing happens for discovery purposes, mirroring how `/kick`/`/ban`
+   already parse the same convention to find live sessions to remove.
+   `/names` is one comma-separated line (alias-aware, via
+   `display_label`); `/who` is one line per person with an away
+   indicator where applicable — matching round 32/33's "compact
+   roster" vs. "more detailed presence view" framing exactly.
+2. **`/list` is a flat, sorted text dump** (pinned-first-then-
+   alphabetical, matching `list_boards`'s existing sort precedent),
+   not the interactive category-nested `pick_item` picker — a quick
+   reference from inside chat, not a second navigation UI competing
+   with the main menu's existing Chat browsing.
+3. **`/whois` reuses `get_vcard` (Track 4) via a newly extracted
+   `_write_vcard_detail` helper, shared with `/finger`** — both
+   commands rendered near-identical blocks before this round; now one
+   function renders it and `/whois` appends online/away/channel-
+   membership lines afterward. Works for offline/never-online
+   accounts too, same as `/finger` — a directory lookup, not an
+   online-only one.
+4. **A new `_channel_names_for_user` helper answers "which channels is
+   X currently in"** — `ChatHub` only ever exposed the reverse
+   direction (per-channel participant lists), so this iterates every
+   channel the *requesting* user can see (`meets_level`, the same
+   filter `/list` uses) and checks each one's roster for the target.
+   This *is* round 32/33's "must respect... hidden-channel visibility"
+   requirement for `/whois`, applied consistently now even though no
+   channel is actually hidden yet (Track 5g) — nothing to revisit
+   later, the filter is already in the right place.
+5. **Caught while writing tests, not a production bug:** `/whois`'s
+   online-status check reads `PresenceRegistry`, which only reflects
+   the *login* session count (`handle_session`'s `enter`/`leave`, round
+   42) — driving `_chat_loop` directly in tests, as this whole test
+   family already does, bypasses `login_flow` entirely, so a target
+   "in" a channel during a test isn't automatically "online" per
+   presence unless the test also calls `presence.enter` itself,
+   matching what a real connection actually does first. Fixed in the
+   test, not the code — the behavior is correct (online reflects being
+   logged in at all, not specifically being in a chat channel; a user
+   just browsing boards is just as online as one actively chatting,
+   per round 42's own reasoning).
+6. **Testing:** new `tests/test_chat_discovery.py` (13 cases: roster
+   listing and dedup across two sessions of the same account, away
+   indicators in `/who`, level-gating in `/list`, and `/whois`'s
+   online/away/channel-membership/bio-visibility behavior). Full suite
+   re-run after adding it (771 passed, 1 skipped) — actually run, not
+   just syntax-checked.
+
+**Track 5c is now complete — per Thiesi's instruction, this is the
+commit/push checkpoint.** Remaining Track 5 scope: 5d (channel
+switching: `/join`, `/leave` redefined, `/topic`), 5e (private
+messaging: `/msg`, `/private`, `/close`), 5f (completion), 5g
+(invite-only/hidden channels).

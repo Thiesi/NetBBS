@@ -20,10 +20,19 @@ from __future__ import annotations
 import asyncio
 from enum import Enum, auto
 
-from netbbs.auth.users import AuthError, User, authenticate_password_async
+from netbbs.auth.users import AuthError, User, authenticate_password_async, list_users
 from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
-from netbbs.chat import ChatHub
+from netbbs.chat import ChatHub, PresenceRegistry
+from netbbs.directory import (
+    MAX_BIO_LINES,
+    BioError,
+    get_bio,
+    get_vcard,
+    is_bio_visible,
+    set_bio,
+    set_bio_visible,
+)
 from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.file_flow import browse_file_areas
@@ -32,7 +41,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.throttle import LoginThrottle
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow, sanitize_text
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -67,6 +76,7 @@ async def handle_session(
     session: Session,
     db: Database,
     hub: ChatHub,
+    presence: PresenceRegistry,
     throttle: LoginThrottle,
     throttle_config: ThrottleConfig,
 ) -> None:
@@ -92,6 +102,15 @@ async def handle_session(
     budget, precisely because the risk this budget guards against
     (an attacker holding open many never-completing connections) no
     longer applies to it.
+
+    `presence` (design doc round 32, sign-off round 42) is entered
+    right before the main menu runs and left in a `finally` around it —
+    this is the one place in the codebase that knows "this account now
+    has one more/one fewer live connection", which `/away`'s "clears
+    only when the account's final session disconnects" behavior
+    depends on. Deliberately scoped to the authenticated portion only,
+    same reasoning as the login-throttle budget above: an
+    unauthenticated connection was never "present" as any account.
     """
     if not throttle.try_enter_unauthenticated():
         await session.write_line(
@@ -140,12 +159,18 @@ async def handle_session(
     if meets_level(user, _DEMO_ELEVATED_LEVEL):
         await session.write_line("(You have elevated access.)")
 
-    await _main_menu(session, db, hub, user)
+    presence.enter(user.username)
+    try:
+        await _main_menu(session, db, hub, presence, user)
+    finally:
+        presence.leave(user.username)
 
     await session.write_line("\r\nGoodbye!")
 
 
-async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+async def _main_menu(
+    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
+) -> None:
     """
     The main menu, now dispatching immediately on a single keystroke
     (`read_key`) rather than waiting for a full line + Enter — a direct
@@ -165,6 +190,8 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
                 menu_key("B", "oards"),
                 menu_key("C", "hat"),
                 menu_key("F", "ile areas"),
+                menu_key("D", "irectory"),
+                menu_key("P", "rofile"),
                 menu_key("L", "ogoff"),
             ]
         )
@@ -178,9 +205,13 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
         elif choice == "b":
             await _browse_boards(session, db, user)
         elif choice == "c":
-            await browse_channels(session, db, hub, user)
+            await browse_channels(session, db, hub, presence, user)
         elif choice == "f":
             await browse_file_areas(session, db, user)
+        elif choice == "d":
+            await _browse_directory(session, db, user)
+        elif choice == "p":
+            await _edit_profile(session, db, user)
         else:
             await session.write_line("Unknown choice.")
 
@@ -451,3 +482,120 @@ async def _render_post_page(session: Session, db: Database, board_name: str, pag
         # single-line fields above -- see sanitize_text's docstring.
         body = sanitize_text(post.body, allow_newlines=True)
         await session.write_line(reflow(body, width=session.terminal_width))
+
+
+# -- user directory & vCard/finger (design doc §13, sign-off round 38) ------
+
+
+async def _browse_directory(session: Session, db: Database, user: User) -> None:
+    """
+    The user directory: a table-style listing of every registered
+    account (`netbbs.auth.users.list_users`). Selecting an entry shows
+    their full finger/vCard detail (`_show_vcard`) — bio visibility is
+    per-target, not a directory-wide filter, so everyone appears in
+    the listing regardless of whether their bio itself is public.
+    """
+    users = list_users(db)
+    selected = await pick_item(
+        session,
+        users,
+        name_of=lambda u: u.username,
+        stable_id_of=lambda u: u.id,
+        description_of=lambda u: _directory_description(db, u),
+        title="User directory",
+        empty_message="No registered users yet.",
+    )
+    if selected is not None:
+        await _show_vcard(session, db, selected, user)
+
+
+def _directory_description(db: Database, target: User) -> str:
+    when = format_for_display(target.created_at, db)
+    bio_state = "public" if is_bio_visible(db, target) else "private"
+    return f"member since {when}, bio: {bio_state}"
+
+
+async def _show_vcard(session: Session, db: Database, target: User, requesting_user: User) -> None:
+    """finger-style detail view — `get_vcard` already resolves
+    visibility (always visible to yourself, otherwise only if the
+    target has opted in)."""
+    vcard = get_vcard(db, target, requesting_user=requesting_user)
+    when = format_for_display(vcard.created_at, db)
+    header = colored(sanitize_text(vcard.username), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(f"Member since: {when}")
+    if vcard.bio is not None:
+        await session.write_line(
+            reflow(sanitize_text(vcard.bio, allow_newlines=True), width=session.terminal_width)
+        )
+    else:
+        await session.write_line(colored("(no public bio)", fg_color=MUTED_COLOR))
+
+
+async def _edit_profile(session: Session, db: Database, user: User) -> None:
+    """
+    Edit your own vCard: the bio and its visibility toggle. Shows the
+    current state first, then a small sub-menu — matches this
+    codebase's existing "show state, then offer actions" shape (e.g.
+    `netbbs.net.file_flow._show_area`) rather than jumping straight
+    into an edit prompt.
+    """
+    current_bio = get_bio(db, user)
+    visible = is_bio_visible(db, user)
+
+    await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
+    if current_bio:
+        await session.write_line(
+            reflow(sanitize_text(current_bio, allow_newlines=True), width=session.terminal_width)
+        )
+    else:
+        await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
+    await session.write_line(f"Visibility: {'public' if visible else 'private'}")
+
+    options = "  ".join(
+        [menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack") + " (or Enter)"]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+    choice = (await session.read_key()).lower()
+    await session.write_line("")
+
+    if choice == "e":
+        await _edit_bio(session, db, user)
+    elif choice == "v":
+        await _toggle_bio_visibility(session, db, user, currently_visible=visible)
+
+
+async def _edit_bio(session: Session, db: Database, user: User) -> None:
+    """
+    Collects up to `MAX_BIO_LINES` lines via repeated `read_line`
+    calls, ending early on a blank line — there is no multi-line/
+    cursor-addressable text entry anywhere in this codebase yet (the
+    fullscreen editor is still-unbuilt Phase 2 Track 6), so this is
+    the same repeated-single-line-read shape every other multi-step
+    prompt here already uses. A blank first line clears the bio
+    entirely, rather than leaving it unchanged — choosing not to edit
+    at all is what the profile screen's own [B]ack option is for.
+    """
+    await session.write_line(f"\r\nEnter your bio, up to {MAX_BIO_LINES} lines. Blank line to finish.")
+    lines: list[str] = []
+    for _ in range(MAX_BIO_LINES):
+        line = (await session.read_line()).strip()
+        if not line:
+            break
+        lines.append(line)
+
+    try:
+        set_bio(db, user, "\n".join(lines))
+    except BioError as exc:
+        await session.write_line(colored(f"Could not save bio: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line("Bio updated.")
+
+
+async def _toggle_bio_visibility(
+    session: Session, db: Database, user: User, *, currently_visible: bool
+) -> None:
+    new_value = not currently_visible
+    set_bio_visible(db, user, new_value)
+    await session.write_line(f"Bio is now {'public' if new_value else 'private'}.")

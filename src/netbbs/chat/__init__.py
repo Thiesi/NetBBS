@@ -4,7 +4,10 @@ Local real-time chat: channels + broadcast hub.
 Local-only (design doc §15) — no Link yet. Channel IDs are
 content-addressed from day one (§7), same reasoning as boards.
 Moderator/permission grants and mute/ban/kick (§13, sign-off round 37)
-live in `netbbs.chat.moderation`.
+live in `netbbs.chat.moderation`; transparent display aliases (round
+32, sign-off round 41) live in `netbbs.chat.nick`; node-wide account
+presence/away state (round 32, sign-off round 42) lives in
+`netbbs.chat.presence`.
 """
 
 from netbbs.chat.channels import (
@@ -15,6 +18,8 @@ from netbbs.chat.channels import (
     list_channels,
 )
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.nick import MAX_NICK_LENGTH, NickError, display_label, get_nick, set_nick
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.moderation import (
     ChannelRestriction,
     ChatModerationError,
@@ -44,6 +49,12 @@ __all__ = [
     "get_channel_by_name",
     "list_channels",
     "ChatHub",
+    "MAX_NICK_LENGTH",
+    "NickError",
+    "display_label",
+    "get_nick",
+    "set_nick",
+    "PresenceRegistry",
     "ChannelRestriction",
     "ChatModerationError",
     "DurationError",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.chat import (
@@ -18,7 +19,11 @@ from netbbs.chat import (
     ChatHub,
     ChatModerationError,
     DurationError,
+    NickError,
+    PresenceRegistry,
     ban_user,
+    display_label,
+    get_nick,
     get_scrollback,
     is_banned,
     is_muted,
@@ -27,10 +32,12 @@ from netbbs.chat import (
     mute_user,
     parse_duration,
     record_message,
+    set_nick,
     unban_user,
     unmute_user,
 )
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
+from netbbs.directory import VCard, get_vcard
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -39,13 +46,21 @@ from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
 
-async def browse_channels(session: Session, db: Database, hub: ChatHub, user: User) -> None:
+async def browse_channels(
+    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
+) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
-    await _browse_channels_in_category(session, db, hub, user, category_id=None)
+    await _browse_channels_in_category(session, db, hub, presence, user, category_id=None)
 
 
 async def _browse_channels_in_category(
-    session: Session, db: Database, hub: ChatHub, user: User, *, category_id: int | None
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    user: User,
+    *,
+    category_id: int | None,
 ) -> None:
     """
     Browse channels within a category (or the top level), mirroring
@@ -79,7 +94,7 @@ async def _browse_channels_in_category(
             empty_message="No chat channels are available to you yet.",
         )
         if channel is not None:
-            await _chat_loop(session, db, hub, channel, user)
+            await _chat_loop(session, db, hub, presence, channel, user)
         return
 
     mixed: list[Category | Channel] = [*categories_here, *channels_here]
@@ -108,9 +123,9 @@ async def _browse_channels_in_category(
         return
 
     if isinstance(selected, Category):
-        await _browse_channels_in_category(session, db, hub, user, category_id=selected.id)
+        await _browse_channels_in_category(session, db, hub, presence, user, category_id=selected.id)
     else:
-        await _chat_loop(session, db, hub, selected, user)
+        await _chat_loop(session, db, hub, presence, selected, user)
 
 
 def _channel_description(hub: ChatHub, channel: Channel) -> str:
@@ -119,7 +134,24 @@ def _channel_description(hub: ChatHub, channel: Channel) -> str:
     return f"{base} ({online} online)".strip()
 
 
-def _render_scrollback_message(message: ChannelMessage) -> str:
+def _resolve_display_label(db: Database, author_label: str) -> str:
+    """
+    Best-effort live alias lookup for scrollback replay (design doc
+    round 32/41): there's no per-message nick snapshot — an alias is
+    presentation metadata looked up live, not stored history — so
+    replay shows the author's *current* alias, not whatever was set at
+    the original moment. Falls back to the stored canonical label if
+    the account can no longer be found (defensive; no account-deletion
+    feature exists yet to actually trigger this).
+    """
+    try:
+        author = get_user_by_username(db, author_label)
+    except AuthError:
+        return sanitize_text(author_label)
+    return sanitize_text(display_label(db, author))
+
+
+def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
     """
     Render a persisted `ChannelMessage` for replay on join, matching the
     live formatting `_chat_loop` itself uses for the same kind of event —
@@ -129,19 +161,102 @@ def _render_scrollback_message(message: ChannelMessage) -> str:
     ("this is what I just sent"), which doesn't carry any meaning when
     reading back history, possibly from a different session than whichever
     one originally sent it.
+
+    `join`/`leave`/`action`/plain-message kinds show the author's
+    *current* alias (`_resolve_display_label`) alongside their
+    canonical username — moderation kinds (`_VERB_BY_KIND`) and `nick`
+    itself deliberately don't: moderation/auditing always shows
+    canonical identity only (design doc round 32, point 7), and a
+    `nick` event's own body text already fully describes the change.
     """
-    author_label = sanitize_text(message.author_label)
     if message.kind == "join":
-        return colored(f"*** {author_label} has joined the channel.", fg_color=MUTED_COLOR)
+        return colored(
+            f"*** {_resolve_display_label(db, message.author_label)} has joined the channel.",
+            fg_color=MUTED_COLOR,
+        )
     if message.kind == "leave":
-        return colored(f"*** {author_label} has left the channel.", fg_color=MUTED_COLOR)
+        return colored(
+            f"*** {_resolve_display_label(db, message.author_label)} has left the channel.",
+            fg_color=MUTED_COLOR,
+        )
+    if message.kind == "action":
+        return colored(
+            f"* {_resolve_display_label(db, message.author_label)} {sanitize_text(message.body)}",
+            fg_color=MUTED_COLOR,
+        )
+    if message.kind == "nick":
+        return colored(
+            f"*** {sanitize_text(message.author_label)} {sanitize_text(message.body)}",
+            fg_color=MUTED_COLOR,
+        )
     if message.kind in _VERB_BY_KIND:
+        author_label = sanitize_text(message.author_label)
         detail = f" ({sanitize_text(message.body)})" if message.body else ""
         return colored(
             f"*** {author_label} was {_VERB_BY_KIND[message.kind]}{detail}.", fg_color=MUTED_COLOR
         )
-    label = colored(f"<{author_label}>", fg_color=ACCENT_COLOR)
+    label = colored(f"<{_resolve_display_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
     return f"{label} {sanitize_text(message.body)}"
+
+
+# -- command dispatch (design doc §13, sign-off round 39) -------------------
+
+
+@dataclass(frozen=True)
+class ChatCommandContext:
+    """Everything a slash-command handler might need, bundled into one
+    consistent shape — replaces what used to be a different ad hoc
+    positional-argument list per handler (Track 3/4's `/mute` etc. each
+    took their own subset of `session, db, hub, channel, user`;
+    `/finger` omitted `hub` entirely)."""
+
+    session: Session
+    db: Database
+    hub: ChatHub
+    presence: PresenceRegistry
+    channel: Channel
+    user: User
+    participant_id: str
+
+
+# A truthy return means "exit the chat loop after this command" — only
+# /quit's handler returns True. Everything else returns None
+# (implicitly, no explicit `return` needed), meaning "continue."
+# Chosen over raising a control-flow exception for quitting: an
+# explicit return contract reads more plainly than exception-driven
+# flow for what is, after all, the ordinary way to leave.
+CommandHandler = Callable[[ChatCommandContext, str], Awaitable[bool | None]]
+
+
+async def _handle_quit(ctx: ChatCommandContext, args: str) -> bool:
+    return True
+
+
+async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
+    names = ", ".join(f"/{name}" for name in sorted(_COMMANDS))
+    await ctx.session.write_line(colored(f"Available commands: {names}", fg_color=MUTED_COLOR))
+
+
+async def _dispatch_command(ctx: ChatCommandContext, line: str) -> bool:
+    """
+    `line` is known to start with `/` (checked by the caller). Any
+    such line is now always treated as a command attempt — looked up
+    in `_COMMANDS`, and if not found, "Unknown command" is shown and
+    nothing is broadcast. Previously (Track 3/4), an unrecognized `/x`
+    line fell all the way through to being sent as an ordinary chat
+    message, since the old ad hoc `if` chain only checked for the
+    specific commands it knew about — a typo'd command silently became
+    public chat text. Standard behavior for slash-command chat systems
+    (IRC/Discord/Slack all reserve leading `/` the same way).
+    """
+    command_word, _, rest = line[1:].partition(" ")
+    handler = _COMMANDS.get(command_word.lower())
+    if handler is None:
+        await ctx.session.write_line(
+            colored(f"Unknown command: /{command_word}", fg_color=MUTED_COLOR)
+        )
+        return False
+    return bool(await handler(ctx, rest))
 
 
 # -- mute/ban/kick (design doc §13, sign-off round 37) -----------------------
@@ -249,136 +364,426 @@ async def _kick_live_sessions(hub: ChatHub, channel: Channel, target: User, *, r
             await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason))
 
 
-async def _handle_mute(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User, args_str: str
-) -> None:
-    parts = args_str.split(maxsplit=1)
+async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
+    parts = args.split(maxsplit=1)
     if not parts:
-        await session.write_line(colored("Usage: /mute <user> [duration] [reason]", fg_color=MUTED_COLOR))
+        await ctx.session.write_line(colored("Usage: /mute <user> [duration] [reason]", fg_color=MUTED_COLOR))
         return
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
 
-    target = await _resolve_target(session, db, target_name)
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
     if target is None:
         return
 
     try:
-        mute_user(db, channel, target, duration=duration, reason=reason, muted_by=user)
+        mute_user(ctx.db, ctx.channel, target, duration=duration, reason=reason, muted_by=ctx.user)
     except ChatModerationError:
-        await session.write_line(
+        await ctx.session.write_line(
             colored("You do not have permission to mute in this channel.", fg_color=MUTED_COLOR)
         )
         return
 
-    detail = _moderation_detail(user.username, duration, reason)
-    await _announce_moderation(db, hub, channel, kind="mute", target_label=target.username, detail=detail)
+    detail = _moderation_detail(ctx.user.username, duration, reason)
+    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="mute", target_label=target.username, detail=detail)
 
 
-async def _handle_unmute(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User, args_str: str
-) -> None:
-    target_name = args_str.split(maxsplit=1)[0] if args_str.split() else ""
+async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
+    target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await session.write_line(colored("Usage: /unmute <user>", fg_color=MUTED_COLOR))
+        await ctx.session.write_line(colored("Usage: /unmute <user>", fg_color=MUTED_COLOR))
         return
 
-    target = await _resolve_target(session, db, target_name)
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
     if target is None:
         return
 
     try:
-        unmute_user(db, channel, target, unmuted_by=user)
+        unmute_user(ctx.db, ctx.channel, target, unmuted_by=ctx.user)
     except ChatModerationError:
-        await session.write_line(
+        await ctx.session.write_line(
             colored("You do not have permission to unmute in this channel.", fg_color=MUTED_COLOR)
         )
         return
 
-    detail = _moderation_detail(user.username, None, None)
-    await _announce_moderation(db, hub, channel, kind="unmute", target_label=target.username, detail=detail)
+    detail = _moderation_detail(ctx.user.username, None, None)
+    await _announce_moderation(
+        ctx.db, ctx.hub, ctx.channel, kind="unmute", target_label=target.username, detail=detail
+    )
 
 
-async def _handle_ban(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User, args_str: str
-) -> None:
-    parts = args_str.split(maxsplit=1)
+async def _handle_ban(ctx: ChatCommandContext, args: str) -> None:
+    parts = args.split(maxsplit=1)
     if not parts:
-        await session.write_line(colored("Usage: /ban <user> [duration] [reason]", fg_color=MUTED_COLOR))
+        await ctx.session.write_line(colored("Usage: /ban <user> [duration] [reason]", fg_color=MUTED_COLOR))
         return
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
 
-    target = await _resolve_target(session, db, target_name)
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
     if target is None:
         return
 
     try:
-        ban_user(db, channel, target, duration=duration, reason=reason, banned_by=user)
+        ban_user(ctx.db, ctx.channel, target, duration=duration, reason=reason, banned_by=ctx.user)
     except ChatModerationError:
-        await session.write_line(
+        await ctx.session.write_line(
             colored("You do not have permission to ban in this channel.", fg_color=MUTED_COLOR)
         )
         return
 
-    detail = _moderation_detail(user.username, duration, reason)
-    await _announce_moderation(db, hub, channel, kind="ban", target_label=target.username, detail=detail)
-    await _kick_live_sessions(hub, channel, target, reason="banned")
+    detail = _moderation_detail(ctx.user.username, duration, reason)
+    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="ban", target_label=target.username, detail=detail)
+    await _kick_live_sessions(ctx.hub, ctx.channel, target, reason="banned")
 
 
-async def _handle_unban(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User, args_str: str
-) -> None:
-    target_name = args_str.split(maxsplit=1)[0] if args_str.split() else ""
+async def _handle_unban(ctx: ChatCommandContext, args: str) -> None:
+    target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await session.write_line(colored("Usage: /unban <user>", fg_color=MUTED_COLOR))
+        await ctx.session.write_line(colored("Usage: /unban <user>", fg_color=MUTED_COLOR))
         return
 
-    target = await _resolve_target(session, db, target_name)
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
     if target is None:
         return
 
     try:
-        unban_user(db, channel, target, unbanned_by=user)
+        unban_user(ctx.db, ctx.channel, target, unbanned_by=ctx.user)
     except ChatModerationError:
-        await session.write_line(
+        await ctx.session.write_line(
             colored("You do not have permission to unban in this channel.", fg_color=MUTED_COLOR)
         )
         return
 
-    detail = _moderation_detail(user.username, None, None)
-    await _announce_moderation(db, hub, channel, kind="unban", target_label=target.username, detail=detail)
+    detail = _moderation_detail(ctx.user.username, None, None)
+    await _announce_moderation(
+        ctx.db, ctx.hub, ctx.channel, kind="unban", target_label=target.username, detail=detail
+    )
 
 
-async def _handle_kick(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User, args_str: str
-) -> None:
-    parts = args_str.split(maxsplit=1)
+async def _handle_kick(ctx: ChatCommandContext, args: str) -> None:
+    parts = args.split(maxsplit=1)
     if not parts:
-        await session.write_line(colored("Usage: /kick <user> [reason]", fg_color=MUTED_COLOR))
+        await ctx.session.write_line(colored("Usage: /kick <user> [reason]", fg_color=MUTED_COLOR))
         return
     target_name = parts[0]
     reason = parts[1] if len(parts) > 1 else None
 
-    target = await _resolve_target(session, db, target_name)
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
     if target is None:
         return
 
     try:
-        kick_user(db, channel, target, reason=reason, kicked_by=user)
+        kick_user(ctx.db, ctx.channel, target, reason=reason, kicked_by=ctx.user)
     except ChatModerationError:
-        await session.write_line(
+        await ctx.session.write_line(
             colored("You do not have permission to kick in this channel.", fg_color=MUTED_COLOR)
         )
         return
 
-    detail = _moderation_detail(user.username, None, reason)
-    await _announce_moderation(db, hub, channel, kind="kick", target_label=target.username, detail=detail)
-    await _kick_live_sessions(hub, channel, target, reason="kicked")
+    detail = _moderation_detail(ctx.user.username, None, reason)
+    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="kick", target_label=target.username, detail=detail)
+    await _kick_live_sessions(ctx.hub, ctx.channel, target, reason="kicked")
+
+
+async def _write_vcard_detail(session: Session, db: Database, vcard: VCard) -> None:
+    """Shared by `/finger` and `/whois` (design doc round 32/43) — the
+    identity/bio block both commands show identically; `/whois`
+    appends online/away/channel-membership lines of its own after
+    calling this."""
+    when = format_for_display(vcard.created_at, db)
+    await session.write_line(colored(f"\r\n{sanitize_text(vcard.username)}", fg_color=ACCENT_COLOR, bold=True))
+    await session.write_line(f"Member since: {when}")
+    if vcard.bio is not None:
+        await session.write_line(sanitize_text(vcard.bio, allow_newlines=True))
+    else:
+        await session.write_line(colored("(no public bio)", fg_color=MUTED_COLOR))
+
+
+async def _handle_finger(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/finger <user>` (design doc §13: "accessible from the directory,
+    main menu, and chat" — this is the chat entry point). Shown only
+    to the requester, not broadcast — a lookup, not a channel event.
+    """
+    target_name = args.split(maxsplit=1)[0] if args.split() else ""
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /finger <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    vcard = get_vcard(ctx.db, target, requesting_user=ctx.user)
+    await _write_vcard_detail(ctx.session, ctx.db, vcard)
+
+
+async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/me <action>` (design doc round 32, point 4): a typed action
+    event ("* alice waves"), stored and transported as a distinct
+    event kind rather than encoded as specially formatted ordinary
+    text. Rendered identically for the actor and everyone else —
+    unlike a regular chat message, there's no "my own words" distinction
+    worth making for a shared narrative-style action.
+    """
+    if not args:
+        await ctx.session.write_line(colored("Usage: /me <action>", fg_color=MUTED_COLOR))
+        return
+
+    label = sanitize_text(display_label(ctx.db, ctx.user))
+    notice = colored(f"* {label} {sanitize_text(args)}", fg_color=MUTED_COLOR)
+
+    await ctx.session.write_line(notice)
+    record_message(
+        ctx.db,
+        ctx.channel,
+        kind="action",
+        author_label=ctx.user.username,
+        author_fingerprint=ctx.user.fingerprint,
+        body=args,
+    )
+    await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
+
+
+async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/nick <name>` sets a transparent display alias (design doc round
+    32, points 7-10); `/nick off` clears it; `/nick` with no argument
+    shows the current one. Nickname changes are their own typed
+    scrollback event, recorded for the channel this command was run
+    in — announced the same way join/leave/action events are.
+    """
+    if not args:
+        current = get_nick(ctx.db, ctx.user)
+        if current:
+            await ctx.session.write_line(f"Your current alias: {sanitize_text(current)}")
+        else:
+            await ctx.session.write_line(
+                colored("Usage: /nick <name> (or /nick off to clear)", fg_color=MUTED_COLOR)
+            )
+        return
+
+    if args.lower() == "off":
+        set_nick(ctx.db, ctx.user, "")
+        await _announce_nick_change(ctx, new_nick=None)
+        return
+
+    try:
+        set_nick(ctx.db, ctx.user, args)
+    except NickError as exc:
+        await ctx.session.write_line(colored(f"Could not set alias: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    await _announce_nick_change(ctx, new_nick=args)
+
+
+async def _announce_nick_change(ctx: ChatCommandContext, *, new_nick: str | None) -> None:
+    username = sanitize_text(ctx.user.username)
+    if new_nick is not None:
+        body = f"is now known as {sanitize_text(new_nick)}|{username}"
+    else:
+        body = "is no longer using an alias"
+    notice = colored(f"*** {username} {body}", fg_color=MUTED_COLOR)
+
+    await ctx.session.write_line(notice)
+    record_message(ctx.db, ctx.channel, kind="nick", author_label=ctx.user.username, body=body)
+    await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
+
+
+async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/away [message]` (design doc round 32, point 5): sets a node-wide
+    away status shared across every one of the account's active
+    sessions; `/away` with no argument clears it. Not written to
+    channel scrollback or broadcast — away status is "visible through
+    local presence views and private-message feedback" per the design
+    doc, neither of which exist yet (Track 5c/5e), so for now this is
+    a private confirmation to the user themselves only.
+    """
+    if not args:
+        if ctx.presence.is_away(ctx.user.username):
+            ctx.presence.clear_away(ctx.user.username)
+            await ctx.session.write_line(colored("You are no longer marked away.", fg_color=MUTED_COLOR))
+        else:
+            await ctx.session.write_line(colored("You are not currently marked away.", fg_color=MUTED_COLOR))
+        return
+
+    ctx.presence.set_away(ctx.user.username, args)
+    await ctx.session.write_line(
+        colored(f"You are now marked away: {sanitize_text(args)}", fg_color=MUTED_COLOR)
+    )
+
+
+# -- discovery (design doc rounds 32/33, sign-off round 43) ------------------
+
+
+def _lookup_user_quietly(db: Database, username: str) -> User | None:
+    """Like `get_user_by_username`, but returns `None` on a miss
+    instead of raising/writing a message — for internal roster
+    iteration (`/names`/`/who`), where `username` came from a live
+    `participant_id`, not user-typed input, so a miss would be a bug
+    to shrug off silently, not something to report back to the user."""
+    try:
+        return get_user_by_username(db, username)
+    except AuthError:
+        return None
+
+
+def _roster_usernames(hub: ChatHub, channel: Channel) -> list[str]:
+    """Every canonical username currently present in `channel`,
+    deduplicated (a user connected via two sessions appears once) and
+    sorted case-insensitively. `ChatHub` only exposes opaque
+    `participant_id` strings; this is the one place `chat_flow.py`'s
+    own `"username:id(session)"` convention gets parsed back out for
+    discovery purposes."""
+    usernames = {pid.split(":", 1)[0] for pid in hub.participant_ids(channel.name)}
+    return sorted(usernames, key=str.lower)
+
+
+async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
+    """`/names` (design doc round 32/33): a compact, one-line roster
+    of `ctx.channel`."""
+    usernames = _roster_usernames(ctx.hub, ctx.channel)
+    if not usernames:
+        await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
+        return
+    labels = []
+    for username in usernames:
+        user = _lookup_user_quietly(ctx.db, username)
+        if user is not None:
+            labels.append(sanitize_text(display_label(ctx.db, user)))
+    await ctx.session.write_line(", ".join(labels))
+
+
+async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
+    """`/who` (design doc round 32/33): the more detailed presence
+    view of `ctx.channel` — one line per person, with an away
+    indicator where applicable."""
+    usernames = _roster_usernames(ctx.hub, ctx.channel)
+    if not usernames:
+        await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
+        return
+    for username in usernames:
+        user = _lookup_user_quietly(ctx.db, username)
+        if user is None:
+            continue
+        label = sanitize_text(display_label(ctx.db, user))
+        if ctx.presence.is_away(username):
+            message = ctx.presence.get_away_message(username)
+            suffix = f" (away: {sanitize_text(message)})" if message else " (away)"
+        else:
+            suffix = ""
+        await ctx.session.write_line(f"{label}{suffix}")
+
+
+async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
+    """`/list` (design doc round 32/33): every channel `ctx.user`'s
+    level allows, "exposes only channels visible to the requesting
+    user." Flat and sorted pinned-first-then-alphabetical, matching
+    `list_boards`/`_browse_channels_in_category`'s existing sort
+    precedent — a quick text reference from inside chat, not the
+    interactive category-nested picker the main menu's Chat option
+    already provides."""
+    visible = [c for c in list_channels(ctx.db) if meets_level(ctx.user, c.min_level)]
+    if not visible:
+        await ctx.session.write_line(colored("No channels are available to you.", fg_color=MUTED_COLOR))
+        return
+    visible.sort(key=lambda c: (not c.pinned, c.name.lower()))
+    for channel in visible:
+        online = ctx.hub.participant_count(channel.name)
+        description = f" - {sanitize_text(channel.description)}" if channel.description else ""
+        await ctx.session.write_line(
+            f"#{sanitize_text(channel.name)} ({online} online){description}"
+        )
+
+
+def _channel_names_for_user(
+    hub: ChatHub, db: Database, requesting_user: User, target_username: str
+) -> list[str]:
+    """
+    Every channel `target_username` currently has a live session in,
+    restricted to channels `requesting_user` can themselves see
+    (`meets_level` — the same filter `/list` uses). This *is* the
+    "hidden-channel visibility" `/whois` must respect (design doc
+    round 32/33), applied consistently now even though no channel is
+    actually hidden yet (Track 5g).
+
+    `ChatHub` has no reverse "which channels is this user in" index —
+    only per-channel participant lists — so this checks every visible
+    channel's roster in turn. O(channels × participants); fine at this
+    project's declared scale (§14).
+    """
+    visible = [c for c in list_channels(db) if meets_level(requesting_user, c.min_level)]
+    names = []
+    for channel in visible:
+        if any(pid.startswith(f"{target_username}:") for pid in hub.participant_ids(channel.name)):
+            names.append(channel.name)
+    return names
+
+
+async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/whois <user>` (design doc round 32/33): reuses `get_vcard`
+    (Track 4) for the identity/bio block (`_write_vcard_detail`,
+    shared with `/finger`), then adds presence info `/finger` doesn't
+    have — online/offline, away status, and which currently-visible
+    channels the target is in. Works for offline/never-online
+    accounts too, same as `/finger` — a directory lookup, not an
+    online-only one.
+    """
+    target_name = args.split(maxsplit=1)[0] if args.split() else ""
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /whois <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    vcard = get_vcard(ctx.db, target, requesting_user=ctx.user)
+    await _write_vcard_detail(ctx.session, ctx.db, vcard)
+
+    online = ctx.presence.is_online(target.username)
+    await ctx.session.write_line(f"Status: {'online' if online else 'offline'}")
+    if ctx.presence.is_away(target.username):
+        message = ctx.presence.get_away_message(target.username)
+        await ctx.session.write_line(f"Away: {sanitize_text(message)}" if message else "Away")
+
+    channel_names = _channel_names_for_user(ctx.hub, ctx.db, ctx.user, target.username)
+    if channel_names:
+        joined = ", ".join(f"#{sanitize_text(name)}" for name in channel_names)
+        await ctx.session.write_line(f"Channels: {joined}")
+
+
+_COMMANDS: dict[str, CommandHandler] = {
+    "quit": _handle_quit,
+    "leave": _handle_quit,
+    "help": _handle_help,
+    "me": _handle_me,
+    "nick": _handle_nick,
+    "away": _handle_away,
+    "mute": _handle_mute,
+    "unmute": _handle_unmute,
+    "ban": _handle_ban,
+    "unban": _handle_unban,
+    "kick": _handle_kick,
+    "finger": _handle_finger,
+    "names": _handle_names,
+    "who": _handle_who,
+    "list": _handle_list,
+    "whois": _handle_whois,
+}
 
 
 async def _chat_loop(
-    session: Session, db: Database, hub: ChatHub, channel: Channel, user: User
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    channel: Channel,
+    user: User,
 ) -> None:
     """
     Real-time chat within `channel`, until the user types /quit.
@@ -442,7 +847,6 @@ async def _chat_loop(
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
 
-    username = sanitize_text(user.username)
     channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
     quit_hint = menu_key("/quit", " to leave")
 
@@ -450,7 +854,7 @@ async def _chat_loop(
     if scrollback:
         await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
         for message in scrollback:
-            await session.write_line(_render_scrollback_message(message))
+            await session.write_line(_render_scrollback_message(db, message))
         # Round 19, point 5: even bounded persistence is a different
         # promise than pure ephemeral chat — worth surfacing explicitly
         # rather than leaving as an internal implementation detail.
@@ -462,16 +866,17 @@ async def _chat_loop(
         )
 
     await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
-    # author_label is stored raw here (user.username, not the sanitized
-    # `username` local) -- sanitize on output, not on storage, per
+    # author_label is stored raw here (user.username, not a sanitized/
+    # alias-aware label) -- sanitize on output, not on storage, per
     # sanitize_text's docstring; only the broadcast text below is
-    # actually rendered to a terminal.
+    # actually rendered to a terminal. display_label looked up fresh
+    # here (not cached) since it can change mid-session via /nick.
     record_message(
         db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
     )
     await hub.broadcast(
         channel.name,
-        colored(f"*** {username} has joined the channel.", fg_color=MUTED_COLOR),
+        colored(f"*** {sanitize_text(display_label(db, user))} has joined the channel.", fg_color=MUTED_COLOR),
         exclude={participant_id},
     )
 
@@ -490,22 +895,19 @@ async def _chat_loop(
             line = (await session.read_line()).strip()
             if not line:
                 continue
-            if line.lower() in ("/quit", "/leave"):
-                return
-            if line.lower().startswith("/mute "):
-                await _handle_mute(session, db, hub, channel, user, line[len("/mute "):])
-                continue
-            if line.lower().startswith("/unmute "):
-                await _handle_unmute(session, db, hub, channel, user, line[len("/unmute "):])
-                continue
-            if line.lower().startswith("/ban "):
-                await _handle_ban(session, db, hub, channel, user, line[len("/ban "):])
-                continue
-            if line.lower().startswith("/unban "):
-                await _handle_unban(session, db, hub, channel, user, line[len("/unban "):])
-                continue
-            if line.lower().startswith("/kick "):
-                await _handle_kick(session, db, hub, channel, user, line[len("/kick "):])
+            if line.startswith("/"):
+                ctx = ChatCommandContext(
+                    session=session,
+                    db=db,
+                    hub=hub,
+                    presence=presence,
+                    channel=channel,
+                    user=user,
+                    participant_id=participant_id,
+                )
+                should_exit = await _dispatch_command(ctx, line)
+                if should_exit:
+                    return
                 continue
 
             restriction = is_muted(db, channel, user)
@@ -530,8 +932,12 @@ async def _chat_loop(
             # can't be done as a single shared broadcast string the way
             # join/leave notices are, since it's genuinely different
             # text per recipient.
-            self_label = colored(f"<{username}>", fg_color=SELF_COLOR, bold=True)
-            others_label = colored(f"<{username}>", fg_color=ACCENT_COLOR)
+            # Looked up fresh on every message, not cached from join
+            # time -- an alias set via /nick mid-session must show up
+            # immediately, not just after the next rejoin.
+            current_label = sanitize_text(display_label(db, user))
+            self_label = colored(f"<{current_label}>", fg_color=SELF_COLOR, bold=True)
+            others_label = colored(f"<{current_label}>", fg_color=ACCENT_COLOR)
             # Sanitized once here, used for both the direct self-write
             # and the broadcast -- receive_loop (above) writes whatever
             # arrives from the hub queue as-is, with no sanitization of
@@ -552,6 +958,13 @@ async def _chat_loop(
             await hub.broadcast(
                 channel.name, f"{others_label} {displayed_line}", exclude={participant_id}
             )
+            # Design doc round 32, point 6: sending a message does not
+            # clear away state -- a user may intentionally remain away
+            # while briefly responding. Reminded, not silently changed.
+            if presence.is_away(user.username):
+                await session.write_line(
+                    colored("(You are still marked away.)", fg_color=MUTED_COLOR)
+                )
 
     receive_task = asyncio.create_task(receive_loop())
     send_task = asyncio.create_task(send_loop())
@@ -576,6 +989,6 @@ async def _chat_loop(
         )
         await hub.broadcast(
             channel.name,
-            colored(f"*** {username} has left the channel.", fg_color=MUTED_COLOR),
+            colored(f"*** {sanitize_text(display_label(db, user))} has left the channel.", fg_color=MUTED_COLOR),
             exclude={participant_id},
         )

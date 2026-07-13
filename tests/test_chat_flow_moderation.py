@@ -20,6 +20,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
@@ -75,6 +76,11 @@ def hub():
 
 
 @pytest.fixture
+def presence():
+    return PresenceRegistry()
+
+
+@pytest.fixture
 def sysop(db):
     return create_user(db, "sysop", password="hunter2", user_level=100)
 
@@ -101,14 +107,14 @@ def _written_text(session: FakeSession) -> str:
 # -- kick, while target is present ----------------------------------------
 
 
-def test_kick_forces_out_a_present_target(db, hub, sysop, bob, channel):
+def test_kick_forces_out_a_present_target(db, hub, presence, sysop, bob, channel):
     async def scenario():
         target_session = FakeSession()  # never types anything
-        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, channel, bob))
+        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, presence, channel, bob))
         await asyncio.sleep(0)  # let target actually join before the kick is issued
 
         mod_session = FakeSession(["/kick bob disruptive", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
 
         await asyncio.wait_for(target_task, timeout=2)
         return target_session, mod_session
@@ -122,21 +128,21 @@ def test_kick_forces_out_a_present_target(db, hub, sysop, bob, channel):
     assert any(m.kind == "kick" for m in scrollback)
 
 
-def test_kick_notice_is_broadcast_to_others(db, hub, sysop, bob, channel):
+def test_kick_notice_is_broadcast_to_others(db, hub, presence, sysop, bob, channel):
     async def scenario():
         target_session = FakeSession()
-        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, channel, bob))
+        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, presence, channel, bob))
         await asyncio.sleep(0)
 
         carol = create_user(db, "carol", password="hunter2", user_level=10)
         bystander_session = FakeSession()
         bystander_task = asyncio.create_task(
-            chat_flow._chat_loop(bystander_session, db, hub, channel, carol)
+            chat_flow._chat_loop(bystander_session, db, hub, presence, channel, carol)
         )
         await asyncio.sleep(0)
 
         mod_session = FakeSession(["/kick bob spamming", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
         await asyncio.wait_for(target_task, timeout=2)
 
         bystander_task.cancel()
@@ -150,14 +156,14 @@ def test_kick_notice_is_broadcast_to_others(db, hub, sysop, bob, channel):
 # -- ban, while target is present ------------------------------------------
 
 
-def test_ban_forces_out_a_present_target(db, hub, sysop, bob, channel):
+def test_ban_forces_out_a_present_target(db, hub, presence, sysop, bob, channel):
     async def scenario():
         target_session = FakeSession()
-        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, channel, bob))
+        target_task = asyncio.create_task(chat_flow._chat_loop(target_session, db, hub, presence, channel, bob))
         await asyncio.sleep(0)
 
         mod_session = FakeSession(["/ban bob 10m abuse", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
 
         await asyncio.wait_for(target_task, timeout=2)
         return target_session
@@ -166,13 +172,13 @@ def test_ban_forces_out_a_present_target(db, hub, sysop, bob, channel):
     assert "banned" in _written_text(target_session)
 
 
-def test_banned_user_cannot_rejoin(db, hub, sysop, bob, channel):
+def test_banned_user_cannot_rejoin(db, hub, presence, sysop, bob, channel):
     async def scenario():
         mod_session = FakeSession(["/ban bob abuse", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
 
         rejoin_session = FakeSession(["/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(rejoin_session, db, hub, channel, bob), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(rejoin_session, db, hub, presence, channel, bob), timeout=2)
         return rejoin_session
 
     rejoin_session = asyncio.run(scenario())
@@ -183,13 +189,13 @@ def test_banned_user_cannot_rejoin(db, hub, sysop, bob, channel):
 # -- mute -------------------------------------------------------------------
 
 
-def test_muted_user_message_is_not_broadcast(db, hub, sysop, bob, channel):
+def test_muted_user_message_is_not_broadcast(db, hub, presence, sysop, bob, channel):
     async def scenario():
         mod_session = FakeSession(["/mute bob spamming", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
 
         target_session = FakeSession(["hello everyone", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(target_session, db, hub, channel, bob), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(target_session, db, hub, presence, channel, bob), timeout=2)
         return target_session
 
     target_session = asyncio.run(scenario())
@@ -199,13 +205,13 @@ def test_muted_user_message_is_not_broadcast(db, hub, sysop, bob, channel):
     assert not any(m.kind == "message" and m.body == "hello everyone" for m in scrollback)
 
 
-def test_unmuted_user_can_send_again(db, hub, sysop, bob, channel):
+def test_unmuted_user_can_send_again(db, hub, presence, sysop, bob, channel):
     async def scenario():
         mod_session = FakeSession(["/mute bob", "/unmute bob", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, channel, sysop), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, channel, sysop), timeout=2)
 
         target_session = FakeSession(["hello again", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(target_session, db, hub, channel, bob), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(target_session, db, hub, presence, channel, bob), timeout=2)
 
     asyncio.run(scenario())
     scrollback = get_scrollback(db, channel)
@@ -215,11 +221,54 @@ def test_unmuted_user_can_send_again(db, hub, sysop, bob, channel):
 # -- permission denial via the real command path ---------------------------
 
 
-def test_non_moderator_cannot_kick(db, hub, bob, channel):
+def test_non_moderator_cannot_kick(db, hub, presence, bob, channel):
     async def scenario():
         session = FakeSession(["/kick sysop nope", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, channel, bob), timeout=2)
+        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, bob), timeout=2)
         return session
 
     session = asyncio.run(scenario())
     assert "do not have permission" in _written_text(session)
+
+
+# -- /finger (design doc §13, sign-off round 38) ---------------------------
+
+
+def test_finger_shows_public_bio(db, hub, presence, sysop, bob, channel):
+    from netbbs.directory import set_bio, set_bio_visible
+
+    set_bio(db, bob, "Retro computing enthusiast")
+    set_bio_visible(db, bob, True)
+
+    async def scenario():
+        session = FakeSession(["/finger bob", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, sysop), timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "Retro computing enthusiast" in _written_text(session)
+
+
+def test_finger_hides_private_bio(db, hub, presence, sysop, bob, channel):
+    from netbbs.directory import set_bio
+
+    set_bio(db, bob, "Secret hobby list")
+
+    async def scenario():
+        session = FakeSession(["/finger bob", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, sysop), timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "Secret hobby list" not in _written_text(session)
+    assert "no public bio" in _written_text(session)
+
+
+def test_finger_unknown_user_shows_friendly_message(db, hub, presence, sysop, channel):
+    async def scenario():
+        session = FakeSession(["/finger nosuchuser", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, sysop), timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "No such user" in _written_text(session)

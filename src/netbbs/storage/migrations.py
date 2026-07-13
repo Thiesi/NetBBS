@@ -543,4 +543,88 @@ MIGRATIONS = [
             ON channel_restrictions(channel_id, user_id, kind);
         """,
     ),
+    Migration(
+        description=(
+            "Generic per-user preference store (design doc §13, round "
+            "38) -- a per-user mirror of node_config, backing the "
+            "vCard bio/visibility fields now and any future per-user "
+            "setting (e.g. a per-user chat timestamp preference, "
+            "round 32) without needing its own storage mechanism."
+        ),
+        sql="""
+        CREATE TABLE user_preferences (
+            user_id  INTEGER NOT NULL REFERENCES users(id),
+            key      TEXT NOT NULL,
+            value    TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
+        );
+        """,
+    ),
+    Migration(
+        description=(
+            "Widens channel_messages.kind's CHECK constraint again to "
+            "admit 'action' (/me, design doc round 32/40) -- same "
+            "standard SQLite table-rebuild as round 37's widening, "
+            "since there's still no ALTER TABLE for changing a CHECK "
+            "in place. Deliberately widened only for what this round "
+            "needs, not speculatively for /nick's not-yet-designed "
+            "event kind too -- see round 40's sign-off note."
+        ),
+        sql="""
+        CREATE TABLE channel_messages_new (
+            id                  INTEGER PRIMARY KEY,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            kind                TEXT NOT NULL CHECK (
+                kind IN ('message', 'join', 'leave', 'mute', 'unmute', 'ban', 'unban', 'kick', 'action')
+            ),
+            author_label        TEXT NOT NULL,
+            author_fingerprint  TEXT,
+            body                TEXT,
+            created_at          TEXT NOT NULL
+        );
+
+        INSERT INTO channel_messages_new
+            SELECT id, channel_id, kind, author_label, author_fingerprint, body, created_at
+            FROM channel_messages;
+
+        DROP TABLE channel_messages;
+
+        ALTER TABLE channel_messages_new RENAME TO channel_messages;
+
+        CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
+        """,
+    ),
+    Migration(
+        description=(
+            "Widens channel_messages.kind's CHECK constraint again to "
+            "admit 'nick' (/nick, design doc round 32/41) -- same "
+            "standard SQLite table-rebuild pattern as rounds 37/40."
+        ),
+        sql="""
+        CREATE TABLE channel_messages_new (
+            id                  INTEGER PRIMARY KEY,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            kind                TEXT NOT NULL CHECK (
+                kind IN (
+                    'message', 'join', 'leave', 'mute', 'unmute', 'ban', 'unban', 'kick',
+                    'action', 'nick'
+                )
+            ),
+            author_label        TEXT NOT NULL,
+            author_fingerprint  TEXT,
+            body                TEXT,
+            created_at          TEXT NOT NULL
+        );
+
+        INSERT INTO channel_messages_new
+            SELECT id, channel_id, kind, author_label, author_fingerprint, body, created_at
+            FROM channel_messages;
+
+        DROP TABLE channel_messages;
+
+        ALTER TABLE channel_messages_new RENAME TO channel_messages;
+
+        CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
+        """,
+    ),
 ]
