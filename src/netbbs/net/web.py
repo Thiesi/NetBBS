@@ -250,12 +250,13 @@ class WebServer:
     intended usage as `netbbs.net.telnet.TelnetServer`/
     `netbbs.net.ssh.SSHServer`.
 
-    Browser websocket requests must carry an approved `Origin`. By default,
-    HTTP and HTTPS origins whose authority exactly matches the request Host
-    are accepted. Deployments needing a different public origin (for example,
+    Supplied browser `Origin` headers must be approved. By default, HTTP and
+    HTTPS origins whose authority exactly matches the request Host are
+    accepted. Deployments needing a different public origin (for example,
     because a reverse proxy rewrites Host) can pass an explicit allowlist.
-    Requests without Origin are deliberately rejected; the bundled client is
-    browser-based and always sends one.
+    Requests without Origin are accepted deliberately for non-browser clients;
+    browsers send Origin for websocket handshakes, so this does not weaken the
+    cross-site protection the check is intended to provide.
     """
 
     def __init__(
@@ -318,7 +319,7 @@ class WebServer:
     def _origin_is_allowed(self, request: web.Request) -> bool:
         origin = request.headers.get("Origin")
         if origin is None:
-            return False
+            return True
         normalized = origin.rstrip("/")
         if self._allowed_origins is not None:
             return normalized in self._allowed_origins
