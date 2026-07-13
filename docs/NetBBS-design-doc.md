@@ -225,7 +225,6 @@ Channel traffic retains bounded channel scrollback. Private `/msg` conversations
 
 Phase 5 carries typed chat events (`message`, `action`, `private`, presence and alias changes) over the authenticated Noise transport. Live `/msg` and `/private` remain distinct from asynchronous Link messages and do not silently fall back to store-and-forward delivery.
 
-
 ## 9. File areas
 
 - **Node-local**, not replicated/synced across NetBBS Link.
@@ -310,7 +309,6 @@ what caused the original rewrite.
   (seconds/minutes/hours/days/weeks/years). All actions logged and echoed
   in-channel for transparency.
 - Chat moderators (non-SysOp) can `kick`/`mute`/`ban` within their scope.
-
 
 **Channel membership and invitations:**
 - New `manage_members` permission, deliberately separate from `edit`: membership management is authorization, not metadata editing.
@@ -493,7 +491,6 @@ any Link work begins, matching Thiesi's actual primary deployment target.
 - **Local chat command set and conversation UX:** `/private` (with `/query` compatibility alias), `/close`, `/who`, `/whois`, `/join`, `/leave`, `/names`, `/list`, and local `/topic`; one active channel per session in this phase.
 - **Command and identity completion:** permission-aware slash-command tab completion plus visibility-aware canonical-username completion for commands that address users.
 - **Invite-only/hidden local channels:** independent visibility and join-policy controls, pending invitations with expiry, explicit acceptance, and a new `manage_members` permission.
-
 - SysOp admin tools (user/board/node management, beyond blocklists)
 - ANSI art support for login/welcome screens
 - **Local real-time private messages (`/msg`)**: online-only, node-wide private chat between currently connected users. Private messages are visually distinct from channel traffic, are not written to channel scrollback, and remain intentionally separate from asynchronous Link messages (Phase 3).
@@ -501,7 +498,6 @@ any Link work begins, matching Thiesi's actual primary deployment target.
 - **Chat action events (`/me`)**: first-class action events stored distinctly from ordinary chat messages and rendered in IRC style.
 - **Local away state (`/away`)**: node-wide away status with optional message, shared across all active sessions, surfaced through presence and private-message feedback.
 - **Transparent chat display aliases (`/nick`)**: optional persistent aliases that never replace canonical identity. Chat always renders both alias and canonical username; moderation, permissions, blocking, and addressing continue to use canonical identity.
-
 - The TUI half of the rendering framework — a transport-independent
   screen-buffer/diff abstraction (moved from Phase 1; see round 26
   sign-off note) — plus the fullscreen editor (see editor implementation
@@ -545,11 +541,9 @@ risk profile.
 - Real-time Link-wide chat (separate low-latency path per §8)
 - Link-wide `/private`, `/who`, `/whois`, `/names`, `/list`, and identity completion where remote presence/directory visibility permits.
 - Multiple simultaneous channel memberships, with active-channel selection, background delivery, and unread-state handling.
-
 - Who's-online (local + Link-wide)
 - Link-wide extension of `/msg` over the real-time Noise transport for currently-online recipients only; asynchronous Link messages remain a separate store-and-forward mechanism.
 - Link-wide propagation of `/me`, `/away`, and transparent display aliases as typed presence/chat events.
-
 - On-demand cross-node file area discovery/download
 - **Open question, deliberately deferred to whenever this phase actually
   starts:** should a newly-joining Link node be fed recent scrollback
@@ -2593,7 +2587,7 @@ a follow-up, so this round does that.
    the concrete regression test for point 5, not just unit coverage of
    `get_file_by_name` in isolation.
 
-## Sign-off notes, round 32 (chat interaction commands and identity presentation)
+## Sign-off notes, round 32 (chat interaction commands and identity presentation — discussion only, not implemented)
 
 Prompted by reviewing the Phase 1 local-chat implementation and identifying the interaction features needed to make chat feel complete before Phase 2 moderation work begins.
 
@@ -2617,7 +2611,7 @@ Prompted by reviewing the Phase 1 local-chat implementation and identifying the 
 
 10. **Nickname changes are typed chat events.** Alias changes are retained in local channel scrollback so subsequent messages remain understandable. Phase 5 extends them across the Link while retaining canonical user and node identity, including the node fingerprint where needed.
 
-## Sign-off notes, round 33 (chat commands, presence and invitations)
+## Sign-off notes, round 33 (chat commands, presence and invitations — discussion only, not implemented)
 
 Prompted by a second post-Phase-1 chat-design round covering IRC-style command affordances, channel discovery, private-conversation mode, and invite-only channels.
 
