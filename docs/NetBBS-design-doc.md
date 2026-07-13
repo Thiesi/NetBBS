@@ -2151,10 +2151,11 @@ plumbing twice.
     delivering a handleable signal (confirmed by hand earlier this
     round) — it would have killed the test process outright rather
     than exercised the fallback branch. Re-verified passing on the
-    Windows dev sandbox with this fix; **still worth Thiesi re-running
-    `pytest` on the NetBSD machine once more** to confirm the fix
-    itself is correct there too, since this session's environment
-    can't do that confirmation directly.
+    Windows dev sandbox with this fix, **and confirmed by Thiesi
+    re-running the full suite on the actual NetBSD machine — all green,
+    including this test.** Issue #15's graceful-shutdown requirement is
+    now closed out end-to-end, on the real deployment target, not just
+    reasoned about from a Windows sandbox.
 13. **README's run instructions rewritten** — the stale "minimal
     manual-test entry point" framing and positional `db_path` argument
     are gone, replaced with the config-file/CLI-flag invocation, a
