@@ -2592,3 +2592,57 @@ a follow-up, so this round does that.
    confirms `/download`-ing the *oldest* one by name still works —
    the concrete regression test for point 5, not just unit coverage of
    `get_file_by_name` in isolation.
+
+## Sign-off notes, round 32 (chat interaction commands and identity presentation)
+
+Prompted by reviewing the Phase 1 local-chat implementation and identifying the interaction features needed to make chat feel complete before Phase 2 moderation work begins.
+
+1. **Local `/msg` adopted for Phase 2 as an online-only, node-wide real-time private-message mechanism.** The recipient must currently be online; delivery goes to every active session belonging to that canonical account. Private messages are rendered distinctly from channel traffic and are not written into channel scrollback.
+
+2. **Live `/msg` remains separate from asynchronous Link messages.** NetBBS must never silently turn a failed or offline `/msg` into a Phase 3 store-and-forward Link message. The two features have different delivery guarantees and user expectations, so fallback between them would be misleading. Phase 5 extends live `/msg` across NetBBS Link only for currently online recipients.
+
+3. **Per-user chat timestamps confirmed for Phase 2.** Timestamp display is a persistent user preference, defaulting to off, available through `/timestamps on`, `/timestamps off`, `/timestamps toggle`, and the preferences interface. It applies consistently to live messages, replayed scrollback, join/leave events, `/me` actions, and private messages. Formatting uses the existing per-user/node display-timezone and display-format system rather than creating chat-specific formatting rules.
+
+4. **`/me` adopted as a typed action event.** Actions are stored and transported as a distinct event type rather than encoded as specially formatted ordinary text. Local actions are retained in bounded channel scrollback and follow the user's timestamp preference. Phase 5 later carries the same typed event across NetBBS Link.
+
+5. **Local `/away` state adopted for Phase 2.** `/away [message]` sets an optional node-wide away status for the authenticated account; `/away` without an argument clears it. The state is shared across all active sessions and clears only when the account's final session disconnects. It is visible through local presence views and private-message feedback, but is not written into channel scrollback or broadcast as a channel event by default.
+
+6. **Sending a message does not automatically clear away state.** Users may intentionally remain marked away while briefly responding. When an away user sends chat traffic, NetBBS should remind them that their away status is still active rather than changing it silently.
+
+7. **Transparent persistent chat aliases adopted through `/nick`.** An alias is presentation metadata, not identity. Every chat rendering must keep the canonical authenticated username plainly visible, using a form such as `<DeepParse|thiesi>`. Moderation, permissions, blocking, reputation, auditing, and addressing always operate on canonical identity.
+
+8. **Aliases are non-unique but may not exactly match another account's canonical username.** This preserves freedom of presentation without allowing an alias to impersonate an authenticated local identity. Alias input must be length-limited, sanitized, and safe for terminal rendering.
+
+9. **Commands address canonical identities.** `/msg` and later Link-wide addressing primarily use canonical usernames or full Link addresses. An alias may be accepted only when it resolves uniquely, and the resulting canonical identity must be shown before or during delivery so ambiguity cannot remain hidden.
+
+10. **Nickname changes are typed chat events.** Alias changes are retained in local channel scrollback so subsequent messages remain understandable. Phase 5 extends them across the Link while retaining canonical user and node identity, including the node fingerprint where needed.
+
+## Sign-off notes, round 33 (chat commands, presence and invitations)
+
+Prompted by a second post-Phase-1 chat-design round covering IRC-style command affordances, channel discovery, private-conversation mode, and invite-only channels.
+
+1. **`/private`, not `/query`, is the primary sustained private-conversation command.** `/msg` remains the one-off direct-message command. `/private <user>` enters a temporary conversation mode layered on top of `/msg`, ordinary input is sent privately to that recipient, and `/close` returns to normal channel input. `/query` remains available only as an IRC-compatibility alias. No additional delivery or storage mechanism is introduced.
+
+2. **No user-facing `/notice` command will be implemented.** Human private communication is fully covered by `/msg` and `/private`, while server-generated and service-generated notifications use typed `system` events. Reproducing IRC's notice distinction would duplicate behavior without adding a meaningful NetBBS capability.
+
+3. **One active channel per session is confirmed for Phase 2.** `/join <channel>` switches the session from its current channel to the requested visible and authorized channel. `/leave` exits the active channel and returns to channel selection or the main menu. Simultaneous multi-channel membership is deferred until Phase 5, when background delivery, unread state, active-channel selection, and richer Link-wide presence already justify the additional machinery.
+
+4. **Local `/who`, `/whois`, `/names`, `/list`, and `/topic` are confirmed for Phase 2.** `/whois` reuses the user-directory and vCard system and must honor profile privacy and hidden-channel visibility. `/names` provides a compact roster for a channel, while `/who` provides a more detailed presence view. `/list` exposes only channels visible to the requesting user.
+
+5. **Topic viewing and topic modification are distinct operations.** Any user allowed to see a channel may view its topic. Changing a local topic requires the existing `edit` permission and is recorded in moderation or metadata history with setter identity and timestamp. Changing a Linked-channel topic becomes a signed authorized metadata event in Phase 6.
+
+6. **Slash-command tab completion is confirmed for Phase 2.** It belongs in the shared character-input layer so Telnet, SSH, and web sessions behave consistently. Completion is case-insensitive, context-aware, and permission-aware; commands unavailable to the current user are not suggested.
+
+7. **Username completion is also Phase 2 scope, with visibility-aware candidate sources.** `/msg` and `/private` complete visible online users; `/whois` completes visible directory entries; `/invite` completes users eligible to be invited. Completion targets canonical usernames rather than aliases. Link-wide identity completion waits until Phase 5 provides suitable remote presence and directory information.
+
+8. **Invite-only channels are adopted with a new `manage_members` permission.** Membership administration is an authorization operation, not a metadata edit, so overloading `edit` was rejected. `manage_members` covers sending and revoking invitations, reviewing membership, granting or removing persistent access, and configuring whether ordinary members may invite others.
+
+9. **Channel visibility and join policy are independent controls.** A channel may be listed or hidden, and independently open to all eligible users or restricted to explicit members. A hidden but otherwise open channel is permitted, but is treated as obscurity rather than meaningful access control.
+
+10. **Invitation-plus-acceptance is confirmed for both local and Linked channels.** Sending an invitation creates a pending invitation only; it does not create membership. The invitee must explicitly accept before access is granted. Invitations may expire, while accepted membership persists until revoked unless a separate expiry policy is deliberately configured.
+
+11. **The default invitation policy is moderators and SysOp only.** A channel may explicitly allow ordinary members to invite others, but this is opt-in rather than inherited automatically.
+
+12. **Linked-channel membership governance belongs in Phase 6.** Invitations, acceptances, membership grants, removals, and revocations become signed events verified against the inviter's or moderator's authority. This extends the existing signed-governance model rather than creating a parallel trust mechanism.
+
+13. **Access restriction is not end-to-end confidentiality.** Invite-only Linked channels may restrict authorized membership, but participating node operators can still observe or retain relayed content. True confidential group chat would require a separate design covering group-key distribution, key rotation, history access, membership changes, compromised members, and multi-session key handling. It is deliberately not implied by the word “private.”
