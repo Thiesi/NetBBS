@@ -2881,3 +2881,109 @@ that round for the full rationale behind the status model, the
 sweep-on-access mechanism, the grace-period config, and the
 separate-function resolution for both the moderation queue and pinned
 views.
+
+## Sign-off notes, round 37 (chat mute/ban/kick — implemented)
+
+Track 3 of the foundation-first Phase 2 sequencing plan, built on
+round 34's `ChannelPermission.MODERATE` grant bit. §13: "mute/ban/
+unmute/unban commands... All actions logged and echoed in-channel for
+transparency."
+
+The real architectural question this round had to answer, found by
+reading `chat/hub.py` and `net/chat_flow.py` directly: **there was no
+mechanism by which one live session could force another to
+disconnect.** `ChatHub` only ever pushed plain strings onto a
+participant's queue, and `receive_loop` only ever printed whatever
+arrived — no participant registry, no cancellation handle, nothing.
+Mute doesn't need this (enforced lazily at the muted user's own next
+send attempt); kick and ban do.
+
+1. **`ChatHub` gained exactly two primitives**, staying inside its
+   existing "opaque `participant_id` string" abstraction rather than
+   teaching it the `username:id(session)` convention `chat_flow.py`
+   itself invented: `participant_ids(channel_name)` (a snapshot) and
+   `async send_to(channel_name, participant_id, message)` (deliver to
+   one specific queue, `False` if they'd already left). `chat_flow.py`
+   does the username-prefix matching itself, since it already owns
+   that convention.
+2. **A small `_KickNotice` object, not a string, forces the exit.**
+   `receive_loop` checks for it and **returns** instead of looping —
+   picked up by `_chat_loop`'s existing `asyncio.wait({receive_task,
+   send_task}, return_when=FIRST_COMPLETED)` exactly the way `/quit`
+   finishing `send_loop` already is, running the same existing
+   `finally` (hub.leave, a `"leave"` scrollback event, a leave
+   broadcast). A kicked/banned user's own disconnect is thus
+   indistinguishable from an ordinary leave to everyone else, by
+   design — the moderation action itself gets its own separate
+   transparency notice (`_announce_moderation`), so nothing is lost.
+3. **One unified `channel_restrictions` table for mute and ban**,
+   discriminated by `kind`, not two tables — structurally identical
+   (same duration/expiry shape, same "is there a live, non-expired
+   row" check), mirroring the existing `channel_messages`
+   kind-discriminator precedent. `UNIQUE(channel_id, user_id, kind)`
+   makes re-muting/re-banning an upsert (replaces duration/reason)
+   rather than accumulating rows.
+4. **No cleanup sweep for expired mute/ban rows** — unlike round
+   35/36's board/file expiry, where deleting the row was the point of
+   the feature, a stale expired restriction causes no problem sitting
+   there; `is_muted`/`is_banned` just filter on `expires_at IS NULL OR
+   expires_at > now` at check time. Simpler than the sweep-on-access
+   mechanism, deliberately not built here since nothing needs it.
+5. **`parse_duration`** matches §13 exactly: no argument = indefinite;
+   bare number = minutes; `s/m/h/d/w/y` suffix = that unit (`y` fixed
+   at 365 days — `timedelta` has no calendar-aware year, and a
+   mute/ban duration doesn't need that precision). Nothing else in the
+   codebase parses durations (confirmed by a grep — `net/throttle.py`
+   works in raw floats).
+6. **Command shape: `/mute <user> [duration] [reason...]`** (same for
+   `/ban`). The first token after the username is tried as a duration;
+   if it parses, it's consumed and the rest is the reason; if it
+   fails, duration defaults to indefinite and the *entire* remainder
+   is the reason. A deliberate call (matches a common `!mute @user 10m
+   spamming`-style convention), explicitly flagged as reconsiderable
+   rather than fully settled — revisit if it turns out to surprise
+   people in practice.
+7. **Ban is checked once, at the top of `_chat_loop`**, before
+   `hub.join` — an unexpired ban means the loop is never entered.
+   `/ban`/`kick` both call the same `_kick_live_sessions` helper
+   afterward to remove a currently-present target; a target with no
+   live session is simply a no-op, not an error.
+8. **`kick_user` (in `netbbs.chat.moderation`) persists no state at
+   all** — only the permission check and audit trail. Actually
+   removing a live session is `chat_flow.py`'s job (point 1/2 above);
+   `netbbs.chat.moderation` knows nothing about `ChatHub` or live
+   sessions by design, same layering as `netbbs.boards.posts`/
+   `netbbs.files.entries` not knowing about `net.chat_flow`.
+9. **New module `chat/moderation.py`**, not `netbbs.moderation` —
+   same precedent as `approve_post`/`delete_post` living in
+   `boards/posts.py`: feature-specific moderation actions live with
+   the feature; `netbbs.moderation` stays limited to the cross-feature
+   grant/log primitives.
+10. **Bug found and fixed during implementation, not before:** this
+    round's own pre-implementation research claimed
+    `channel_messages.kind` had no DB-level `CHECK` constraint, only
+    an application-level `Literal` type hint — wrong, confirmed the
+    hard way when the first integration test raised `sqlite3.
+    IntegrityError: CHECK constraint failed`. A real `CHECK (kind IN
+    ('message', 'join', 'leave'))` has existed on the table since its
+    original migration. Fixed with the standard SQLite table-rebuild
+    (`CREATE ... _new` with the widened `CHECK`, copy rows, `DROP`,
+    `RENAME`, recreate the index) folded into this round's migration —
+    SQLite has no `ALTER TABLE` for changing a `CHECK` in place.
+    Worth remembering: pre-implementation research claims about
+    schema constraints should be verified against the actual
+    migration SQL, not trusted at face value, before code is written
+    against them.
+11. **Testing:** `tests/test_chat_moderation.py` (28 cases — duration
+    parsing, permission gating, mute/ban state and upsert-on-repeat,
+    audit logging) plus a new `tests/test_chat_flow_moderation.py` (7
+    cases) exercising the real `/mute`/`/ban`/`/kick` commands through
+    `_chat_loop` itself, including the cross-session force-disconnect.
+    The latter needed a fake `Session` — confirmed none existed
+    anywhere in `tests/` before this round — built as a small, local
+    `FakeSession` (scripted input list; `read_line` blocks forever via
+    an unset `asyncio.Event` once its lines run out, the same shape a
+    real session has while genuinely waiting for input, which is what
+    lets a kick notice — not the target's own `/quit` — be the thing
+    that ends their loop). Full suite re-run after adding both (663
+    passed, 1 skipped) — actually run, not just syntax-checked.

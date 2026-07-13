@@ -480,4 +480,67 @@ MIGRATIONS = [
             ON files(area_id, status, created_at, file_id);
         """,
     ),
+    Migration(
+        description=(
+            "Chat channel moderation restrictions -- mute/ban (design "
+            "doc §13, round 37), gated by "
+            "netbbs.moderation.roles.ChannelPermission.MODERATE. Also "
+            "widens channel_messages.kind's CHECK constraint to admit "
+            "the five new scrollback event kinds mute/ban/kick land."
+        ),
+        sql="""
+        -- SQLite has no ALTER TABLE to change a CHECK constraint in
+        -- place, so this is the standard rebuild: new table with the
+        -- widened CHECK, copy every row across, drop the old table,
+        -- rename the new one into place, recreate its index. Nothing
+        -- else has a foreign key pointing *into* channel_messages, so
+        -- this is safe with PRAGMA foreign_keys = ON.
+        CREATE TABLE channel_messages_new (
+            id                  INTEGER PRIMARY KEY,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            kind                TEXT NOT NULL CHECK (
+                kind IN ('message', 'join', 'leave', 'mute', 'unmute', 'ban', 'unban', 'kick')
+            ),
+            author_label        TEXT NOT NULL,
+            author_fingerprint  TEXT,
+            body                TEXT,
+            created_at          TEXT NOT NULL
+        );
+
+        INSERT INTO channel_messages_new
+            SELECT id, channel_id, kind, author_label, author_fingerprint, body, created_at
+            FROM channel_messages;
+
+        DROP TABLE channel_messages;
+
+        ALTER TABLE channel_messages_new RENAME TO channel_messages;
+
+        CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
+
+        -- One table for both mute and ban, discriminated by kind --
+        -- mirrors the channel_messages kind-discriminator precedent:
+        -- mute and ban are structurally identical (same duration/
+        -- expiry shape, same "is there a live, non-expired row for
+        -- (channel, user)" check). Unlike moderator_grants'
+        -- object_id, none of these three key columns are nullable, so
+        -- a single UNIQUE constraint is sufficient here -- no need
+        -- for that table's two-partial-index workaround.
+        CREATE TABLE channel_restrictions (
+            id                   INTEGER PRIMARY KEY,
+            channel_id           INTEGER NOT NULL REFERENCES channels(id),
+            user_id              INTEGER NOT NULL REFERENCES users(id),
+            kind                 TEXT NOT NULL CHECK (kind IN ('mute', 'ban')),
+            -- NULL = indefinite (design doc §13: "no argument = indefinite").
+            expires_at           TEXT,
+            imposed_by_user_id   INTEGER NOT NULL REFERENCES users(id),
+            reason               TEXT,
+            created_at           TEXT NOT NULL,
+
+            UNIQUE (channel_id, user_id, kind)
+        );
+
+        CREATE INDEX idx_channel_restrictions_lookup
+            ON channel_restrictions(channel_id, user_id, kind);
+        """,
+    ),
 ]

@@ -1,14 +1,20 @@
 """
 In-memory, single-node real-time chat broadcast hub.
 
-Design doc §15 Phase 1 scope: local chat only, no moderation (kick/mute/
-ban are explicitly Phase 2), no persistence — chat is inherently
-ephemeral/real-time, unlike boards, which have no design-doc requirement
-to survive a restart. Phase 5's Link-wide chat later extends this same
-broadcast concept across nodes; this hub's queue-per-participant design
-is meant to generalize cleanly to that later (a remote-origin message
-could be pushed into the same queues a local broadcast uses), though
-nothing about Link participation is implemented here.
+Design doc §15 Phase 1 scope: local chat only, no persistence — chat is
+inherently ephemeral/real-time, unlike boards, which have no design-doc
+requirement to survive a restart. Phase 5's Link-wide chat later extends
+this same broadcast concept across nodes; this hub's queue-per-participant
+design is meant to generalize cleanly to that later (a remote-origin
+message could be pushed into the same queues a local broadcast uses),
+though nothing about Link participation is implemented here.
+
+Mute/ban/kick (design doc §13, round 37) live in
+`netbbs.chat.moderation`/`netbbs.net.chat_flow`, not here — this class
+only provides the two primitives (`participant_ids`, `send_to`) needed
+to reach a specific live session, while staying deliberately ignorant
+of the `participant_id` naming convention or what a delivered message
+means.
 """
 
 from __future__ import annotations
@@ -87,6 +93,39 @@ class ChatHub:
 
     def participant_count(self, channel_name: str) -> int:
         return len(self._channels[channel_name])
+
+    def participant_ids(self, channel_name: str) -> list[str]:
+        """
+        Every `participant_id` currently present in `channel_name`, a
+        snapshot (same non-live-dict-iteration safety as `broadcast`).
+
+        `ChatHub` treats `participant_id` as an opaque string — it has
+        no idea `netbbs.net.chat_flow` builds it as
+        `f"{username}:{id(session)}"`. This method exists specifically
+        so a caller that *does* know that convention (kick/ban, design
+        doc §13/round 37) can find every live session belonging to a
+        given username without `ChatHub` itself needing to learn that
+        convention.
+        """
+        return list(self._channels[channel_name].keys())
+
+    async def send_to(self, channel_name: str, participant_id: str, message: object) -> bool:
+        """
+        Deliver `message` to exactly one participant's queue, if
+        they're still present in `channel_name`.
+
+        Returns whether delivery happened — `False` if they'd already
+        left (e.g. a kick racing the target's own `/quit`), which the
+        caller can treat as "nothing to do" rather than an error.
+        Unlike `broadcast`, `message` isn't required to be a `str` —
+        round 37 uses this to deliver a small kick/ban sentinel object
+        `receive_loop` recognizes, distinct from any real chat text.
+        """
+        queue = self._channels[channel_name].get(participant_id)
+        if queue is None:
+            return False
+        await queue.put(message)
+        return True
 
     def last_activity(self, channel_name: str) -> str | None:
         """Timestamp of the most recent broadcast to `channel_name` since
