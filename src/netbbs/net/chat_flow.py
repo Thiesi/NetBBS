@@ -22,7 +22,7 @@ from netbbs.chat.categories import Category, list_subcategories, list_top_level_
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key
+from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 
 
@@ -117,12 +117,13 @@ def _render_scrollback_message(message: ChannelMessage) -> str:
     reading back history, possibly from a different session than whichever
     one originally sent it.
     """
+    author_label = sanitize_text(message.author_label)
     if message.kind == "join":
-        return colored(f"*** {message.author_label} has joined the channel.", fg_color=MUTED_COLOR)
+        return colored(f"*** {author_label} has joined the channel.", fg_color=MUTED_COLOR)
     if message.kind == "leave":
-        return colored(f"*** {message.author_label} has left the channel.", fg_color=MUTED_COLOR)
-    label = colored(f"<{message.author_label}>", fg_color=ACCENT_COLOR)
-    return f"{label} {message.body}"
+        return colored(f"*** {author_label} has left the channel.", fg_color=MUTED_COLOR)
+    label = colored(f"<{author_label}>", fg_color=ACCENT_COLOR)
+    return f"{label} {sanitize_text(message.body)}"
 
 
 async def _chat_loop(
@@ -173,7 +174,8 @@ async def _chat_loop(
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
 
-    channel_label = colored(f"#{channel.name}", fg_color=ACCENT_COLOR, bold=True)
+    username = sanitize_text(user.username)
+    channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
     quit_hint = menu_key("/quit", " to leave")
 
     scrollback = get_scrollback(db, channel)
@@ -192,12 +194,16 @@ async def _chat_loop(
         )
 
     await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
+    # author_label is stored raw here (user.username, not the sanitized
+    # `username` local) -- sanitize on output, not on storage, per
+    # sanitize_text's docstring; only the broadcast text below is
+    # actually rendered to a terminal.
     record_message(
         db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
     )
     await hub.broadcast(
         channel.name,
-        colored(f"*** {user.username} has joined the channel.", fg_color=MUTED_COLOR),
+        colored(f"*** {username} has joined the channel.", fg_color=MUTED_COLOR),
         exclude={participant_id},
     )
 
@@ -223,9 +229,17 @@ async def _chat_loop(
             # can't be done as a single shared broadcast string the way
             # join/leave notices are, since it's genuinely different
             # text per recipient.
-            self_label = colored(f"<{user.username}>", fg_color=SELF_COLOR, bold=True)
-            others_label = colored(f"<{user.username}>", fg_color=ACCENT_COLOR)
-            await session.write_line(f"{self_label} {line}")
+            self_label = colored(f"<{username}>", fg_color=SELF_COLOR, bold=True)
+            others_label = colored(f"<{username}>", fg_color=ACCENT_COLOR)
+            # Sanitized once here, used for both the direct self-write
+            # and the broadcast -- receive_loop (above) writes whatever
+            # arrives from the hub queue as-is, with no sanitization of
+            # its own, so the broadcast payload must already be safe by
+            # the time it's queued. record_message below stores the raw
+            # `line`, not this sanitized copy -- sanitize on output, not
+            # on storage.
+            displayed_line = sanitize_text(line)
+            await session.write_line(f"{self_label} {displayed_line}")
             record_message(
                 db,
                 channel,
@@ -235,7 +249,7 @@ async def _chat_loop(
                 body=line,
             )
             await hub.broadcast(
-                channel.name, f"{others_label} {line}", exclude={participant_id}
+                channel.name, f"{others_label} {displayed_line}", exclude={participant_id}
             )
 
     receive_task = asyncio.create_task(receive_loop())
@@ -261,6 +275,6 @@ async def _chat_loop(
         )
         await hub.broadcast(
             channel.name,
-            colored(f"*** {user.username} has left the channel.", fg_color=MUTED_COLOR),
+            colored(f"*** {username} has left the channel.", fg_color=MUTED_COLOR),
             exclude={participant_id},
         )

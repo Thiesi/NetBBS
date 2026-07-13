@@ -43,7 +43,7 @@ import math
 from typing import Callable, Sequence, TypeVar
 
 from netbbs.net.session import Session
-from netbbs.rendering import HEADER_COLOR, colored, menu_key, truncate
+from netbbs.rendering import HEADER_COLOR, colored, menu_key, sanitize_text, truncate
 
 T = TypeVar("T")
 
@@ -87,6 +87,15 @@ async def pick_item(
     permanent identifier (typically a database ID) — see the module
     docstring for why this is deliberately independent of the item's
     position in `items`.
+
+    `name_of`/`description_of` results are sanitized (`netbbs.rendering.
+    sanitize_text`, design doc round 29) immediately before display —
+    every caller of this shared picker (boards, chat channels, file
+    areas) gets that protection automatically rather than needing to
+    remember it individually. Search matching (`query.lower() in
+    name_of(item).lower()`) deliberately uses the *raw*, unsanitized
+    name — matching is a text-comparison operation, not something
+    written to the terminal, so there's nothing to protect there.
     """
     if not items:
         await session.write_line(f"\r\n{empty_message}")
@@ -117,10 +126,10 @@ async def pick_item(
             # showing this second number somewhere, `goto` would be
             # nearly undiscoverable — nothing else on screen reveals what
             # number to type for it.
-            line = f"  {position:02d}. (#{stable_id_of(item)}) {name_of(item)}"
+            line = f"  {position:02d}. (#{stable_id_of(item)}) {sanitize_text(name_of(item))}"
             description = description_of(item)
             if description:
-                line += f" - {description}"
+                line += f" - {sanitize_text(description)}"
             await session.write_line(truncate(line, session.terminal_width))
 
         nav = "  ".join(

@@ -2166,3 +2166,144 @@ plumbing twice.
     confirmed as intentionally out of scope, the same as when `python
     -m netbbs` was first introduced; daemonization remains the service
     supervisor's job).
+
+## Sign-off notes, round 29 (terminal rendering sanitization — implemented)
+
+Issue #8: usernames, board/channel/file-area names and descriptions,
+post subjects/bodies, chat messages, uploader labels, and filenames all
+ultimately reach an ANSI-capable terminal, but until now nothing
+stopped one of those values from containing a real ESC byte and
+smuggling an arbitrary CSI/OSC/DCS sequence into a user's terminal —
+spoofing the UI, faking a prompt, clearing the screen, altering the
+window title via OSC, or (with a bidi override) making displayed text
+visually differ from its actual content.
+
+1. **New `netbbs.rendering.sanitize.sanitize_text()` — the one
+   documented sanitizer every terminal-visible untrusted string now
+   passes through, immediately before interpolation, per the
+   acceptance criteria.** Two genuine either/or forks here were
+   confirmed with Thiesi rather than picked unilaterally:
+   - **Silent removal, not visible-marker replacement**, for stripped
+     characters — simpler, no unpredictable length change, no new
+     marker-choice surface of its own to get wrong.
+   - **Only the 9 well-documented bidi embedding/override/isolate
+     controls** (U+202A–U+202E, U+2066–U+2069 — the "Trojan Source"
+     set with genuine visual-reordering capability), not the entire
+     Unicode "Format" (Cf) category. The broader category also
+     contains zero-width joiners/non-joiners and similar characters
+     with legitimate uses in real multilingual/emoji text and no
+     reordering capability of their own — stripping those would
+     corrupt legitimate content for no benefit specific to this
+     issue's terminal-injection/UI-spoofing threat model. Recorded as
+     an explicit, narrower-than-maximal scope boundary, not an
+     oversight.
+2. **Removes every Unicode "Control" (Cc) character** — C0 (U+0000–
+   U+001F, which includes ESC — removing ESC alone is sufficient to
+   prevent untrusted text from ever forming a live CSI/OSC/DCS/APC
+   sequence, since all of those require an ESC byte to introduce
+   them), DEL (U+007F), and C1 (U+0080–U+009F, the 8-bit single-byte
+   alternate encodings of the same sequence-introducers some terminals
+   accept — stripping only the 7-bit ESC form would leave this path
+   open, verified directly with a single-byte-CSI test case). Two
+   narrow, explicit exceptions matching the issue's own "except
+   explicitly permitted newline/tab semantics": tab is always kept;
+   newline is kept only when the caller passes `allow_newlines=True`
+   (post bodies — genuinely multi-line content — opt in; every
+   single-line field leaves this at the default `False`, since an
+   embedded newline in content displayed as one line is exactly the
+   kind of thing that could fake extra output lines or spoof a
+   prompt). Carriage return is **always** stripped regardless of
+   `allow_newlines` — unlike `\n`, a lone `\r` isn't touched by
+   `Session.write()`'s CRLF normalization and would reach the wire as
+   a raw cursor-to-column-0 move.
+3. **A real, avoidable mistake caught and fixed during this round, not
+   shipped:** the first draft of `_BIDI_CONTROLS` used the actual
+   invisible bidi characters as literal string content in the source
+   file. Caught before commit — having genuinely hard-to-review,
+   near-invisible characters sitting in the sanitizer's own source
+   would have been an ironic, self-defeating risk (unauditable in a
+   diff, exactly the property that makes them dangerous in untrusted
+   content). Rewritten to build the set from explicit numeric code
+   points via `chr()`, with the reasoning for why left as a comment
+   directly above it so a future editor doesn't reintroduce the same
+   mistake.
+4. **Sanitizes on output, not on storage — the exact split the issue
+   asked for.** Nothing `create_post`/`create_user`/`create_board`/
+   `record_message`/`upload_file`/etc. writes to the database is ever
+   touched; `sanitize_text()` is called only at the point a value is
+   about to be interpolated into something written to a `Session`. A
+   moderator, or a future Link re-transmission, still sees the
+   original content. Verified explicitly at the one place this
+   distinction is easiest to get backwards — `netbbs.net.chat_flow`'s
+   live chat send loop calls `record_message(..., body=line)` with the
+   *raw* typed line, while the direct self-write and the broadcast
+   payload queued for other participants both use a separately
+   sanitized copy.
+5. **Distinguishing trusted NetBBS-generated ANSI markup from
+   untrusted content is structural, not a property `sanitize_text`
+   itself tracks:** callers sanitize only the untrusted piece, at the
+   point of interpolation, before handing it to `netbbs.rendering.ansi.
+   colored()` — never the whole already-composed line. `colored()`
+   only *adds* its own SGR codes around whatever text it receives, so
+   an ESC byte `sanitize_text` already removed from the untrusted
+   piece can never be reintroduced by wrapping. Verified with a test
+   asserting a picker header's own generated CSI/SGR codes survive
+   completely intact alongside a hostile board name in the same
+   picker's output — proving sanitization hit only the untrusted piece,
+   not the whole rendered line.
+6. **Centralized in `netbbs.net.picker.pick_item()` for board/channel/
+   file-area listings** — `name_of`/`description_of` results are
+   sanitized inside the shared picker itself, once, rather than
+   requiring every current and future caller to remember it
+   individually. Search matching (`query.lower() in name_of(item).
+   lower()`) deliberately still uses the *raw* name — matching is a
+   text comparison, not something written to a terminal, so there's
+   nothing there to protect. Every other injection point — the login
+   welcome banner (username), board post display (subject/body/
+   author label, subject/author sanitized before the ANSI wrap, body
+   sanitized *before* `reflow()` since `textwrap`'s width math counts
+   raw characters too), live and scrollback chat (author label,
+   message body, join/leave notices), and file area listing (filename,
+   description, uploader label, plus the user-typed `/download
+   <filename>` echoed back in error messages) — was audited and fixed
+   directly at its own call site. A final grep sweep across every
+   `session.write`/`write_line` call in `netbbs.net` confirmed no
+   remaining untrusted-content interpolation was missed; the only
+   other raw-string writes found (`netbbs.net.zmodem`'s `write_raw`
+   calls) are real Zmodem protocol frames, not rendered terminal text
+   — explicitly out of scope for a *rendering*-boundary sanitizer, and
+   sanitizing them would corrupt the actual file transfer.
+7. **Verified as actually wired, not just correct in isolation:** unit
+   tests (`tests/test_sanitize.py`, 21 cases) cover exactly the
+   acceptance criteria's named categories — ESC, all C0/C1 controls,
+   OSC- and CSI-shaped payloads (including the single-byte C1 CSI
+   form), all 9 bidi controls, and ordinary UTF-8 text passing through
+   unchanged. Separately, `tests/test_terminal_sanitization.py` drives
+   the *real* board/chat/file-area/picker code paths with a realistic
+   combined hostile payload (fake-title OSC + BEL, clear-screen CSI,
+   raw C1 control, embedded in otherwise-ordinary text) stored via the
+   real `create_post`/`create_channel`/`record_message`/`upload_file`
+   functions, and inspects what actually reaches a fake session's
+   `write`/`write_line` calls — confirming the wiring at each site, not
+   just that the sanitizer function itself is correct. One of these
+   was deliberately used to catch a real mistake: an early version of
+   the test asserted "no ESC byte anywhere in the output" at all,
+   which is wrong once `colored()`'s own legitimate SGR codes are also
+   present in the same output — caught immediately by the test itself
+   failing against known-correct code, not by inspection, and fixed by
+   asserting against the hostile payload's *specific* byte sequences
+   instead. A second check, reverting sanitization at one call site
+   and confirming the corresponding test fails before restoring it,
+   confirmed the tests are actually meaningful rather than vacuously
+   passing.
+8. **Explicit non-goals for this round**, matching the issue's own
+   framing as "Medium now; High once remote Link content is accepted"
+   — nothing here is Link-specific, since no Link code exists yet
+   (Phase 3); this is purely the local-node rendering boundary every
+   current content path already goes through, positioned to need no
+   rework once federated content arrives and flows through the same
+   `Session.write`/`write_line` calls. Also explicitly not attempted:
+   broader Unicode confusable-character detection (homoglyph
+   spoofing of usernames/board names) and moderation-side content
+   filtering — both real, separate concerns from terminal-injection
+   safety, worth their own design pass if/when they matter.

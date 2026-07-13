@@ -36,7 +36,7 @@ from netbbs.net import zmodem
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -124,22 +124,23 @@ def _format_size(size_bytes: int) -> str:
 
 
 async def _show_area(session: Session, db: Database, area: FileArea, user: User) -> None:
+    area_name = sanitize_text(area.name)
     files = list_files(db, area, user)
     can_write = meets_level(user, area.min_write_level)
 
     if not files:
-        await session.write_line(f"\r\n[{area.name}] has no files yet.")
+        await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        header = colored(f"[{area.name}]", fg_color=HEADER_COLOR, bold=True)
+        header = colored(f"[{area_name}]", fg_color=HEADER_COLOR, bold=True)
         await session.write_line(f"\r\n{header}")
         for entry in files:
             when = format_for_display(entry.created_at, db)
             size = _format_size(entry.size_bytes)
-            name_line = colored(f"{entry.filename} ({size})", fg_color=ACCENT_COLOR)
+            name_line = colored(f"{sanitize_text(entry.filename)} ({size})", fg_color=ACCENT_COLOR)
             await session.write_line(f"\r\n{name_line}")
-            await session.write_line(f"  uploaded by {entry.uploader_label} ({when})")
+            await session.write_line(f"  uploaded by {sanitize_text(entry.uploader_label)} ({when})")
             if entry.description:
-                await session.write_line(f"  {entry.description}")
+                await session.write_line(f"  {sanitize_text(entry.description)}")
 
     if not files and not can_write:
         return
@@ -179,19 +180,25 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
         await session.write_line(f"\r\nUpload failed: {exc}")
         return
     await session.write_line(
-        f"\r\nUploaded {entry.filename!r} ({entry.size_bytes} bytes) to [{area.name}]."
+        f"\r\nUploaded {sanitize_text(entry.filename)!r} ({entry.size_bytes} bytes) "
+        f"to [{sanitize_text(area.name)}]."
     )
 
 
 async def _handle_download(session: Session, files: list[FileEntry], filename: str) -> None:
+    # Matched against the raw, unsanitized `filename` the user actually
+    # typed -- sanitizing before comparison risks a false match/miss
+    # against real stored filenames; sanitize_text is only applied
+    # below, at the point this gets echoed back to the terminal.
     matches = [entry for entry in files if entry.filename == filename]
     if not matches:
-        await session.write_line(f"\r\nNo file named {filename!r} in this area.")
+        await session.write_line(f"\r\nNo file named {sanitize_text(filename)!r} in this area.")
         return
 
     entry = matches[0]
+    entry_filename = sanitize_text(entry.filename)
     await session.write_line(
-        f"\r\nStarting Zmodem send of {entry.filename!r} — accept the transfer in your terminal."
+        f"\r\nStarting Zmodem send of {entry_filename!r} — accept the transfer in your terminal."
     )
     try:
         data = download_file(entry)
@@ -199,4 +206,4 @@ async def _handle_download(session: Session, files: list[FileEntry], filename: s
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         await session.write_line(f"\r\nDownload failed: {exc}")
         return
-    await session.write_line(f"\r\nSent {entry.filename!r}.")
+    await session.write_line(f"\r\nSent {entry_filename!r}.")

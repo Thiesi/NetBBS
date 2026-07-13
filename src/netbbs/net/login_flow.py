@@ -32,7 +32,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.throttle import LoginThrottle
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -133,7 +133,9 @@ async def handle_session(
         return
 
     user = login_result
-    await session.write_line(f"\r\nWelcome, {user.username}! You are level {user.user_level}.")
+    await session.write_line(
+        f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
+    )
 
     if meets_level(user, _DEMO_ELEVATED_LEVEL):
         await session.write_line("(You have elevated access.)")
@@ -370,24 +372,33 @@ async def _browse_boards_in_category(
 
 
 async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:
+    board_name = sanitize_text(board.name)
     posts = list_posts(db, board, user)
     if not posts:
-        await session.write_line(f"\r\n[{board.name}] has no posts yet.")
+        await session.write_line(f"\r\n[{board_name}] has no posts yet.")
     else:
-        header = colored(f"[{board.name}]", fg_color=HEADER_COLOR, bold=True)
+        header = colored(f"[{board_name}]", fg_color=HEADER_COLOR, bold=True)
         await session.write_line(f"\r\n{header}")
         for post in posts:
             when = format_for_display(post.created_at, db)
             post_header = colored(
-                f"{post.subject} -- {post.author_label} ({when})", fg_color=ACCENT_COLOR
+                f"{sanitize_text(post.subject)} -- {sanitize_text(post.author_label)} ({when})",
+                fg_color=ACCENT_COLOR,
             )
             await session.write_line(f"\r\n{post_header}")
             # Reflowed to this specific session's actual detected width
             # (NAWS-negotiated, or the 80-column default — see
             # netbbs.net.session.Session.terminal_width), not a fixed
             # assumption, per the design doc's "must degrade gracefully
-            # above 40x24 minimum" requirement.
-            await session.write_line(reflow(post.body, width=session.terminal_width))
+            # above 40x24 minimum" requirement. Sanitized *before*
+            # reflow, not after — textwrap's width math counts raw
+            # characters, so a stray control byte would also throw off
+            # wrapping, not just be a display-safety concern.
+            # allow_newlines=True: a post body is genuinely multi-line
+            # content (paragraph breaks), unlike the single-line fields
+            # above -- see sanitize_text's docstring.
+            body = sanitize_text(post.body, allow_newlines=True)
+            await session.write_line(reflow(body, width=session.terminal_width))
 
     if not meets_level(user, board.min_write_level):
         return

@@ -1,0 +1,219 @@
+"""
+End-to-end verification that untrusted content is actually sanitized
+where it's rendered (design doc round 29, issue #8) -- distinct from
+tests/test_sanitize.py, which tests `sanitize_text` in isolation. These
+drive the real board/chat/file-area/picker code paths with genuinely
+hostile stored/typed content and inspect what actually reaches
+`Session.write`/`write_line`, confirming the wiring, not just the
+sanitizer function itself.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from netbbs.auth.users import create_user
+from netbbs.boards import create_board, create_post
+from netbbs.chat import ChatHub, create_channel, get_scrollback, record_message
+from netbbs.files import create_file_area, upload_file
+from netbbs.net.chat_flow import _chat_loop, _render_scrollback_message
+from netbbs.net.file_flow import _show_area
+from netbbs.net.login_flow import _show_board
+from netbbs.net.picker import pick_item
+from netbbs.storage.database import Database
+
+# A representative hostile payload combining several attack classes
+# named in the issue: ESC-introduced OSC (fake window title + BEL),
+# ESC-introduced CSI (clear screen), and a raw C1 control -- embedded
+# inside otherwise-ordinary text, the realistic shape of an attack
+# (not just a bare escape sequence with nothing else).
+HOSTILE = "Free stuff\x1b]0;PWNED\x07\x1b[2Jmore text\x9b1m"
+
+
+class FakeSession:
+    def __init__(self, lines=None, keys=None, peer_address="203.0.113.5"):
+        self._lines = iter(lines or [])
+        self._keys = iter(keys or [])
+        self.written: list[str] = []
+        self.terminal_width = 80
+        self.terminal_height = 24
+        self.peer_address = peer_address
+
+    async def write(self, text: str) -> None:
+        self.written.append(text)
+
+    async def write_line(self, text: str = "") -> None:
+        self.written.append(text + "\n")
+
+    async def read_line(self, echo: bool = True) -> str:
+        # Falls back to "" (an empty Enter-press) once scripted input
+        # runs out, rather than raising -- simpler than every test
+        # needing to script out every trailing optional prompt exactly.
+        return next(self._lines, "")
+
+    async def read_key(self, echo: bool = True) -> str:
+        return next(self._keys)
+
+    @property
+    def output(self) -> str:
+        return "".join(self.written)
+
+
+def _assert_hostile_payload_neutralized(text: str) -> None:
+    """
+    Checks that HOSTILE's specific dangerous byte sequences don't
+    survive intact -- not a blanket "no ESC anywhere in the output"
+    check, which would also (wrongly) flag NetBBS's own legitimate
+    `colored()` SGR sequences that are expected to appear in this same
+    output alongside the sanitized content.
+    """
+    assert "\x1b]0;PWNED\x07" not in text, "hostile OSC (fake window title) sequence survived intact"
+    assert "\x1b[2J" not in text, "hostile CSI (clear screen) sequence survived intact"
+    assert "\x9b1m" not in text, "hostile C1 CSI byte survived"
+    assert "\x07" not in text, "raw BEL byte reached the terminal"
+    assert "\x9b" not in text, "raw C1 control byte reached the terminal"
+    # The literal text around the stripped bytes should still be there,
+    # confirming the sanitizer ran (removed exactly the dangerous
+    # bytes) rather than the whole hostile string being dropped/erroring.
+    assert "Free stuff" in text
+    assert "more text" in text
+
+
+def test_board_post_subject_body_and_author_are_sanitized(tmp_path):
+    db = Database(tmp_path / "node.db")
+    hostile_user = create_user(db, HOSTILE, password="hunter2", user_level=10)
+    board = create_board(db, HOSTILE, description=HOSTILE, creator=hostile_user)
+    create_post(db, board, hostile_user, HOSTILE, HOSTILE)
+
+    # min_write_level defaults to 0, so this account (level 10) can
+    # write and will hit the trailing "post a new message?" prompt --
+    # FakeSession.read_line() falls back to "" (skip) once past the
+    # single scripted answer needed for the post-listing output above it.
+    session = FakeSession()
+
+    asyncio.run(_show_board(session, db, board, hostile_user))
+
+    _assert_hostile_payload_neutralized(session.output)
+    db.close()
+
+
+def test_board_name_is_sanitized_in_empty_board_message(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, HOSTILE, creator=user)
+    session = FakeSession()
+
+    asyncio.run(_show_board(session, db, board, user))
+
+    _assert_hostile_payload_neutralized(session.output)
+    assert "has no posts yet" in session.output
+    db.close()
+
+
+def test_picker_sanitizes_hostile_names_and_descriptions(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    boards = [create_board(db, HOSTILE, description=HOSTILE, creator=user)]
+    session = FakeSession(keys=["q"])
+
+    async def scenario():
+        return await pick_item(
+            session,
+            boards,
+            name_of=lambda b: b.name,
+            stable_id_of=lambda b: b.id,
+            description_of=lambda b: b.description,
+            title="Available boards",
+            empty_message="No boards.",
+        )
+
+    asyncio.run(scenario())
+
+    _assert_hostile_payload_neutralized(session.output)
+    db.close()
+
+
+def test_pickers_own_trusted_ansi_styling_survives_sanitization(tmp_path):
+    """The header/nav lines pick_item generates itself (colored(), not
+    user content) must still contain real ANSI codes -- confirms
+    sanitization is applied only to the untrusted name/description
+    pieces, never to the picker's own composed output."""
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    boards = [create_board(db, "Ordinary Board Name", creator=user)]
+    session = FakeSession(keys=["q"])
+
+    async def scenario():
+        await pick_item(
+            session,
+            boards,
+            name_of=lambda b: b.name,
+            stable_id_of=lambda b: b.id,
+            title="Available boards",
+            empty_message="No boards.",
+        )
+
+    asyncio.run(scenario())
+
+    assert "\x1b[" in session.output  # the header's own CSI/SGR codes
+    db.close()
+
+
+def test_chat_scrollback_replay_sanitizes_author_and_body(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(db, "lobby", creator=user)
+    record_message(
+        db, channel, kind="message", author_label=HOSTILE, author_fingerprint=None, body=HOSTILE
+    )
+
+    rendered = _render_scrollback_message(get_scrollback(db, channel)[0])
+
+    _assert_hostile_payload_neutralized(rendered)
+    db.close()
+
+
+def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
+    db = Database(tmp_path / "node.db")
+    sender = create_user(db, "alice", password="hunter2", user_level=10)
+    recipient = create_user(db, "bob", password="hunter2", user_level=10)
+    channel = create_channel(db, "lobby", creator=sender)
+    hub = ChatHub()
+
+    sender_session = FakeSession(lines=[HOSTILE, "/quit"])
+    received: list[str] = []
+
+    async def scenario():
+        queue = hub.join(channel.name, "bob-participant")
+
+        async def collect_one():
+            received.append(await queue.get())  # bob's own join notice from... no, sender's join
+            received.append(await queue.get())  # the actual chat message
+            received.append(await queue.get())  # sender's leave notice
+
+        collector = asyncio.create_task(collect_one())
+        await _chat_loop(sender_session, db, hub, channel, sender)
+        await collector
+        hub.leave(channel.name, "bob-participant")
+
+    asyncio.run(scenario())
+
+    _assert_hostile_payload_neutralized(sender_session.output)
+
+    broadcast_text = "".join(received)
+    _assert_hostile_payload_neutralized(broadcast_text)
+    db.close()
+
+
+def test_file_area_listing_sanitizes_filename_description_and_uploader(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, HOSTILE, password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=user)
+    upload_file(db, area, user, HOSTILE, b"file contents", description=HOSTILE)
+
+    session = FakeSession(lines=[""])  # Enter at the trailing command prompt -> go back
+
+    asyncio.run(_show_area(session, db, area, user))
+
+    _assert_hostile_payload_neutralized(session.output)
+    db.close()

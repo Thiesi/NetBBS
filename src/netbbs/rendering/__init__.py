@@ -1,6 +1,7 @@
 """
 The ANSI rendering framework (design doc §4/§15) — color/cursor/
-screen-clearing helpers plus text reflow.
+screen-clearing helpers, text reflow, and `sanitize_text` (round 29,
+issue #8) for the untrusted-content half of what reaches a terminal.
 
 Transport-independent character-mode input lives in
 `netbbs.net.char_input`, not here. A future screen-buffer/diff
@@ -21,6 +22,7 @@ from netbbs.rendering.ansi import (
 )
 from netbbs.rendering.menu import menu_key
 from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow, truncate
+from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.theme import ACCENT_COLOR, HEADER_COLOR, MENU_KEY_COLOR, MUTED_COLOR, SELF_COLOR
 
 __all__ = [
@@ -36,6 +38,7 @@ __all__ = [
     "DEFAULT_WIDTH",
     "reflow",
     "truncate",
+    "sanitize_text",
     "ACCENT_COLOR",
     "HEADER_COLOR",
     "MENU_KEY_COLOR",
