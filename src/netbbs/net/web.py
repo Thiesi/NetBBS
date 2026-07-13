@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, web
 
-from netbbs.net.char_input import InputHistory, move_cursor, redraw_tail
+from netbbs.net.char_input import Completer, InputHistory, apply_tab_completion, move_cursor, redraw_tail
 from netbbs.net.session import Session, SessionClosedError
 
 _logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ _LF = "\n"
 _BS = "\x08"
 _DEL = "\x7f"
 _ESC = "\x1b"
+_TAB = "\t"
 
 # Same reasoning as netbbs.net.char_input._MAX_LINE_LENGTH — cheap
 # insurance against unbounded input from a broken or malicious client,
@@ -257,21 +258,28 @@ class WebSession(Session):
             "raw byte I/O is not available over the web transport — see write_raw"
         )
 
-    async def read_line(self, echo: bool = True, history: InputHistory | None = None) -> str:
+    async def read_line(
+        self,
+        echo: bool = True,
+        history: InputHistory | None = None,
+        completer: Completer | None = None,
+    ) -> str:
         """
-        Read one line, with the same cursor-addressable editing and
-        `history` recall `netbbs.net.char_input.read_line` provides for
-        Telnet/SSH (design doc round 47/Track 5f) -- reusing that
-        module's `move_cursor`/`redraw_tail` helpers directly rather
-        than re-deriving the same escape-sequence/redraw arithmetic a
-        second time. `echo=False` (password prompts) keeps the
-        original simple append/Backspace-from-the-end-only behavior,
-        same scope boundary as the Telnet/SSH path and for the same
-        reason -- see that module's `read_line` docstring.
+        Read one line, with the same cursor-addressable editing,
+        `history` recall (design doc round 47/Track 5f), and `completer`-
+        driven Tab completion (design doc round 49/Track 5g)
+        `netbbs.net.char_input.read_line` provides for Telnet/SSH --
+        reusing that module's `move_cursor`/`redraw_tail`/
+        `apply_tab_completion` helpers directly rather than re-deriving
+        the same escape-sequence/redraw arithmetic a second time.
+        `echo=False` (password prompts) keeps the original simple
+        append/Backspace-from-the-end-only behavior, same scope boundary
+        as the Telnet/SSH path and for the same reason -- see that
+        module's `read_line` docstring.
         """
         if not echo:
             return await self._read_line_masked()
-        return await self._read_line_editable(history)
+        return await self._read_line_editable(history, completer)
 
     async def _read_line_masked(self) -> str:
         line: list[str] = []
@@ -292,7 +300,9 @@ class WebSession(Session):
         await self.write("\r\n")
         return "".join(line)
 
-    async def _read_line_editable(self, history: InputHistory | None) -> str:
+    async def _read_line_editable(
+        self, history: InputHistory | None, completer: Completer | None = None
+    ) -> str:
         line: list[str] = []
         cursor = 0
         overwrite = False
@@ -365,6 +375,11 @@ class WebSession(Session):
                         self.write, terminal_col=terminal_col, edit_pos=cursor,
                         line=line, new_cursor=cursor,
                     )
+                continue
+
+            if char == _TAB:
+                if completer is not None:
+                    cursor = await apply_tab_completion(self.write, completer, line, cursor)
                 continue
 
             if ord(char) < 0x20:

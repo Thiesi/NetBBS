@@ -48,6 +48,37 @@ def test_accounts_are_independent():
     assert registry.is_online("bob") is False
 
 
+# -- online_usernames (design doc round 49/Track 5g) -------------------------
+
+
+def test_online_usernames_empty_by_default():
+    registry = PresenceRegistry()
+    assert registry.online_usernames() == set()
+
+
+def test_online_usernames_includes_every_entered_account():
+    registry = PresenceRegistry()
+    registry.enter("alice")
+    registry.enter("bob")
+    assert registry.online_usernames() == {"alice", "bob"}
+
+
+def test_online_usernames_excludes_accounts_after_final_leave():
+    registry = PresenceRegistry()
+    registry.enter("alice")
+    registry.enter("bob")
+    registry.leave("bob")
+    assert registry.online_usernames() == {"alice"}
+
+
+def test_online_usernames_still_includes_account_with_remaining_session():
+    registry = PresenceRegistry()
+    registry.enter("alice")
+    registry.enter("alice")
+    registry.leave("alice")
+    assert registry.online_usernames() == {"alice"}
+
+
 # -- away -------------------------------------------------------------------
 
 

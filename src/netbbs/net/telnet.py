@@ -165,18 +165,24 @@ class TelnetSession(Session):
         except (ConnectionResetError, BrokenPipeError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def read_line(self, echo: bool = True, history: char_input.InputHistory | None = None) -> str:
+    async def read_line(
+        self,
+        echo: bool = True,
+        history: char_input.InputHistory | None = None,
+        completer: char_input.Completer | None = None,
+    ) -> str:
         """
         Read one line of input, character by character, echoing (or
         masking, if `echo=False`) each character ourselves as it
         arrives — see the module docstring for why this replaced relying
         on the client's own local line editing. Actual character-by-
-        character logic, including cursor-addressable editing and
-        `history` recall (design doc round 47/Track 5f), lives in
+        character logic, including cursor-addressable editing, `history`
+        recall (design doc round 47/Track 5f), and `completer`-driven Tab
+        completion (design doc round 49/Track 5g), lives in
         `netbbs.net.char_input`, shared with SSH; this method just
         supplies the byte source.
         """
-        return await char_input.read_line(self, self.write, echo, history)
+        return await char_input.read_line(self, self.write, echo, history, completer)
 
     async def read_key(self, echo: bool = True) -> str:
         """

@@ -281,11 +281,11 @@ class _SessionThatDropsBobAfterEnteringPrivateMode(FakeSession):
         self._presence = presence
         self._dropped = False
 
-    async def read_line(self, echo: bool = True, history=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
         if self._lines and self._lines[0] == "hello" and not self._dropped:
             self._dropped = True
             self._presence.leave("bob")
-        return await super().read_line(echo=echo, history=history)
+        return await super().read_line(echo=echo, history=history, completer=completer)
 
 
 def test_private_target_going_offline_mid_conversation_is_handled(

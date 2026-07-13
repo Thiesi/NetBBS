@@ -415,6 +415,120 @@ def test_search_matches_name_case_insensitively():
     assert result["value"] == "Apple"
 
 
+# -- search: Tab completion (design doc round 49/Track 5g) ------------------
+
+
+def test_search_tab_completes_a_single_matching_candidate():
+    result = {}
+    items = ["alpha", "beta"]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"s")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"al\t\r\n")  # Tab-complete "al" to "alpha ", then Enter
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] == "alpha"
+
+
+def test_search_tab_with_no_matching_candidates_does_not_change_the_query():
+    result = {}
+    items = ["alpha", "beta"]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"s")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"zz\t\r\n")  # no candidate starts with "zz"
+            data = await _read_until_quiet(reader)
+            assert b"No matches." in data
+            writer.write(b"b")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] is None
+
+
+def test_search_tab_completion_reflects_the_current_working_set_not_the_full_list():
+    # Candidates for Tab are drawn from `working_set` (design doc round
+    # 49/Track 5g) -- confirms a completion offered mid-search doesn't
+    # ever suggest an item already filtered out by an earlier search.
+    result = {}
+    items = ["alpha", "alligator", "amber"]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"s")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            # Narrow to alpha/alligator via a substring search that
+            # "amber" doesn't match at all.
+            writer.write(b"al\r\n")
+            await _read_until_quiet(reader)
+
+            writer.write(b"s")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.write(b"a\t")  # Tab, scoped to the narrowed working_set
+            await writer.drain()
+            data = await _read_until_quiet(reader)
+            assert b"amber" not in data  # excluded by the earlier search, not just prefix
+            assert b"alpha" in data
+            assert b"alligator" in data
+
+            writer.write(b"pha\r\n")  # finish typing "alpha" -> unique substring match
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] == "alpha"
+
+
 # -- goto --------------------------------------------------------------
 
 

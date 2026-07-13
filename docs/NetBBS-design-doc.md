@@ -3892,3 +3892,129 @@ request actioned in the same round:
 4. **Testing:** two new regression tests (above) plus the one updated
    existing test. Full suite re-run: **868 passed, 1 skipped** —
    actually run, not just syntax-checked.
+
+## Sign-off notes, round 49 (Phase 2 Track 5g: slash-command + username tab completion — implemented)
+
+Implements the plan agreed with Thiesi for Track 5g (design doc §15
+phasing, resequenced after 5f per round 45's decision 5) — Tab
+completion for chat's slash-commands and username arguments, plus the
+folded-in addendum wiring the same mechanism into the picker's
+`"Search: "` prompt.
+
+1. **`apply_tab_completion` added to `netbbs.net.char_input`, alongside
+   a new `Completer = Callable[[str], Sequence[str]]` type** — reusing
+   round 47/Track 5f's transport-agnostic split: this function and its
+   two small helpers (`_current_word_start`, `_common_prefix`) have no
+   dependency on bytes or `ByteSource`, so `netbbs.net.web.WebSession`
+   imports and calls it directly rather than re-deriving the same
+   redraw arithmetic a second time — the same reuse shape `move_cursor`/
+   `redraw_tail`/`InputHistory` already established. Deliberately
+   generic: the function has no idea what a "command" or "username" is,
+   only the generic notion of "word" (the whitespace-delimited token
+   ending at the cursor) needed to know how much of the buffer a
+   candidate replaces. Zero candidates does nothing (not even a bell —
+   an empty Tab press while composing free text isn't itself an error);
+   one candidate replaces the word plus a trailing space; multiple
+   candidates extend to their longest shared prefix (bash-style) and
+   list every candidate below, then reprint the in-progress line.
+   Wired into `_read_line_editable`'s main loop as a new `_TAB = 0x09`
+   branch, positioned alongside the existing Backspace/Delete handling;
+   `_read_line_masked` (password prompts) is untouched, matching the
+   same echo=False scope boundary `history` already established.
+2. **Deliberate simplification, not spelled out in the original plan
+   text: no caller-side prompt label is redrawn alongside a
+   multi-candidate list.** `read_line` has no idea a prompt string like
+   `"Choice: "`/`"Search: "` even exists (chat's `send_loop` has no
+   static prompt at all), so after printing candidates it only reprints
+   the raw line buffer, not any label preceding it. Chat is unaffected
+   (nothing to redraw); the picker's `"Search: "` label simply doesn't
+   reappear until the next real prompt cycle. Documented in
+   `apply_tab_completion`'s own docstring rather than left as a silent
+   gap.
+3. **`Session.read_line`'s ABC signature, and `TelnetSession`/
+   `SSHSession`/`WebSession`, all gain the same optional `completer`
+   parameter** — mechanically identical to how `history` was threaded
+   in round 47, `Completer` imported via the same `TYPE_CHECKING`-
+   guarded pattern in `session.py` to avoid the pre-existing circular
+   import with `char_input.py`.
+4. **The BBS-specific completer lives in `netbbs.net.chat_flow`, built
+   fresh by `_build_completer(db, presence, channel, user)` on every
+   `send_loop` iteration** — cheap (a handful of string comparisons,
+   at most one permission lookup), and always reflects the actor's
+   *current* moderator status rather than a snapshot taken once at
+   channel entry, since grants can change mid-session. Three shapes,
+   checked in order:
+   - A bare `/word` with no space yet completes against `_COMMANDS`
+     keys, filtered through a new, deliberately separate
+     `_COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel,
+     User], bool]]` rather than widening `_COMMANDS`' own value type —
+     `_dispatch_command` and `/help`'s listing need no changes at all.
+     Only `/mute`/`/unmute`/`/ban`/`/unban`/`/kick` are gated (on
+     `ChannelPermission.MODERATE`); everything else is always
+     suggested. **This is purely a suggestion filter, not an
+     authorization check** — the handlers themselves, via
+     `ChatModerationError`, remain the sole source of truth for what's
+     actually allowed to run; a non-moderator who already knows `/mute`
+     exists can still type it, they just won't see it offered.
+   - `/msg `, `/private `, `/query ` complete against
+     `PresenceRegistry.online_usernames()` — a new method there,
+     alongside the existing single-account `is_online` check, matching
+     those three commands' own online-only refusal at send time (round
+     46/Track 5e).
+   - `/whois `, `/finger ` complete against every registered account
+     (`netbbs.auth.users.list_users`), online or not — both commands
+     already work for offline accounts.
+   - Anything else (plain chat text, an unrecognized command, or past
+     the first argument of a username-completing command) returns no
+     candidates. All matching case-insensitive (round 33 point 6).
+   - `/invite` (Track 5h) is explicitly not wired up yet — nothing to
+     complete against until that track's membership model exists;
+     `_COMMAND_VISIBILITY` is already shaped to accept its
+     `MANAGE_MEMBERS` gate whenever it lands.
+5. **Picker addendum, folded in as agreed:** `pick_item`'s `"Search: "`
+   prompt gets a `_search_completer(candidates)` built fresh each time
+   from `[name_of(item) for item in working_set]` — the *current*
+   filtered set, not the caller's full original list, so a completion
+   offered after an earlier search never suggests something that
+   search already excluded. Purely additive, confirmed by test: the
+   substring-match-on-Enter behavior is completely unchanged, Tab only
+   ever helps when what's typed is already a real prefix of some
+   candidate.
+   - **One real scope boundary found and deliberately handled, not
+     glossed over:** `apply_tab_completion`'s generic word-boundary
+     logic only ever replaces the *last* whitespace-delimited word —
+     exactly right for chat's single-word command/username
+     completions, but capable of corrupting a multi-word picker
+     candidate name (e.g. the category `"Vintage Computing"` seen in
+     Thiesi's own round-48 transcript) if allowed to complete past an
+     already-typed internal space: the generic replace-last-word logic
+     would only overwrite the second word, duplicating the first.
+     `_search_completer` sidesteps this by returning no candidates at
+     all once the query already contains a space — completes the
+     *first* word of a name reliably, never corrupts a multi-word one.
+     Redefining the picker's own search matching to prefix-only (which
+     could support the general multi-word case properly) is a separate,
+     larger, round-16-reversing question, explicitly out of scope here,
+     same as the original plan flagged.
+6. **Testing:** `tests/test_char_input_completion.py` (10 cases — the
+   generic word-replacement mechanics: no-completer/zero-candidate
+   no-ops, single-candidate replacement with trailing space, multi-
+   candidate shared-prefix extension and listing, and mid-line
+   completion at a cursor position behind trailing untouched text),
+   `tests/test_chat_completion.py` (17 cases — command-name completion
+   including permission-gating and its exact channel-scoping, `/msg`/
+   `/private`/`/query`'s online-only matching, `/whois`/`/finger`'s
+   any-account matching, case-insensitivity, and plain-text/no-
+   candidate cases), `tests/test_web_completion.py` (5 cases, the
+   `WebSession` parallel), and `tests/test_chat_presence.py` (4 new
+   cases for `online_usernames`). `tests/test_picker.py` gains 3
+   completer-wired cases including the working-set-scoping and
+   multi-word-safety behaviors above. Full suite re-run: **905 passed,
+   1 skipped** — actually run, not just syntax-checked. (This round's
+   verification was briefly interrupted by an unrelated platform-side
+   tool outage blocking all command execution; every change was
+   manually re-traced by hand against the actual source during that
+   window rather than assumed correct, and the full suite passed
+   without a single fix needed once execution resumed — a rare case
+   worth noting, not the norm this project's history has otherwise
+   shown for byte-level line-editing code.)

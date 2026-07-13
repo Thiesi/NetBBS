@@ -42,6 +42,7 @@ from __future__ import annotations
 import math
 from typing import Callable, Sequence, TypeVar
 
+from netbbs.net.char_input import Completer
 from netbbs.net.session import Session
 from netbbs.rendering import HEADER_COLOR, colored, menu_key, sanitize_text, truncate
 
@@ -191,7 +192,8 @@ async def pick_item(
         if key_lower == "s":
             await session.write_line("")
             await session.write("Search: ")
-            query = (await session.read_line()).strip()
+            search_completer = _search_completer([name_of(item) for item in working_set])
+            query = (await session.read_line(completer=search_completer)).strip()
             if not query:
                 # Empty search clears back to the full, unfiltered list
                 # — doubles as "cancel" when nothing was filtered yet
@@ -250,6 +252,35 @@ async def pick_item(
 
         await session.write_line("")
         await session.write("\a")
+
+
+def _search_completer(candidates: Sequence[str]) -> Completer:
+    """
+    Tab completion for `pick_item`'s `"Search: "` prompt (design doc
+    round 49/Track 5g) — purely additive: the substring-match-on-Enter
+    search behavior above is completely unchanged, this only helps when
+    what's typed so far happens to already be a real *prefix* of some
+    candidate's name.
+
+    Deliberately returns no candidates once the query contains a space:
+    `netbbs.net.char_input`'s generic Tab logic only ever replaces the
+    *last* whitespace-delimited word, which is exactly right for
+    `chat_flow`'s single-word command/username completions but would
+    corrupt a multi-word candidate name (e.g. a category like "Vintage
+    Computing") if allowed to complete past an already-typed internal
+    space. Safe scope: complete the *first* word of a name, not every
+    word within it — redefining the picker's own search matching to
+    prefix-only (which could support the general case properly) is a
+    separate, larger, round-16-reversing question, out of scope here.
+    """
+
+    def completer(text: str) -> list[str]:
+        if " " in text:
+            return []
+        lower = text.lower()
+        return sorted(name for name in candidates if name.lower().startswith(lower))
+
+    return completer
 
 
 def _page_size(session: Session) -> int:

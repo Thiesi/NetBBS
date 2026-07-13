@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     # already makes every annotation in this file a lazily-evaluated
     # string at runtime; this block exists only so type checkers/IDEs
     # can resolve `InputHistory` by name.
-    from netbbs.net.char_input import InputHistory
+    from netbbs.net.char_input import Completer, InputHistory
 
 
 class SessionClosedError(Exception):
@@ -79,7 +79,12 @@ class Session(ABC):
         await self.write(text + "\r\n")
 
     @abstractmethod
-    async def read_line(self, echo: bool = True, history: InputHistory | None = None) -> str:
+    async def read_line(
+        self,
+        echo: bool = True,
+        history: InputHistory | None = None,
+        completer: Completer | None = None,
+    ) -> str:
         """
         Read one line of input from the client.
 
@@ -101,6 +106,17 @@ class Session(ABC):
         with one `InputHistory` constructed per connected session (see
         `netbbs.net.login_flow.handle_session`) so recall persists
         across a `/join` channel switch.
+
+        `completer` (design doc round 49/Track 5g) enables Tab
+        completion for this read, also ignored for masked reads — see
+        `netbbs.net.char_input.apply_tab_completion`'s docstring for its
+        exact behavior. Built fresh per call by callers that need it
+        (`netbbs.net.chat_flow`'s command/username completer,
+        `netbbs.net.picker.pick_item`'s name-based one for its
+        `"Search: "` prompt), not threaded through a session-lifetime
+        object the way `history` is — a completer's candidate set
+        depends on exactly where it's called from, so there's nothing
+        to persist between calls the way recalled history lines are.
         """
 
     @abstractmethod

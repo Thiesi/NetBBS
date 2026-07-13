@@ -53,7 +53,7 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True, history=None) -> str:
+    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
         # Falls back to "" (an empty Enter-press) once scripted input
         # runs out, rather than raising -- simpler than every test
         # needing to script out every trailing optional prompt exactly.

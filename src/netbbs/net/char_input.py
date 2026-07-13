@@ -21,23 +21,24 @@ bytes, escape-sequence discarding, the CR/LF line-ending dance, the
 max-length cap) is verbatim-identical regardless of which transport sits
 underneath — so it lives here once, not duplicated per transport.
 
-Cursor-addressable line editing and command history (design doc §15
-Phase 2, sign-off round 47/Track 5f): `move_cursor`/`redraw_tail` and
-`InputHistory` below are written with no dependency on bytes or
-`ByteSource` at all (pure `list[str]`/cursor-integer/`WriteFunc`
-manipulation) specifically so `netbbs.net.web.WebSession` — which
-decodes a browser's `onData` events into whole characters itself and
-deliberately does not share this module's byte-oriented reading
-(round 25) — can still reuse this *editing* logic instead of
-duplicating it a second time. Only the raw-byte/UTF-8/`ByteSource` half
-stays genuinely separate between the two.
+Cursor-addressable line editing, command history, and Tab completion
+(design doc §15 Phase 2, sign-off rounds 47/49, Tracks 5f/5g):
+`move_cursor`/`redraw_tail`, `InputHistory`, and `apply_tab_completion`
+below are written with no dependency on bytes or `ByteSource` at all
+(pure `list[str]`/cursor-integer/`WriteFunc` manipulation) specifically
+so `netbbs.net.web.WebSession` — which decodes a browser's `onData`
+events into whole characters itself and deliberately does not share
+this module's byte-oriented reading (round 25) — can still reuse this
+*editing* logic instead of duplicating it a second time. Only the
+raw-byte/UTF-8/`ByteSource` half stays genuinely separate between the
+two.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError
 
@@ -48,6 +49,7 @@ _NUL = 0x00
 _BS = 0x08  # Backspace
 _DEL = 0x7F  # Delete — many terminals send this for the Backspace key
 _ESC = 0x1B
+_TAB = 0x09
 
 # Bounded wait used when peeking for a byte that might not be coming (a
 # following LF after a lone CR; the rest of an escape sequence) — short
@@ -241,6 +243,98 @@ class InputHistory:
         return self._entries[-index_from_most_recent]
 
 
+# -- tab completion (transport/byte agnostic, design doc round 49/Track 5g) -
+
+# `Completer` is deliberately generic: given the text of the current
+# line up to the cursor, return every full-word replacement candidate
+# for whatever's being typed. This module has no idea what a "command"
+# or a "username" is — that domain knowledge lives entirely in the
+# closure a caller supplies (see `netbbs.net.chat_flow`'s per-read_line
+# completer, or `netbbs.net.picker.pick_item`'s name-based one); this
+# module only knows the generic notion of "word" (split on a literal
+# space) needed to know how much of the buffer to replace.
+Completer = Callable[[str], Sequence[str]]
+
+
+def _current_word_start(line: list[str], cursor: int) -> int:
+    """Start index of the whitespace-delimited token ending at
+    `cursor` — the region Tab completion replaces."""
+    i = cursor
+    while i > 0 and line[i - 1] != " ":
+        i -= 1
+    return i
+
+
+def _common_prefix(candidates: Sequence[str]) -> str:
+    if not candidates:
+        return ""
+    prefix = candidates[0]
+    for candidate in candidates[1:]:
+        while not candidate.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    return prefix
+
+
+async def apply_tab_completion(
+    write: WriteFunc, completer: Completer, line: list[str], cursor: int
+) -> int:
+    """
+    Handle one Tab keypress in an editable line buffer: ask `completer`
+    for candidates completing the word ending at `cursor`, apply the
+    result to `line` in place, and return the new cursor position.
+
+    Zero candidates: does nothing (not even a bell — an empty Tab press
+    while composing free text is common and not itself an error, unlike
+    an actually-invalid menu keystroke elsewhere in this codebase). One
+    candidate: replaces the current word with it plus a trailing space,
+    ready to type the next word. Multiple candidates: extends the word
+    to their longest shared prefix (bash-style), if that's longer than
+    what's already typed, then lists every candidate on its own line
+    below and reprints the in-progress line.
+
+    Deliberately reprints only the raw line content after showing a
+    candidate list, not any caller-side prompt label ("Choice: ",
+    "Search: ") — this module has no idea such a label exists, the same
+    way it has no idea what a command or username is. Callers with a
+    static prompt (`pick_item`'s `"Search: "`) accept that the label
+    itself doesn't reappear alongside a multi-candidate list; callers
+    without one (chat's `send_loop`, which has no prompt string at all)
+    are unaffected.
+    """
+    text_before_cursor = "".join(line[:cursor])
+    candidates = list(completer(text_before_cursor))
+    if not candidates:
+        return cursor
+
+    word_start = _current_word_start(line, cursor)
+
+    if len(candidates) == 1:
+        replacement = list(candidates[0]) + [" "]
+        terminal_col = cursor
+        line[word_start:cursor] = replacement
+        new_cursor = word_start + len(replacement)
+        await redraw_tail(
+            write, terminal_col=terminal_col, edit_pos=word_start, line=line, new_cursor=new_cursor
+        )
+        return new_cursor
+
+    prefix = list(_common_prefix(candidates))
+    if prefix != line[word_start:cursor]:
+        terminal_col = cursor
+        line[word_start:cursor] = prefix
+        cursor = word_start + len(prefix)
+        await redraw_tail(
+            write, terminal_col=terminal_col, edit_pos=word_start, line=line, new_cursor=cursor
+        )
+
+    await write("\r\n" + "  ".join(candidates) + "\r\n")
+    await write("".join(line))
+    await write(move_cursor(len(line) - cursor, forward=False))
+    return cursor
+
+
 def _push_back(source: ByteSource, byte: int) -> None:
     pending = getattr(source, _PUSHBACK_ATTR, None)
     if pending is None:
@@ -275,6 +369,7 @@ async def read_line(
     write: WriteFunc,
     echo: bool = True,
     history: InputHistory | None = None,
+    completer: Completer | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -282,17 +377,20 @@ async def read_line(
     Track 5f): Left/Right move within the line, Home/End jump to its
     start/end, Backspace/Delete remove from either side of the cursor,
     Insert toggles overwrite mode, and Up/Down cycle through `history`
-    if one is supplied.
+    if one is supplied. Tab triggers completion via `completer` (design
+    doc round 49/Track 5g), if one is supplied — see
+    `apply_tab_completion`'s docstring for its exact behavior.
 
     `echo=False` (password prompts) deliberately keeps the original,
     simpler append/Backspace-from-the-end-only behavior with no cursor
-    movement or history — a masked field doesn't meaningfully benefit
-    from mid-line editing, and it avoids needing a parallel masked-
-    display buffer just to support a case nothing asks for.
+    movement, history, or completion — a masked field doesn't
+    meaningfully benefit from any of that, and it avoids needing a
+    parallel masked-display buffer just to support cases nothing asks
+    for.
     """
     if not echo:
         return await _read_line_masked(source, write)
-    return await _read_line_editable(source, write, history)
+    return await _read_line_editable(source, write, history, completer)
 
 
 async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
@@ -338,7 +436,10 @@ async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
 
 
 async def _read_line_editable(
-    source: ByteSource, write: WriteFunc, history: InputHistory | None
+    source: ByteSource,
+    write: WriteFunc,
+    history: InputHistory | None,
+    completer: Completer | None = None,
 ) -> str:
     line: list[str] = []
     cursor = 0
@@ -364,6 +465,11 @@ async def _read_line_editable(
                 await redraw_tail(
                     write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
                 )
+            continue
+
+        if b == _TAB:
+            if completer is not None:
+                cursor = await apply_tab_completion(write, completer, line, cursor)
             continue
 
         if b == _ESC:

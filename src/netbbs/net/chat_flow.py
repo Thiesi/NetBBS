@@ -12,7 +12,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from netbbs.auth.users import AuthError, User, get_user_by_username
+from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import (
     Channel,
     ChannelError,
@@ -43,7 +43,8 @@ from netbbs.chat import (
 )
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.directory import VCard, get_vcard
-from netbbs.net.char_input import InputHistory
+from netbbs.moderation import ChannelPermission, has_permission
+from netbbs.net.char_input import Completer, InputHistory
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -1064,6 +1065,84 @@ _COMMANDS: dict[str, CommandHandler] = {
 }
 
 
+# -- Tab completion (design doc round 49/Track 5g) --------------------------
+
+# Per-command visibility predicate for completion *suggestions* only --
+# deliberately a separate dict rather than widening _COMMANDS' own value
+# type, so dispatch (_dispatch_command) and /help's listing need no
+# changes at all. A command absent from this dict is always suggested.
+# This is purely a suggestion filter, not an authorization check: the
+# handlers themselves (mute_user/kick_user/etc., via ChatModerationError)
+# remain the sole source of truth for what's actually allowed to run --
+# unchanged by this track. Reserved for 5h's membership-admin commands
+# too, once those exist; nothing to wire up for them yet.
+def _requires_moderate(db: Database, channel: Channel, user: User) -> bool:
+    return has_permission(
+        db, user, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
+    )
+
+
+_COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
+    "mute": _requires_moderate,
+    "unmute": _requires_moderate,
+    "ban": _requires_moderate,
+    "unban": _requires_moderate,
+    "kick": _requires_moderate,
+}
+
+# The commands whose first argument is a username -- distinguished by
+# whether it must currently be *online* (/msg, /private, /query -- a
+# live conversation can't reach an offline account, matching those
+# commands' own online_usernames() and the online refusal on send)
+# versus any registered account at all (/whois, /finger -- both work
+# for offline accounts too).
+_ONLINE_USER_COMMAND_PREFIXES = ("/msg ", "/private ", "/query ")
+_ANY_USER_COMMAND_PREFIXES = ("/whois ", "/finger ")
+
+
+def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel, user: User) -> Completer:
+    """
+    Builds one Tab-completion closure per `read_line()` call in
+    `send_loop`, from the state available there -- cheap (a handful of
+    string comparisons plus, at most, one permission lookup), and always
+    reflects the actor's *current* permissions rather than a snapshot
+    taken once at channel entry (moderator grants can change
+    mid-session, unlike a static completer built once and reused).
+
+    All matching is case-insensitive (design doc round 33 point 6).
+    """
+
+    def completer(text: str) -> list[str]:
+        if text.startswith("/") and " " not in text:
+            prefix = text[1:].lower()
+            return sorted(
+                f"/{name}"
+                for name in _COMMANDS
+                if name.lower().startswith(prefix)
+                and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, channel, user))
+            )
+
+        for command_prefix in _ONLINE_USER_COMMAND_PREFIXES:
+            rest = text[len(command_prefix) :]
+            if text.lower().startswith(command_prefix) and " " not in rest:
+                word = rest.lower()
+                return sorted(
+                    name for name in presence.online_usernames() if name.lower().startswith(word)
+                )
+
+        for command_prefix in _ANY_USER_COMMAND_PREFIXES:
+            rest = text[len(command_prefix) :]
+            if text.lower().startswith(command_prefix) and " " not in rest:
+                word = rest.lower()
+                return sorted(
+                    candidate.username for candidate in list_users(db) if candidate.username.lower().startswith(word)
+                )
+
+        return []
+
+    return completer
+
+
 async def _chat_loop(
     session: Session,
     db: Database,
@@ -1199,7 +1278,8 @@ async def _chat_loop(
         private_target: User | None = None
 
         while True:
-            line = (await session.read_line(history=history)).strip()
+            completer = _build_completer(db, presence, channel, user)
+            line = (await session.read_line(history=history, completer=completer)).strip()
             if not line:
                 continue
             if line.startswith("/"):

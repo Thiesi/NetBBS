@@ -48,6 +48,13 @@ class PresenceRegistry:
     def is_online(self, username: str) -> bool:
         return self._session_counts.get(username, 0) > 0
 
+    def online_usernames(self) -> set[str]:
+        """Every currently-online account — used by `/msg`/`/private`/
+        `/query`'s Tab completion (design doc round 49/Track 5g) to
+        suggest only reachable targets, distinct from `is_online`'s
+        single-account check."""
+        return set(self._session_counts)
+
     def set_away(self, username: str, message: str) -> None:
         """Mark `username` away, sharing the same status across every
         one of their active sessions (design doc round 32: "shared
