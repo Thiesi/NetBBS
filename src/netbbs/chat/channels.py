@@ -47,6 +47,9 @@ class Channel:
     pinned: bool
     created_at: str
     topic: str | None
+    hidden: bool
+    members_only: bool
+    allow_member_invites: bool
 
 
 def create_channel(
@@ -57,6 +60,9 @@ def create_channel(
     min_level: int = 0,
     category_id: int | None = None,
     pinned: bool = False,
+    hidden: bool = False,
+    members_only: bool = False,
+    allow_member_invites: bool = False,
     creator: User,
 ) -> Channel:
     """Create a new local channel. No permission check on creation here —
@@ -65,7 +71,14 @@ def create_channel(
 
     `category_id` optionally places the channel under a
     `netbbs.chat.categories.Category`. `pinned` channels always sort
-    first — see `list_channels`."""
+    first — see `list_channels`. `hidden`/`members_only`/
+    `allow_member_invites` (design doc §8/round 33 points 8/9/11, Phase
+    2 Track 5h) default to `False` — an invite-only or hidden channel is
+    always an explicit opt-in, never accidental. No `/createchannel`
+    command exists yet (matches every earlier track's precedent — no
+    SysOp channel/board-creation UI), so these are seeded here directly,
+    e.g. by test fixtures, the same way round 21's file-area equivalents
+    already are."""
     created_at = utc_now_iso()
     channel_id = compute_content_id(
         {
@@ -80,10 +93,14 @@ def create_channel(
         db.connection.execute(
             """
             INSERT INTO channels
-                (channel_id, name, description, min_level, category_id, pinned, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (channel_id, name, description, min_level, category_id, pinned, created_at,
+                 hidden, members_only, allow_member_invites)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (channel_id, name, description, min_level, category_id, int(pinned), created_at),
+            (
+                channel_id, name, description, min_level, category_id, int(pinned), created_at,
+                int(hidden), int(members_only), int(allow_member_invites),
+            ),
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
@@ -160,4 +177,7 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         pinned=bool(row["pinned"]),
         created_at=row["created_at"],
         topic=row["topic"],
+        hidden=bool(row["hidden"]),
+        members_only=bool(row["members_only"]),
+        allow_member_invites=bool(row["allow_member_invites"]),
     )

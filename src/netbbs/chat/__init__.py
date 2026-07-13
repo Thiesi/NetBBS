@@ -21,6 +21,18 @@ from netbbs.chat.channels import (
 )
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
+from netbbs.chat.membership import (
+    ChannelInvitation,
+    MembershipError,
+    accept_invitation,
+    add_member,
+    create_invitation,
+    has_pending_invitation,
+    is_member,
+    list_members,
+    remove_member,
+    revoke_invitation,
+)
 from netbbs.chat.nick import MAX_NICK_LENGTH, NickError, display_label, get_nick, set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.moderation import (
@@ -55,6 +67,16 @@ __all__ = [
     "set_topic",
     "ChatHub",
     "MessageMailbox",
+    "ChannelInvitation",
+    "MembershipError",
+    "accept_invitation",
+    "add_member",
+    "create_invitation",
+    "has_pending_invitation",
+    "is_member",
+    "list_members",
+    "remove_member",
+    "revoke_invitation",
     "MAX_NICK_LENGTH",
     "NickError",
     "display_label",

@@ -67,9 +67,10 @@ def test_bare_slash_lists_every_visible_command(db, presence, alice, channel):
 def test_command_prefix_matches_only_names_starting_with_it(db, presence, alice, channel):
     completer = chat_flow._build_completer(db, presence, channel, alice)
     candidates = completer("/m")
-    assert set(candidates) <= {"/msg", "/me", "/mute"}
+    assert set(candidates) <= {"/msg", "/me", "/mute", "/members"}
     assert "/msg" in candidates
     assert "/me" in candidates
+    assert "/members" in candidates  # always visible -- not gated on MANAGE_MEMBERS
 
 
 def test_command_completion_is_case_insensitive(db, presence, alice, channel):
@@ -110,6 +111,55 @@ def test_moderation_commands_stay_hidden_from_completion_after_a_moderate_grant_
 def test_unrelated_command_prefix_matches_nothing(db, presence, alice, channel):
     completer = chat_flow._build_completer(db, presence, channel, alice)
     assert completer("/zzz") == []
+
+
+# -- membership-admin commands (design doc round 33 points 8/11, Track 5h) --
+
+
+def test_non_manager_does_not_see_membership_admin_commands_suggested(db, presence, alice, channel):
+    completer = chat_flow._build_completer(db, presence, channel, alice)
+    candidates = completer("/")
+    assert "/uninvite" not in candidates
+    assert "/grantaccess" not in candidates
+    assert "/revokeaccess" not in candidates
+    # /invite is a distinct predicate -- checked separately below.
+    assert "/invite" not in candidates
+
+
+def test_manager_does_see_membership_admin_commands_suggested(db, presence, alice, channel):
+    grant_permissions(
+        db, alice, object_type="channel", object_id=channel.id,
+        permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=alice,
+    )
+    completer = chat_flow._build_completer(db, presence, channel, alice)
+    candidates = completer("/")
+    assert "/invite" in candidates
+    assert "/uninvite" in candidates
+    assert "/grantaccess" in candidates
+    assert "/revokeaccess" in candidates
+
+
+def test_invite_is_suggested_to_a_plain_member_when_the_channel_opts_in(db, presence, alice, bob, channel):
+    from netbbs.chat.membership import add_member
+
+    grant_permissions(
+        db, alice, object_type="channel", object_id=channel.id,
+        permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=alice,
+    )
+    open_channel = create_channel(
+        db, "welcoming", creator=alice, members_only=True, allow_member_invites=True
+    )
+    grant_permissions(
+        db, alice, object_type="channel", object_id=open_channel.id,
+        permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=alice,
+    )
+    add_member(db, open_channel, bob, granted_by=alice)
+
+    completer = chat_flow._build_completer(db, presence, open_channel, bob)
+    candidates = completer("/")
+    assert "/invite" in candidates
+    # bob has no MANAGE_MEMBERS -- the other three admin commands stay hidden.
+    assert "/uninvite" not in candidates
 
 
 # -- /msg, /private, /query: online usernames only ---------------------
@@ -163,6 +213,27 @@ def test_finger_completes_against_offline_users_too(db, presence, alice, bob, ch
 def test_whois_completion_matches_multiple_candidates(db, presence, alice, bob, carol, channel):
     completer = chat_flow._build_completer(db, presence, channel, alice)
     assert set(completer("/whois ")) == {"alice", "bob", "carol"}
+
+
+# -- /invite: registered users who aren't already members (Track 5h) -----
+
+
+def test_invite_completes_against_offline_users_too(db, presence, alice, bob, channel):
+    completer = chat_flow._build_completer(db, presence, channel, alice)
+    assert completer("/invite bo") == ["bob"]
+
+
+def test_invite_excludes_users_already_a_member(db, presence, alice, bob, channel):
+    from netbbs.chat.membership import add_member
+    from netbbs.moderation import ChannelPermission, grant_permissions
+
+    grant_permissions(
+        db, alice, object_type="channel", object_id=channel.id,
+        permissions=ChannelPermission.MANAGE_MEMBERS, granted_by=alice,
+    )
+    add_member(db, channel, bob, granted_by=alice)
+    completer = chat_flow._build_completer(db, presence, channel, alice)
+    assert completer("/invite bo") == []
 
 
 # -- plain chat text: no candidates --------------------------------------

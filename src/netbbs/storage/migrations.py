@@ -639,4 +639,62 @@ MIGRATIONS = [
         ALTER TABLE channels ADD COLUMN topic TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Adds invite-only/hidden channel support (design doc §8/"
+            "round 33 points 8/9/11, Phase 2 Track 5h): channels.hidden "
+            "and channels.members_only are independent axes (a "
+            "members_only-but-not-hidden channel still appears in "
+            "listings -- 'hidden + open is obscurity, not access "
+            "control', round 33 point 9), channels.allow_member_invites "
+            "is the opt-in described in round 33 point 11. All three "
+            "default to 0 (off) -- an existing channel's behavior is "
+            "unchanged unless a moderator explicitly opts in. "
+            "channel_members is persistent membership -- deliberately "
+            "its own table rather than folded into moderator_grants: "
+            "membership is access/visibility eligibility, not a "
+            "permission bit. channel_invitations tracks the invite-then-"
+            "accept flow separately from that direct-grant path; expiry "
+            "follows channel_restrictions' precedent (filter at check "
+            "time via expires_at, no sweep-on-access needed) rather "
+            "than posts/files' round 35 sweep-and-delete pattern -- an "
+            "invitation row isn't storage anyone needs reclaimed the "
+            "way expired content is, it just needs to stop granting "
+            "access once past its expiry."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE channels ADD COLUMN members_only INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE channels ADD COLUMN allow_member_invites INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE channel_members (
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            user_id             INTEGER NOT NULL REFERENCES users(id),
+            granted_by_user_id  INTEGER NOT NULL REFERENCES users(id),
+            created_at          TEXT NOT NULL,
+
+            PRIMARY KEY (channel_id, user_id)
+        );
+
+        CREATE TABLE channel_invitations (
+            id                   INTEGER PRIMARY KEY,
+            channel_id           INTEGER NOT NULL REFERENCES channels(id),
+            invited_user_id      INTEGER NOT NULL REFERENCES users(id),
+            invited_by_user_id   INTEGER NOT NULL REFERENCES users(id),
+            status               TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+            created_at           TEXT NOT NULL,
+            -- NULL = indefinite (same convention channel_restrictions
+            -- already uses) -- nothing in the command surface sets this
+            -- yet (no duration argument on /invite), but the schema
+            -- supports it without a further migration once/if one is
+            -- added.
+            expires_at           TEXT,
+
+            UNIQUE (channel_id, invited_user_id)
+        );
+
+        CREATE INDEX idx_channel_invitations_lookup
+            ON channel_invitations(channel_id, invited_user_id, status);
+        """,
+    ),
 ]

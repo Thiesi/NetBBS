@@ -8,10 +8,16 @@ terminals with `telnet localhost 2323` and join the same channel from
 both to see real-time chat working.
 
 Usage:
-    python scripts/create_test_channel.py <db_path> <channel_name> [description] [category_name] [pinned:yes/no]
+    python scripts/create_test_channel.py <db_path> <channel_name> [description] [category_name] \
+        [pinned:yes/no] [hidden:yes/no] [members_only:yes/no] [allow_member_invites:yes/no]
 
 Run scripts/create_test_category.py first if you want to assign a
 category — this script looks it up by name, it doesn't create one.
+
+The last three flags seed an invite-only/hidden channel (design doc §8/
+round 33 points 8/9/11, Phase 2 Track 5h) for manual testing — no
+`/createchannel` command exists to set these interactively, same as
+every earlier track's precedent.
 """
 
 from __future__ import annotations
@@ -37,6 +43,9 @@ def main() -> None:
     description = sys.argv[3] if len(sys.argv) > 3 else None
     category_name = sys.argv[4] if len(sys.argv) > 4 else None
     pinned = len(sys.argv) > 5 and sys.argv[5].lower() in ("yes", "true", "1")
+    hidden = len(sys.argv) > 6 and sys.argv[6].lower() in ("yes", "true", "1")
+    members_only = len(sys.argv) > 7 and sys.argv[7].lower() in ("yes", "true", "1")
+    allow_member_invites = len(sys.argv) > 8 and sys.argv[8].lower() in ("yes", "true", "1")
 
     db = Database(db_path)
 
@@ -60,10 +69,22 @@ def main() -> None:
         description=description,
         category_id=category_id,
         pinned=pinned,
+        hidden=hidden,
+        members_only=members_only,
+        allow_member_invites=allow_member_invites,
         creator=creator,
     )
-    pinned_note = " (pinned)" if channel.pinned else ""
-    print(f"Created channel #{channel.name} (channel_id {channel.channel_id[:16]}...){pinned_note} in {db_path}")
+    notes = []
+    if channel.pinned:
+        notes.append("pinned")
+    if channel.hidden:
+        notes.append("hidden")
+    if channel.members_only:
+        notes.append("members-only")
+    if channel.allow_member_invites:
+        notes.append("member-invites-allowed")
+    notes_suffix = f" ({', '.join(notes)})" if notes else ""
+    print(f"Created channel #{channel.name} (channel_id {channel.channel_id[:16]}...){notes_suffix} in {db_path}")
 
 
 if __name__ == "__main__":

@@ -20,22 +20,31 @@ from netbbs.chat import (
     ChatHub,
     ChatModerationError,
     DurationError,
+    MembershipError,
     MessageMailbox,
     NickError,
     PresenceRegistry,
     TopicError,
+    accept_invitation,
+    add_member,
     ban_user,
+    create_invitation,
     display_label,
     get_channel_by_name,
     get_nick,
     get_scrollback,
+    has_pending_invitation,
     is_banned,
+    is_member,
     is_muted,
     kick_user,
     list_channels,
+    list_members,
     mute_user,
     parse_duration,
     record_message,
+    remove_member,
+    revoke_invitation,
     set_nick,
     set_topic,
     unban_user,
@@ -94,6 +103,43 @@ async def browse_channels(
         return  # _Quit
 
 
+def _visible_channels_for(db: Database, user: User) -> list[Channel]:
+    """
+    Every channel `user` is allowed to *see* — the shared filter behind
+    the picker, `/list`, and `/whois`'s channel-membership display
+    (design doc round 33 point 9, Phase 2 Track 5h). Consolidates what
+    were three separate, slightly-duplicated `meets_level`-only list
+    comprehensions (round 43) into one place, adding the hidden-channel
+    condition: level still gates access exactly as before, and a
+    `hidden` channel is additionally excluded unless the user is
+    already a member, holds a pending invitation, or holds *any*
+    moderator grant on it (checked via `has_permission` with every
+    `ChannelPermission` bit combined — "does the user hold any of
+    these," not one specific bit).
+
+    A `members_only`-but-not-`hidden` channel still appears here —
+    "hidden + open is obscurity, not access control" (round 33 point
+    9): only `hidden` controls listing visibility itself; `members_only`
+    alone just means you can see it exists but can't `/join` it without
+    access (enforced separately, in `_handle_join`).
+    """
+    visible = []
+    for channel in list_channels(db):
+        if not meets_level(user, channel.min_level):
+            continue
+        if channel.hidden and not (
+            is_member(db, channel, user)
+            or has_pending_invitation(db, channel, user)
+            or has_permission(
+                db, user, object_type="channel", object_id=channel.id,
+                permission=ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS,
+            )
+        ):
+            continue
+        visible.append(channel)
+    return visible
+
+
 async def _pick_channel(
     session: Session,
     db: Database,
@@ -112,7 +158,7 @@ async def _pick_channel(
     copies drifting out of sync in what they claim rather than just in
     what they say.
     """
-    all_channels = [c for c in list_channels(db) if meets_level(user, c.min_level)]
+    all_channels = _visible_channels_for(db, user)
     # Activity-sort applied before splitting by category, so ordering
     # within each category's channel list is still most-recent-first —
     # same node-wide default as boards (design doc round 17).
@@ -324,6 +370,17 @@ async def _handle_leave(ctx: ChatCommandContext, args: str) -> ChatAction:
 
 
 async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
+    """
+    `/join <channel>` -- see `_handle_leave`/`ChatAction` for the outer
+    loop's side of channel switching.
+
+    Also doubles as invitation *acceptance* (design doc round 33, Phase
+    2 Track 5h): there is no separate `/accept` command — successfully
+    joining a `members_only` channel via a pending invitation marks it
+    accepted, reusing this existing "look up, check authorization,
+    switch" flow instead of inventing parallel command surface for the
+    same action.
+    """
     channel_name = args.strip()
     if not channel_name:
         await ctx.session.write_line(colored("Usage: /join <channel>", fg_color=MUTED_COLOR))
@@ -343,11 +400,21 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         )
         return None
 
+    already_member = is_member(ctx.db, channel, ctx.user)
+    if channel.members_only and not already_member and not has_pending_invitation(ctx.db, channel, ctx.user):
+        await ctx.session.write_line(
+            colored("You are not authorized to join that channel.", fg_color=MUTED_COLOR)
+        )
+        return None
+
     if channel.id == ctx.channel.id:
         await ctx.session.write_line(
             colored(f"You are already in #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
         )
         return None
+
+    if channel.members_only and not already_member:
+        accept_invitation(ctx.db, channel, ctx.user)
 
     return _SwitchTo(channel)
 
@@ -968,7 +1035,7 @@ async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
     precedent — a quick text reference from inside chat, not the
     interactive category-nested picker the main menu's Chat option
     already provides."""
-    visible = [c for c in list_channels(ctx.db) if meets_level(ctx.user, c.min_level)]
+    visible = _visible_channels_for(ctx.db, ctx.user)
     if not visible:
         await ctx.session.write_line(colored("No channels are available to you.", fg_color=MUTED_COLOR))
         return
@@ -987,17 +1054,18 @@ def _channel_names_for_user(
     """
     Every channel `target_username` currently has a live session in,
     restricted to channels `requesting_user` can themselves see
-    (`meets_level` — the same filter `/list` uses). This *is* the
-    "hidden-channel visibility" `/whois` must respect (design doc
-    round 32/33), applied consistently now even though no channel is
-    actually hidden yet (Track 5h).
+    (`_visible_channels_for` — the same filter `/list` and the picker
+    use). This *is* the "hidden-channel visibility" `/whois` must
+    respect (design doc round 32/33), now actually enforced against real
+    hidden channels (Track 5h), not just consistently applied ahead of
+    their existence the way round 43 originally left it.
 
     `ChatHub` has no reverse "which channels is this user in" index —
     only per-channel participant lists — so this checks every visible
     channel's roster in turn. O(channels × participants); fine at this
     project's declared scale (§14).
     """
-    visible = [c for c in list_channels(db) if meets_level(requesting_user, c.min_level)]
+    visible = _visible_channels_for(db, requesting_user)
     names = []
     for channel in visible:
         if any(pid.startswith(f"{target_username}:") for pid in hub.participant_ids(channel.name)):
@@ -1039,6 +1107,140 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(f"Channels: {joined}")
 
 
+# -- invite-only channels & membership admin (design doc §8/round 33 -------
+# points 8/9/11, Phase 2 Track 5h) -------------------------------------
+
+
+async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/invite <user>` (design doc round 33 point 11): allowed if the
+    actor holds `ChannelPermission.MANAGE_MEMBERS`, **or** the channel
+    has `allow_member_invites` set and the actor is already a member —
+    `create_invitation` itself is the one place that authorization
+    decision is made (`netbbs.chat.membership`), not duplicated here.
+
+    Notifies the invitee through Track 5e's mailbox/live-push mechanism
+    directly (`_deliver_private_message`) — no second delivery mechanism
+    invented for this, and it already works for a currently-offline
+    invitee (mailbox delivery doesn't require the recipient to be online
+    right now, only `/msg`'s own send-time check does).
+    """
+    target_name = args.strip()
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /invite <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    try:
+        create_invitation(ctx.db, ctx.channel, target, invited_by=ctx.user)
+    except MembershipError:
+        await ctx.session.write_line(
+            colored("You do not have permission to invite users to this channel.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await _deliver_private_message(
+        ctx, target, f"You've been invited to #{sanitize_text(ctx.channel.name)}. Use /join to accept."
+    )
+    await ctx.session.write_line(
+        colored(f"Invited {sanitize_text(target.username)}.", fg_color=MUTED_COLOR)
+    )
+
+
+async def _handle_uninvite(ctx: ChatCommandContext, args: str) -> None:
+    target_name = args.strip()
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /uninvite <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    try:
+        revoke_invitation(ctx.db, ctx.channel, target, revoked_by=ctx.user)
+    except MembershipError:
+        await ctx.session.write_line(
+            colored("You do not have permission to do that, or there is no pending invitation.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await ctx.session.write_line(
+        colored(f"Invitation for {sanitize_text(target.username)} revoked.", fg_color=MUTED_COLOR)
+    )
+
+
+async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
+    """`/grantaccess <user>` (design doc round 33 point 8): directly
+    adds `target` to `channel_members`, bypassing the invite-then-accept
+    flow entirely — a distinct capability from `/invite`, not an
+    alternate way to trigger the same thing."""
+    target_name = args.strip()
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /grantaccess <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    try:
+        add_member(ctx.db, ctx.channel, target, granted_by=ctx.user)
+    except MembershipError:
+        await ctx.session.write_line(
+            colored("You do not have permission to manage members on this channel.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await ctx.session.write_line(
+        colored(f"Granted {sanitize_text(target.username)} access to this channel.", fg_color=MUTED_COLOR)
+    )
+
+
+async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
+    """`/revokeaccess <user>` (design doc round 33 point 8): removes a
+    `channel_members` grant. Deliberately doesn't force out a currently-
+    live session the way `/kick` does — a distinct, narrower action
+    (revoking future access, not ending a present one); a target already
+    connected stays connected until they leave or reconnect."""
+    target_name = args.strip()
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /revokeaccess <user>", fg_color=MUTED_COLOR))
+        return
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    try:
+        remove_member(ctx.db, ctx.channel, target, removed_by=ctx.user)
+    except MembershipError:
+        await ctx.session.write_line(
+            colored("You do not have permission to manage members on this channel.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await ctx.session.write_line(
+        colored(f"Revoked {sanitize_text(target.username)}'s access to this channel.", fg_color=MUTED_COLOR)
+    )
+
+
+async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
+    """`/members` (design doc round 33 point 8): lists current direct
+    members. Viewable by anyone already in the channel (you can only
+    run this from inside it) — not further gated, reviewing your own
+    channel's roster is different from administering it."""
+    members = list_members(ctx.db, ctx.channel)
+    if not members:
+        await ctx.session.write_line(colored("No members have been granted access yet.", fg_color=MUTED_COLOR))
+        return
+    names = ", ".join(sanitize_text(member.username) for member in members)
+    await ctx.session.write_line(f"Members: {names}")
+
+
 _COMMANDS: dict[str, CommandHandler] = {
     "quit": _handle_quit,
     "leave": _handle_leave,
@@ -1062,6 +1264,11 @@ _COMMANDS: dict[str, CommandHandler] = {
     "who": _handle_who,
     "list": _handle_list,
     "whois": _handle_whois,
+    "invite": _handle_invite,
+    "uninvite": _handle_uninvite,
+    "grantaccess": _handle_grantaccess,
+    "revokeaccess": _handle_revokeaccess,
+    "members": _handle_members,
 }
 
 
@@ -1072,14 +1279,29 @@ _COMMANDS: dict[str, CommandHandler] = {
 # type, so dispatch (_dispatch_command) and /help's listing need no
 # changes at all. A command absent from this dict is always suggested.
 # This is purely a suggestion filter, not an authorization check: the
-# handlers themselves (mute_user/kick_user/etc., via ChatModerationError)
-# remain the sole source of truth for what's actually allowed to run --
-# unchanged by this track. Reserved for 5h's membership-admin commands
-# too, once those exist; nothing to wire up for them yet.
+# handlers themselves (mute_user/kick_user/etc., via ChatModerationError/
+# MembershipError) remain the sole source of truth for what's actually
+# allowed to run -- unchanged by this track.
 def _requires_moderate(db: Database, channel: Channel, user: User) -> bool:
     return has_permission(
         db, user, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
     )
+
+
+def _requires_manage_members(db: Database, channel: Channel, user: User) -> bool:
+    return has_permission(
+        db, user, object_type="channel", object_id=channel.id, permission=ChannelPermission.MANAGE_MEMBERS
+    )
+
+
+def _can_invite(db: Database, channel: Channel, user: User) -> bool:
+    """`/invite`'s own visibility predicate is more permissive than the
+    other three membership-admin commands, matching `create_invitation`'s
+    real authorization exactly (design doc round 33 point 11's opt-in) --
+    unlike them, it's not gated on MANAGE_MEMBERS alone."""
+    if _requires_manage_members(db, channel, user):
+        return True
+    return channel.allow_member_invites and is_member(db, channel, user)
 
 
 _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
@@ -1088,6 +1310,10 @@ _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
     "ban": _requires_moderate,
     "unban": _requires_moderate,
     "kick": _requires_moderate,
+    "invite": _can_invite,
+    "uninvite": _requires_manage_members,
+    "grantaccess": _requires_manage_members,
+    "revokeaccess": _requires_manage_members,
 }
 
 # The commands whose first argument is a username -- distinguished by
@@ -1095,9 +1321,11 @@ _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
 # live conversation can't reach an offline account, matching those
 # commands' own online_usernames() and the online refusal on send)
 # versus any registered account at all (/whois, /finger -- both work
-# for offline accounts too).
+# for offline accounts too). /invite is its own case just below --
+# eligible candidates are registered users who aren't already members.
 _ONLINE_USER_COMMAND_PREFIXES = ("/msg ", "/private ", "/query ")
 _ANY_USER_COMMAND_PREFIXES = ("/whois ", "/finger ")
+_INVITE_COMMAND_PREFIX = "/invite "
 
 
 def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel, user: User) -> Completer:
@@ -1137,6 +1365,15 @@ def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel,
                 return sorted(
                     candidate.username for candidate in list_users(db) if candidate.username.lower().startswith(word)
                 )
+
+        rest = text[len(_INVITE_COMMAND_PREFIX) :]
+        if text.lower().startswith(_INVITE_COMMAND_PREFIX) and " " not in rest:
+            word = rest.lower()
+            return sorted(
+                candidate.username
+                for candidate in list_users(db)
+                if candidate.username.lower().startswith(word) and not is_member(db, channel, candidate)
+            )
 
         return []
 

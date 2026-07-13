@@ -4018,3 +4018,126 @@ folded-in addendum wiring the same mechanism into the picker's
    without a single fix needed once execution resumed — a rare case
    worth noting, not the norm this project's history has otherwise
    shown for byte-level line-editing code.)
+
+## Sign-off notes, round 50 (Phase 2 Track 5h: invite-only/hidden channels, manage_members — implemented)
+
+Implements the plan agreed with Thiesi for Track 5h (design doc §8/
+round 33 points 8/9/11) — the last of Tracks 5d-5h. **Phase 2 Track 5 is
+now complete in its entirety.**
+
+1. **Schema: two independent axes plus an opt-in, all defaulting off.**
+   `channels.hidden`/`channels.members_only`/`channels.allow_member_
+   invites` (all `INTEGER NOT NULL DEFAULT 0`) — an existing channel's
+   behavior is unchanged unless a moderator explicitly opts in. New
+   `channel_members(channel_id, user_id, granted_by_user_id, created_at,
+   PRIMARY KEY(channel_id, user_id))` — deliberately its own table, not
+   folded into `moderator_grants`: membership is access/visibility
+   eligibility, not a permission bit, and conflating the two would be
+   the same layering mistake this codebase has consistently avoided
+   elsewhere. New `channel_invitations(id, channel_id, invited_user_id,
+   invited_by_user_id, status, created_at, expires_at)`, `status IN
+   ('pending', 'accepted', 'revoked')`, `UNIQUE(channel_id,
+   invited_user_id)`. Expiry follows `channel_restrictions`' precedent
+   (filter `expires_at` at check time, no sweep-on-access needed)
+   rather than posts/files' round 35 sweep-and-delete pattern — nothing
+   in the command surface actually sets an expiry yet (no duration
+   argument on `/invite`), but the schema/query already honor one if
+   ever set directly, confirmed by a dedicated test at the row level
+   rather than left unverified.
+2. **New `netbbs.chat.membership` module**, distinct from `netbbs.chat.
+   channels` (CRUD/topic) and `netbbs.chat.moderation` (mute/ban/kick)
+   for the same reason those two are already separate: membership is
+   its own concern. `is_member`/`add_member`/`remove_member` (direct,
+   persistent access — round 33 point 8's "granting or removing
+   persistent access" as its own capability, distinct from invitations,
+   bypassing the invite-then-accept flow entirely) and `create_
+   invitation`/`revoke_invitation`/`has_pending_invitation`/`accept_
+   invitation` (the invite-then-accept flow). Every mutating function
+   checks `ChannelPermission.MANAGE_MEMBERS` itself and raises a new
+   `MembershipError` — same "library function is the one place the
+   authorization decision is made" pattern `netbbs.chat.moderation`'s
+   `_impose`/`_lift` already established, not a new shape. `create_
+   invitation`'s check is the one exception with an OR clause: MANAGE_
+   MEMBERS, **or** `allow_member_invites` set and the actor already a
+   member (round 33 point 11's opt-in) — checked in exactly one place,
+   not duplicated at the command layer.
+3. **No `/accept` command.** Accepting an invitation is just
+   successfully `/join`-ing the channel — reuses Track 5d's existing
+   "look up, check authorization, switch" flow instead of inventing
+   parallel command surface for the same action. `_handle_join`'s
+   eligibility now extends to `meets_level(...) AND (not members_only
+   OR is_member(...) OR has_pending_invitation(...))`; a successful join
+   consumed via a pending invitation calls `accept_invitation` to mark
+   it accepted, so it doesn't dangle as still-pending after being used.
+4. **Command surface, all gated by `MANAGE_MEMBERS` except `/invite`
+   (its own OR-condition predicate) and `/members` (ungated — viewable
+   by anyone already in the channel, reviewing your own channel's
+   roster is different from administering it):** `/invite <user>`,
+   `/uninvite <user>` (revokes a pending invitation only — nothing to
+   revoke if none is pending, raises `MembershipError`), `/grantaccess
+   <user>`/`/revokeaccess <user>` (direct `channel_members` add/remove).
+   `/invite` notifies the invitee through Track 5e's mailbox/live-push
+   mechanism directly (`_deliver_private_message`, reused verbatim, not
+   duplicated) — this already works for a currently-offline invitee,
+   unlike `/msg`'s own online-only send-time check, since mailbox
+   delivery doesn't require the recipient to be online right now. No
+   `/createchannel` exists (matches every earlier track's precedent);
+   `create_channel` and `scripts/create_test_channel.py` both gained the
+   three new optional parameters for seeding, the latter via three new
+   trailing CLI flags.
+5. **Visibility consolidated into one shared `_visible_channels_for(db,
+   user)` in `chat_flow.py`**, replacing three separate, slightly-
+   duplicated `meets_level`-only list comprehensions round 43 left
+   behind (the picker's channel listing, `/list`, and `/whois`'s
+   channel-membership display via `_channel_names_for_user`) — exactly
+   the consolidation round 43's own sign-off note anticipated. A
+   `hidden` channel is now actually excluded unless the user is already
+   a member, holds a pending invitation, or holds *any* moderator grant
+   on it (checked via `has_permission` with every `ChannelPermission`
+   bit OR'd together as the argument — "does the user hold any of
+   these," not one specific bit, avoiding a separate "has any grant at
+   all" library function nothing else needs). "Hidden + open is
+   obscurity, not access control" (round 33 point 9): a `members_only`-
+   but-not-`hidden` channel still appears in every listing — you can see
+   it exists and that you can't `/join` it without access; only `hidden`
+   controls listing visibility itself. Confirmed as genuinely
+   independent axes by a dedicated test, not assumed from the code
+   reading alone.
+6. **Tab completion extended, not just left as a Track 5g gap:**
+   `/invite `, `/uninvite `, `/grantaccess `, `/revokeaccess ` added to
+   the permission-aware `_COMMAND_VISIBILITY` predicate dict from round
+   49 — three gated on `MANAGE_MEMBERS` alone (`_requires_manage_
+   members`), but `/invite` gets its own predicate (`_can_invite`)
+   matching `create_invitation`'s real OR-condition authorization
+   exactly, a deliberate improvement on the original plan text's literal
+   "gated on MANAGE_MEMBERS" for all four — a plain member on an
+   `allow_member_invites` channel now correctly sees `/invite` suggested
+   even without a permission grant, rather than a suggestion/reality
+   mismatch. `/invite <user>` completes against registered users who
+   aren't already direct members (a new, `/invite`-specific completion
+   branch — not one of round 49's existing online/any-user prefix
+   groups, since "invite-eligible" is its own definition).
+7. **Testing:** `tests/test_channel_membership.py` (24 cases — schema/
+   library-level `channel_members`/`channel_invitations` CRUD, the
+   `allow_member_invites` OR-condition from both sides, expiry
+   filtering at the row level, cross-channel scoping), `tests/
+   test_chat_flow_membership.py` (22 cases — `/invite`/`/uninvite`/
+   `/grantaccess`/`/revokeaccess`/`/members` through the real
+   dispatcher, `/join` consuming a pending invitation and marking it
+   accepted, a rejected `/join` against a `members_only` channel with no
+   invitation, and a regression guard confirming ordinary open-channel
+   `/join` is unaffected), `tests/test_chat_visibility.py` (12 cases —
+   hidden/members_only exercised as genuinely independent combinations,
+   `/list` and `/whois` through the real dispatcher, and the "grant on a
+   *different* channel doesn't leak visibility" scoping check). `tests/
+   test_chat_completion.py` gained 7 new cases for the membership-admin
+   completion predicates. One real test-setup mistake caught and fixed
+   before this round's tests were considered done, not just before they
+   passed: an early version of the `/whois`-hides-a-hidden-channel test
+   granted the *requester* `MANAGE_MEMBERS` on the hidden channel purely
+   to let her perform `add_member` as the test's admin action — which
+   then legitimately made the channel visible to her too, defeating the
+   test's own premise. Fixed by introducing a separate admin account to
+   perform that setup step, keeping the actual requester's grants at
+   zero. Full suite re-run: **968 passed, 1 skipped** — actually run,
+   not just syntax-checked.
