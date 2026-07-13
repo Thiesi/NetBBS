@@ -24,7 +24,10 @@ underneath — so it lives here once, not duplicated per transport.
 
 from __future__ import annotations
 
+import time
 from typing import Awaitable, Callable, Protocol
+
+from netbbs.net.session import SessionClosedError
 
 # Control byte values relevant to character-mode line building.
 _CR = 0x0D
@@ -55,6 +58,21 @@ _MAX_LINE_LENGTH = 4096
 # each transport. The source implementations are ordinary mutable session
 # objects, and only this module reads/writes the private attribute.
 _PUSHBACK_ATTR = "_netbbs_char_input_pushback"
+
+# Escape sequences are terminal-emulator control messages, not bulk data —
+# same reasoning as netbbs.net.telnet's subnegotiation bounds (issue #5). A
+# CSI sequence's parameter bytes are capped in count, and the whole sequence
+# (the initial peek plus the CSI parameter loop) is bounded by one total
+# deadline rather than relying on _FOLLOWUP_BYTE_TIMEOUT resetting on every
+# legitimately-arriving byte — a client that keeps a CSI sequence "alive" by
+# continuously sending parameter bytes just under that per-byte timeout would
+# otherwise never trip either individual read's own bound. 32 bytes is
+# generous headroom for any real terminal's CSI sequences (even a modified
+# key combo like Ctrl+Up, `ESC[1;5A`, is under 10 bytes); 1 second matches
+# the subnegotiation deadline, keeping both "protocol control message"
+# bounds consistent with each other.
+_MAX_ESCAPE_SEQUENCE_LENGTH = 32
+_ESCAPE_SEQUENCE_TIMEOUT = 1.0
 
 
 class ByteSource(Protocol):
@@ -284,16 +302,46 @@ async def _discard_escape_sequence(source: ByteSource) -> None:
     discarding just the ESC itself, on a short timeout — so we can never
     hang waiting for bytes that aren't coming, the same reasoning as
     `_consume_optional_lf_or_nul`.
+
+    Bounded by both a maximum CSI parameter length and one total deadline
+    covering the whole CSI parameter loop — see the module-level
+    constants just above. Tracked via an explicit `time.monotonic()`
+    deadline checked once per loop iteration, deliberately *not* an
+    `asyncio.wait_for(...)` wrapped around the whole function: that was
+    the first approach tried here, and direct testing against a real
+    socket (not just an in-memory fake source) surfaced a genuine race —
+    this function's own per-byte `_read_byte_with_timeout` calls are
+    already each individually wrapped in their own `wait_for` by the
+    underlying transport (see e.g. `netbbs.net.telnet.TelnetSession.
+    read_byte_with_timeout`), and an *outer* `wait_for` cancelling an
+    *inner* one at nearly the same moment the inner one would have timed
+    out anyway is timing-sensitive in a way that isn't reliably
+    reproducible — it worked correctly in some runs and silently failed
+    to fire in others. An explicit deadline check has no such ambiguity:
+    either `time.monotonic()` has passed the deadline or it hasn't.
+    Either limit being exceeded raises `SessionClosedError`, closing the
+    session the same way an oversized/stalled Telnet subnegotiation does
+    (`netbbs.net.telnet._read_subnegotiation_body`): a client that won't
+    stop sending what claims to be a single escape sequence is a
+    protocol-level violation serious enough to end the connection, not
+    something to just silently keep discarding forever.
     """
     next_byte = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     if next_byte is None:
         return
 
     if next_byte == 0x5B:  # '[' — CSI sequence
+        deadline = time.monotonic() + _ESCAPE_SEQUENCE_TIMEOUT
+        consumed = 0
         while True:
+            if time.monotonic() >= deadline:
+                raise SessionClosedError("terminal escape sequence timed out")
             b = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
             if b is None:
                 return
+            consumed += 1
+            if consumed > _MAX_ESCAPE_SEQUENCE_LENGTH:
+                raise SessionClosedError("terminal escape sequence is too long")
             if 0x40 <= b <= 0x7E:
                 return  # final byte of the CSI sequence
     elif next_byte == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte

@@ -17,6 +17,7 @@ import asyncio
 
 import pytest
 
+import netbbs.net.char_input as char_input_module
 from netbbs.net.char_input import read_key, read_line
 from netbbs.net.session import SessionClosedError
 
@@ -225,5 +226,89 @@ def test_connection_closed_mid_line_raises_session_closed_error():
         writer = Writer()
         with pytest.raises(SessionClosedError):
             await read_line(source, writer)
+
+    asyncio.run(scenario())
+
+
+# -- bounded escape-sequence parsing (issue #5, CSI half) -------------------
+
+
+def test_oversized_csi_sequence_raises_session_closed_error():
+    async def scenario():
+        # ESC [ followed by more non-terminating parameter bytes than the
+        # cap allows -- none of these bytes fall in 0x40-0x7E, so the CSI
+        # loop never finds a final byte and keeps consuming until the
+        # length cap trips.
+        oversized = b"9" * (char_input_module._MAX_ESCAPE_SEQUENCE_LENGTH + 1)
+        source = FakeByteSource(b"a\x1b[" + oversized + b"Ab\r\n")
+        writer = Writer()
+        with pytest.raises(SessionClosedError, match="too long"):
+            await read_line(source, writer)
+
+    asyncio.run(scenario())
+
+
+def test_csi_sequence_within_length_cap_still_works():
+    async def scenario():
+        # One byte under the cap, still non-terminating until the final
+        # byte -- confirms the cap is a strict "more than N", not "N or
+        # fewer also rejected".
+        within_cap = b"9" * (char_input_module._MAX_ESCAPE_SEQUENCE_LENGTH - 1)
+        source = FakeByteSource(b"a\x1b[" + within_cap + b"Ab\r\n")
+        writer = Writer()
+        line = await read_line(source, writer)
+        assert line == "ab"
+
+    asyncio.run(scenario())
+
+
+def test_csi_sequence_exceeding_total_deadline_raises_session_closed_error(monkeypatch):
+    """A client that keeps a CSI sequence "alive" by continuously sending
+    parameter bytes -- each one arriving well within the per-byte
+    _FOLLOWUP_BYTE_TIMEOUT, so no individual read ever times out -- must
+    still be bounded by one total deadline for the whole sequence, not
+    just by how many bytes it sends. Isolated from the length cap by
+    raising it out of the way, so only the timeout can trip here."""
+
+    monkeypatch.setattr(char_input_module, "_ESCAPE_SEQUENCE_TIMEOUT", 0.05)
+    monkeypatch.setattr(char_input_module, "_MAX_ESCAPE_SEQUENCE_LENGTH", 1_000_000)
+
+    class SlowTrickleSource:
+        """First byte enters CSI mode ('['); every byte after that is a
+        real (non-terminating) parameter byte returned after a short
+        delay, forever -- never times out an individual read, never
+        sends a final byte in 0x40-0x7E."""
+
+        def __init__(self):
+            self._first = True
+
+        async def read_byte(self) -> int | None:
+            raise AssertionError("read_line should only use read_byte_with_timeout here")
+
+        async def read_byte_with_timeout(self, timeout: float) -> int | None:
+            await asyncio.sleep(0.02)
+            if self._first:
+                self._first = False
+                return 0x5B  # '[' -- enter CSI parameter mode
+            return ord("9")
+
+    async def scenario():
+        source = SlowTrickleSource()
+        # _discard_escape_sequence is what read_line/read_key dispatch to
+        # after consuming the leading ESC byte itself -- called directly
+        # here since SlowTrickleSource has no fixed buffer to pre-seed
+        # with one.
+        with pytest.raises(SessionClosedError, match="timed out"):
+            await char_input_module._discard_escape_sequence(source)
+
+    asyncio.run(scenario())
+
+
+def test_valid_csi_and_ss3_sequences_still_work_within_new_bounds():
+    async def scenario():
+        source = FakeByteSource(b"a\x1b[Ab\x1bOPc\r\n")
+        writer = Writer()
+        line = await read_line(source, writer)
+        assert line == "abc"
 
     asyncio.run(scenario())
