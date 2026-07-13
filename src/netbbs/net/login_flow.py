@@ -165,7 +165,7 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
                 menu_key("B", "oards"),
                 menu_key("C", "hat"),
                 menu_key("F", "ile areas"),
-                menu_key("Q", "uit"),
+                menu_key("L", "ogoff"),
             ]
         )
         await session.write_line(f"\r\n{header} {options}")
@@ -173,7 +173,7 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
         choice = (await session.read_key()).lower()
         await session.write_line("")  # move to a fresh line after the single-key echo
 
-        if choice == "q":
+        if choice == "l":
             return
         elif choice == "b":
             await _browse_boards(session, db, user)
