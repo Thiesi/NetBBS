@@ -627,4 +627,16 @@ MIGRATIONS = [
         CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
         """,
     ),
+    Migration(
+        description=(
+            "Adds channels.topic (design doc §8/round 33 point 5, Phase "
+            "2 Track 5d) -- a moderator-editable /topic, distinct from "
+            "the existing description column (a creation-time blurb "
+            "shown in listings, never edited afterward). Nullable, no "
+            "default: a channel starts with no topic set."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN topic TEXT;
+        """,
+    ),
 ]

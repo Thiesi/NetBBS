@@ -18,12 +18,22 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
+from netbbs.moderation import ChannelPermission, has_permission, record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
 
 class ChannelError(Exception):
     """Raised for channel creation/lookup failures."""
+
+
+class TopicError(Exception):
+    """Raised when the acting user doesn't hold `ChannelPermission.EDIT`
+    on the channel. Deliberately not `netbbs.chat.moderation`'s
+    `ChatModerationError` -- that module already imports `Channel` from
+    here, so importing back from it would be a circular import; a small
+    local exception avoids that without needing a third shared module
+    just for this."""
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,7 @@ class Channel:
     category_id: int | None
     pinned: bool
     created_at: str
+    topic: str | None
 
 
 def create_channel(
@@ -112,6 +123,32 @@ def list_channels(db: Database) -> list[Channel]:
     return [_row_to_channel(row) for row in rows]
 
 
+def set_topic(db: Database, channel: Channel, topic: str | None, *, set_by: User) -> Channel:
+    """
+    Set (or clear, if `topic` is `None`/empty) `channel`'s topic.
+
+    Requires `set_by` to hold `ChannelPermission.EDIT` on `channel` --
+    already reserved for exactly this in `netbbs.moderation.roles`
+    (`"EDIT = auto()  # gates /topic changes (round 33, point 5)"`).
+    Logged via the shared `moderation_log` audit trail (design doc round
+    33 point 5: "recorded in moderation or metadata history with setter
+    identity and timestamp") -- that table's `actor`/`created_at` columns
+    already satisfy this, no separate history table needed.
+    """
+    if not has_permission(
+        db, set_by, object_type="channel", object_id=channel.id, permission=ChannelPermission.EDIT
+    ):
+        raise TopicError(f"{set_by.username!r} does not hold edit permission on this channel")
+
+    db.connection.execute("UPDATE channels SET topic = ? WHERE id = ?", (topic or None, channel.id))
+    db.connection.commit()
+
+    record_action(
+        db, actor=set_by, action="topic", object_type="channel", object_id=channel.id, detail=topic
+    )
+    return get_channel_by_name(db, channel.name)
+
+
 def _row_to_channel(row: sqlite3.Row) -> Channel:
     return Channel(
         id=row["id"],
@@ -122,4 +159,5 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         category_id=row["category_id"],
         pinned=bool(row["pinned"]),
         created_at=row["created_at"],
+        topic=row["topic"],
     )

@@ -15,14 +15,17 @@ from typing import Awaitable, Callable
 from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.chat import (
     Channel,
+    ChannelError,
     ChannelMessage,
     ChatHub,
     ChatModerationError,
     DurationError,
     NickError,
     PresenceRegistry,
+    TopicError,
     ban_user,
     display_label,
+    get_channel_by_name,
     get_nick,
     get_scrollback,
     is_banned,
@@ -33,6 +36,7 @@ from netbbs.chat import (
     parse_duration,
     record_message,
     set_nick,
+    set_topic,
     unban_user,
     unmute_user,
 )
@@ -49,21 +53,43 @@ from netbbs.timeutil import format_for_display
 async def browse_channels(
     session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
 ) -> None:
-    """Entry point: browse from the top level (no category selected yet)."""
-    await _browse_channels_in_category(session, db, hub, presence, user, category_id=None)
+    """
+    Entry point: browse from the top level, then run the chat loop for
+    whatever's picked.
+
+    A small outer loop, not a single call (design doc §8/round 33,
+    sign-off round 44 — Track 5d): `/leave` returns here to pick again,
+    `/join` jumps straight back into `_chat_loop` with an already-
+    validated channel without going through the picker at all, and
+    `/quit` (or a kick/dropped connection) exits out to the caller (the
+    main menu). Always re-enters the picker at the *top* level on
+    `/leave`, never wherever a category-nested pick left off — the same
+    "back always lands somewhere consistent" reasoning `/quit` already
+    followed, not a new decision.
+    """
+    channel = await _pick_channel(session, db, hub, user, category_id=None)
+    while channel is not None:
+        action = await _chat_loop(session, db, hub, presence, channel, user)
+        if isinstance(action, _SwitchTo):
+            channel = action.channel
+            continue
+        if isinstance(action, _ToPicker):
+            channel = await _pick_channel(session, db, hub, user, category_id=None)
+            continue
+        return  # _Quit
 
 
-async def _browse_channels_in_category(
+async def _pick_channel(
     session: Session,
     db: Database,
     hub: ChatHub,
-    presence: PresenceRegistry,
     user: User,
     *,
     category_id: int | None,
-) -> None:
+) -> Channel | None:
     """
-    Browse channels within a category (or the top level), mirroring
+    Browse channels within a category (or the top level) and return
+    whichever one the user picks, or `None` if they back out — mirrors
     `netbbs.net.login_flow._browse_boards_in_category` exactly — same
     reasoning, same two-level cap, same category/item ID-namespace
     disambiguation trick (negated category IDs). See that function's
@@ -84,7 +110,7 @@ async def _browse_channels_in_category(
     )
 
     if not categories_here:
-        channel = await pick_item(
+        return await pick_item(
             session,
             channels_here,
             name_of=lambda c: c.name,
@@ -93,9 +119,6 @@ async def _browse_channels_in_category(
             title="Available channels",
             empty_message="No chat channels are available to you yet.",
         )
-        if channel is not None:
-            await _chat_loop(session, db, hub, presence, channel, user)
-        return
 
     mixed: list[Category | Channel] = [*categories_here, *channels_here]
 
@@ -120,12 +143,11 @@ async def _browse_channels_in_category(
         empty_message="No chat channels are available to you yet.",
     )
     if selected is None:
-        return
+        return None
 
     if isinstance(selected, Category):
-        await _browse_channels_in_category(session, db, hub, presence, user, category_id=selected.id)
-    else:
-        await _chat_loop(session, db, hub, presence, selected, user)
+        return await _pick_channel(session, db, hub, user, category_id=selected.id)
+    return selected
 
 
 def _channel_description(hub: ChatHub, channel: Channel) -> str:
@@ -199,7 +221,8 @@ def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
     return f"{label} {sanitize_text(message.body)}"
 
 
-# -- command dispatch (design doc §13, sign-off round 39) -------------------
+# -- command dispatch (design doc §13, sign-off round 39; ChatAction result
+# type widened from a bare bool in round 44/Track 5d) ------------------------
 
 
 @dataclass(frozen=True)
@@ -219,17 +242,122 @@ class ChatCommandContext:
     participant_id: str
 
 
-# A truthy return means "exit the chat loop after this command" — only
-# /quit's handler returns True. Everything else returns None
-# (implicitly, no explicit `return` needed), meaning "continue."
-# Chosen over raising a control-flow exception for quitting: an
-# explicit return contract reads more plainly than exception-driven
-# flow for what is, after all, the ordinary way to leave.
-CommandHandler = Callable[[ChatCommandContext, str], Awaitable[bool | None]]
+@dataclass(frozen=True)
+class _Quit:
+    """Exit chat entirely, back to the main menu — `/quit`'s meaning,
+    and also what a kick/ban or a dropped connection resolves to."""
 
 
-async def _handle_quit(ctx: ChatCommandContext, args: str) -> bool:
-    return True
+@dataclass(frozen=True)
+class _ToPicker:
+    """Exit the current channel, back to channel selection — `/leave`'s
+    meaning (Track 5d; previously an alias for `/quit`)."""
+
+
+@dataclass(frozen=True)
+class _SwitchTo:
+    """Jump directly to an already-validated channel — `/join
+    <channel>`'s meaning. Carries the resolved `Channel`, not just a
+    name: resolution/authorization already happened in the handler, so
+    the outer loop (`browse_channels`) doesn't need to repeat it."""
+
+    channel: Channel
+
+
+# What a command handler returns after running: `None` means "continue
+# the chat loop as normal." A `ChatAction` means "something about the
+# loop itself needs to change" — propagated all the way up through
+# `_dispatch_command`/`send_loop`/`_chat_loop` to `browse_channels`,
+# which is the only place that actually knows what to do with it (switch
+# channels, return to the picker, or exit). Originally just `bool`
+# (round 39; only `/quit` ever returned `True`) — widened, not replaced,
+# once `/leave`/`/join` needed to distinguish two more outcomes from
+# plain "keep going" (design doc round 44/Track 5d): the same "explicit
+# return contract, not exceptions" reasoning round 39 already established,
+# just with more to say than a single bit could carry.
+ChatAction = _Quit | _ToPicker | _SwitchTo
+CommandHandler = Callable[[ChatCommandContext, str], Awaitable[ChatAction | None]]
+
+
+async def _handle_quit(ctx: ChatCommandContext, args: str) -> ChatAction:
+    return _Quit()
+
+
+async def _handle_leave(ctx: ChatCommandContext, args: str) -> ChatAction:
+    return _ToPicker()
+
+
+async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
+    channel_name = args.strip()
+    if not channel_name:
+        await ctx.session.write_line(colored("Usage: /join <channel>", fg_color=MUTED_COLOR))
+        return None
+
+    try:
+        channel = get_channel_by_name(ctx.db, channel_name)
+    except ChannelError:
+        await ctx.session.write_line(
+            colored(f"No such channel: {sanitize_text(channel_name)!r}", fg_color=MUTED_COLOR)
+        )
+        return None
+
+    if not meets_level(ctx.user, channel.min_level):
+        await ctx.session.write_line(
+            colored("You are not authorized to join that channel.", fg_color=MUTED_COLOR)
+        )
+        return None
+
+    if channel.id == ctx.channel.id:
+        await ctx.session.write_line(
+            colored(f"You are already in #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
+        )
+        return None
+
+    return _SwitchTo(channel)
+
+
+async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/topic` with no arguments shows the current topic — viewable by
+    anyone already in the channel, no separate permission check, since
+    being here at all already implies visibility. `/topic <text>`
+    attempts to change it, gated by `ChannelPermission.EDIT` (see
+    `netbbs.chat.channels.set_topic`). Deliberately not persisted into
+    scrollback (design doc round 33 point 5 only asks for moderation-log
+    history, unlike `/nick`'s explicit scrollback requirement) — a live
+    in-channel notice plus the audit log entry `set_topic` already
+    writes is enough.
+
+    Viewing re-fetches the channel fresh from the database rather than
+    trusting `ctx.channel.topic` — `ctx.channel` is a snapshot taken once
+    per `_chat_loop` invocation (a frozen dataclass, never mutated in
+    place), so it would otherwise still show the *old* topic for the
+    rest of the session after a successful change, the same "look it up
+    fresh, don't cache" reasoning `display_label` already follows for
+    `/nick`.
+    """
+    if not args:
+        current = get_channel_by_name(ctx.db, ctx.channel.name)
+        if current.topic:
+            await ctx.session.write_line(f"Topic: {sanitize_text(current.topic)}")
+        else:
+            await ctx.session.write_line(colored("No topic set.", fg_color=MUTED_COLOR))
+        return
+
+    try:
+        set_topic(ctx.db, ctx.channel, args, set_by=ctx.user)
+    except TopicError:
+        await ctx.session.write_line(
+            colored("You do not have permission to change the topic.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    notice = colored(
+        f"*** Topic changed by {sanitize_text(ctx.user.username)}: {sanitize_text(args)}",
+        fg_color=MUTED_COLOR,
+    )
+    await ctx.session.write_line(notice)
+    await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
 
 
 async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
@@ -237,7 +365,7 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(colored(f"Available commands: {names}", fg_color=MUTED_COLOR))
 
 
-async def _dispatch_command(ctx: ChatCommandContext, line: str) -> bool:
+async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
     """
     `line` is known to start with `/` (checked by the caller). Any
     such line is now always treated as a command attempt — looked up
@@ -255,8 +383,8 @@ async def _dispatch_command(ctx: ChatCommandContext, line: str) -> bool:
         await ctx.session.write_line(
             colored(f"Unknown command: /{command_word}", fg_color=MUTED_COLOR)
         )
-        return False
-    return bool(await handler(ctx, rest))
+        return None
+    return await handler(ctx, rest)
 
 
 # -- mute/ban/kick (design doc §13, sign-off round 37) -----------------------
@@ -682,7 +810,7 @@ async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
     """`/list` (design doc round 32/33): every channel `ctx.user`'s
     level allows, "exposes only channels visible to the requesting
     user." Flat and sorted pinned-first-then-alphabetical, matching
-    `list_boards`/`_browse_channels_in_category`'s existing sort
+    `list_boards`/`_pick_channel`'s existing sort
     precedent — a quick text reference from inside chat, not the
     interactive category-nested picker the main menu's Chat option
     already provides."""
@@ -708,7 +836,7 @@ def _channel_names_for_user(
     (`meets_level` — the same filter `/list` uses). This *is* the
     "hidden-channel visibility" `/whois` must respect (design doc
     round 32/33), applied consistently now even though no channel is
-    actually hidden yet (Track 5g).
+    actually hidden yet (Track 5h).
 
     `ChatHub` has no reverse "which channels is this user in" index —
     only per-channel participant lists — so this checks every visible
@@ -759,7 +887,9 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
 
 _COMMANDS: dict[str, CommandHandler] = {
     "quit": _handle_quit,
-    "leave": _handle_quit,
+    "leave": _handle_leave,
+    "join": _handle_join,
+    "topic": _handle_topic,
     "help": _handle_help,
     "me": _handle_me,
     "nick": _handle_nick,
@@ -784,9 +914,14 @@ async def _chat_loop(
     presence: PresenceRegistry,
     channel: Channel,
     user: User,
-) -> None:
+) -> ChatAction:
     """
-    Real-time chat within `channel`, until the user types /quit.
+    Real-time chat within `channel`, until the user types /quit, /leave,
+    or /join — returns a `ChatAction` telling `browse_channels` what to
+    do next (exit to the main menu, return to the channel picker, or
+    jump straight into another channel) rather than just ending. A kick/
+    ban or a dropped connection (`receive_task` finishing instead of
+    `send_task`) always resolves to `_Quit()`.
 
     The core architectural piece this needed, which nothing before it in
     the codebase did: a session has to be able to *receive* a broadcast
@@ -890,7 +1025,7 @@ async def _chat_loop(
                 return
             await session.write_line(message)
 
-    async def send_loop() -> None:
+    async def send_loop() -> ChatAction | None:
         while True:
             line = (await session.read_line()).strip()
             if not line:
@@ -905,9 +1040,9 @@ async def _chat_loop(
                     user=user,
                     participant_id=participant_id,
                 )
-                should_exit = await _dispatch_command(ctx, line)
-                if should_exit:
-                    return
+                action = await _dispatch_command(ctx, line)
+                if action is not None:
+                    return action
                 continue
 
             restriction = is_muted(db, channel, user)
@@ -980,8 +1115,14 @@ async def _chat_loop(
         # pending" and the cancellation may not actually finish cleanly
         # before this function returns.
         await asyncio.gather(*pending, return_exceptions=True)
+        outcome: ChatAction | None = None
         for task in done:
-            task.result()  # re-raise, e.g. SessionClosedError from a dropped connection
+            value = task.result()  # re-raise, e.g. SessionClosedError from a dropped connection
+            if task is send_task:
+                outcome = value
+        # receive_task finishing (a kick/ban) has no ChatAction of its
+        # own -- it always means "exit entirely," same as /quit.
+        return outcome or _Quit()
     finally:
         hub.leave(channel.name, participant_id)
         record_message(

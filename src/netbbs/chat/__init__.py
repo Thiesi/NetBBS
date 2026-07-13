@@ -13,9 +13,11 @@ presence/away state (round 32, sign-off round 42) lives in
 from netbbs.chat.channels import (
     Channel,
     ChannelError,
+    TopicError,
     create_channel,
     get_channel_by_name,
     list_channels,
+    set_topic,
 )
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.nick import MAX_NICK_LENGTH, NickError, display_label, get_nick, set_nick
@@ -45,9 +47,11 @@ from netbbs.chat.scrollback import (
 __all__ = [
     "Channel",
     "ChannelError",
+    "TopicError",
     "create_channel",
     "get_channel_by_name",
     "list_channels",
+    "set_topic",
     "ChatHub",
     "MAX_NICK_LENGTH",
     "NickError",

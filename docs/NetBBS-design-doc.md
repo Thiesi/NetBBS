@@ -3499,3 +3499,97 @@ first.
    syntax-checked, including the specific hung-test scenario reproduced
    and confirmed fixed before moving on, not just assumed fixed from
    reading the diff.
+
+## Sign-off notes, round 45 (Phase 2 Track 5d: channel switching — implemented)
+
+Implements the plan agreed with Thiesi for Track 5d (`/join`, `/leave`
+redefined, `/topic`) — see design doc §8 and rounds 32/33's original
+scoping. Also resequences the remaining Track 5 work: a new Track 5f
+(command history & cursor-addressable line editing) is inserted before
+what was Track 5f (tab completion, now 5g), which in turn pushes
+invite-only/hidden channels from 5g to 5h — prompted by Thiesi actually
+using the chat command surface and finding retyping long commands
+painful, discussed and confirmed before any of Track 5 continued.
+
+1. **`CommandHandler`'s return type widened from a bare `bool` to a
+   small tagged union, `ChatAction`** (`_Quit | _ToPicker | _SwitchTo`),
+   not replaced with something else — a direct, mechanical extension of
+   round 39's own "explicit return contract, not exceptions" choice, now
+   needing to distinguish three outcomes instead of one. `_dispatch_command`
+   and `send_loop` propagate whatever a handler returns instead of
+   coercing to bool; `_chat_loop` itself now returns `ChatAction`,
+   resolving to `_Quit()` whenever `receive_task` (not `send_task`)
+   is what finished — a kick/ban or a dropped connection, same as before.
+2. **`_chat_loop` itself needed no internal concept of "switching
+   channels"** — `browse_channels` became a small outer loop instead of
+   a single call, reacting to whatever `ChatAction` `_chat_loop` returns:
+   `_SwitchTo(channel)` loops straight back into `_chat_loop` with the
+   new channel (which naturally re-runs the existing leave-then-join
+   sequence — no special-casing needed), `_ToPicker` re-enters channel
+   selection, `_Quit` returns to the main menu. The old
+   `_browse_channels_in_category` was split into `_pick_channel` (pure
+   picking, returns `Channel | None`, no `_chat_loop` call inside it)
+   so `browse_channels` could own the loop without duplicating the
+   category-recursion logic.
+3. **`/leave` stops aliasing `/quit`'s handler and gets its own**,
+   returning `_ToPicker()` — a deliberate divergence from round 39's
+   "both map to the same handler," flagged there as a placeholder
+   specifically pending this track. `/quit` is unchanged.
+4. **`/join <channel>`'s handler resolves and validates, but never
+   touches `hub`/the database itself** — it looks up the channel,
+   checks `meets_level` (the same filter `browse_channels`/`/list`
+   already use), rejects a not-found/unauthorized/already-active target
+   with a friendly message, and returns `_SwitchTo(channel)` on success.
+   All the actual joining (ban check, `hub.join`, scrollback replay,
+   join broadcast) happens for free via `_chat_loop`'s existing entry
+   sequence once `browse_channels`' loop calls it again with the new
+   channel — confirmed this required no new "switch" code path at all
+   during design, not just assumed.
+5. **`/topic`: new nullable `channels.topic` column** (migration 21),
+   distinct from the existing `description` (a creation-time listing
+   blurb, never moderator-edited). `netbbs.chat.channels.set_topic`
+   gated by `ChannelPermission.EDIT` — already reserved for exactly this
+   in `netbbs.moderation.roles` since round 34
+   (`"EDIT = auto()  # gates /topic changes (round 33, point 5)"`).
+   Logged via the existing `moderation_log` audit trail, satisfying
+   round 33 point 5's "recorded... with setter identity and timestamp"
+   with no new table. Deliberately **not** persisted into
+   `channel_messages`/scrollback, unlike `/nick`'s explicit scrollback
+   requirement — round 33 point 5 only asks for moderation-log history,
+   and a topic scrollback kind would be a fourth `CHECK`-widening
+   migration for something nothing asks for.
+6. **A real, if narrow, bug found and fixed during testing, not
+   shipped:** `_handle_topic`'s "view" branch initially read
+   `ctx.channel.topic` directly — `ctx.channel` is a snapshot taken once
+   per `_chat_loop` invocation (a frozen dataclass, never mutated in
+   place), so after a successful `/topic <text>` change, viewing the
+   topic again in the *same* session still showed the stale pre-change
+   value for the rest of that visit. Caught by a test that set a topic
+   and then immediately viewed it. Fixed by re-fetching the channel
+   fresh from the database on every view, the same "look it up fresh,
+   don't trust a cached snapshot" reasoning `display_label` already
+   follows for `/nick` mid-session changes.
+7. **`TopicError` is a new, small, local exception in
+   `netbbs.chat.channels`, not `netbbs.chat.moderation`'s existing
+   `ChatModerationError`.** `chat.moderation` already imports `Channel`
+   from `chat.channels`; importing back the other way for `set_topic`
+   to raise `ChatModerationError` would be a circular import. Confirmed
+   directly (not just reasoned about) that `channels.py` importing
+   `netbbs.moderation` (the generic package, not `netbbs.chat.moderation`)
+   for `ChannelPermission`/`has_permission`/`record_action` has no such
+   cycle — the same package `netbbs.chat.moderation` itself already
+   depends on.
+8. **Testing:** new `tests/test_channel_topic.py` (7 cases: permission
+   gating including confirming `MODERATE` alone doesn't grant `EDIT`,
+   per-object and local-blanket grants, clearing via an empty string,
+   moderation-log recording) and `tests/test_chat_flow_join.py` (18
+   cases — `/quit`/`/leave`/`/join`/`/topic` driven through the real
+   `_chat_loop` dispatcher via the existing `FakeSession`
+   (`test_chat_flow_moderation.py`), including a kick still resolving to
+   `_Quit()`, and `browse_channels`' outer-loop dispatch tested in
+   isolation via `monkeypatch`-ed `_pick_channel`/`_chat_loop` fakes,
+   since exercising the real picker needs a `read_key()`-capable session
+   this project's existing chat `FakeSession` deliberately doesn't
+   implement). Full suite re-run after adding both (796 passed, 1
+   skipped) — actually run, not just syntax-checked; the topic-staleness
+   bug (point 6) was caught this way, not by review.
