@@ -97,12 +97,13 @@ def _strip_escape_sequences(data: str) -> str:
 class WebSession(Session):
     """A single browser client's terminal session, over a websocket."""
 
-    def __init__(self, ws: web.WebSocketResponse):
+    def __init__(self, ws: web.WebSocketResponse, peer_address: str | None = None):
         self._ws = ws
         self._char_queue: asyncio.Queue[str | None] = asyncio.Queue(
             maxsize=_MAX_QUEUED_CHARS
         )
         self._input_error = "client disconnected"
+        self.peer_address = peer_address
         self._reader_task = asyncio.create_task(self._read_loop())
 
     def _signal_input_closed(self, message: str) -> None:
@@ -332,7 +333,7 @@ class WebServer:
 
         ws = web.WebSocketResponse(max_msg_size=_MAX_WS_MESSAGE_SIZE)
         await ws.prepare(request)
-        session = WebSession(ws)
+        session = WebSession(ws, request.remote)
         try:
             await self._session_handler(session)
         except SessionClosedError:

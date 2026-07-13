@@ -45,6 +45,13 @@ class Session(ABC):
     terminal_width: int = 80
     terminal_height: int = 24
 
+    #: Best-known remote address (host only, no port) for this
+    #: connection, or `None` if a transport genuinely has no such
+    #: concept. Used for per-source login throttling (see
+    #: `netbbs.net.throttle.LoginThrottle`) — not meant for any identity
+    #: or trust decision, since it's trivially spoofable/shared (NAT).
+    peer_address: str | None = None
+
     @abstractmethod
     async def write(self, text: str) -> None:
         """Send raw text to the client, no trailing newline added."""

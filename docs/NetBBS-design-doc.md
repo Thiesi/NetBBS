@@ -1939,3 +1939,214 @@ open questions and a provisional shape, not final answers.
 4. **Explicit non-goal for this round:** no golden test vectors,
    since there is no second implementation yet for them to protect
    interop against — premature this far ahead of Phase 3.
+
+## Sign-off notes, round 28 (node configuration, secure defaults, login throttling — implemented)
+
+Three audit issues (#15, #1, #3) bundled deliberately into one round
+rather than three: #1's "insecure listeners require explicit opt-in"
+and #15's "runtime behavior driven by validated configuration" are the
+same underlying config model looked at from two angles, and #3's
+throttling policy needed to be *part of* that config model (an
+operator-tunable `[throttle]` table) from the start rather than bolted
+on separately. Doing them as one pass avoided building the config
+plumbing twice.
+
+1. **New `netbbs.net.nodeconfig` module — an optional TOML file plus
+   CLI overrides (CLI wins), validated before use.** Python 3.11's
+   stdlib `tomllib` (read-only) was used rather than adding a
+   dependency — consistent with this project's general dependency-
+   minimalism (see CLAUDE.md re: PyNaCl over `cryptography`). Unknown
+   config-file sections/keys are a hard error (`ConfigError`), not
+   silently ignored — a typo'd `[trottle]` table should fail loudly at
+   startup, not silently run with defaults an operator thinks they
+   overrode. `netbbs.__main__.main()` catches `ConfigError` and exits
+   with a one-line message, never a raw traceback.
+2. **Secure defaults, resolving issue #1:** SSH defaults *enabled*
+   ("make SSH the secure default interactive transport" — the issue's
+   own recommended direction); Telnet and the plain-HTTP web transport
+   both default *disabled*, and even when explicitly enabled without
+   an operator-chosen `host`, default to `127.0.0.1` rather than every
+   interface. `NodeConfig.describe_insecure_bindings()` logs a
+   prominent warning for either plaintext transport bound somewhere
+   other than loopback; SSH is excluded from this check at any bind
+   address, since it isn't plaintext regardless of where it's exposed.
+   **No TLS support was built directly into the web transport** —
+   confirmed as the deliberately smaller-scope option (the issue
+   explicitly offered "support TLS directly... or clearly require/
+   document a reverse proxy" as alternatives): a TLS-terminating
+   reverse proxy in front of a loopback-bound `aiohttp` instance is
+   the documented, supported path (see README), avoiding ongoing
+   certificate-handling maintenance surface this project doesn't need
+   to own when every mainstream reverse proxy already solves it well,
+   and SSH already offers a secure, no-extra-infrastructure option for
+   operators who don't want to run one.
+3. **Cross-connection login throttling, resolving issue #3 — new
+   `netbbs.net.throttle.LoginThrottle`:** three independent token-
+   bucket budgets (per-source-address, per-username, node-wide global),
+   node-lifetime shared state that reconnecting does not reset, plus a
+   separate concurrent-unauthenticated-session cap. Token buckets over
+   hard lockouts, per the issue's own explicit preference — a bucket
+   run dry simply refills, so there's no persistent locked-out state
+   either a legitimate user gets stuck in or an attacker could
+   weaponize against someone else's account. All-or-nothing
+   consumption across the three budgets (checked via a non-consuming
+   `peek`, only actually consumed if all three currently have a token)
+   so a rejected attempt never drains an unrelated budget — e.g. two
+   legitimate users sharing a NAT'd source address don't have each
+   other's per-username budgets affected by the rejection itself. Per-
+   key buckets (source/username) are capped at a configurable
+   `max_tracked_keys` via LRU eviction, directly answering the
+   acceptance criterion that this be "bounded in memory and cannot be
+   abused with arbitrary usernames/IP keys" — **an honest, explicitly
+   accepted limitation**, not silently glossed over: an attacker who
+   also rotates *both* source and username defeats per-key throttling
+   by construction (each fresh key gets a fresh bucket), which is
+   exactly why the global budget layer exists as a backstop that
+   doesn't depend on key identity at all (verified directly by a test
+   exercising 20 distinct source/username pairs against a small global
+   budget — only the global cap's worth get through).
+4. **The expensive-verification budget check happens *before*
+   `authenticate_password_async` runs, not after** — a throttled
+   attempt never pays Argon2's real cost, which is the actual DoS half
+   of issue #3 (issue #2's off-loop/bounded-concurrency fix bounds
+   *concurrent* Argon2 cost; this bounds how often it runs at all).
+   Verified with a test that makes a real call to
+   `authenticate_password_async` an assertion failure once the budget
+   is exhausted, not just checking the final rejection message.
+5. **Idle timeout and overall login deadline are two genuinely
+   different mechanisms, both new `netbbs.net.login_flow._login`/
+   `handle_session` behavior:** each individual prompt read
+   (username, password) is wrapped in its own
+   `asyncio.wait_for(..., timeout=unauthenticated_idle_timeout_seconds)`
+   — resets on any activity, catches a client that goes silent
+   mid-prompt. Separately, the *whole* login attempt loop is wrapped
+   in one `asyncio.wait_for(..., timeout=login_deadline_seconds)` —
+   catches a client that stays active but never actually finishes
+   (verified with a fake session that responds every 50ms forever,
+   confirming the overall deadline fires even though no individual
+   read ever times out). Both new `LoginOutcome` members
+   (`IDLE_TIMEOUT`, `THROTTLED`) get their own distinct user-facing
+   message, matching the existing `ATTEMPTS_EXHAUSTED`/`BLOCKED`
+   pattern.
+6. **A real, if narrowly-averted, correctness risk deliberately
+   checked rather than assumed:** this session's own round-5 sign-off
+   note records a genuine asyncio bug where a *nested* `asyncio.
+   wait_for` (an outer one wrapping a call chain using `asyncio.
+   wait_for` internally) intermittently misbehaved when both timeouts
+   were tuned to the same narrow window. The new idle-timeout wrapper
+   is exactly this shape — `TelnetSession.read_byte_with_timeout` does
+   use `asyncio.wait_for` internally, for CSI escape-sequence handling
+   — so this was verified directly against a real Telnet socket rather
+   than trusted on the (correct, but round-5 already proved
+   insufficient on its own) reasoning that a 60-second-scale idle
+   timeout and sub-second internal timeouts are never close enough to
+   race. `tests/test_telnet_idle_timeout.py` specifically stresses the
+   case that would trigger it — an arrow-key escape sequence arriving
+   *while* the outer idle-timeout wait_for is armed — parametrized to
+   repeat 5x, the way the original round-5 bug only ever surfaced
+   under repetition. All reliable.
+7. **The concurrent-unauthenticated-session budget is scoped to
+   exactly the login phase**, acquired at the top of `handle_session`
+   and released in a `finally` immediately once `_login` resolves one
+   way or another — *before* the main menu ever runs, not held for a
+   session's whole connected lifetime. An authenticated user sitting
+   connected for hours doesn't count against it; only genuinely
+   unauthenticated connections do, which is the actual risk this
+   budget guards against.
+8. **SSH gets a deliberately narrower slice of this throttling story,
+   not the full treatment — a scope boundary, not an oversight:** SSH
+   authenticates during the SSH protocol handshake itself
+   (`_NetBBSSSHServer.validate_password`), a different code path from
+   `netbbs.net.login_flow.handle_session` that Telnet/web share. It
+   *does* consult the same shared `LoginThrottle.allow_attempt`
+   (per-source/per-username/global budgets) — confirmed by this
+   session's own prior discovery, during PR #22's review, that issue
+   #2's Argon2-offload fix originally missed this exact code path, so
+   the same transport-agnostic-acceptance-criteria lesson was applied
+   proactively here. But the idle-timeout/login-deadline/concurrent-
+   session-cap machinery is *not* reimplemented for SSH: asyncssh
+   already owns that connection's handshake lifecycle via its own
+   `login_timeout` option (configured from the same
+   `login_deadline_seconds` value, passed through `SSHServer.start`),
+   which is asyncssh's documented mechanism for exactly this ("the
+   time allowed for a client to send a version string, complete key
+   exchange, and complete user authentication, before the connection
+   is dropped") — reimplementing it independently would mean two
+   competing timeout mechanisms racing on the same connection for no
+   benefit. Verified directly against a real, deliberately-silent TCP
+   connection (not assumed from reading asyncssh's docs) that the
+   configured `login_timeout` actually disconnects it at the
+   configured time, not eventually via some other mechanism. Also
+   verified that a per-source budget exhausted on one SSH connection
+   stays exhausted on the next SSH connection reusing the same
+   `LoginThrottle` — the actual "reconnecting doesn't reset it"
+   acceptance criterion, confirmed for SSH specifically, not just
+   assumed to follow from the Telnet/web case.
+9. **`netbbs.__main__` rewritten around one testable `run(config, *,
+   shutdown_event)` coroutine, resolving issue #15:** starts every
+   enabled+available listener, blocks on `shutdown_event.wait()`, then
+   stops every listener and closes the database in a `finally`. The
+   injectable `shutdown_event` was a deliberate design choice so the
+   whole coordinated-shutdown path is unit-testable without a real
+   subprocess or real OS signals (`tests/test_main_lifecycle.py`) —
+   `main()`'s only job is wiring real SIGTERM/SIGINT into that same
+   event via `loop.add_signal_handler`, falling back to `signal.signal`
+   + `call_soon_threadsafe` where `add_signal_handler` raises
+   `NotImplementedError` (Unix-only per the stdlib docs).
+10. **Partial-start failure cleanup, verified against a real bind
+    conflict, not simulated:** every listener start is wrapped so a
+    failure partway through (a real second `asyncio.start_server` on
+    an already-occupied port, in the test) stops whatever already
+    started, in reverse order, before the failure is reported — an
+    operator never ends up with an unintended subset of listeners
+    silently running because a later one failed to bind. **A real bug
+    found via manual testing, not caught by the first pass of unit
+    tests:** the first implementation re-raised the raw underlying
+    exception (`OSError`, an `ImportError`-shaped message, etc.)
+    straight out of `_start_servers`, which `main()`'s
+    `except StartupError` clause didn't catch — an actual port
+    conflict on this dev machine (SSH's default port 2222 already in
+    use) produced a multi-frame asyncio/asyncssh traceback instead of
+    the clear message issue #15 asks for. Fixed by having every
+    listener-start failure — not just the "nothing started at all"
+    case — wrap into `StartupError` with the transport name and
+    underlying reason, so `main()` has exactly one exception type to
+    catch. Left as a explicit lesson in the commit/PR trail: this is
+    exactly the kind of gap synthetic unit tests (which construct
+    their own controlled failure scenarios) can miss, and only running
+    the real command surfaced it — consistent with CLAUDE.md's
+    "actually run it" standard.
+11. **Zero listeners started is also a hard, clear failure** (`"no
+    listener actually started"`), not a silently-idle process — e.g.
+    every configured transport unavailable (SSH configured but
+    `asyncssh` not installed). Verified by forcing an `ImportError` via
+    `sys.modules`, not just asserted from reading the code.
+12. **One honest, explicitly-flagged verification gap, the same
+    standard rounds 23/24/25 already held SSH/Zmodem/xterm.js to:**
+    `_install_signal_handlers`'s own registration-and-callback logic
+    was verified directly (register the handler, invoke it exactly as
+    the OS would, confirm `shutdown_event` gets set —
+    `tests/test_main_lifecycle.py`), but genuine end-to-end OS signal
+    *delivery* through this sandboxed Windows/Git-Bash dev environment
+    could not be confirmed: `os.kill(pid, SIGINT)` on Windows calls
+    `TerminateProcess` directly for a non-zero pid (not a real,
+    Python-handleable signal), and even the correct broadcast form
+    (`os.kill(0, signal.CTRL_C_EVENT)`) didn't reliably reach Python's
+    signal machinery through Git Bash's console emulation — both
+    sandbox/OS artifacts, not defects in the implementation. The real
+    deployment target (NetBSD, POSIX) uses `loop.add_signal_handler`
+    directly instead of the Windows-only `signal.signal` fallback —
+    standard, well-tested asyncio behavior, not something this project
+    invented. Worth a direct `kill -TERM`/Ctrl+C check from Thiesi's
+    actual NetBSD machine before considering issue #15's graceful-
+    shutdown requirement fully closed out end-to-end.
+13. **README's run instructions rewritten** — the stale "minimal
+    manual-test entry point" framing and positional `db_path` argument
+    are gone, replaced with the config-file/CLI-flag invocation, a
+    worked `netbbs.toml` example, and explicit documentation of the
+    secure-by-default posture, the throttling policy, graceful
+    shutdown, and the rc.d-friendly foreground-process expectation for
+    NetBSD deployments (this process still does not daemonize itself —
+    confirmed as intentionally out of scope, the same as when `python
+    -m netbbs` was first introduced; daemonization remains the service
+    supervisor's job).

@@ -17,6 +17,7 @@ editor that's the actual reason it's needed (design doc round 26).
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum, auto
 
 from netbbs.auth.users import AuthError, User, authenticate_password_async
@@ -26,8 +27,10 @@ from netbbs.chat import ChatHub
 from netbbs.moderation import is_blocked
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.file_flow import browse_file_areas
+from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
+from netbbs.net.throttle import LoginThrottle
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, reflow
 from netbbs.storage.database import Database
@@ -56,14 +59,75 @@ class LoginOutcome(Enum):
 
     ATTEMPTS_EXHAUSTED = auto()
     BLOCKED = auto()
+    THROTTLED = auto()
+    IDLE_TIMEOUT = auto()
 
 
-async def handle_session(session: Session, db: Database, hub: ChatHub) -> None:
-    await session.write_line(WELCOME_BANNER)
+async def handle_session(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    throttle: LoginThrottle,
+    throttle_config: ThrottleConfig,
+) -> None:
+    """
+    Top-level per-connection entry point.
 
-    login_result = await _login(session, db)
+    `throttle`/`throttle_config` implement issue #3's cross-connection
+    login throttling: `throttle` is node-lifetime shared state (one
+    instance for the whole node, constructed in `netbbs.__main__`
+    alongside `hub` — see `netbbs.net.throttle.LoginThrottle`),
+    `throttle_config` is the (also node-wide, but stateless) policy
+    numbers driving it. Kept as two separate parameters rather than
+    folding the config into the stateful object: `LoginThrottle` only
+    needs the numbers once, at construction, to build its token
+    buckets — `throttle_config` is consulted here directly for the
+    per-connection attempt count, idle timeout, and login deadline,
+    which aren't `LoginThrottle`'s concern at all.
+
+    The concurrent-unauthenticated-session budget is acquired for the
+    *entire* login phase (from here until `_login` returns one way or
+    another) and released before the main menu ever runs — a session
+    that's successfully authenticated no longer counts against this
+    budget, precisely because the risk this budget guards against
+    (an attacker holding open many never-completing connections) no
+    longer applies to it.
+    """
+    if not throttle.try_enter_unauthenticated():
+        await session.write_line(
+            "This server has too many pending logins right now. Please try again shortly."
+        )
+        return
+
+    try:
+        await session.write_line(WELCOME_BANNER)
+        try:
+            login_result = await asyncio.wait_for(
+                _login(
+                    session,
+                    db,
+                    throttle,
+                    max_attempts=throttle_config.max_attempts_per_connection,
+                    idle_timeout=throttle_config.unauthenticated_idle_timeout_seconds,
+                ),
+                timeout=throttle_config.login_deadline_seconds,
+            )
+        except asyncio.TimeoutError:
+            await session.write_line("\r\nLogin timed out. Goodbye.")
+            return
+    finally:
+        throttle.leave_unauthenticated()
+
     if login_result is LoginOutcome.ATTEMPTS_EXHAUSTED:
         await session.write_line("Too many failed attempts. Goodbye.")
+        return
+    if login_result is LoginOutcome.IDLE_TIMEOUT:
+        await session.write_line("\r\nTimed out waiting for input. Goodbye.")
+        return
+    if login_result is LoginOutcome.THROTTLED:
+        await session.write_line(
+            "\r\nToo many login attempts. Please try again later."
+        )
         return
     if login_result is LoginOutcome.BLOCKED:
         return
@@ -120,7 +184,12 @@ async def _main_menu(session: Session, db: Database, hub: ChatHub, user: User) -
 
 
 async def _login(
-    session: Session, db: Database, max_attempts: int = _MAX_LOGIN_ATTEMPTS
+    session: Session,
+    db: Database,
+    throttle: LoginThrottle,
+    *,
+    max_attempts: int = _MAX_LOGIN_ATTEMPTS,
+    idle_timeout: float,
 ) -> User | LoginOutcome:
     """
     Prompt for username/password up to `max_attempts` times.
@@ -136,10 +205,24 @@ async def _login(
     Flagging explicitly rather than silently only ever exercising half of
     what `netbbs.auth` supports.
 
-    Per-connection attempt limiting only, nothing persistent yet — a real
-    lockout/ban mechanism belongs to §13's mute/ban system, which is
-    Phase 2. This is just enough to stop a single connection from
-    hammering the password check in a tight loop.
+    `max_attempts` is still per-connection only — reconnecting resets
+    *this* counter, same as before issue #3. What's new is that it's no
+    longer the only limit: `throttle.allow_attempt` below is
+    cross-connection, node-lifetime state that reconnecting does not
+    reset (see `netbbs.net.throttle.LoginThrottle`), which is what
+    actually stops an attacker from working around the per-connection
+    limit by reconnecting. A real persistent lockout/ban mechanism still
+    belongs to §13's mute/ban system (Phase 2) — this is throttling, not
+    that.
+
+    Each prompt read is individually bounded by `idle_timeout`
+    (`asyncio.wait_for` around one `read_line` call) — a client that
+    stops sending mid-prompt doesn't hold a connection (and an
+    unauthenticated-session budget slot, see `handle_session`) open
+    forever. This is a *per-read* inactivity timeout, distinct from
+    `handle_session`'s overall `login_deadline_seconds`, which bounds
+    the whole login process even against a client that stays active but
+    never actually finishes (see that function's docstring).
 
     The blocklist check happens *here*, after successful authentication,
     not inside `authenticate_password_async` itself — authentication ("are
@@ -151,19 +234,31 @@ async def _login(
     whether they're blocked.
     """
     for attempt in range(max_attempts):
-        await session.write("\r\nUsername: ")
-        username = (await session.read_line()).strip()
+        try:
+            await session.write("\r\nUsername: ")
+            username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
+        except asyncio.TimeoutError:
+            return LoginOutcome.IDLE_TIMEOUT
         if not username:
             continue
 
-        await session.write("Password: ")
-        password = await session.read_line(echo=False)
+        try:
+            await session.write("Password: ")
+            password = await asyncio.wait_for(session.read_line(echo=False), timeout=idle_timeout)
+        except asyncio.TimeoutError:
+            return LoginOutcome.IDLE_TIMEOUT
         # No explicit blank-line write needed here anymore — read_line()
         # now writes its own trailing CRLF after Enter unconditionally
         # (part of character-mode input; see netbbs.net.telnet), whereas
         # the original line-mode implementation relied on the client's
         # own local echo to show that newline and needed this line to
         # compensate. Leaving it in would now print an extra blank line.
+
+        if not throttle.allow_attempt(source=session.peer_address, username=username):
+            # Rejected before the expensive Argon2 work runs at all — see
+            # LoginThrottle.allow_attempt's docstring for why the check
+            # happens before, not after, authenticate_password_async.
+            return LoginOutcome.THROTTLED
 
         try:
             user = await authenticate_password_async(db, username, password)

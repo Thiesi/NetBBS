@@ -72,7 +72,10 @@ netbbs/
 │   │                     the fullscreen editor that needs it (round 26)
 │   ├── config.py         Node-wide key-value settings (currently just
 │   │                     display timestamp format)
-│   ├── __main__.py       Minimal runnable entry point for manual testing
+│   ├── __main__.py       Configuration-driven node entry point: builds a
+│   │                     NodeConfig (net/nodeconfig.py), starts every
+│   │                     enabled listener, and shuts down cleanly on
+│   │                     SIGTERM/SIGINT (round 28)
 │   └── timeutil.py       Storage-format timestamps (utc_now_iso) and
 │                         user-facing display formatting, kept separate
 ├── scripts/
@@ -105,14 +108,90 @@ roughly mirroring the design doc's sections: `transport/`, `link/`
 separate, testable module — see design doc §3 for the reasoning against a
 single monolithic script.
 
+## Running a node
+
+`python -m netbbs` is configuration-driven (design doc round 28), not a
+positional `db_path` argument anymore. What listens where, and the
+login-throttling policy protecting it, come from an optional TOML config
+file plus CLI overrides (CLI wins):
+
+```sh
+python -m netbbs --config /etc/netbbs/netbbs.toml
+# or, with no file at all, defaults + CLI flags only:
+python -m netbbs --db netbbs.db --enable-telnet --telnet-host 127.0.0.1
+```
+
+Example `netbbs.toml`:
+
+```toml
+[database]
+path = "/var/db/netbbs/netbbs.db"
+
+[ssh]
+enabled = true
+host = "0.0.0.0"
+port = 2222
+
+[telnet]
+enabled = false
+
+[web]
+enabled = false
+
+[throttle]
+# All optional -- shown here with their built-in defaults.
+max_attempts_per_connection = 3
+per_source_capacity = 10
+per_source_refill_per_minute = 5
+per_username_capacity = 10
+per_username_refill_per_minute = 5
+global_capacity = 100
+global_refill_per_minute = 60
+max_concurrent_unauthenticated_sessions = 100
+login_deadline_seconds = 120
+unauthenticated_idle_timeout_seconds = 60
+```
+
+**Secure by default (issue #1):** SSH is the only transport enabled out
+of the box. Telnet and the plain-HTTP web transport both default to
+*disabled* — passwords are never exposed over plaintext by default —
+and even when explicitly enabled (`--enable-telnet`, `[telnet] enabled =
+true`, etc.) without an explicit `host`, they bind to `127.0.0.1` rather
+than every interface. Enabling either one on a non-loopback address logs
+a prominent warning on startup. The web transport has no built-in TLS —
+put a TLS-terminating reverse proxy (nginx, relayd, etc.) in front of a
+loopback-bound instance for HTTPS/WSS; see
+`src/netbbs/net/nodeconfig.py`'s module docstring for why that's the
+supported path instead of certificate handling built into `aiohttp`
+directly.
+
+**Cross-connection login throttling (issue #3):** per-source-address,
+per-username, and node-wide budgets persist for the node's whole
+lifetime — reconnecting doesn't reset them, unlike the still-present
+per-connection 3-attempt limit. See `src/netbbs/net/throttle.py`.
+
+**Graceful shutdown:** SIGTERM/SIGINT stop every listener and close the
+database in an orderly `finally`, rather than however the OS happens to
+tear down the process. For an rc.d-style NetBSD service, run this in the
+foreground and let the service supervisor manage backgrounding/restart
+— `netbbs` does not daemonize itself.
+
+**Config validation:** an invalid config (bad port, empty host, no
+transport enabled at all, an unreadable/malformed file) is reported as a
+clear one-line error and a non-zero exit, not a raw traceback or a node
+silently listening for nobody.
+
 ## Manually testing the Telnet connection
+
+Telnet is off by default (see above) — enable it explicitly for local
+testing:
 
 ```sh
 python scripts/create_test_user.py netbbs.db thiesi hunter2 100
 python scripts/create_test_board.py netbbs.db general "General discussion"
 python scripts/create_test_channel.py netbbs.db lobby "General chat"
 python scripts/set_node_config.py netbbs.db display_timezone Europe/Berlin
-python -m netbbs netbbs.db
+python -m netbbs --db netbbs.db --enable-telnet
 ```
 
 For real-time chat specifically, open two separate `telnet localhost
@@ -184,8 +263,9 @@ Then, from another terminal:
 telnet localhost 2323
 ```
 
-Port 2323, not 23 — binding 23 needs root. See `src/netbbs/__main__.py`
-for why, and for what a real deployment would need instead.
+Port 2323, not 23 — binding 23 needs root. See `src/netbbs/net/
+nodeconfig.py` for why, and for what a real deployment would need
+instead.
 
 ## Development
 

@@ -72,7 +72,12 @@ _SUBNEGOTIATION_TIMEOUT = 1.0
 class TelnetSession(Session):
     """A single Telnet client connection."""
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        peer_address: str | None = None,
+    ):
         self._reader = reader
         self._writer = writer
         # Conservative defaults (also the Session base class defaults);
@@ -82,6 +87,7 @@ class TelnetSession(Session):
         # updated subnegotiation — simply keeps these values.
         self.terminal_width = 80
         self.terminal_height = 24
+        self.peer_address = peer_address
 
     async def negotiate_initial_options(self) -> None:
         """
@@ -363,7 +369,8 @@ class TelnetServer:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         peer = writer.get_extra_info("peername")
-        session = TelnetSession(reader, writer)
+        peer_address = peer[0] if peer else None
+        session = TelnetSession(reader, writer, peer_address)
         try:
             await session.negotiate_initial_options()
             await self._session_handler(session)

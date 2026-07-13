@@ -1,98 +1,216 @@
 """
-`python -m netbbs [db_path]` — minimal runnable entry point.
+`python -m netbbs [--config PATH] [options...]` — node entry point.
 
-Not the final node-startup story: no config file, no node identity
-loading, no daemonization, no rc.d integration. This exists so Phase 1
-work can actually be connected to and manually tested over a real Telnet
-or SSH session, rather than only exercised through pytest. Those
-production concerns belong with later Phase 1/connectivity work, once
-there's an actual daemon lifecycle to design around.
+Configuration-driven (design doc round 28, issue #15): what listens
+where, and the login-throttling policy protecting it, come from
+`netbbs.net.nodeconfig.NodeConfig` — an optional TOML file plus CLI
+overrides — rather than the hardcoded constants this module used to
+carry directly. See `netbbs.net.nodeconfig` for the file format and
+`README.md` for a worked example, including the rc.d-friendly
+foreground invocation NetBSD deployments should use (this process does
+not daemonize itself; that's the service supervisor's job).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
-from pathlib import Path
 
 from netbbs.chat import ChatHub
 from netbbs.net.login_flow import handle_session
-from netbbs.net.telnet import TelnetServer
+from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
+from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
-# Port 2323, not the standard Telnet port 23: binding port 23 requires
-# root/CAP_NET_BIND_SERVICE on POSIX systems, which is more privilege
-# than a manual-test entry point should need or want. A real deployment
-# would either run this behind a privilege-dropping wrapper, use a
-# reverse proxy / port-forward rule (e.g. via the same kind of Apache
-# setup already used elsewhere), or an inetd-style super-server — a
-# decision for actual node-startup work, not this script. Same reasoning
-# for SSH's port (2222, not 22) and the web server's (8080, an
-# unprivileged default rather than 80).
-DEFAULT_TELNET_PORT = 2323
-DEFAULT_SSH_PORT = 2222
-DEFAULT_WEB_PORT = 8080
-DEFAULT_HOST = "0.0.0.0"
+_logger = logging.getLogger(__name__)
+
+
+class StartupError(Exception):
+    """Raised when one or more enabled listeners fail to start.
+    Whatever did start is already stopped again by the time this is
+    raised — see `run`'s partial-start cleanup."""
+
+
+def _build_throttle(config: NodeConfig) -> LoginThrottle:
+    t = config.throttle
+    return LoginThrottle(
+        per_source_capacity=t.per_source_capacity,
+        per_source_refill_per_minute=t.per_source_refill_per_minute,
+        per_username_capacity=t.per_username_capacity,
+        per_username_refill_per_minute=t.per_username_refill_per_minute,
+        global_capacity=t.global_capacity,
+        global_refill_per_minute=t.global_refill_per_minute,
+        max_tracked_keys=t.max_tracked_keys,
+        max_concurrent_unauthenticated_sessions=t.max_concurrent_unauthenticated_sessions,
+    )
+
+
+async def _start_servers(
+    config: NodeConfig, db: Database, session_handler, throttle: LoginThrottle
+) -> list:
+    """
+    Start every enabled, available listener. On any failure partway
+    through, stop whatever already started before re-raising as
+    `StartupError` (issue #15: "partial startup failures clean up
+    already-started components" — an operator should never end up with
+    an unintended subset of listeners silently running because the
+    third one failed to bind).
+
+    `throttle` is the *same* `LoginThrottle` instance `run()` hands to
+    `session_handler` for Telnet/web — SSH's `validate_password` (see
+    `netbbs.net.ssh`) must share it too, not get its own, or its
+    per-source/per-username/global budgets would track each transport
+    separately and an attacker could simply switch transports to reset
+    them, defeating the entire point of a cross-connection budget.
+    """
+    started: list = []
+
+    async def _start_one(name: str, server) -> None:
+        try:
+            await server.start()
+        except Exception as exc:
+            for already_started in reversed(started):
+                await already_started.stop()
+            # Wrapped into StartupError, not left as a raw OSError/etc.,
+            # so main() has exactly one exception type to catch for a
+            # clear, actionable message (issue #15: "fail clearly") —
+            # an operator who fat-fingers a port number should see
+            # "ssh listener failed to start: ... already in use", not a
+            # multi-frame asyncssh/asyncio traceback.
+            raise StartupError(f"{name} listener failed to start: {exc}") from exc
+        started.append(server)
+
+    if config.telnet.enabled:
+        from netbbs.net.telnet import TelnetServer
+
+        await _start_one(
+            "telnet",
+            TelnetServer(
+                host=config.telnet.host, port=config.telnet.port, session_handler=session_handler
+            ),
+        )
+        _logger.info("NetBBS listening on %s:%d (Telnet)", config.telnet.host, config.telnet.port)
+
+    if config.ssh.enabled:
+        try:
+            from netbbs.net.ssh import SSHServer
+        except ImportError:
+            _logger.warning(
+                "SSH is enabled in configuration but asyncssh is not installed — "
+                "skipping SSH listener (pip install netbbs[ssh])"
+            )
+        else:
+            await _start_one(
+                "ssh",
+                SSHServer(
+                    host=config.ssh.host,
+                    port=config.ssh.port,
+                    db=db,
+                    session_handler=session_handler,
+                    throttle=throttle,
+                    login_timeout=config.throttle.login_deadline_seconds,
+                ),
+            )
+            _logger.info("NetBBS listening on %s:%d (SSH)", config.ssh.host, config.ssh.port)
+
+    if config.web.enabled:
+        try:
+            from netbbs.net.web import WebServer
+        except ImportError:
+            _logger.warning(
+                "web is enabled in configuration but aiohttp is not installed — "
+                "skipping web listener (pip install netbbs[web])"
+            )
+        else:
+            await _start_one(
+                "web",
+                WebServer(host=config.web.host, port=config.web.port, session_handler=session_handler),
+            )
+            _logger.info("NetBBS listening on %s:%d (web)", config.web.host, config.web.port)
+
+    if not started:
+        raise StartupError(
+            "no listener actually started — every enabled transport either failed to "
+            "bind or is missing its optional dependency; the node has nothing to serve"
+        )
+
+    return started
+
+
+async def run(config: NodeConfig, *, shutdown_event: asyncio.Event | None = None) -> None:
+    """
+    Run one node's lifetime: open the database, start every configured
+    listener, and block until `shutdown_event` is set — then stop every
+    listener and close the database, in that order, before returning.
+
+    `shutdown_event` is injectable specifically so this coordinated
+    shutdown path is testable without sending real OS signals (see
+    `tests/test_main_lifecycle.py`); the real top-level `main()` below
+    wires actual SIGTERM/SIGINT handling to it.
+    """
+    for warning in config.describe_insecure_bindings():
+        _logger.warning(warning)
+
+    db = Database(config.db_path)
+    hub = ChatHub()
+    throttle = _build_throttle(config)
+    throttle_config = config.throttle
+
+    async def session_handler(session):
+        await handle_session(session, db, hub, throttle, throttle_config)
+
+    servers: list = []
+    try:
+        servers = await _start_servers(config, db, session_handler, throttle)
+
+        if shutdown_event is None:
+            shutdown_event = asyncio.Event()
+        await shutdown_event.wait()
+    finally:
+        for server in reversed(servers):
+            await server.stop()
+        db.close()
+        _logger.info("NetBBS node shut down cleanly")
+
+
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event) -> None:
+    def _request_shutdown() -> None:
+        _logger.info("shutdown requested")
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            # add_signal_handler is Unix-only (see the stdlib asyncio
+            # docs); the intended deployment target is NetBSD (see
+            # CLAUDE.md), where this branch never runs. Windows dev
+            # environments fall back to signal.signal, which can't
+            # safely touch asyncio state directly from the handler —
+            # call_soon_threadsafe hands the actual event-setting back
+            # to the loop instead.
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(_request_shutdown))
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    db_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("netbbs.db")
-    db = Database(db_path)
-
-    # One hub for the whole node's lifetime, shared across every
-    # connected session, regardless of which transport it arrived
-    # through — this is what makes cross-session real-time chat possible
-    # at all (see netbbs.chat.hub.ChatHub).
-    hub = ChatHub()
-
-    async def session_handler(session):
-        await handle_session(session, db, hub)
-
-    telnet_server = TelnetServer(
-        host=DEFAULT_HOST, port=DEFAULT_TELNET_PORT, session_handler=session_handler
-    )
-    await telnet_server.start()
-    logging.info(
-        "NetBBS listening on %s:%d (Telnet, database: %s)",
-        DEFAULT_HOST,
-        DEFAULT_TELNET_PORT,
-        db_path,
-    )
-
-    servers = [telnet_server]
-
-    # SSH is an optional extra (design doc round 22: asyncssh pulls in
-    # `cryptography`, deliberately not a core dependency — see
-    # pyproject.toml's `ssh` extra) — a Telnet-only node should still
-    # start normally without it installed, just without an SSH listener.
     try:
-        from netbbs.net.ssh import SSHServer
-    except ImportError:
-        logging.info("asyncssh not installed — skipping SSH listener (pip install netbbs[ssh])")
-    else:
-        ssh_server = SSHServer(
-            host=DEFAULT_HOST, port=DEFAULT_SSH_PORT, db=db, session_handler=session_handler
-        )
-        await ssh_server.start()
-        logging.info("NetBBS listening on %s:%d (SSH)", DEFAULT_HOST, DEFAULT_SSH_PORT)
-        servers.append(ssh_server)
+        config = load_config(sys.argv[1:])
+    except ConfigError as exc:
+        _logger.error("configuration error: %s", exc)
+        raise SystemExit(1) from exc
 
-    # Web is likewise an optional extra (design doc round 22/25's `web`
-    # extra) — aiohttp isn't needed at all for a Telnet/SSH-only node.
+    shutdown_event = asyncio.Event()
+    _install_signal_handlers(asyncio.get_running_loop(), shutdown_event)
+
     try:
-        from netbbs.net.web import WebServer
-    except ImportError:
-        logging.info("aiohttp not installed — skipping web listener (pip install netbbs[web])")
-    else:
-        web_server = WebServer(host=DEFAULT_HOST, port=DEFAULT_WEB_PORT, session_handler=session_handler)
-        await web_server.start()
-        logging.info("NetBBS listening on %s:%d (web)", DEFAULT_HOST, DEFAULT_WEB_PORT)
-        servers.append(web_server)
-
-    await asyncio.gather(*(server.serve_forever() for server in servers))
+        await run(config, shutdown_event=shutdown_event)
+    except StartupError as exc:
+        _logger.error("startup failed: %s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

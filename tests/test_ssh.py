@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from netbbs.auth.users import create_user
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.ssh import SSHServer
+from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
 
@@ -33,10 +34,25 @@ def db(tmp_path):
     database.close()
 
 
-async def _run_server(db, session_handler):
-    server = SSHServer(host="127.0.0.1", port=0, db=db, session_handler=session_handler)
+async def _run_server(db, session_handler, **server_kwargs):
+    server = SSHServer(host="127.0.0.1", port=0, db=db, session_handler=session_handler, **server_kwargs)
     await server.start()
     return server
+
+
+def _throttle(**overrides) -> LoginThrottle:
+    defaults = dict(
+        per_source_capacity=10.0,
+        per_source_refill_per_minute=5.0,
+        per_username_capacity=10.0,
+        per_username_refill_per_minute=5.0,
+        global_capacity=100.0,
+        global_refill_per_minute=60.0,
+        max_tracked_keys=10_000,
+        max_concurrent_unauthenticated_sessions=100,
+    )
+    defaults.update(overrides)
+    return LoginThrottle(**defaults)
 
 
 def _client_key_for(db, username, user_level=10):
@@ -72,6 +88,110 @@ def test_password_auth_succeeds_with_correct_credentials(db):
 
     asyncio.run(scenario())
     assert calls == ["in"]
+
+
+def test_password_auth_honors_shared_login_throttle(db):
+    """
+    Design doc round 28 (issue #3): SSH's validate_password must
+    consult the *same* LoginThrottle instance Telnet/web use, not skip
+    throttling entirely. A budget already exhausted before the
+    connection even starts (per_source_capacity=0) must reject a
+    password attempt with otherwise-correct credentials.
+    """
+    create_user(db, "alice", password="hunter2", user_level=10)
+    throttle = _throttle(per_source_capacity=0.0, per_source_refill_per_minute=0.0)
+
+    async def handler(session: Session):
+        raise AssertionError("session handler must not run — auth should fail")
+
+    async def scenario():
+        server = await _run_server(db, handler, throttle=throttle)
+        try:
+            with pytest.raises(asyncssh.PermissionDenied):
+                async with asyncssh.connect(
+                    "127.0.0.1",
+                    server.port,
+                    username="alice",
+                    password="hunter2",
+                    known_hosts=None,
+                ):
+                    pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_password_auth_reconnect_does_not_reset_shared_throttle(db):
+    """The cross-connection half of issue #3, specifically for SSH:
+    exhausting the per-source budget on one SSH connection must still
+    be exhausted on the *next* SSH connection reusing the same
+    LoginThrottle -- reconnecting must not reset it."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    throttle = _throttle(per_source_capacity=1.0, per_source_refill_per_minute=0.0)
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(db, handler, throttle=throttle)
+        try:
+            # First connection consumes the one available token.
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+            ):
+                pass
+
+            # Second connection ("reconnect"): budget is already spent.
+            with pytest.raises(asyncssh.PermissionDenied):
+                async with asyncssh.connect(
+                    "127.0.0.1",
+                    server.port,
+                    username="alice",
+                    password="hunter2",
+                    known_hosts=None,
+                ):
+                    pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_login_timeout_disconnects_an_idle_unauthenticated_connection(db):
+    """
+    Design doc round 28 (issue #3): SSH's equivalent of Telnet/web's
+    idle-timeout/login-deadline is asyncssh's own `login_timeout`
+    option (see SSHServer.start/__init__'s docstrings for why SSH
+    doesn't reuse netbbs.net.login_flow's own timeout logic). Verified
+    against a real TCP connection that sends nothing after the initial
+    handshake -- not assumed to work just because the option was
+    passed through.
+    """
+    import time
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(db, handler, login_timeout=0.5)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            start = time.monotonic()
+            while True:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=3.0)
+                if not chunk:
+                    break
+            elapsed = time.monotonic() - start
+            writer.close()
+            # Closed around the configured login_timeout, not just
+            # eventually -- well under the 3.0s wait_for ceiling used
+            # only as a test-hang safety net.
+            assert elapsed < 2.0
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
 
 
 def test_password_auth_fails_with_wrong_password(db):

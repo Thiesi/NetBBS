@@ -42,6 +42,7 @@ import nacl.signing
 from netbbs.auth.users import AuthError, authenticate_password_async, authorize_public_key
 from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -86,6 +87,8 @@ class SSHSession(Session):
             self.terminal_width = width
         if height > 0:
             self.terminal_height = height
+        peer = process.get_extra_info("peername")
+        self.peer_address = peer[0] if peer else None
 
     async def write(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write performs, and the
@@ -167,13 +170,26 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
     `server_factory` contract), so `db` — shared, one per node — is
     captured via the closure `netbbs.net.ssh.create_ssh_server` builds,
     not stored as a class attribute.
+
+    `throttle` is `netbbs.net.login_flow`'s cross-connection
+    `LoginThrottle` (design doc round 28, issue #3), shared with
+    Telnet/web. Only the per-source/per-username/global token-bucket
+    check (`allow_attempt`) applies here — the concurrent-
+    unauthenticated-session cap and idle-timeout pieces of the same
+    issue are Telnet/web-specific (see `netbbs.net.login_flow.
+    handle_session`); SSH's equivalent is asyncssh's own `login_timeout`
+    (see `SSHServer.start` below), which owns this connection's
+    handshake lifecycle in a way this per-attempt callback doesn't.
     """
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, throttle: LoginThrottle | None):
         self._db = db
+        self._throttle = throttle
+        self._peer_address: str | None = None
 
     def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
-        self._peer = conn.get_extra_info("peername")
+        peer = conn.get_extra_info("peername")
+        self._peer_address = peer[0] if peer else None
 
     def password_auth_supported(self) -> bool:
         return True
@@ -184,6 +200,12 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # must go through the bounded off-loop path too, or a burst of SSH
         # password attempts blocks the loop on Argon2 just as much as the
         # Telnet path used to (issue #2).
+        if self._throttle is not None and not self._throttle.allow_attempt(
+            source=self._peer_address, username=username
+        ):
+            # Rejected before the expensive Argon2 work runs at all —
+            # the whole point of checking the budget first (issue #3).
+            return False
         try:
             await authenticate_password_async(self._db, username, password)
         except AuthError:
@@ -221,11 +243,26 @@ class SSHServer:
     intended usage as `netbbs.net.telnet.TelnetServer`.
     """
 
-    def __init__(self, host: str, port: int, db: Database, session_handler: SessionHandler):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        db: Database,
+        session_handler: SessionHandler,
+        *,
+        throttle: LoginThrottle | None = None,
+        login_timeout: float | None = None,
+    ):
         self._host = host
         self._port = port
         self._db = db
         self._session_handler = session_handler
+        self._throttle = throttle
+        # asyncssh's own login-deadline mechanism — see this class's
+        # docstring and _NetBBSSSHServer's for why SSH doesn't reuse
+        # netbbs.net.login_flow's idle-timeout/login-deadline logic
+        # directly. `None` keeps asyncssh's own built-in default.
+        self._login_timeout = login_timeout
         self._acceptor: asyncssh.SSHAcceptor | None = None
 
     @property
@@ -236,14 +273,18 @@ class SSHServer:
 
     async def start(self) -> None:
         host_key_path = ensure_host_key(self._db)
+        extra_options: dict = {}
+        if self._login_timeout is not None:
+            extra_options["login_timeout"] = self._login_timeout
         self._acceptor = await asyncssh.create_server(
-            lambda: _NetBBSSSHServer(self._db),
+            lambda: _NetBBSSSHServer(self._db, self._throttle),
             self._host,
             self._port,
             server_host_keys=[str(host_key_path)],
             process_factory=self._handle_process,
             encoding=None,
             line_editor=False,
+            **extra_options,
         )
 
     async def serve_forever(self) -> None:
