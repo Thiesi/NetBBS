@@ -3593,3 +3593,91 @@ painful, discussed and confirmed before any of Track 5 continued.
    implement). Full suite re-run after adding both (796 passed, 1
    skipped) — actually run, not just syntax-checked; the topic-staleness
    bug (point 6) was caught this way, not by review.
+
+## Sign-off notes, round 46 (Phase 2 Track 5e: private messaging — implemented)
+
+Implements the plan agreed with Thiesi for Track 5e (`/msg`,
+`/private`/`/query`, `/close`) — see design doc round 32 point 1-2 and
+round 33 point 1's original scoping.
+
+1. **Delivery: mailbox + next-prompt, confirmed with Thiesi over full
+   session-wide live interrupt delivery.** Round 32 requires `/msg` to
+   reach "every active session belonging to that canonical account,"
+   but only a session actually inside `_chat_loop` has any live receive
+   mechanism today — `_main_menu`, board/file browsing, and the
+   directory all just block synchronously with nothing listening in the
+   background. True interrupt delivery to *any* screen would mean
+   threading a persistent receive-task through `handle_session` itself,
+   a much bigger change than this track's scope. Resolved instead as
+   two paths: a recipient with a live participant_id in *some* channel
+   right now gets pushed instantly via the existing `ChatHub` (new
+   `_find_live_participant`, scanning every channel's roster the same
+   O(channels) way `_channel_names_for_user`/`_kick_live_sessions`
+   already do); otherwise the message queues in a new
+   `netbbs.chat.mailbox.MessageMailbox` and is shown at the recipient's
+   next natural prompt.
+2. **Exactly one flush point needed: the top of `_main_menu`'s loop**
+   (folded into the existing `_draw_main_menu` helper, which already
+   ran on entry and after every submenu return) — every screen (boards,
+   files, directory, profile, chat) already passes through there before
+   its next redraw, so no other call site needed touching.
+   `MessageMailbox` is constructed once in `__main__.py` alongside
+   `hub`/`presence` and threaded the same way, all the way down through
+   `handle_session` → `_main_menu` → `browse_channels` → `_chat_loop` →
+   `ChatCommandContext`.
+3. **`/msg`/`/private` both check `presence.is_online(...)` at send
+   time and refuse outright if not online** (round 32 point 1) — no
+   queuing for a genuinely offline user, only for the
+   online-but-not-reachable-right-now gap the mailbox exists for. A
+   mailbox entry for someone who disconnects before their next
+   `_main_menu` flush is simply dropped, an accepted edge case matching
+   live `/msg`'s fundamentally ephemeral nature (round 32 point 2: never
+   silently falls back to Phase 3's store-and-forward Link messages).
+   Never written to scrollback or the moderation log, confirmed by a
+   dedicated test, not just assumed.
+4. **`/private <user>` layers on `/msg` via new `_EnterPrivate`/
+   `_ExitPrivate` `ChatAction` variants** — unlike `_Quit`/`_ToPicker`/
+   `_SwitchTo` (Track 5d), these never propagate past `send_loop`:
+   they're consumed there, updating a local `private_target: User |
+   None` closure variable. **Confirmed with Thiesi: other slash-commands
+   still dispatch normally while in private mode** (matching round 39's
+   existing "leading `/` is always a command attempt" rule, no special-
+   casing needed) — only non-slash lines change meaning, routed to the
+   private conversation via a shared `_deliver_private_message` helper
+   instead of posted to the channel. `/close` (`_handle_close`) always
+   returns `_ExitPrivate()` unconditionally; `send_loop` itself is the
+   only place that actually knows whether private mode is active, so it
+   decides what message to show ("Returned to #channel" vs. "You are
+   not in a private conversation").
+5. **`/query` is registered as a plain alias for `_handle_private` in
+   `_COMMANDS`** (round 33 point 1: "accepted only as an IRC-
+   compatibility alias") — no separate handler.
+6. **A real edge case identified and handled, not left implicit:** if
+   `private_target` goes offline *during* an active private
+   conversation (not just before `/private` is first typed), the next
+   plain line sent checks `presence.is_online` again before delivering,
+   clears `private_target`, and tells the user — rather than silently
+   queuing into a mailbox for someone who's no longer reachable at all.
+   Verified with a dedicated test using a small `FakeSession` subclass
+   that drops the target's presence between two scripted lines, not
+   just reasoned about.
+7. **Testing:** new `tests/test_chat_mailbox.py` (6 cases, library-level
+   `MessageMailbox`), `tests/test_chat_flow_private.py` (13 cases —
+   `/msg`'s online-check refusal, live delivery to a recipient in a
+   *different* channel, mailbox fallback for online-but-not-in-any-
+   channel, never written to scrollback/moderation-log, `/private`
+   entry and plain-line routing, commands still dispatching mid-private-
+   conversation, `/close`, `/query`'s alias behavior, and the mid-
+   conversation offline edge case from point 6), and `tests/
+   test_login_mailbox_flush.py` (4 cases driving `_main_menu` directly —
+   a pending message shown before the menu on entry, shown exactly
+   once, no spurious output when the mailbox is empty, and a message
+   queued while "in" a submenu appearing after the return-to-menu
+   redraw). Threading the new `mailbox` parameter through `_chat_loop`/
+   `browse_channels`/`handle_session`/`_main_menu` required updating
+   call sites across nine existing test files (the same "widening a
+   threaded parameter breaks many call sites" pattern round 42's own
+   sign-off note already described when `presence` was first
+   introduced) — caught immediately by the full suite re-run, not left
+   for later discovery. Full suite re-run after all of this (819
+   passed, 1 skipped) — actually run, not just syntax-checked.

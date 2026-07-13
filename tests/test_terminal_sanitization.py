@@ -14,7 +14,14 @@ import asyncio
 
 from netbbs.auth.users import create_user
 from netbbs.boards import create_board, create_post
-from netbbs.chat import ChatHub, PresenceRegistry, create_channel, get_scrollback, record_message
+from netbbs.chat import (
+    ChatHub,
+    MessageMailbox,
+    PresenceRegistry,
+    create_channel,
+    get_scrollback,
+    record_message,
+)
 from netbbs.files import create_file_area, upload_file
 from netbbs.net.chat_flow import _chat_loop, _render_scrollback_message
 from netbbs.net.file_flow import _show_area
@@ -188,6 +195,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     channel = create_channel(db, "lobby", creator=sender)
     hub = ChatHub()
     presence = PresenceRegistry()
+    mailbox = MessageMailbox()
 
     sender_session = FakeSession(lines=[HOSTILE, "/quit"])
     received: list[str] = []
@@ -201,7 +209,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
             received.append(await queue.get())  # sender's leave notice
 
         collector = asyncio.create_task(collect_one())
-        await _chat_loop(sender_session, db, hub, presence, channel, sender)
+        await _chat_loop(sender_session, db, hub, presence, mailbox, channel, sender)
         await collector
         hub.leave(channel.name, "bob-participant")
 

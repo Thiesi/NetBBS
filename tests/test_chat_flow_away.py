@@ -17,6 +17,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import chat_flow
 from netbbs.storage.database import Database
@@ -56,7 +57,10 @@ def _written_text(session: FakeSession) -> str:
 
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
-    await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, user), timeout=2)
+    mailbox = MessageMailbox()
+    await asyncio.wait_for(
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+    )
     return session
 
 
@@ -94,12 +98,17 @@ def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
 
     async def scenario():
+        mailbox = MessageMailbox()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(chat_flow._chat_loop(watcher, db, hub, presence, channel, bob))
+        watcher_task = asyncio.create_task(
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, bob)
+        )
         await asyncio.sleep(0)
 
         actor = FakeSession(["/away gone to lunch", "/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(actor, db, hub, presence, channel, alice), timeout=2)
+        await asyncio.wait_for(
+            chat_flow._chat_loop(actor, db, hub, presence, mailbox, channel, alice), timeout=2
+        )
 
         watcher_task.cancel()
         await asyncio.gather(watcher_task, return_exceptions=True)

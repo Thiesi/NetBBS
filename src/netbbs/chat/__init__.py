@@ -20,6 +20,7 @@ from netbbs.chat.channels import (
     set_topic,
 )
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.nick import MAX_NICK_LENGTH, NickError, display_label, get_nick, set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.moderation import (
@@ -53,6 +54,7 @@ __all__ = [
     "list_channels",
     "set_topic",
     "ChatHub",
+    "MessageMailbox",
     "MAX_NICK_LENGTH",
     "NickError",
     "display_label",

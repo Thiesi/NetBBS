@@ -18,7 +18,7 @@ import logging
 import signal
 import sys
 
-from netbbs.chat import ChatHub, PresenceRegistry
+from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.login_flow import handle_session
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
 from netbbs.net.throttle import LoginThrottle
@@ -156,11 +156,12 @@ async def run(config: NodeConfig, *, shutdown_event: asyncio.Event | None = None
     db = Database(config.db_path)
     hub = ChatHub()
     presence = PresenceRegistry()
+    mailbox = MessageMailbox()
     throttle = _build_throttle(config)
     throttle_config = config.throttle
 
     async def session_handler(session):
-        await handle_session(session, db, hub, presence, throttle, throttle_config)
+        await handle_session(session, db, hub, presence, mailbox, throttle, throttle_config)
 
     servers: list = []
     try:

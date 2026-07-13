@@ -18,6 +18,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.net import chat_flow
@@ -58,7 +59,10 @@ def _written_text(session: FakeSession) -> str:
 
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
-    await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, user), timeout=2)
+    mailbox = MessageMailbox()
+    await asyncio.wait_for(
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+    )
     return session
 
 

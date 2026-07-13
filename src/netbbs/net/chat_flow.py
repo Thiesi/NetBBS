@@ -20,6 +20,7 @@ from netbbs.chat import (
     ChatHub,
     ChatModerationError,
     DurationError,
+    MessageMailbox,
     NickError,
     PresenceRegistry,
     TopicError,
@@ -51,7 +52,12 @@ from netbbs.timeutil import format_for_display
 
 
 async def browse_channels(
-    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    user: User,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
@@ -69,7 +75,7 @@ async def browse_channels(
     """
     channel = await _pick_channel(session, db, hub, user, category_id=None)
     while channel is not None:
-        action = await _chat_loop(session, db, hub, presence, channel, user)
+        action = await _chat_loop(session, db, hub, presence, mailbox, channel, user)
         if isinstance(action, _SwitchTo):
             channel = action.channel
             continue
@@ -237,6 +243,7 @@ class ChatCommandContext:
     db: Database
     hub: ChatHub
     presence: PresenceRegistry
+    mailbox: MessageMailbox
     channel: Channel
     user: User
     participant_id: str
@@ -264,18 +271,38 @@ class _SwitchTo:
     channel: Channel
 
 
+@dataclass(frozen=True)
+class _EnterPrivate:
+    """Enter private-conversation mode targeting `target` — `/private
+    <user>`'s meaning (Track 5e). Unlike `_ToPicker`/`_SwitchTo`, this
+    never propagates past `send_loop` — it's consumed entirely there,
+    updating its own local `private_target` variable, since entering
+    private mode doesn't change anything about *which channel* the loop
+    is running in."""
+
+    target: User
+
+
+@dataclass(frozen=True)
+class _ExitPrivate:
+    """Leave private-conversation mode, back to ordinary channel input —
+    `/close`'s meaning. Same "consumed entirely inside `send_loop`"
+    scope as `_EnterPrivate`."""
+
+
 # What a command handler returns after running: `None` means "continue
 # the chat loop as normal." A `ChatAction` means "something about the
 # loop itself needs to change" — propagated all the way up through
-# `_dispatch_command`/`send_loop`/`_chat_loop` to `browse_channels`,
-# which is the only place that actually knows what to do with it (switch
-# channels, return to the picker, or exit). Originally just `bool`
-# (round 39; only `/quit` ever returned `True`) — widened, not replaced,
-# once `/leave`/`/join` needed to distinguish two more outcomes from
-# plain "keep going" (design doc round 44/Track 5d): the same "explicit
-# return contract, not exceptions" reasoning round 39 already established,
-# just with more to say than a single bit could carry.
-ChatAction = _Quit | _ToPicker | _SwitchTo
+# `_dispatch_command`/`send_loop`/`_chat_loop` to `browse_channels`
+# (`_Quit`/`_ToPicker`/`_SwitchTo`), or consumed directly inside
+# `send_loop` without going any further (`_EnterPrivate`/`_ExitPrivate`,
+# Track 5e — see their own docstrings). Originally just `bool` (round
+# 39; only `/quit` ever returned `True`) — widened, not replaced, each
+# time a new command needed to distinguish another outcome from plain
+# "keep going": the same "explicit return contract, not exceptions"
+# reasoning round 39 already established, just with more to say than a
+# single bit could carry.
+ChatAction = _Quit | _ToPicker | _SwitchTo | _EnterPrivate | _ExitPrivate
 CommandHandler = Callable[[ChatCommandContext, str], Awaitable[ChatAction | None]]
 
 
@@ -358,6 +385,124 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     )
     await ctx.session.write_line(notice)
     await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
+
+
+def _find_live_participant(hub: ChatHub, db: Database, username: str) -> tuple[str, str] | None:
+    """
+    Every channel's roster is checked in turn for a live session
+    belonging to `username` — `ChatHub` has no reverse "which channel is
+    this user in" index, the same O(channels) shape as
+    `_channel_names_for_user`/`_kick_live_sessions`, which already parse
+    the same `"username:id(session)"` convention for the same reason.
+    Returns `(channel_name, participant_id)` for the first live session
+    found, or `None` if `username` has no live session in any channel
+    right now (e.g. online but browsing boards, or between channels) —
+    exactly the case `netbbs.chat.mailbox.MessageMailbox` exists for.
+    """
+    for channel in list_channels(db):
+        for participant_id in hub.participant_ids(channel.name):
+            if participant_id.startswith(f"{username}:"):
+                return channel.name, participant_id
+    return None
+
+
+async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: str) -> None:
+    """
+    Delivers a private message to `target`: instantly, via the existing
+    `ChatHub`, if they currently have a live session in some channel
+    (the same delivery mechanism moderation notices already use, just a
+    differently-formatted string — no new `receive_loop` branch needed);
+    otherwise queued in the mailbox for their next natural prompt
+    (design doc round 32, sign-off round 46/Track 5e — mailbox +
+    next-prompt delivery, confirmed with Thiesi over full session-wide
+    live interrupt delivery, which nothing outside `_chat_loop` has any
+    mechanism for today — see `netbbs.chat.mailbox`'s module docstring).
+
+    Never written to scrollback or the moderation log — round 32 point
+    1's "online-only" private messages are intentionally as ephemeral as
+    live chat itself.
+    """
+    sender_label = sanitize_text(display_label(ctx.db, ctx.user))
+    notice = colored(
+        f"*** Private message from {sender_label}: {sanitize_text(body)}",
+        fg_color=MUTED_COLOR,
+        bold=True,
+    )
+
+    live = _find_live_participant(ctx.hub, ctx.db, target.username)
+    if live is not None:
+        channel_name, participant_id = live
+        await ctx.hub.send_to(channel_name, participant_id, notice)
+    else:
+        ctx.mailbox.deliver(target.username, notice)
+
+    await ctx.session.write_line(
+        colored(f"(sent to {sanitize_text(target.username)})", fg_color=MUTED_COLOR)
+    )
+
+
+async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/msg <user> <text>` (design doc round 32 point 1): a one-off,
+    online-only private message. Scoped as a chat-context command only,
+    matching every command Tracks 3-5d already built — no parallel
+    main-menu entry point.
+    """
+    parts = args.split(maxsplit=1)
+    if len(parts) < 2:
+        await ctx.session.write_line(colored("Usage: /msg <user> <text>", fg_color=MUTED_COLOR))
+        return
+    target_name, body = parts
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return
+
+    if not ctx.presence.is_online(target.username):
+        await ctx.session.write_line(
+            colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await _deliver_private_message(ctx, target, body)
+
+
+async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | None:
+    """
+    `/private <user>` (design doc round 33 point 1): enters a temporary
+    private-conversation mode layered on `/msg` — ordinary (non-slash)
+    input is sent privately to `target` until `/close`. `/query` is
+    registered as a plain alias for this same handler in `_COMMANDS`
+    (round 33 point 1: "accepted only as an IRC-compatibility alias").
+    """
+    target_name = args.split(maxsplit=1)[0] if args.split() else ""
+    if not target_name:
+        await ctx.session.write_line(colored("Usage: /private <user>", fg_color=MUTED_COLOR))
+        return None
+
+    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    if target is None:
+        return None
+
+    if not ctx.presence.is_online(target.username):
+        await ctx.session.write_line(
+            colored(f"{sanitize_text(target.username)} is not currently online.", fg_color=MUTED_COLOR)
+        )
+        return None
+
+    close_hint = menu_key("/close", "")
+    await ctx.session.write_line(
+        colored(
+            f"Entering private conversation with {sanitize_text(target.username)}. "
+            f"Type {close_hint} to return.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    return _EnterPrivate(target)
+
+
+async def _handle_close(ctx: ChatCommandContext, args: str) -> ChatAction:
+    return _ExitPrivate()
 
 
 async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
@@ -890,6 +1035,10 @@ _COMMANDS: dict[str, CommandHandler] = {
     "leave": _handle_leave,
     "join": _handle_join,
     "topic": _handle_topic,
+    "msg": _handle_msg,
+    "private": _handle_private,
+    "query": _handle_private,  # IRC-compatibility alias (design doc round 33 point 1)
+    "close": _handle_close,
     "help": _handle_help,
     "me": _handle_me,
     "nick": _handle_nick,
@@ -912,6 +1061,7 @@ async def _chat_loop(
     db: Database,
     hub: ChatHub,
     presence: PresenceRegistry,
+    mailbox: MessageMailbox,
     channel: Channel,
     user: User,
 ) -> ChatAction:
@@ -977,7 +1127,7 @@ async def _chat_loop(
         await session.write_line(
             colored(f"\r\nYou are banned from this channel ({until}).", fg_color=MUTED_COLOR)
         )
-        return
+        return _Quit()
 
     participant_id = f"{user.username}:{id(session)}"
     queue = hub.join(channel.name, participant_id)
@@ -1026,6 +1176,18 @@ async def _chat_loop(
             await session.write_line(message)
 
     async def send_loop() -> ChatAction | None:
+        # Per-session private-conversation state (design doc round 33
+        # point 1, sign-off round 46/Track 5e): set by `/private`
+        # (`_EnterPrivate`), cleared by `/close` (`_ExitPrivate`). A
+        # plain local, not anything shared/global -- only this session's
+        # own next lines of ordinary input are affected. While set,
+        # slash-commands still dispatch exactly as normal (confirmed
+        # with Thiesi, matching round 39's existing "leading / is always
+        # a command attempt" rule) -- only *non-slash* lines change
+        # meaning, routed to the private conversation instead of posted
+        # to the channel.
+        private_target: User | None = None
+
         while True:
             line = (await session.read_line()).strip()
             if not line:
@@ -1036,13 +1198,53 @@ async def _chat_loop(
                     db=db,
                     hub=hub,
                     presence=presence,
+                    mailbox=mailbox,
                     channel=channel,
                     user=user,
                     participant_id=participant_id,
                 )
                 action = await _dispatch_command(ctx, line)
+                if isinstance(action, _EnterPrivate):
+                    private_target = action.target
+                    continue
+                if isinstance(action, _ExitPrivate):
+                    if private_target is None:
+                        await session.write_line(
+                            colored("You are not in a private conversation.", fg_color=MUTED_COLOR)
+                        )
+                    else:
+                        private_target = None
+                        await session.write_line(
+                            colored(
+                                f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR
+                            )
+                        )
+                    continue
                 if action is not None:
                     return action
+                continue
+
+            if private_target is not None:
+                ctx = ChatCommandContext(
+                    session=session,
+                    db=db,
+                    hub=hub,
+                    presence=presence,
+                    mailbox=mailbox,
+                    channel=channel,
+                    user=user,
+                    participant_id=participant_id,
+                )
+                if not presence.is_online(private_target.username):
+                    await session.write_line(
+                        colored(
+                            f"{sanitize_text(private_target.username)} is no longer online.",
+                            fg_color=MUTED_COLOR,
+                        )
+                    )
+                    private_target = None
+                    continue
+                await _deliver_private_message(ctx, private_target, line)
                 continue
 
             restriction = is_muted(db, channel, user)

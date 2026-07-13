@@ -15,6 +15,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.nick import set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
@@ -61,7 +62,10 @@ def _written_text(session: FakeSession) -> str:
 
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
-    await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, channel, user), timeout=2)
+    mailbox = MessageMailbox()
+    await asyncio.wait_for(
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+    )
     return session
 
 
@@ -111,12 +115,17 @@ def test_alias_shown_on_join(db, hub, presence, alice, bob, channel):
     set_nick(db, alice, "DeepParse")
 
     async def scenario():
+        mailbox = MessageMailbox()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(chat_flow._chat_loop(watcher, db, hub, presence, channel, bob))
+        watcher_task = asyncio.create_task(
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, bob)
+        )
         await asyncio.sleep(0)
 
         joiner = FakeSession(["/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(joiner, db, hub, presence, channel, alice), timeout=2)
+        await asyncio.wait_for(
+            chat_flow._chat_loop(joiner, db, hub, presence, mailbox, channel, alice), timeout=2
+        )
 
         watcher_task.cancel()
         await asyncio.gather(watcher_task, return_exceptions=True)
@@ -130,12 +139,17 @@ def test_alias_shown_on_leave(db, hub, presence, alice, bob, channel):
     set_nick(db, bob, "Bobby")
 
     async def scenario():
+        mailbox = MessageMailbox()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(chat_flow._chat_loop(watcher, db, hub, presence, channel, alice))
+        watcher_task = asyncio.create_task(
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, alice)
+        )
         await asyncio.sleep(0)
 
         leaver = FakeSession(["/quit"])
-        await asyncio.wait_for(chat_flow._chat_loop(leaver, db, hub, presence, channel, bob), timeout=2)
+        await asyncio.wait_for(
+            chat_flow._chat_loop(leaver, db, hub, presence, mailbox, channel, bob), timeout=2
+        )
 
         watcher_task.cancel()
         await asyncio.gather(watcher_task, return_exceptions=True)

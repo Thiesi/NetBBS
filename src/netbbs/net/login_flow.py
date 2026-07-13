@@ -23,7 +23,7 @@ from enum import Enum, auto
 from netbbs.auth.users import AuthError, User, authenticate_password_async, list_users
 from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
-from netbbs.chat import ChatHub, PresenceRegistry
+from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.directory import (
     MAX_BIO_LINES,
     BioError,
@@ -77,6 +77,7 @@ async def handle_session(
     db: Database,
     hub: ChatHub,
     presence: PresenceRegistry,
+    mailbox: MessageMailbox,
     throttle: LoginThrottle,
     throttle_config: ThrottleConfig,
 ) -> None:
@@ -161,14 +162,27 @@ async def handle_session(
 
     presence.enter(user.username)
     try:
-        await _main_menu(session, db, hub, presence, user)
+        await _main_menu(session, db, hub, presence, mailbox, user)
     finally:
         presence.leave(user.username)
 
     await session.write_line("\r\nGoodbye!")
 
 
-async def _draw_main_menu(session: Session) -> None:
+async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User) -> None:
+    """
+    Shows any private messages that arrived while away from this menu,
+    then the menu itself.
+
+    This is the one place `/msg`'s mailbox-plus-next-prompt delivery
+    (design doc round 32, sign-off round 46/Track 5e) actually flushes:
+    every screen (boards, files, directory, profile, chat) returns here
+    before its next redraw, so a single flush point here covers all of
+    them without needing one sprinkled into each individual screen.
+    """
+    for message in mailbox.flush(user.username):
+        await session.write_line(message)
+
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
     options = "  ".join(
         [
@@ -184,7 +198,12 @@ async def _draw_main_menu(session: Session) -> None:
 
 
 async def _main_menu(
-    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    user: User,
 ) -> None:
     """
     The main menu, now dispatching immediately on a single keystroke
@@ -205,7 +224,7 @@ async def _main_menu(
     redraw or print an error message; there's no line to re-type or
     correct, so it just sounds a bell and re-prompts.
     """
-    await _draw_main_menu(session)
+    await _draw_main_menu(session, mailbox, user)
     while True:
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
@@ -215,19 +234,19 @@ async def _main_menu(
             return
         elif choice == "b":
             await _browse_boards(session, db, user)
-            await _draw_main_menu(session)
+            await _draw_main_menu(session, mailbox, user)
         elif choice == "c":
-            await browse_channels(session, db, hub, presence, user)
-            await _draw_main_menu(session)
+            await browse_channels(session, db, hub, presence, mailbox, user)
+            await _draw_main_menu(session, mailbox, user)
         elif choice == "f":
             await browse_file_areas(session, db, user)
-            await _draw_main_menu(session)
+            await _draw_main_menu(session, mailbox, user)
         elif choice == "d":
             await _browse_directory(session, db, user)
-            await _draw_main_menu(session)
+            await _draw_main_menu(session, mailbox, user)
         elif choice == "p":
             await _edit_profile(session, db, user)
-            await _draw_main_menu(session)
+            await _draw_main_menu(session, mailbox, user)
         else:
             await session.write("\a")
 

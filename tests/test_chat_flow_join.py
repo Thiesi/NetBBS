@@ -18,6 +18,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel, get_channel_by_name
 from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.moderation import ChannelPermission, grant_permissions
@@ -74,8 +75,9 @@ def _written(session: FakeSession) -> str:
 
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
+    mailbox = MessageMailbox()
     action = await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, channel, user), timeout=2
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
     )
     return session, action
 
@@ -108,15 +110,16 @@ def test_kick_still_resolves_to_quit_action(db, hub, presence, sysop, alice, cha
     )
 
     async def scenario():
+        mailbox = MessageMailbox()
         target_session = FakeSession()  # never types anything
         target_task = asyncio.create_task(
-            chat_flow._chat_loop(target_session, db, hub, presence, channel, alice)
+            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, channel, alice)
         )
         await asyncio.sleep(0)  # let target actually join before the kick is issued
 
         kicker_session = FakeSession([f"/kick {alice.username}", "/quit"])
         kicker_action = await asyncio.wait_for(
-            chat_flow._chat_loop(kicker_session, db, hub, presence, channel, sysop), timeout=2
+            chat_flow._chat_loop(kicker_session, db, hub, presence, mailbox, channel, sysop), timeout=2
         )
         target_action = await asyncio.wait_for(target_task, timeout=2)
         return kicker_action, target_action
@@ -267,7 +270,7 @@ def test_browse_channels_switch_to_skips_the_picker(monkeypatch, db, hub, presen
 
     chat_loop_calls = []
 
-    async def fake_chat_loop(session, db, hub, presence, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, ch, user):
         chat_loop_calls.append(ch)
         if len(chat_loop_calls) == 1:
             return chat_flow._SwitchTo(other_channel)
@@ -276,7 +279,7 @@ def test_browse_channels_switch_to_skips_the_picker(monkeypatch, db, hub, presen
     monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
     monkeypatch.setattr(chat_flow, "_chat_loop", fake_chat_loop)
 
-    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, alice))
+    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, MessageMailbox(), alice))
 
     assert pick_calls == [None]  # picker only consulted once, for the initial entry
     assert chat_loop_calls == [channel, other_channel]  # second call jumped straight there
@@ -291,7 +294,7 @@ def test_browse_channels_to_picker_reconsults_the_picker(monkeypatch, db, hub, p
 
     chat_loop_calls = 0
 
-    async def fake_chat_loop(session, db, hub, presence, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, ch, user):
         nonlocal chat_loop_calls
         chat_loop_calls += 1
         if chat_loop_calls < 2:
@@ -301,7 +304,7 @@ def test_browse_channels_to_picker_reconsults_the_picker(monkeypatch, db, hub, p
     monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
     monkeypatch.setattr(chat_flow, "_chat_loop", fake_chat_loop)
 
-    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, alice))
+    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, MessageMailbox(), alice))
 
     assert pick_calls == [None, None]  # re-consulted after /leave, always the top level
     assert chat_loop_calls == 2
@@ -314,13 +317,13 @@ def test_browse_channels_quit_exits_without_repicking(monkeypatch, db, hub, pres
         pick_calls.append(category_id)
         return channel
 
-    async def fake_chat_loop(session, db, hub, presence, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, ch, user):
         return chat_flow._Quit()
 
     monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
     monkeypatch.setattr(chat_flow, "_chat_loop", fake_chat_loop)
 
-    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, alice))
+    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, MessageMailbox(), alice))
 
     assert pick_calls == [None]  # picked once, then exited -- no second pick
 
@@ -331,7 +334,7 @@ def test_browse_channels_returns_immediately_if_nothing_picked(monkeypatch, db, 
 
     chat_loop_called = False
 
-    async def fake_chat_loop(session, db, hub, presence, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, ch, user):
         nonlocal chat_loop_called
         chat_loop_called = True
         return chat_flow._Quit()
@@ -339,6 +342,6 @@ def test_browse_channels_returns_immediately_if_nothing_picked(monkeypatch, db, 
     monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
     monkeypatch.setattr(chat_flow, "_chat_loop", fake_chat_loop)
 
-    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, alice))
+    asyncio.run(chat_flow.browse_channels(FakeSession([]), db, hub, presence, MessageMailbox(), alice))
 
     assert chat_loop_called is False
