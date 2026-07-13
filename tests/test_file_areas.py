@@ -17,7 +17,7 @@ from netbbs.files import (
     download_file,
     get_file,
     list_file_areas,
-    list_files,
+    list_files_page,
     upload_file,
 )
 from netbbs.permissions import InsufficientLevelError
@@ -223,12 +223,23 @@ def test_uploader_fingerprint_is_none_for_password_only_user(db, alice):
     assert entry.uploader_fingerprint is None
 
 
-def test_list_files_returns_all_in_order(db, alice):
+def test_list_files_page_returns_all_in_order(db, alice, monkeypatch):
+    import netbbs.files.entries as entries_module
+
+    # Explicit, distinct timestamps -- real wall-clock calls in quick
+    # succession can land on the same microsecond (exactly what this
+    # file's own module docstring warns about); list_files_page's
+    # deterministic tie-breaker for same-timestamp entries is file_id
+    # (a content hash), which doesn't preserve upload order, so a tie
+    # would make this assertion flaky without them (design doc round 31).
+    timestamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:00.000001Z"])
+    monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
+
     area = create_file_area(db, "docs", creator=alice)
     upload_file(db, area, alice, "first.txt", b"1")
     upload_file(db, area, alice, "second.txt", b"2")
-    files = list_files(db, area, alice)
-    assert [f.filename for f in files] == ["first.txt", "second.txt"]
+    page = list_files_page(db, area, alice)
+    assert [f.filename for f in page.entries] == ["first.txt", "second.txt"]
 
 
 # -- level-gating ---------------------------------------------------------
@@ -249,11 +260,11 @@ def test_upload_allowed_at_exact_min_write_level(db, bob):
 def test_list_files_blocked_below_min_read_level(db, alice, bob):
     area = create_file_area(db, "staff-only", min_read_level=50, creator=alice)
     with pytest.raises(InsufficientLevelError):
-        list_files(db, area, bob)
+        list_files_page(db, area, bob)
 
 
 def test_list_files_allowed_at_sufficient_level(db, alice):
     area = create_file_area(db, "docs", min_read_level=5, creator=alice)
     upload_file(db, area, alice, "readme.txt", b"hello")
-    files = list_files(db, area, alice)
-    assert len(files) == 1
+    page = list_files_page(db, area, alice)
+    assert len(page.entries) == 1

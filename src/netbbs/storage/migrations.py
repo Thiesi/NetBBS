@@ -316,4 +316,21 @@ MIGRATIONS = [
             ON posts(board_id, created_at, post_id);
         """,
     ),
+    Migration(
+        description=(
+            "Composite index matching the paginated file-listing query pattern "
+            "(design doc round 31, issue #10's file-area follow-up)."
+        ),
+        sql="""
+        -- Same reasoning as the posts composite index directly above:
+        -- netbbs.files.entries.list_files_page orders/filters by
+        -- exactly (area_id, created_at, file_id). idx_files_area_id
+        -- (round 2's migration) deliberately left in place for the same
+        -- reason idx_posts_board_id was -- redundant for query planning
+        -- once this composite index exists, but dropping a shipped
+        -- index is its own separate, non-urgent cleanup.
+        CREATE INDEX idx_files_area_id_created_at_file_id
+            ON files(area_id, created_at, file_id);
+        """,
+    ),
 ]

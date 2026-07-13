@@ -126,22 +126,146 @@ def get_file(db: Database, file_id: str) -> FileEntry:
     return _row_to_file_entry(row)
 
 
-def list_files(db: Database, area: FileArea, requesting_user: User) -> list[FileEntry]:
-    """List all files in `area`, oldest first, after checking the
-    requesting user meets the area's `min_read_level`.
+def get_file_by_name(db: Database, area: FileArea, filename: str) -> FileEntry | None:
+    """
+    Look up a file in `area` by its exact stored `filename` — added
+    alongside `list_files_page` (design doc round 31) specifically so
+    `/download <filename>` (see `netbbs.net.file_flow._handle_download`)
+    keeps working for a file that isn't on the *currently displayed*
+    page. Pagination bounds what's fetched for browsing; it was never
+    meant to bound what can be *referenced by name*, and the previous,
+    unbounded `list_files` happened to make that distinction invisible
+    since the full listing was always in memory anyway.
 
-    Structurally identical to (and, before design doc round 30/issue
-    #10, mirrored) `netbbs.boards.posts`'s old unbounded `list_posts` —
-    unlike posts, file areas were **not** in scope for round 30's
-    pagination fix (issue #10 named board posts specifically). This
-    function has the same unbounded-growth exposure `list_posts` had;
-    left as a known, explicitly-flagged gap for a future round rather
-    than silently inconsistent with how posts now work."""
+    `filename` is not unique within an area (unlike `file_id`) — two
+    uploads can share a name (e.g. re-uploads/versions). Returns the
+    *oldest* match, preserving exactly the tie-breaking behavior the
+    old in-memory `next(entry for entry in files if entry.filename ==
+    filename)` scan had, which always saw entries oldest-first.
+    """
+    row = db.connection.execute(
+        """
+        SELECT * FROM files
+        WHERE area_id = ? AND filename = ?
+        ORDER BY created_at ASC, file_id ASC
+        LIMIT 1
+        """,
+        (area.id, filename),
+    ).fetchone()
+    return _row_to_file_entry(row) if row is not None else None
+
+
+_DEFAULT_PAGE_SIZE = 5
+
+FileEntryCursor = tuple[str, str]  # (created_at, file_id) -- see FileEntryPage/list_files_page
+
+
+@dataclass(frozen=True)
+class FileEntryPage:
+    """One bounded page of file entries, always in chronological
+    (oldest-first) order *within the page* — matches
+    `netbbs.boards.posts.PostPage`'s shape and reasoning exactly (design
+    doc round 31, issue #10's file-area follow-up), which this module
+    mirrors deliberately rather than inventing a parallel design."""
+
+    entries: list[FileEntry]
+    has_older: bool
+    has_newer: bool
+
+
+def list_files_page(
+    db: Database,
+    area: FileArea,
+    requesting_user: User,
+    *,
+    before: FileEntryCursor | None = None,
+    after: FileEntryCursor | None = None,
+    limit: int = _DEFAULT_PAGE_SIZE,
+) -> FileEntryPage:
+    """
+    Fetch one bounded page of files in `area` (design doc round 31,
+    issue #10's file-area follow-up to round 30's board-post
+    pagination) — never the whole area's listing, however large its
+    history. Enforces `area.min_read_level`, same as the unbounded
+    function this replaces.
+
+    Deliberately mirrors `netbbs.boards.posts.list_posts_page` byte for
+    byte in approach — same cursor-based (keyset) pagination over
+    `OFFSET`/`LIMIT` for the same stability-under-concurrent-inserts
+    and no-growing-scan-cost reasons, same `(created_at, file_id)`
+    ordering with `file_id` (content-addressed, globally unique) as a
+    deterministic tie-breaker for the rare same-timestamp case, same
+    three mutually exclusive `before`/`after`/neither modes, and the
+    same `has_older`/`has_newer` semantics — see that function's
+    docstring for the full reasoning, not repeated here to avoid the
+    two copies drifting out of sync in what they claim rather than just
+    in what they say (same reasoning `netbbs.net.chat_flow`'s and
+    `netbbs.net.file_flow`'s own category-browsing docstrings already
+    use for not re-explaining `netbbs.net.login_flow`'s pattern).
+    """
     require_level(requesting_user, area.min_read_level)
-    rows = db.connection.execute(
-        "SELECT * FROM files WHERE area_id = ? ORDER BY created_at", (area.id,)
-    ).fetchall()
-    return [_row_to_file_entry(row) for row in rows]
+    if before is not None and after is not None:
+        raise ValueError("specify at most one of before/after")
+
+    if after is not None:
+        created_at, file_id = after
+        rows = db.connection.execute(
+            """
+            SELECT * FROM files
+            WHERE area_id = ? AND (created_at, file_id) > (?, ?)
+            ORDER BY created_at ASC, file_id ASC
+            LIMIT ?
+            """,
+            (area.id, created_at, file_id, limit),
+        ).fetchall()
+        entries = [_row_to_file_entry(row) for row in rows]
+    elif before is not None:
+        created_at, file_id = before
+        rows = db.connection.execute(
+            """
+            SELECT * FROM files
+            WHERE area_id = ? AND (created_at, file_id) < (?, ?)
+            ORDER BY created_at DESC, file_id DESC
+            LIMIT ?
+            """,
+            (area.id, created_at, file_id, limit),
+        ).fetchall()
+        entries = [_row_to_file_entry(row) for row in reversed(rows)]
+    else:
+        rows = db.connection.execute(
+            """
+            SELECT * FROM files
+            WHERE area_id = ?
+            ORDER BY created_at DESC, file_id DESC
+            LIMIT ?
+            """,
+            (area.id, limit),
+        ).fetchall()
+        entries = [_row_to_file_entry(row) for row in reversed(rows)]
+
+    if not entries:
+        return FileEntryPage(entries=[], has_older=False, has_newer=False)
+
+    oldest, newest = entries[0], entries[-1]
+    has_older = db.connection.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM files
+            WHERE area_id = ? AND (created_at, file_id) < (?, ?)
+        )
+        """,
+        (area.id, oldest.created_at, oldest.file_id),
+    ).fetchone()[0]
+    has_newer = db.connection.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM files
+            WHERE area_id = ? AND (created_at, file_id) > (?, ?)
+        )
+        """,
+        (area.id, newest.created_at, newest.file_id),
+    ).fetchone()[0]
+    return FileEntryPage(entries=entries, has_older=bool(has_older), has_newer=bool(has_newer))
 
 
 def download_file(entry: FileEntry) -> bytes:

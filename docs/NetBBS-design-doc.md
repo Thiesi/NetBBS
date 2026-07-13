@@ -2443,3 +2443,77 @@ project's actual single-connection architecture.
     `"Subject 10"`/`"Subject 12"` etc. once board sizes reached double
     digits — fixed by matching the exact post-header separator
     (`"Subject 1 --"`) instead.
+
+## Sign-off notes, round 31 (file-area pagination — implemented)
+
+Round 30 explicitly flagged `netbbs.files.entries.list_files` as
+having the exact same unbounded-fetch shape `list_posts` used to,
+scoped out only because issue #10 named board posts specifically —
+Thiesi asked directly for the same fix to be applied to file areas as
+a follow-up, so this round does that.
+
+1. **`list_files_page()` deliberately mirrors `list_posts_page()`'s
+   design byte for byte**, not a fresh design pass: same cursor-based
+   (keyset) pagination, same `(created_at, file_id)` ordering with
+   `file_id` (content-addressed, globally unique) as the deterministic
+   tie-breaker, same three `before`/`after`/neither modes, same
+   `has_older`/`has_newer` computed via their own indexed `EXISTS`
+   checks against the page's actual boundary rather than inferred from
+   fetch mode. `FileEntryPage`/`FileEntryCursor` mirror `PostPage`/
+   `PostCursor` the same way. `list_files` replaced entirely, same
+   reasoning as `list_posts`'s replacement (one production caller, no
+   value in leaving an unbounded footgun around) — `tests/test_file_
+   areas.py`'s three call sites migrated to the paginated function.
+2. **New composite index** `idx_files_area_id_created_at_file_id ON
+   files(area_id, created_at, file_id)`, added as a new migration —
+   same reasoning as round 30's posts index, including the same
+   decision to leave the old single-column `idx_files_area_id` (round
+   2) in place rather than drop it in the same migration.
+3. **`_show_area` mirrors `_show_board`'s pagination *semantics*
+   exactly** — same newest-first default (applied directly per
+   Thiesi's "same fix" instruction, not re-litigated as a fresh UX
+   fork this round), same `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack`
+   options, shown only when they currently apply.
+4. **One deliberate mechanical difference from `_show_board`, not an
+   inconsistency worth ironing out:** `_show_area` reads the
+   navigation choice via `read_line()`, not `read_key()`.
+   `_show_board`'s options are all single immediate keystrokes;
+   `_show_area` also has to accept free-text multi-character commands
+   (`/download <filename>`, `/upload`) in the same prompt, which
+   single-keystroke dispatch structurally can't support — `read_key()`
+   returns after exactly one character, before `/download ` could ever
+   be typed. `o`/`n`/`r`/`b` are still accepted as their own line,
+   consistent in spirit even though the input mechanism differs.
+5. **A real correctness issue pagination would otherwise have silently
+   introduced, found and fixed proactively rather than shipped as a
+   regression:** the old `_handle_download` matched `/download
+   <filename>` against `files: list[FileEntry]` — the *entire* area's
+   listing, since `list_files` was unbounded. Once browsing is
+   paginated, that in-memory list is only ever one page; a user
+   referencing a file by name from outside the current page (an
+   earlier page, or told about it by someone else) would have silently
+   stopped working — a real regression a purely mechanical "swap the
+   function name" port would have shipped. Fixed with a new
+   `get_file_by_name(db, area, filename)` doing its own direct,
+   indexed lookup against the whole area regardless of what's
+   currently paged into memory — pagination bounds what's fetched for
+   *browsing*, not what can be *referenced by name*. `filename` isn't
+   unique within an area (unlike `file_id`); `get_file_by_name`
+   preserves the old scan's oldest-match tie-breaking behavior
+   (`ORDER BY created_at ASC, file_id ASC LIMIT 1`), confirmed with a
+   dedicated test, not just assumed to not matter. Boards have no
+   equivalent concern — nothing in the interactive board UI currently
+   lets a user reference a post outside the visible page by name/ID, so
+   this class of bug is specific to file areas' `/download` command.
+6. **Testing**: `tests/test_file_pagination.py` (11 cases, matching
+   `tests/test_post_pagination.py`'s coverage exactly, plus three cases
+   specific to `get_file_by_name`: finding a file that's genuinely not
+   on the newest page, returning `None` for a truly nonexistent name,
+   and the oldest-match tie-breaking behavior for duplicate filenames).
+   `tests/test_file_area_pagination_ui.py` (6 cases, matching
+   `tests/test_board_pagination_ui.py`'s coverage, plus a dedicated
+   end-to-end test driving the real `_show_area` loop that uploads
+   more than a page's worth of files, never pages backward, and
+   confirms `/download`-ing the *oldest* one by name still works —
+   the concrete regression test for point 5, not just unit coverage of
+   `get_file_by_name` in isolation.

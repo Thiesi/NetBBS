@@ -19,10 +19,13 @@ from netbbs.files.areas import (
 )
 from netbbs.files.entries import (
     FileEntry,
+    FileEntryCursor,
     FileEntryError,
+    FileEntryPage,
     download_file,
     get_file,
-    list_files,
+    get_file_by_name,
+    list_files_page,
     upload_file,
 )
 
@@ -33,9 +36,12 @@ __all__ = [
     "get_file_area_by_name",
     "list_file_areas",
     "FileEntry",
+    "FileEntryCursor",
     "FileEntryError",
+    "FileEntryPage",
     "download_file",
     "get_file",
-    "list_files",
+    "get_file_by_name",
+    "list_files_page",
     "upload_file",
 ]

@@ -21,10 +21,11 @@ from __future__ import annotations
 from netbbs.auth.users import User
 from netbbs.files import (
     FileArea,
-    FileEntry,
+    FileEntryPage,
     download_file,
+    get_file_by_name,
     list_file_areas,
-    list_files,
+    list_files_page,
     upload_file,
 )
 from netbbs.files.categories import (
@@ -124,45 +125,103 @@ def _format_size(size_bytes: int) -> str:
 
 
 async def _show_area(session: Session, db: Database, area: FileArea, user: User) -> None:
+    """
+    Show `area`, one bounded page of files at a time (design doc round
+    31, issue #10's file-area follow-up to round 30's board-post
+    pagination) — mirrors `netbbs.net.login_flow._show_board`'s
+    pagination *semantics* exactly: same newest-first default, same
+    `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` options, same reasoning for
+    both (see that function's docstring, not repeated here).
+
+    One deliberate mechanical difference from `_show_board`, not an
+    inconsistency: this reads the choice via `read_line()`, not
+    `read_key()`. `_show_board`'s options are all single immediate
+    keystrokes; this screen also needs to accept free-text multi-
+    character commands (`/download <filename>`, `/upload`) in the same
+    prompt, which single-keystroke dispatch can't support — `read_key()`
+    returns after exactly one character, before "/download " could ever
+    be typed.
+
+    `/download <filename>` deliberately looks a file up by name across
+    the *whole area* (`get_file_by_name`), not just the currently
+    displayed page — pagination bounds what's fetched for browsing, not
+    what can be referenced by a name the user already knows (from an
+    earlier page, or from outside this session entirely).
+    """
     area_name = sanitize_text(area.name)
-    files = list_files(db, area, user)
+    page = list_files_page(db, area, user)
     can_write = meets_level(user, area.min_write_level)
 
-    if not files:
+    if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        header = colored(f"[{area_name}]", fg_color=HEADER_COLOR, bold=True)
-        await session.write_line(f"\r\n{header}")
-        for entry in files:
-            when = format_for_display(entry.created_at, db)
-            size = _format_size(entry.size_bytes)
-            name_line = colored(f"{sanitize_text(entry.filename)} ({size})", fg_color=ACCENT_COLOR)
-            await session.write_line(f"\r\n{name_line}")
-            await session.write_line(f"  uploaded by {sanitize_text(entry.uploader_label)} ({when})")
-            if entry.description:
-                await session.write_line(f"  {sanitize_text(entry.description)}")
+        while True:
+            await _render_file_page(session, db, area_name, page)
 
-    if not files and not can_write:
+            options = []
+            if page.has_older:
+                options.append(menu_key("O", "lder"))
+            if page.has_newer:
+                options.append(menu_key("N", "ewer"))
+                options.append(menu_key("R", "ecent"))
+            options.append(menu_key("B", "ack") + " (or Enter)")
+            await session.write_line(f"\r\n{'  '.join(options)}")
+
+            hints = [menu_key("/download <filename>", " — receive via Zmodem")]
+            if can_write:
+                hints.append(menu_key("/upload", " — send via Zmodem"))
+            await session.write_line("  ".join(hints))
+            await session.write("Choice or command: ")
+            choice = (await session.read_line()).strip()
+
+            if choice == "" or choice.lower() == "b":
+                break
+            elif choice.lower() == "o" and page.has_older:
+                oldest = page.entries[0]
+                page = list_files_page(db, area, user, before=(oldest.created_at, oldest.file_id))
+            elif choice.lower() == "n" and page.has_newer:
+                newest = page.entries[-1]
+                page = list_files_page(db, area, user, after=(newest.created_at, newest.file_id))
+            elif choice.lower() == "r" and page.has_newer:
+                page = list_files_page(db, area, user)
+            elif choice.lower() == "/upload" and can_write:
+                await _handle_upload(session, db, area, user)
+                return
+            elif choice.lower().startswith("/download "):
+                filename = choice[len("/download ") :].strip()
+                await _handle_download(session, db, area, filename)
+                return
+            else:
+                await session.write_line("Unknown choice.")
         return
 
-    hints = []
-    if files:
-        hints.append(menu_key("/download <filename>", " — receive via Zmodem"))
-    if can_write:
-        hints.append(menu_key("/upload", " — send via Zmodem"))
+    if not can_write:
+        return
+
+    hints = [menu_key("/upload", " — send via Zmodem")]
     await session.write_line(f"\r\n{'  '.join(hints)}")
     await session.write("Command (or press Enter to go back): ")
     command = (await session.read_line()).strip()
 
     if not command:
         return
-    elif command.lower() == "/upload" and can_write:
+    elif command.lower() == "/upload":
         await _handle_upload(session, db, area, user)
-    elif command.lower().startswith("/download "):
-        filename = command[len("/download ") :].strip()
-        await _handle_download(session, files, filename)
     else:
         await session.write_line("Unknown command.")
+
+
+async def _render_file_page(session: Session, db: Database, area_name: str, page: FileEntryPage) -> None:
+    header = colored(f"[{area_name}]", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    for entry in page.entries:
+        when = format_for_display(entry.created_at, db)
+        size = _format_size(entry.size_bytes)
+        name_line = colored(f"{sanitize_text(entry.filename)} ({size})", fg_color=ACCENT_COLOR)
+        await session.write_line(f"\r\n{name_line}")
+        await session.write_line(f"  uploaded by {sanitize_text(entry.uploader_label)} ({when})")
+        if entry.description:
+            await session.write_line(f"  {sanitize_text(entry.description)}")
 
 
 async def _handle_upload(session: Session, db: Database, area: FileArea, user: User) -> None:
@@ -185,17 +244,18 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
     )
 
 
-async def _handle_download(session: Session, files: list[FileEntry], filename: str) -> None:
-    # Matched against the raw, unsanitized `filename` the user actually
-    # typed -- sanitizing before comparison risks a false match/miss
-    # against real stored filenames; sanitize_text is only applied
-    # below, at the point this gets echoed back to the terminal.
-    matches = [entry for entry in files if entry.filename == filename]
-    if not matches:
+async def _handle_download(session: Session, db: Database, area: FileArea, filename: str) -> None:
+    # Looked up by exact name across the whole area (get_file_by_name),
+    # not just the currently displayed page -- see _show_area's
+    # docstring. Matched against the raw, unsanitized `filename` the
+    # user actually typed -- sanitizing before comparison risks a false
+    # match/miss against real stored filenames; sanitize_text is only
+    # applied below, at the point this gets echoed back to the terminal.
+    entry = get_file_by_name(db, area, filename)
+    if entry is None:
         await session.write_line(f"\r\nNo file named {sanitize_text(filename)!r} in this area.")
         return
 
-    entry = matches[0]
     entry_filename = sanitize_text(entry.filename)
     await session.write_line(
         f"\r\nStarting Zmodem send of {entry_filename!r} — accept the transfer in your terminal."
