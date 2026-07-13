@@ -294,12 +294,12 @@ def test_csi_sequence_exceeding_total_deadline_raises_session_closed_error(monke
 
     async def scenario():
         source = SlowTrickleSource()
-        # _discard_escape_sequence is what read_line/read_key dispatch to
+        # _read_escape_sequence is what read_line/read_key dispatch to
         # after consuming the leading ESC byte itself -- called directly
         # here since SlowTrickleSource has no fixed buffer to pre-seed
         # with one.
         with pytest.raises(SessionClosedError, match="timed out"):
-            await char_input_module._discard_escape_sequence(source)
+            await char_input_module._read_escape_sequence(source)
 
     asyncio.run(scenario())
 

@@ -248,6 +248,7 @@ async def pick_item(
             await session.write("\a")
             continue
 
+        await session.write_line("")
         await session.write("\a")
 
 

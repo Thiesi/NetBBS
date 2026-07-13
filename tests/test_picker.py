@@ -205,6 +205,52 @@ def test_unknown_command_letter_sounds_bell_and_stays_in_picker():
     assert result["value"] is None
 
 
+def test_repeated_invalid_keys_each_land_on_their_own_line():
+    """
+    Regression test for a real round-44 bug (design doc round 48): the
+    unrecognized-key fallback never emitted a newline before the bell,
+    so consecutive invalid keys ran the re-prompted "Choice: " text
+    together with the previous echoed character on one line
+    ("Choice: zChoice: zChoice: z...") instead of each attempt getting
+    its own line, the way `_main_menu`/`_show_board` already did.
+    """
+    result = {}
+    items = ["a"]
+
+    async def handler(session: Session):
+        result["value"] = await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1, title="I", empty_message="none"
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await _read_until_quiet(reader)
+            writer.write(b"z")
+            await writer.drain()
+            first = await _read_until_quiet(reader)
+            writer.write(b"y")
+            await writer.drain()
+            second = await _read_until_quiet(reader)
+            # Each invalid key's echo+bell is followed by a fresh-line
+            # "Choice: " reprompt -- not jammed onto the same line as the
+            # previous attempt.
+            assert first == b"z\r\n\aChoice: "
+            assert second == b"y\r\n\aChoice: "
+            writer.write(b"b")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert result["value"] is None
+
+
 # -- search ----------------------------------------------------------------
 
 

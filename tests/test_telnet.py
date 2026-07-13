@@ -208,7 +208,12 @@ def test_backspace_removes_last_character_and_erases_visually():
 
             writer.write(bytes([0x08]))  # Backspace
             await writer.drain()
-            assert await reader.readexactly(3) == b"\b \b"
+            # Cursor-addressable editing (design doc round 47/Track 5f)
+            # erases via move-left + ESC[K rather than the old "\b \b"
+            # trick, since the same redraw primitive also has to work
+            # for a Backspace in the *middle* of a line, not just at
+            # the end.
+            assert await reader.readexactly(7) == b"\x1b[1D\x1b[K"
 
             writer.write(b"lo\r\n")
             await writer.drain()
@@ -241,7 +246,7 @@ def test_delete_byte_also_works_as_backspace():
 
             writer.write(bytes([0x7F]))  # DEL
             await writer.drain()
-            assert await reader.readexactly(3) == b"\b \b"
+            assert await reader.readexactly(7) == b"\x1b[1D\x1b[K"
 
             writer.write(b"c\r\n")
             await writer.drain()

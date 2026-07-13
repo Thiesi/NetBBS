@@ -114,8 +114,8 @@ class SSHSession(Session):
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise SessionClosedError("client disconnected during write") from exc
 
-    async def read_line(self, echo: bool = True) -> str:
-        return await char_input.read_line(self, self.write, echo)
+    async def read_line(self, echo: bool = True, history: char_input.InputHistory | None = None) -> str:
+        return await char_input.read_line(self, self.write, echo, history)
 
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)

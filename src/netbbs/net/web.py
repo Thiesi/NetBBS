@@ -12,6 +12,13 @@ directly against decoded characters — reusing `char_input`'s
 byte-oriented `ByteSource` protocol here would mean forcing something
 that was never bytes back into a byte-shaped hole.
 
+Cursor-addressable editing and history recall (design doc round 47/
+Track 5f) reuse `char_input.move_cursor`/`redraw_tail`/`InputHistory`
+directly, though — those are pure `list[str]`/cursor-integer/`WriteFunc`
+manipulation with no dependency on bytes, so only the byte-vs-already-
+decoded-character *reading* half stays genuinely separate between the
+two transports, same split round 25 already established.
+
 **File transfer is not available over this transport.** Real Zmodem
 interop (`netbbs.net.zmodem`) depends on the *terminal client*
 auto-detecting and driving the protocol — a property of native terminal
@@ -27,12 +34,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, web
 
+from netbbs.net.char_input import InputHistory, move_cursor, redraw_tail
 from netbbs.net.session import Session, SessionClosedError
 
 _logger = logging.getLogger(__name__)
@@ -62,20 +71,39 @@ _MAX_WS_MESSAGE_SIZE = 16 * 1024
 _MAX_KEY_EVENT_LENGTH = 4096
 _MAX_QUEUED_CHARS = 8192
 
+# Recognized escape sequences, mirroring netbbs.net.char_input's
+# _CSI_FINAL_TO_KEY/_CSI_TILDE_TO_KEY/_SS3_TO_KEY exactly (same key set,
+# same reasoning) but keyed by already-decoded characters rather than
+# raw byte values, since that's what a browser's onData event delivers.
+_CSI_FINAL_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
+_CSI_TILDE_TO_KEY = {"1": "HOME", "4": "END", "3": "DELETE", "2": "INSERT"}
+_SS3_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
 
-def _strip_escape_sequences(data: str) -> str:
+
+@dataclass(frozen=True)
+class _SpecialKey:
+    """Distinguishes a recognized escape sequence (e.g. the two literal
+    characters "U" and "P" typed by a user) from the *symbolic* key
+    "UP" produced by parsing `ESC[A` — both would otherwise be
+    indistinguishable plain strings once queued."""
+
+    name: str
+
+
+def _parse_input_events(data: str) -> list[str | _SpecialKey]:
     """
-    Remove terminal escape sequences (arrow keys, function keys, etc.)
-    from a raw `onData` string before any of it reaches the character
-    queue — the same "not supported in this pass" scope
-    `netbbs.net.char_input._discard_escape_sequence` documents for
+    Splits a raw `onData` string into plain characters and recognized
+    `_SpecialKey`s (arrow keys, Home/End, Delete, Insert — design doc
+    round 47/Track 5f), discarding anything else escape-sequence-shaped
+    as a complete unit — the same "recognize a few, discard the rest"
+    scope `netbbs.net.char_input._read_escape_sequence` documents for
     Telnet/SSH, applied here at the point a whole keystroke event
     arrives rather than via a peek-with-timeout: xterm.js's `onData`
     already delivers a complete escape sequence in one event for a
     single keypress, unlike a raw byte stream where bytes can arrive
     split across separate reads, so there's nothing to peek for.
     """
-    out: list[str] = []
+    out: list[str | _SpecialKey] = []
     i = 0
     while i < len(data):
         if data[i] == _ESC and i + 1 < len(data):
@@ -84,14 +112,26 @@ def _strip_escape_sequences(data: str) -> str:
                 j = i + 2
                 while j < len(data) and not ("\x40" <= data[j] <= "\x7e"):
                     j += 1
-                i = j + 1 if j < len(data) else len(data)
+                if j < len(data):
+                    params, final = data[i + 2 : j], data[j]
+                    key = _CSI_TILDE_TO_KEY.get(params) if final == "~" else (
+                        _CSI_FINAL_TO_KEY.get(final) if not params else None
+                    )
+                    if key is not None:
+                        out.append(_SpecialKey(key))
+                    i = j + 1
+                else:
+                    i = len(data)
                 continue
             if nxt == "O" and i + 2 < len(data):  # SS3: ESC O <char>
+                key = _SS3_TO_KEY.get(data[i + 2])
+                if key is not None:
+                    out.append(_SpecialKey(key))
                 i += 3
                 continue
         out.append(data[i])
         i += 1
-    return "".join(out)
+    return out
 
 
 class WebSession(Session):
@@ -99,7 +139,7 @@ class WebSession(Session):
 
     def __init__(self, ws: web.WebSocketResponse, peer_address: str | None = None):
         self._ws = ws
-        self._char_queue: asyncio.Queue[str | None] = asyncio.Queue(
+        self._char_queue: asyncio.Queue[str | _SpecialKey | None] = asyncio.Queue(
             maxsize=_MAX_QUEUED_CHARS
         )
         self._input_error = "client disconnected"
@@ -157,9 +197,9 @@ class WebSession(Session):
             if isinstance(data, str):
                 if len(data) > _MAX_KEY_EVENT_LENGTH:
                     await self._reject_input("web terminal key event is too large")
-                for char in _strip_escape_sequences(data):
+                for item in _parse_input_events(data):
                     try:
-                        self._char_queue.put_nowait(char)
+                        self._char_queue.put_nowait(item)
                     except asyncio.QueueFull:
                         await self._reject_input("web terminal input queue is full")
         elif event_type == "resize":
@@ -173,11 +213,26 @@ class WebSession(Session):
         # this version doesn't understand yet shouldn't break the
         # session over it.
 
-    async def _read_char(self) -> str:
-        char = await self._char_queue.get()
-        if char is None:
+    async def _read_item(self) -> str | _SpecialKey:
+        """Every queued item, plain character or recognized special
+        key alike — used by `read_line`'s cursor-aware path, which
+        needs to tell them apart. `_read_char` (below) is the
+        char-only view `read_key` and masked reads still want."""
+        item = await self._char_queue.get()
+        if item is None:
             raise SessionClosedError(self._input_error)
-        return char
+        return item
+
+    async def _read_char(self) -> str:
+        """Plain characters only -- a recognized special key has no
+        meaning for a masked read or a single-keystroke menu choice
+        (same reasoning `netbbs.net.char_input.read_key` documents for
+        Telnet/SSH), so it's silently skipped here rather than
+        surfaced."""
+        while True:
+            item = await self._read_item()
+            if isinstance(item, str):
+                return item
 
     async def write(self, text: str) -> None:
         # Same CRLF normalization TelnetSession.write/SSHSession.write
@@ -202,7 +257,23 @@ class WebSession(Session):
             "raw byte I/O is not available over the web transport — see write_raw"
         )
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, history: InputHistory | None = None) -> str:
+        """
+        Read one line, with the same cursor-addressable editing and
+        `history` recall `netbbs.net.char_input.read_line` provides for
+        Telnet/SSH (design doc round 47/Track 5f) -- reusing that
+        module's `move_cursor`/`redraw_tail` helpers directly rather
+        than re-deriving the same escape-sequence/redraw arithmetic a
+        second time. `echo=False` (password prompts) keeps the
+        original simple append/Backspace-from-the-end-only behavior,
+        same scope boundary as the Telnet/SSH path and for the same
+        reason -- see that module's `read_line` docstring.
+        """
+        if not echo:
+            return await self._read_line_masked()
+        return await self._read_line_editable(history)
+
+    async def _read_line_masked(self) -> str:
         line: list[str] = []
         while True:
             char = await self._read_char()
@@ -217,9 +288,113 @@ class WebSession(Session):
                 continue
             if len(line) < _MAX_LINE_LENGTH:
                 line.append(char)
-                await self.write(char if echo else "*")
+                await self.write("*")
         await self.write("\r\n")
         return "".join(line)
+
+    async def _read_line_editable(self, history: InputHistory | None) -> str:
+        line: list[str] = []
+        cursor = 0
+        overwrite = False
+        history_index = 0
+        saved_in_progress: list[str] | None = None
+
+        while True:
+            item = await self._read_item()
+
+            if isinstance(item, _SpecialKey):
+                key = item.name
+                if key == "LEFT":
+                    if cursor > 0:
+                        cursor -= 1
+                        await self.write(move_cursor(1, forward=False))
+                elif key == "RIGHT":
+                    if cursor < len(line):
+                        cursor += 1
+                        await self.write(move_cursor(1, forward=True))
+                elif key == "HOME":
+                    if cursor > 0:
+                        await self.write(move_cursor(cursor, forward=False))
+                        cursor = 0
+                elif key == "END":
+                    if cursor < len(line):
+                        await self.write(move_cursor(len(line) - cursor, forward=True))
+                        cursor = len(line)
+                elif key == "DELETE":
+                    if cursor < len(line):
+                        terminal_col = cursor
+                        del line[cursor]
+                        await redraw_tail(
+                            self.write, terminal_col=terminal_col, edit_pos=cursor,
+                            line=line, new_cursor=cursor,
+                        )
+                elif key == "INSERT":
+                    overwrite = not overwrite
+                elif key in ("UP", "DOWN") and history is not None:
+                    recalled = None
+                    if key == "UP" and history_index < len(history):
+                        if history_index == 0:
+                            saved_in_progress = list(line)
+                        history_index += 1
+                        recalled = list(history.entry(history_index))
+                    elif key == "DOWN" and history_index > 0:
+                        history_index -= 1
+                        recalled = list(saved_in_progress) if history_index == 0 else list(
+                            history.entry(history_index)
+                        )
+                    if recalled is not None:
+                        terminal_col = cursor
+                        line = recalled
+                        cursor = len(line)
+                        await redraw_tail(
+                            self.write, terminal_col=terminal_col, edit_pos=0,
+                            line=line, new_cursor=cursor,
+                        )
+                continue
+
+            char = item
+            if char in (_CR, _LF):
+                break
+
+            if char in (_BS, _DEL):
+                if cursor > 0:
+                    terminal_col = cursor
+                    del line[cursor - 1]
+                    cursor -= 1
+                    await redraw_tail(
+                        self.write, terminal_col=terminal_col, edit_pos=cursor,
+                        line=line, new_cursor=cursor,
+                    )
+                continue
+
+            if ord(char) < 0x20:
+                continue
+
+            if overwrite and cursor < len(line):
+                line[cursor] = char
+                cursor += 1
+                await self.write(char)
+                continue
+
+            if len(line) >= _MAX_LINE_LENGTH:
+                continue
+
+            terminal_col = cursor
+            line.insert(cursor, char)
+            cursor += 1
+            if cursor == len(line):
+                await self.write(char)
+            else:
+                await redraw_tail(
+                    self.write, terminal_col=terminal_col, edit_pos=terminal_col,
+                    line=line, new_cursor=cursor,
+                )
+
+        await self.write("\r\n")
+        result = "".join(line)
+        if history is not None:
+            history.record(result)
+        return result
 
     async def read_key(self, echo: bool = True) -> str:
         while True:

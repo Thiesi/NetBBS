@@ -192,3 +192,19 @@ def test_edit_profile_visibility_toggles_from_public_to_private(tmp_path):
     asyncio.run(_edit_profile(session, db, user))
 
     assert is_bio_visible(db, user) is False
+
+
+def test_edit_profile_invalid_key_does_not_redraw_the_screen(tmp_path):
+    # Regression test for a real round-44 bug (design doc round 48):
+    # the profile loop redrew the whole "Your profile:" screen at the
+    # top of every iteration, including right after an invalid
+    # keystroke, contradicting the "no redraw on invalid input"
+    # agreement -- an unrecognized key should just bell and re-prompt.
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(keys=["z", "b"])
+
+    asyncio.run(_edit_profile(session, db, user))
+
+    assert session.output.count("Your profile:") == 1
+    assert "\a" in session.output

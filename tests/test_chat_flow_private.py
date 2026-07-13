@@ -19,6 +19,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -43,6 +44,11 @@ def presence():
 @pytest.fixture
 def mailbox():
     return MessageMailbox()
+
+
+@pytest.fixture
+def history():
+    return InputHistory()
 
 
 @pytest.fixture
@@ -71,8 +77,9 @@ def _written(session: FakeSession) -> str:
 
 async def _run(db, hub, presence, mailbox, channel, user, lines):
     session = FakeSession(lines)
+    history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
 
@@ -109,15 +116,16 @@ def test_msg_delivers_live_to_a_recipient_in_a_different_channel(
     presence.enter("bob")
 
     async def scenario():
+        history = InputHistory()
         target_session = FakeSession()  # sits in other_channel, never types
         target_task = asyncio.create_task(
-            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, other_channel, bob)
+            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, history, other_channel, bob)
         )
         await asyncio.sleep(0)  # let bob actually join before the /msg is sent
 
         sender_session = FakeSession(["/msg bob hello there", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(sender_session, db, hub, presence, mailbox, channel, alice),
+            chat_flow._chat_loop(sender_session, db, hub, presence, mailbox, history, channel, alice),
             timeout=2,
         )
 
@@ -273,11 +281,11 @@ class _SessionThatDropsBobAfterEnteringPrivateMode(FakeSession):
         self._presence = presence
         self._dropped = False
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, history=None) -> str:
         if self._lines and self._lines[0] == "hello" and not self._dropped:
             self._dropped = True
             self._presence.leave("bob")
-        return await super().read_line(echo=echo)
+        return await super().read_line(echo=echo, history=history)
 
 
 def test_private_target_going_offline_mid_conversation_is_handled(
@@ -290,7 +298,7 @@ def test_private_target_going_offline_mid_conversation_is_handled(
 
     asyncio.run(
         asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice), timeout=2
         )
     )
 

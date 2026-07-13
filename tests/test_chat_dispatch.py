@@ -22,6 +22,7 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -60,8 +61,9 @@ def _written_text(session: FakeSession) -> str:
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
+    history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
 

@@ -18,6 +18,7 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.directory import set_bio, set_bio_visible
 from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -61,8 +62,9 @@ def _written_text(session: FakeSession) -> str:
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
+    history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
 
@@ -73,15 +75,16 @@ async def _run(db, hub, presence, channel, user, lines):
 def test_names_lists_everyone_present(db, hub, presence, alice, bob, channel):
     async def scenario():
         mailbox = MessageMailbox()
+        history = InputHistory()
         watcher = FakeSession()
         watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, bob)
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
         )
         await asyncio.sleep(0)
 
         asker = FakeSession(["/names", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(asker, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(asker, db, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -97,15 +100,16 @@ def test_names_lists_everyone_present(db, hub, presence, alice, bob, channel):
 def test_names_dedupes_two_sessions_of_the_same_account(db, hub, presence, alice, channel):
     async def scenario():
         mailbox = MessageMailbox()
+        history = InputHistory()
         extra = FakeSession()
         extra_task = asyncio.create_task(
-            chat_flow._chat_loop(extra, db, hub, presence, mailbox, channel, alice)
+            chat_flow._chat_loop(extra, db, hub, presence, mailbox, history, channel, alice)
         )
         await asyncio.sleep(0)
 
         asker = FakeSession(["/names", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(asker, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(asker, db, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         extra_task.cancel()
@@ -138,15 +142,16 @@ def test_names_empty_channel_shows_message(db, hub, presence, alice, channel):
 def test_who_shows_away_indicator(db, hub, presence, alice, bob, channel):
     async def scenario():
         mailbox = MessageMailbox()
+        history = InputHistory()
         watcher = FakeSession()
         watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, bob)
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
         )
         await asyncio.sleep(0)
 
         asker = FakeSession(["/away gone to lunch", "/who", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(asker, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(asker, db, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -204,15 +209,16 @@ def test_whois_shows_online_when_target_is_present(db, hub, presence, alice, bob
 
     async def scenario():
         mailbox = MessageMailbox()
+        history = InputHistory()
         target = FakeSession()
         target_task = asyncio.create_task(
-            chat_flow._chat_loop(target, db, hub, presence, mailbox, channel, bob)
+            chat_flow._chat_loop(target, db, hub, presence, mailbox, history, channel, bob)
         )
         await asyncio.sleep(0)
 
         asker = FakeSession(["/whois bob", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(asker, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(asker, db, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         target_task.cancel()

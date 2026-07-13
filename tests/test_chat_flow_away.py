@@ -20,6 +20,7 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -58,8 +59,9 @@ def _written_text(session: FakeSession) -> str:
 async def _run(db, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
+    history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, channel, user), timeout=2
+        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
 
@@ -99,15 +101,16 @@ def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
 
     async def scenario():
         mailbox = MessageMailbox()
+        history = InputHistory()
         watcher = FakeSession()
         watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, channel, bob)
+            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
         )
         await asyncio.sleep(0)
 
         actor = FakeSession(["/away gone to lunch", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, channel, alice), timeout=2
+            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()

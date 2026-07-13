@@ -20,11 +20,23 @@ line/key-reading logic itself (backspace handling, UTF-8 continuation
 bytes, escape-sequence discarding, the CR/LF line-ending dance, the
 max-length cap) is verbatim-identical regardless of which transport sits
 underneath — so it lives here once, not duplicated per transport.
+
+Cursor-addressable line editing and command history (design doc §15
+Phase 2, sign-off round 47/Track 5f): `move_cursor`/`redraw_tail` and
+`InputHistory` below are written with no dependency on bytes or
+`ByteSource` at all (pure `list[str]`/cursor-integer/`WriteFunc`
+manipulation) specifically so `netbbs.net.web.WebSession` — which
+decodes a browser's `onData` events into whole characters itself and
+deliberately does not share this module's byte-oriented reading
+(round 25) — can still reuse this *editing* logic instead of
+duplicating it a second time. Only the raw-byte/UTF-8/`ByteSource` half
+stays genuinely separate between the two.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
 from netbbs.net.session import SessionClosedError
@@ -74,6 +86,42 @@ _PUSHBACK_ATTR = "_netbbs_char_input_pushback"
 _MAX_ESCAPE_SEQUENCE_LENGTH = 32
 _ESCAPE_SEQUENCE_TIMEOUT = 1.0
 
+# Recognized CSI final bytes with no parameter bytes -- plain arrow keys
+# plus the (less universal, but real) direct Home/End forms some
+# terminals send. Anything else -- modified combos like Ctrl+Up
+# (`ESC[1;5A`), function keys, etc. -- stays unrecognized/discarded,
+# same "not supported in this pass" scope this module has always had,
+# just narrower now that *something* is recognized.
+_CSI_FINAL_TO_KEY: dict[int, str] = {
+    0x41: "UP",
+    0x42: "DOWN",
+    0x43: "RIGHT",
+    0x44: "LEFT",
+    0x48: "HOME",
+    0x46: "END",
+}
+
+# Recognized CSI "tilde" forms: ESC [ <param> ~ -- the alternate Home/
+# End encoding some terminals use, plus Delete/Insert, which have no
+# plain-letter CSI form at all.
+_CSI_TILDE_TO_KEY: dict[bytes, str] = {
+    b"1": "HOME",
+    b"4": "END",
+    b"3": "DELETE",
+    b"2": "INSERT",
+}
+
+# SS3 forms (ESC O <letter>) -- some terminals' "application cursor key
+# mode" encoding, seen for arrows and occasionally Home/End.
+_SS3_TO_KEY: dict[str, str] = {
+    "A": "UP",
+    "B": "DOWN",
+    "C": "RIGHT",
+    "D": "LEFT",
+    "H": "HOME",
+    "F": "END",
+}
+
 
 class ByteSource(Protocol):
     """What a transport must supply for `read_line`/`read_key` below to
@@ -111,6 +159,88 @@ class ByteSource(Protocol):
 WriteFunc = Callable[[str], Awaitable[None]]
 
 
+# -- cursor-addressable editing primitives (transport/byte agnostic) --------
+
+
+def move_cursor(count: int, *, forward: bool) -> str:
+    """The raw ANSI cursor-movement sequence to shift the terminal
+    cursor `count` columns left or right within the current line, or
+    `""` if `count <= 0` — callers can unconditionally call this without
+    checking for the no-op case themselves."""
+    if count <= 0:
+        return ""
+    return f"\x1b[{count}{'C' if forward else 'D'}"
+
+
+async def redraw_tail(
+    write: WriteFunc, *, terminal_col: int, edit_pos: int, line: list[str], new_cursor: int
+) -> None:
+    """
+    The one redraw primitive every mid-line edit (insert, Backspace,
+    Delete, full-line history recall) goes through: reposition the
+    terminal cursor from wherever it currently is (`terminal_col`) to
+    `edit_pos`, erase to the end of the visible line (`ESC[K`), reprint
+    `line[edit_pos:]` — whatever the edit left there — then reposition
+    to `new_cursor`.
+
+    Reprinting only the tail (not the whole line) keeps this cheap for
+    the common case of editing near the end of a short line, and erasing
+    via `ESC[K` rather than manually overwriting with spaces means the
+    terminal — not this code — is responsible for knowing how much
+    trailing whitespace to clear, which is simpler and can't drift out
+    of sync with the actual old line length.
+    """
+    if terminal_col > edit_pos:
+        await write(move_cursor(terminal_col - edit_pos, forward=False))
+    elif terminal_col < edit_pos:
+        await write(move_cursor(edit_pos - terminal_col, forward=True))
+    await write("\x1b[K")
+    await write("".join(line[edit_pos:]))
+    await write(move_cursor(len(line) - new_cursor, forward=False))
+
+
+@dataclass
+class InputHistory:
+    """
+    Bounded, in-memory command history for one connected session (design
+    doc round 44/Track 5f) — Up/Down recall in `read_line`.
+
+    Deliberately not tied to any one channel: constructed once per
+    connection (alongside `hub`/`presence`/`mailbox` — see
+    `netbbs.net.login_flow.handle_session`) and threaded down to every
+    `read_line()` call that wants recall, so history persists across a
+    `/join` channel switch within the same session rather than resetting.
+    In-memory only, no persistence, same ephemeral posture as chat itself
+    — nothing here needs to survive a disconnect.
+
+    Bounded size (`max_entries`), matching this project's consistent
+    bounded-not-unbounded philosophy elsewhere (chat scrollback's 100-
+    event cap, the picker's 99-item page cap).
+    """
+
+    max_entries: int = 50
+    _entries: list[str] = field(default_factory=list)
+
+    def record(self, line: str) -> None:
+        """Appends `line` if non-blank — an empty Enter press isn't
+        worth recalling later."""
+        if not line:
+            return
+        self._entries.append(line)
+        if len(self._entries) > self.max_entries:
+            self._entries.pop(0)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def entry(self, index_from_most_recent: int) -> str:
+        """`entry(1)` is the most recently recorded line, `entry(2)` the
+        one before that, and so on — matches how `read_line`'s recall
+        state (`history_index`) naturally counts "how many Ups back from
+        the in-progress line.\""""
+        return self._entries[-index_from_most_recent]
+
+
 def _push_back(source: ByteSource, byte: int) -> None:
     pending = getattr(source, _PUSHBACK_ATTR, None)
     if pending is None:
@@ -140,21 +270,39 @@ async def _read_byte_with_timeout(source: ByteSource, timeout: float) -> int | N
     return await source.read_byte_with_timeout(timeout)
 
 
-async def read_line(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
+async def read_line(
+    source: ByteSource,
+    write: WriteFunc,
+    echo: bool = True,
+    history: InputHistory | None = None,
+) -> str:
     """
-    Read one line of input, character by character, echoing (or masking,
-    if `echo=False`) each character via `write` as it arrives.
+    Read one line of input, echoing (or masking, if `echo=False`) as it
+    arrives, with cursor-addressable editing (design doc round 44/
+    Track 5f): Left/Right move within the line, Home/End jump to its
+    start/end, Backspace/Delete remove from either side of the cursor,
+    Insert toggles overwrite mode, and Up/Down cycle through `history`
+    if one is supplied.
 
-    `echo=False` masks each typed character with `*` instead of showing
-    it as typed, matching common modern password-field UX (revealing
-    length, not content) rather than the more conservative "reveal
-    nothing" alternative.
+    `echo=False` (password prompts) deliberately keeps the original,
+    simpler append/Backspace-from-the-end-only behavior with no cursor
+    movement or history — a masked field doesn't meaningfully benefit
+    from mid-line editing, and it avoids needing a parallel masked-
+    display buffer just to support a case nothing asks for.
     """
+    if not echo:
+        return await _read_line_masked(source, write)
+    return await _read_line_editable(source, write, history)
+
+
+async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
+    """The original simple behavior, preserved as-is for masked
+    (password) reads — see `read_line`'s docstring for why."""
     line: list[str] = []
     while True:
         b = await _read_byte(source)
         if b is None:
-            continue  # pure transport-level action, no data produced
+            continue
 
         if b in (_CR, _LF):
             if b == _CR:
@@ -168,7 +316,102 @@ async def read_line(source: ByteSource, write: WriteFunc, echo: bool = True) -> 
             continue
 
         if b == _ESC:
-            await _discard_escape_sequence(source)
+            await _read_escape_sequence(source)
+            continue
+
+        if b < 0x20:
+            continue
+
+        if b < 0x80:
+            char = chr(b)
+        else:
+            char = await _read_utf8_continuation(source, b)
+            if char is None:
+                continue
+
+        if len(line) < _MAX_LINE_LENGTH:
+            line.append(char)
+            await write("*")
+
+    await write("\r\n")
+    return "".join(line)
+
+
+async def _read_line_editable(
+    source: ByteSource, write: WriteFunc, history: InputHistory | None
+) -> str:
+    line: list[str] = []
+    cursor = 0
+    overwrite = False
+    history_index = 0  # 0 == "not recalling", editing the in-progress line
+    saved_in_progress: list[str] | None = None
+
+    while True:
+        b = await _read_byte(source)
+        if b is None:
+            continue  # pure transport-level action, no data produced
+
+        if b in (_CR, _LF):
+            if b == _CR:
+                await _consume_optional_lf_or_nul(source)
+            break
+
+        if b in (_BS, _DEL):
+            if cursor > 0:
+                terminal_col = cursor
+                del line[cursor - 1]
+                cursor -= 1
+                await redraw_tail(
+                    write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
+                )
+            continue
+
+        if b == _ESC:
+            key = await _read_escape_sequence(source)
+            if key == "LEFT":
+                if cursor > 0:
+                    cursor -= 1
+                    await write(move_cursor(1, forward=False))
+            elif key == "RIGHT":
+                if cursor < len(line):
+                    cursor += 1
+                    await write(move_cursor(1, forward=True))
+            elif key == "HOME":
+                if cursor > 0:
+                    await write(move_cursor(cursor, forward=False))
+                    cursor = 0
+            elif key == "END":
+                if cursor < len(line):
+                    await write(move_cursor(len(line) - cursor, forward=True))
+                    cursor = len(line)
+            elif key == "DELETE":
+                if cursor < len(line):
+                    terminal_col = cursor
+                    del line[cursor]
+                    await redraw_tail(
+                        write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
+                    )
+            elif key == "INSERT":
+                overwrite = not overwrite
+            elif key in ("UP", "DOWN") and history is not None:
+                recalled = None
+                if key == "UP" and history_index < len(history):
+                    if history_index == 0:
+                        saved_in_progress = list(line)
+                    history_index += 1
+                    recalled = list(history.entry(history_index))
+                elif key == "DOWN" and history_index > 0:
+                    history_index -= 1
+                    recalled = list(saved_in_progress) if history_index == 0 else list(
+                        history.entry(history_index)
+                    )
+                if recalled is not None:
+                    terminal_col = cursor
+                    line = recalled
+                    cursor = len(line)
+                    await redraw_tail(
+                        write, terminal_col=terminal_col, edit_pos=0, line=line, new_cursor=cursor
+                    )
             continue
 
         if b < 0x20:
@@ -184,14 +427,35 @@ async def read_line(source: ByteSource, write: WriteFunc, echo: bool = True) -> 
             if char is None:
                 continue  # malformed/interrupted multi-byte sequence
 
-        if len(line) < _MAX_LINE_LENGTH:
-            line.append(char)
-            await write(char if echo else "*")
-        # else: silently drop the character but keep reading — Backspace
-        # and Enter still work normally past the cap.
+        if overwrite and cursor < len(line):
+            line[cursor] = char
+            cursor += 1
+            await write(char)
+            continue
+
+        if len(line) >= _MAX_LINE_LENGTH:
+            # silently drop the character but keep reading — Backspace,
+            # movement, and Enter still work normally past the cap.
+            continue
+
+        terminal_col = cursor
+        line.insert(cursor, char)
+        cursor += 1
+        if cursor == len(line):
+            # Appending at the end -- the common case while typing
+            # normally -- needs only the one character written, not a
+            # full (empty) tail reprint.
+            await write(char)
+        else:
+            await redraw_tail(
+                write, terminal_col=terminal_col, edit_pos=terminal_col, line=line, new_cursor=cursor
+            )
 
     await write("\r\n")
-    return "".join(line)
+    result = "".join(line)
+    if history is not None:
+        history.record(result)
+    return result
 
 
 async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
@@ -202,11 +466,11 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
     using `read_line`.
 
     Control bytes with no meaning as a standalone "key" — Backspace/
-    Delete, CR/LF, unsupported escape sequences — are silently skipped
-    and reading continues, rather than being returned as a key in their
-    own right: there's no line being built here to backspace within, and
-    Enter doesn't mean anything special when we're already responding to
-    the very next keystroke, immediately.
+    Delete, CR/LF, escape sequences (recognized or not; there's no line
+    here for Left/Right/Home/End/Delete to act within, and Up/Down have
+    no history to recall in a single-keystroke menu) — are silently
+    skipped and reading continues, rather than being returned as a key
+    in their own right.
     """
     while True:
         b = await _read_byte(source)
@@ -217,7 +481,7 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
             continue
 
         if b == _ESC:
-            await _discard_escape_sequence(source)
+            await _read_escape_sequence(source)
             continue
 
         if b < 0x20:
@@ -285,66 +549,74 @@ async def _consume_optional_lf_or_nul(source: ByteSource) -> None:
         _push_back(source, peek)
 
 
-async def _discard_escape_sequence(source: ByteSource) -> None:
+def _decode_csi(params: bytes, final_byte: int) -> str | None:
+    if not params:
+        return _CSI_FINAL_TO_KEY.get(final_byte)
+    if final_byte == 0x7E:
+        return _CSI_TILDE_TO_KEY.get(params)
+    return None
+
+
+async def _read_escape_sequence(source: ByteSource) -> str | None:
     """
-    Consume and discard a terminal escape sequence following an ESC byte
-    (arrow keys, function keys, Home/End, etc.) as a complete unit — not
-    supported in this pass. Handles the two common shapes real terminals
-    use for special keys:
+    Consume a terminal escape sequence following an ESC byte as a
+    complete unit and return a symbolic key name for the small set this
+    project recognizes — `"UP"`/`"DOWN"`/`"LEFT"`/`"RIGHT"`/`"HOME"`/
+    `"END"`/`"DELETE"`/`"INSERT"` — or `None` for a real Escape keypress
+    with nothing following, or any shape not in that set (still
+    discarded as a complete unit either way — "recognize a few, discard
+    the rest" replaces round 13/14's original "discard everything"
+    scope, it doesn't loosen the discarding itself). Handles the two
+    common shapes real terminals use for special keys:
 
-    - CSI sequences: ESC [ ... <final byte in 0x40-0x7E> (the vast
-      majority of arrow/function/navigation keys)
-    - SS3 sequences: ESC O <single letter> (some terminals' "application
-      cursor key mode" encoding for arrow keys)
-
-    Anything else after a lone ESC (a real Escape keypress with nothing
-    following, or a shape we don't recognize) is left alone after
-    discarding just the ESC itself, on a short timeout — so we can never
-    hang waiting for bytes that aren't coming, the same reasoning as
-    `_consume_optional_lf_or_nul`.
+    - CSI sequences: ESC [ ... <final byte in 0x40-0x7E>
+    - SS3 sequences: ESC O <single letter>
 
     Bounded by both a maximum CSI parameter length and one total deadline
     covering the whole CSI parameter loop — see the module-level
-    constants just above. Tracked via an explicit `time.monotonic()`
-    deadline checked once per loop iteration, deliberately *not* an
+    constants above. Tracked via an explicit `time.monotonic()` deadline
+    checked once per loop iteration, deliberately *not* an
     `asyncio.wait_for(...)` wrapped around the whole function: that was
-    the first approach tried here, and direct testing against a real
-    socket (not just an in-memory fake source) surfaced a genuine race —
-    this function's own per-byte `_read_byte_with_timeout` calls are
-    already each individually wrapped in their own `wait_for` by the
-    underlying transport (see e.g. `netbbs.net.telnet.TelnetSession.
-    read_byte_with_timeout`), and an *outer* `wait_for` cancelling an
-    *inner* one at nearly the same moment the inner one would have timed
-    out anyway is timing-sensitive in a way that isn't reliably
-    reproducible — it worked correctly in some runs and silently failed
-    to fire in others. An explicit deadline check has no such ambiguity:
-    either `time.monotonic()` has passed the deadline or it hasn't.
-    Either limit being exceeded raises `SessionClosedError`, closing the
-    session the same way an oversized/stalled Telnet subnegotiation does
-    (`netbbs.net.telnet._read_subnegotiation_body`): a client that won't
-    stop sending what claims to be a single escape sequence is a
+    the first approach tried when this function was still
+    `_discard_escape_sequence` (round 13/14), and direct testing against
+    a real socket (not just an in-memory fake source) surfaced a genuine
+    race — this function's own per-byte `_read_byte_with_timeout` calls
+    are already each individually wrapped in their own `wait_for` by the
+    underlying transport, and an *outer* `wait_for` cancelling an *inner*
+    one at nearly the same moment the inner one would have timed out
+    anyway is timing-sensitive in a way that isn't reliably reproducible.
+    An explicit deadline check has no such ambiguity. Either limit being
+    exceeded raises `SessionClosedError`, closing the session the same
+    way an oversized/stalled Telnet subnegotiation does: a client that
+    won't stop sending what claims to be a single escape sequence is a
     protocol-level violation serious enough to end the connection, not
     something to just silently keep discarding forever.
     """
     next_byte = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
     if next_byte is None:
-        return
+        return None
 
     if next_byte == 0x5B:  # '[' — CSI sequence
         deadline = time.monotonic() + _ESCAPE_SEQUENCE_TIMEOUT
         consumed = 0
+        params = bytearray()
         while True:
             if time.monotonic() >= deadline:
                 raise SessionClosedError("terminal escape sequence timed out")
             b = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
             if b is None:
-                return
+                return None
             consumed += 1
             if consumed > _MAX_ESCAPE_SEQUENCE_LENGTH:
                 raise SessionClosedError("terminal escape sequence is too long")
             if 0x40 <= b <= 0x7E:
-                return  # final byte of the CSI sequence
+                return _decode_csi(bytes(params), b)  # final byte of the CSI sequence
+            params.append(b)
     elif next_byte == 0x4F:  # 'O' — SS3 sequence, always exactly one more byte
-        await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+        letter = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+        if letter is None or not (0x20 <= letter < 0x7F):
+            return None
+        return _SS3_TO_KEY.get(chr(letter))
     # else: some other/unrecognized shape — just the ESC itself was
     # consumed; nothing more to do.
+    return None

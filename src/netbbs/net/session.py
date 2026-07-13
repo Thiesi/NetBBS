@@ -11,6 +11,16 @@ a given user connected through.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Deferred/type-checking-only: netbbs.net.char_input itself imports
+    # SessionClosedError from this module, so a real top-level import
+    # here would be circular. `from __future__ import annotations`
+    # already makes every annotation in this file a lazily-evaluated
+    # string at runtime; this block exists only so type checkers/IDEs
+    # can resolve `InputHistory` by name.
+    from netbbs.net.char_input import InputHistory
 
 
 class SessionClosedError(Exception):
@@ -69,7 +79,7 @@ class Session(ABC):
         await self.write(text + "\r\n")
 
     @abstractmethod
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, history: InputHistory | None = None) -> str:
         """
         Read one line of input from the client.
 
@@ -81,6 +91,16 @@ class Session(ABC):
         echoing entirely and handles this itself, character by character;
         other transports may differ — which is exactly why this is
         abstract rather than shared logic here.
+
+        `history` (design doc §15 Phase 2, sign-off round 47/Track 5f)
+        enables Up/Down command recall for this read — optional, and
+        ignored entirely for masked (`echo=False`) reads, which keep
+        simple append-only editing (see `netbbs.net.char_input.
+        read_line`'s docstring for why). Most callers don't pass one;
+        currently only `netbbs.net.chat_flow`'s chat input loop does,
+        with one `InputHistory` constructed per connected session (see
+        `netbbs.net.login_flow.handle_session`) so recall persists
+        across a `/join` channel switch.
         """
 
     @abstractmethod

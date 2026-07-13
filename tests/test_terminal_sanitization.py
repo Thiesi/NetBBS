@@ -23,6 +23,7 @@ from netbbs.chat import (
     record_message,
 )
 from netbbs.files import create_file_area, upload_file
+from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import _chat_loop, _render_scrollback_message
 from netbbs.net.file_flow import _show_area
 from netbbs.net.login_flow import _show_board
@@ -52,7 +53,7 @@ class FakeSession:
     async def write_line(self, text: str = "") -> None:
         self.written.append(text + "\n")
 
-    async def read_line(self, echo: bool = True) -> str:
+    async def read_line(self, echo: bool = True, history=None) -> str:
         # Falls back to "" (an empty Enter-press) once scripted input
         # runs out, rather than raising -- simpler than every test
         # needing to script out every trailing optional prompt exactly.
@@ -209,7 +210,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
             received.append(await queue.get())  # sender's leave notice
 
         collector = asyncio.create_task(collect_one())
-        await _chat_loop(sender_session, db, hub, presence, mailbox, channel, sender)
+        await _chat_loop(sender_session, db, hub, presence, mailbox, InputHistory(), channel, sender)
         await collector
         hub.leave(channel.name, "bob-participant")
 

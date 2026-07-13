@@ -43,6 +43,7 @@ from netbbs.chat import (
 )
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.directory import VCard, get_vcard
+from netbbs.net.char_input import InputHistory
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
@@ -57,6 +58,7 @@ async def browse_channels(
     hub: ChatHub,
     presence: PresenceRegistry,
     mailbox: MessageMailbox,
+    history: InputHistory,
     user: User,
 ) -> None:
     """
@@ -72,10 +74,16 @@ async def browse_channels(
     `/leave`, never wherever a category-nested pick left off — the same
     "back always lands somewhere consistent" reasoning `/quit` already
     followed, not a new decision.
+
+    `history` (design doc round 47/Track 5f) is the one connection's
+    `InputHistory`, constructed once in `netbbs.net.login_flow.
+    handle_session` — passed straight through to every `_chat_loop`
+    call here so command recall persists across a `/join` channel
+    switch rather than resetting.
     """
     channel = await _pick_channel(session, db, hub, user, category_id=None)
     while channel is not None:
-        action = await _chat_loop(session, db, hub, presence, mailbox, channel, user)
+        action = await _chat_loop(session, db, hub, presence, mailbox, history, channel, user)
         if isinstance(action, _SwitchTo):
             channel = action.channel
             continue
@@ -1062,6 +1070,7 @@ async def _chat_loop(
     hub: ChatHub,
     presence: PresenceRegistry,
     mailbox: MessageMailbox,
+    history: InputHistory,
     channel: Channel,
     user: User,
 ) -> ChatAction:
@@ -1098,14 +1107,15 @@ async def _chat_loop(
     `^M` instead of a newline) landed in `netbbs.net.telnet` after real
     testing surfaced the problems client-side line editing was causing —
     an earlier version of this docstring described that as still
-    deferred; it isn't anymore. The remaining scope limitation is
-    narrower: no cursor-addressable line editing (arrow keys, Home/End)
-    — Backspace/Delete only remove from the end of what's typed. So an
-    incoming message can still land mid-typing and interleave visually
-    with a user's own in-progress line, same as classic line-mode chat
-    tools (Unix `talk`, `wall`) always had — full mid-line redraw to
-    avoid that would need real cursor-addressable TUI machinery, still
-    out of scope.
+    deferred; it isn't anymore. Cursor-addressable editing (Left/Right/
+    Home/End/Delete/Insert) and Up/Down command-history recall (`history`
+    — design doc round 47/Track 5f) landed later still, once retyping a
+    long `/mute`/`/ban` reason from scratch each time turned out to be
+    genuinely painful in practice. An incoming message can still land
+    mid-typing and interleave visually with a user's own in-progress
+    line, same as classic line-mode chat tools (Unix `talk`, `wall`)
+    always had — that's a receive-vs-send-task race (see below), a
+    different problem from line editing, and still out of scope.
 
     Scrollback (design doc round 19/20) is replayed here, before the
     "Joined" line, using whatever was persisted *before* this join —
@@ -1189,7 +1199,7 @@ async def _chat_loop(
         private_target: User | None = None
 
         while True:
-            line = (await session.read_line()).strip()
+            line = (await session.read_line(history=history)).strip()
             if not line:
                 continue
             if line.startswith("/"):

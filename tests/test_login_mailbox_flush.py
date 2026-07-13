@@ -17,6 +17,7 @@ import asyncio
 from netbbs.auth.users import User
 from netbbs.chat import MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
+from netbbs.net.char_input import InputHistory
 
 
 class FakeSession:
@@ -57,7 +58,7 @@ def test_pending_private_message_shown_before_the_menu_on_entry():
         mailbox = MessageMailbox()
         mailbox.deliver("alice", "*** Private message from bob: hi there")
         session = FakeSession(keys=["l"])  # logoff immediately
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, _make_user())
+        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
@@ -72,7 +73,7 @@ def test_message_is_only_shown_once_not_on_every_redraw():
         mailbox = MessageMailbox()
         mailbox.deliver("alice", "*** Private message from bob: only once")
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, _make_user())
+        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
@@ -83,7 +84,7 @@ def test_no_extra_output_when_mailbox_is_empty():
     async def scenario():
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, _make_user())
+        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
@@ -106,8 +107,8 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(monkeypa
     monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)
 
     async def scenario():
-        session = FakeSession(keys=["b", "l"])  # boards, then logoff
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, user)
+        session = FakeSession(keys=["m", "l"])  # boards, then logoff
+        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), user)
         return session
 
     session = asyncio.run(scenario())

@@ -34,6 +34,7 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.moderation import is_blocked
+from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.file_flow import browse_file_areas
 from netbbs.net.nodeconfig import ThrottleConfig
@@ -160,9 +161,17 @@ async def handle_session(
     if meets_level(user, _DEMO_ELEVATED_LEVEL):
         await session.write_line("(You have elevated access.)")
 
+    # One InputHistory per connection (design doc round 47/Track 5f),
+    # not node-wide like hub/presence/mailbox -- constructed here rather
+    # than passed in from netbbs.__main__, so each connected session
+    # gets its own recall buffer. Only threaded down into chat's input
+    # loop (the actual pain point this was built for); other screens'
+    # read_line() calls simply don't pass one and get no recall.
+    history = InputHistory()
+
     presence.enter(user.username)
     try:
-        await _main_menu(session, db, hub, presence, mailbox, user)
+        await _main_menu(session, db, hub, presence, mailbox, history, user)
     finally:
         presence.leave(user.username)
 
@@ -186,7 +195,7 @@ async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User)
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
     options = "  ".join(
         [
-            f"Message {menu_key('B', 'oards')}",
+            menu_key("M", "essage Boards"),
             menu_key("C", "hat"),
             menu_key("F", "ile areas"),
             menu_key("D", "irectory"),
@@ -203,6 +212,7 @@ async def _main_menu(
     hub: ChatHub,
     presence: PresenceRegistry,
     mailbox: MessageMailbox,
+    history: InputHistory,
     user: User,
 ) -> None:
     """
@@ -232,11 +242,11 @@ async def _main_menu(
 
         if choice == "l":
             return
-        elif choice == "b":
+        elif choice == "m":
             await _browse_boards(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "c":
-            await browse_channels(session, db, hub, presence, mailbox, user)
+            await browse_channels(session, db, hub, presence, mailbox, history, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "f":
             await browse_file_areas(session, db, user)
@@ -577,6 +587,29 @@ async def _show_vcard(session: Session, db: Database, target: User, requesting_u
         await session.write_line(colored("(no public bio)", fg_color=MUTED_COLOR))
 
 
+async def _render_profile(session: Session, db: Database, user: User) -> bool:
+    """Renders the profile state plus its option line — the unit that
+    should be redrawn on an actual state change (initial entry, an edit
+    or a visibility toggle), not on every loop iteration regardless of
+    whether anything changed. Returns the current visibility, needed by
+    the caller to pass into `_toggle_bio_visibility`."""
+    current_bio = get_bio(db, user)
+    visible = is_bio_visible(db, user)
+
+    await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
+    if current_bio:
+        await session.write_line(
+            reflow(sanitize_text(current_bio, allow_newlines=True), width=session.terminal_width)
+        )
+    else:
+        await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
+    await session.write_line(f"Visibility: {'public' if visible else 'private'}")
+
+    options = "  ".join([menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{options}")
+    return visible
+
+
 async def _edit_profile(session: Session, db: Database, user: User) -> None:
     """
     Edit your own vCard: the bio and its visibility toggle. Shows the
@@ -585,28 +618,14 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
     `netbbs.net.file_flow._show_area`) rather than jumping straight
     into an edit prompt.
 
-    Loops, redrawing the (possibly just-updated) state after an edit or
-    toggle, until `b` explicitly backs out — previously this ran once and
-    returned after *any* keystroke, including a genuinely unrecognized
-    one, which meant an invalid key silently exited the screen instead of
-    being ignored. An unrecognized key now sounds a bell and re-prompts,
-    same as the main menu.
+    Redraws the (possibly just-updated) state only after an edit or
+    toggle actually happens, not on every loop iteration — mirrors
+    `_show_board`'s `_render_board_page` split. An unrecognized key
+    sounds a bell and re-prompts without redrawing anything, same as
+    the main menu and the picker.
     """
+    visible = await _render_profile(session, db, user)
     while True:
-        current_bio = get_bio(db, user)
-        visible = is_bio_visible(db, user)
-
-        await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
-        if current_bio:
-            await session.write_line(
-                reflow(sanitize_text(current_bio, allow_newlines=True), width=session.terminal_width)
-            )
-        else:
-            await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
-        await session.write_line(f"Visibility: {'public' if visible else 'private'}")
-
-        options = "  ".join([menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack")])
-        await session.write_line(f"\r\n{options}")
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
         await session.write_line("")
@@ -615,8 +634,10 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
             return
         elif choice == "e":
             await _edit_bio(session, db, user)
+            visible = await _render_profile(session, db, user)
         elif choice == "v":
             await _toggle_bio_visibility(session, db, user, currently_visible=visible)
+            visible = await _render_profile(session, db, user)
         else:
             await session.write("\a")
 

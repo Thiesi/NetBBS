@@ -3681,3 +3681,214 @@ round 33 point 1's original scoping.
    introduced) — caught immediately by the full suite re-run, not left
    for later discovery. Full suite re-run after all of this (819
    passed, 1 skipped) — actually run, not just syntax-checked.
+
+## Sign-off notes, round 47 (Phase 2 Track 5f: command history & cursor-addressable line editing — implemented)
+
+Implements the track Thiesi added mid-session after actually using the
+chat command surface and finding retyping long commands (especially
+ones with a trailing free-text reason, e.g. `/mute bob spamming in
+#general again`) genuinely painful. Confirmed scope up front: history
+*and* full cursor editing, not history alone, sequenced as its own
+track before Track 5g (tab completion) rather than folded into it —
+see the plan's decision 5. Explicitly **not** the deferred "TUI half"
+(round 13/26's screen-buffer-diffing scope for the eventual fullscreen
+editor): a single, non-wrapping input line is a bounded reprint-and-
+reposition problem, closer to a shell's readline than to a screen
+editor, and this doesn't pull that heavier machinery forward or
+substitute for it.
+
+1. **Two new transport-agnostic primitives added to
+   `netbbs.net.char_input`**, reused directly by both the byte-oriented
+   Telnet/SSH path and (unlike everything else in that module) the
+   already-decoded-character Web path: `move_cursor(count, *,
+   forward)` (emits `ESC[<n>C`/`ESC[<n>D`) and `redraw_tail(write, *,
+   terminal_col, edit_pos, line, new_cursor)` — reposition to
+   `edit_pos`, erase-to-end-of-line (`ESC[K`), reprint the line's tail,
+   reposition to `new_cursor`. One redraw operation covers every edit
+   shape: mid-line insert, backspace, forward-delete, and full-line
+   history recall (`edit_pos=0`) all just call it with different
+   arguments, rather than each having its own erase/reprint logic.
+2. **Escape-sequence handling changes from discard-only to
+   parse-and-act, for a specific, still-bounded set of sequences.**
+   `_discard_escape_sequence` is renamed `_read_escape_sequence` and
+   now returns a symbolic key string (`"UP"`/`"DOWN"`/`"LEFT"`/
+   `"RIGHT"`/`"HOME"`/`"END"`/`"DELETE"`/`"INSERT"`) instead of `None`,
+   via new `_CSI_FINAL_TO_KEY`/`_CSI_TILDE_TO_KEY`/`_SS3_TO_KEY`
+   lookup tables covering both `ESC[<letter>` and `ESC[<n>~` forms
+   (some terminals send Home/End as `ESC[1~`/`ESC[4~` rather than
+   `ESC[H`/`ESC[F`) plus the SS3 (`ESC O <letter>`) variants. Anything
+   not in those tables is still discarded as a complete unit exactly as
+   before — the existing bounded-length/bounded-time safety properties
+   (`_MAX_ESCAPE_SEQUENCE_LENGTH`, `_ESCAPE_SEQUENCE_TIMEOUT`, round
+   13/14) are unchanged, only loosened in *which* recognized sequences
+   now carry meaning. `read_key` keeps its old behavior unchanged
+   (still discards every escape sequence, now via the renamed
+   function, ignoring its returned key).
+3. **The line buffer became cursor-aware**, replacing the old
+   append/pop-at-the-end-only model: `line: list[str]` plus a live
+   cursor index. Backspace removes the character before the cursor
+   (not necessarily the buffer's last character) and moves the cursor
+   back; Delete removes the character at the cursor without moving it;
+   Insert toggles overwrite mode (replace-at-cursor instead of
+   insert-and-shift, falling back to append at the end of the line,
+   matching today's behavior, when there's nothing to overwrite).
+   Left/Right/Home/End move the cursor without touching the buffer.
+4. **`InputHistory`** (`char_input.py`): `record(line)` (skips blank
+   lines), bounded to a fixed `max_entries` (default 50 — the same
+   bounded-not-unbounded posture as chat scrollback's 100-event cap and
+   the picker's 99-item page cap), in-memory only, no persistence, same
+   ephemeral posture as chat itself. Up/Down recall preserves whatever
+   was mid-typed before the first Up (a `saved_in_progress` slot
+   restored when Down is pressed past the newest recalled entry) —
+   standard shell-history behavior, not something Thiesi asked for
+   explicitly but assumed as baseline given the "full cursor editing"
+   framing.
+5. **Owned per connected session, not per node and not per channel.**
+   `history = InputHistory()` is constructed once inside
+   `handle_session` (unlike `hub`/`presence`/`mailbox`, which are
+   node-wide, constructed once in `__main__.py`) — so recall works
+   across a `/join` channel switch within one connection, but each new
+   connection starts with empty history, and one user's two concurrent
+   sessions don't share recall state. Threaded through only as far as
+   chat needs it today (`_main_menu` → `browse_channels` →
+   `_chat_loop` → `send_loop`'s `session.read_line(history=history)`)
+   — board/file/directory/profile browsing deliberately do not receive
+   it, out of scope per the plan.
+6. **Masked reads (`echo=False`, i.e. password entry) deliberately
+   keep the old simple append/pop behavior** — no cursor movement, no
+   history recall, nothing that would echo characters of a password
+   back via redraw. Split into `_read_line_masked` vs.
+   `_read_line_editable` in both `char_input.py` and `web.py`, selected
+   by `echo`, so this isn't a special case bolted onto the new logic
+   but a clean fork at the top of `read_line`.
+7. **`netbbs.net.web.WebSession` gets a full parallel
+   implementation**, not a shared one — consistent with round 25's
+   already-accepted deliberate non-sharing between the byte-oriented
+   and character-oriented transports (the same duplication shape Track
+   5g's tab completion will also need there). It imports and reuses
+   `move_cursor`/`redraw_tail`/`InputHistory` directly from
+   `char_input.py` (those three have no bytes dependency at all, so
+   nothing prevented sharing them specifically), but has its own
+   symbolic-key parsing: `_strip_escape_sequences` is replaced by
+   `_parse_input_events(data) -> list[str | _SpecialKey]`, and
+   `WebSession._char_queue` is retyped to carry that union so
+   `_read_line_editable` can distinguish a literal typed character from
+   an arrow/Home/End/Delete/Insert event the same way the byte path
+   does with its symbolic-string return.
+8. **`Session.read_line`'s ABC signature grows an optional `history:
+   InputHistory | None = None` parameter**, threaded straight through
+   by both `TelnetSession` and `SSHSession` into `char_input.read_line`
+   (both already delegate everything else there). A `TYPE_CHECKING`-
+   guarded import of `InputHistory` into `session.py` avoids a circular
+   import, since `char_input.py` already imports `SessionClosedError`
+   from `session.py`.
+9. **Two real bugs found by actually running the tests, not by
+   review — both from the same "byte-exact assertion meets dangling
+   connection" failure shape rounds 44's sign-off note already
+   described once:**
+   - `tests/test_telnet.py` had two tests hardcoding the old
+     backspace-at-end-of-line wire output (`b"\b \b"`, 3 bytes — the
+     classic terminal trick). The new unified `redraw_tail` primitive
+     legitimately sends `b"\x1b[1D\x1b[K"` (7 bytes) instead for the
+     same visual effect. The resulting assertion mismatch triggered a
+     **hang**, not a clean failure — the connection was left dangling
+     past the failed assertion and `server.stop()` blocked waiting for
+     the handler task. Diagnosed via a standalone repro script
+     confirming the real bytes sent were correct and prompt, isolating
+     the hang to the test's own missing cleanup after the assertion.
+     Fixed by updating both hardcoded assertions to the new sequence.
+   - A self-caught timing hazard in my own new
+     `tests/test_web_line_editing.py`: an initial helper used
+     `await asyncio.sleep(0.1)` to "let the server catch up" before
+     closing the connection — exactly the guessed-fixed-delay
+     anti-pattern this project's own history has flagged repeatedly
+     (rounds 20, 28, 44). Caught and fixed before the first run,
+     replaced with deterministic draining of `ws.receive_json()` until
+     a message ending in `"\r\n"` is observed.
+10. **Testing:** `tests/test_char_input_line_editing.py` (22 cases —
+    cursor movement including tilde-form Home/End, exact
+    escape-sequence byte assertions for mid-line insert/backspace/
+    delete, Insert/overwrite toggle, masked-read exemption confirmed)
+    and `tests/test_char_input_history.py` (15 cases — `InputHistory`
+    in isolation plus Up/Down wired into `read_line`). New
+    `tests/test_web_line_editing.py` (10 cases — the same shapes via
+    `WebSession`, plus one exact-wire-message-sequence test). All 19
+    pre-existing `test_char_input.py` tests re-verified passing
+    unchanged, confirming behavioral backward-compatibility for
+    everything not newly recognized. Threading the new `history`
+    parameter through `_chat_loop`/`browse_channels`/`_main_menu`
+    required updating call sites across eleven existing test files —
+    the same mechanical "widening a threaded parameter breaks many
+    call sites" pattern rounds 42 and 46 already described, not a new
+    kind of problem. Full suite re-run after all of this: **866
+    passed, 1 skipped** — actually run, not just syntax-checked.
+
+## Sign-off notes, round 48 (menu invalid-key consistency fixes + Boards hotkey rename — implemented)
+
+Thiesi tested a real session against round 44's "no redraw on invalid
+input" fix and found it wasn't actually consistent across screens —
+pasted a real transcript showing the `Choice: ` prompt visibly running
+together across repeated invalid keystrokes in one screen but not
+another. Investigated by reading the four screens that share this
+"single keystroke, bell-only feedback" shape (`_main_menu`, `pick_item`,
+`_show_board`, `_edit_profile`) side by side rather than guessing from
+the transcript alone (the pasted text itself had every real `\r\n`
+flattened by whatever copied it, so it couldn't be trusted to show
+*which* screen was actually missing one — confirmed by reading the code
+instead). Two distinct, real bugs found, plus a separate labeling
+request actioned in the same round:
+
+1. **`netbbs.net.picker.pick_item`'s unrecognized-key fallback never
+   emitted a newline before the bell** — unlike `_main_menu`/
+   `_show_board`, which both unconditionally move to a fresh line after
+   *every* keystroke (valid or not) before evaluating it. The picker's
+   final `else` branch (an unrecognized letter that isn't `n`/`p`/`s`/
+   `g`/`b` and isn't a digit) just wrote the bell and looped straight
+   back to `write("Choice: ")` with nothing in between — so two
+   consecutive invalid keys produced `Choice: zChoice: yChoice: ...`,
+   growing on one line forever, exactly what Thiesi's transcript showed.
+   The digit-selection and page-boundary invalid paths were already
+   correct (they already had a `write_line("")` earlier in their own
+   branches) — only this one fallback was missing it. Fixed with a
+   single added `write_line("")` before the bell, bringing it in line
+   with the other three screens. Regression test:
+   `tests/test_picker.py::test_repeated_invalid_keys_each_land_on_their_own_line`,
+   asserting the exact byte sequence (`b"z\r\n\aChoice: "`) rather than
+   just "a bell appears somewhere" the way the two pre-existing invalid-
+   key tests in that file already did — those would not have caught
+   this bug, which is presumably why it shipped in round 44 unnoticed.
+2. **`_edit_profile` still redrew the entire profile screen on every
+   loop iteration, including right after an invalid keystroke** — a
+   real regression against round 44's own agreement and against that
+   function's own docstring, which claimed "an unrecognized key now
+   sounds a bell and re-prompts, same as the main menu" while the code
+   actually redrew the bio/visibility/options block unconditionally at
+   the top of the loop every time. `_show_board` had already been fixed
+   correctly in round 44 (state-rendering split into `_render_board_page`,
+   called only on entry and after a real page change) but `_edit_profile`
+   was missed. Fixed the same way: new `_render_profile` helper, called
+   once on entry and again only after `e`/`v` actually change something;
+   the loop itself now only does `write("Choice: ")` → read → bell-on-
+   invalid, never redrawing. Regression test:
+   `tests/test_directory_ui.py::test_edit_profile_invalid_key_does_not_redraw_the_screen`,
+   asserting `"Your profile:"` appears in the output exactly once even
+   after an invalid keystroke — the four pre-existing `_edit_profile`
+   tests never drove an invalid key at all, so none of them could have
+   caught this.
+3. **Main menu's Boards hotkey changed from `B` to `M`, at Thiesi's
+   explicit request.** Round 44 renamed the label text ("Boards" →
+   "Message Boards") but left the underlying hotkey and its bracket
+   position unchanged (`Message [B]oards`) — since that same round also
+   made `B` the universal "back" key everywhere else in the system
+   (picker's `[Q]uit`→`[B]ack`), having the main menu's own *entry* key
+   for one specific section also be `B` reads as a collision, not just
+   an odd mnemonic. Changed to `[M]essage Boards`, dispatch updated from
+   `choice == "b"` to `choice == "m"`. One existing test
+   (`tests/test_login_mailbox_flush.py`) scripted `"b"` to enter boards
+   via a monkeypatched `_browse_boards`; updated to `"m"`. No other test
+   exercises the main menu's boards entry key directly (everything else
+   monkeypatches `_browse_boards` or drives it via `_browse_boards`
+   itself, not through `_main_menu`'s dispatch).
+4. **Testing:** two new regression tests (above) plus the one updated
+   existing test. Full suite re-run: **868 passed, 1 skipped** —
+   actually run, not just syntax-checked.
