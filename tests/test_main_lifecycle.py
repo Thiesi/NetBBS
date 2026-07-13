@@ -193,37 +193,40 @@ def test_startup_failure_still_closes_the_database(tmp_path):
 
 def test_signal_handler_registration_triggers_shutdown_event():
     """
-    Verifies `_install_signal_handlers`'s own logic -- registration
-    succeeds and the registered callback correctly sets `shutdown_event`
-    via the thread-safe asyncio bridge -- independent of whether *this
-    test process's own OS-level signal delivery* can be exercised
-    end-to-end in a given sandbox.
+    Sends a real signal via `signal.raise_signal` -- a genuine C-level
+    `raise()`, not a manual Python-level invocation -- and confirms
+    `shutdown_event` ends up set, regardless of which branch
+    `_install_signal_handlers` actually took to get there.
 
-    That distinction matters here specifically: manual verification in
-    this Windows/Git-Bash dev sandbox found `os.kill(pid, SIGINT)` on
-    Windows actually calls `TerminateProcess` (not a real, Python-
-    handleable signal) for a non-zero pid, and even the correct
-    broadcast form (`os.kill(0, signal.CTRL_C_EVENT)`) didn't reliably
-    reach Python's signal machinery through Git Bash's console
-    emulation. Both are sandbox/OS artifacts, not defects in this
-    function -- confirmed by registering the handler and invoking it
-    directly (exactly what the OS would do on a real signal), which
-    this test does. The real deployment target (NetBSD, POSIX) uses
-    `loop.add_signal_handler` directly instead of this Windows-only
-    fallback branch -- standard, well-tested asyncio behavior this test
-    doesn't re-verify. Worth a real `kill -TERM`/Ctrl+C check on
-    Thiesi's actual NetBSD machine before considering issue #15's
-    graceful-shutdown requirement fully closed out end-to-end.
+    That "regardless of which branch" is the point, and the reason this
+    version replaced an earlier one: on POSIX, `_install_signal_handlers`
+    uses `loop.add_signal_handler`, which installs asyncio's own
+    low-level no-op C handler and dispatches the real callback later via
+    an internal self-pipe -- `signal.getsignal(SIGTERM)` in that case
+    returns *asyncio's* placeholder, not this module's `_request_shutdown`,
+    so manually invoking whatever `getsignal` returns (the previous
+    version of this test) silently tested the wrong thing and always
+    passed vacuously on Windows (where the `signal.signal` fallback
+    really is installed directly) while doing nothing useful on real
+    POSIX targets -- caught by an actual NetBSD pytest run, not by
+    reasoning about it, which is exactly the "actually run it" lesson
+    CLAUDE.md already calls out elsewhere in this project's history.
+
+    `signal.raise_signal` was chosen over `os.kill(os.getpid(), sig)`
+    specifically because `os.kill` with a real (non-zero) pid on Windows
+    calls `TerminateProcess` instead of delivering a real, Python-
+    handleable signal (confirmed by hand in this project's Windows dev
+    sandbox) -- it would kill the test process outright rather than
+    exercise the fallback branch. `raise_signal` goes through the actual
+    C-level signal-raising mechanism on both platforms, so it correctly
+    reaches whichever dispatch mechanism is actually installed.
     """
     shutdown_event = asyncio.Event()
 
     async def scenario():
         loop = asyncio.get_running_loop()
         _install_signal_handlers(loop, shutdown_event)
-        handler = signal.getsignal(signal.SIGTERM)
-        assert handler is not None and handler != signal.SIG_DFL
-        handler(signal.SIGTERM, None)
-        await asyncio.sleep(0.05)
-        assert shutdown_event.is_set()
+        signal.raise_signal(signal.SIGTERM)
+        await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
 
     asyncio.run(scenario())

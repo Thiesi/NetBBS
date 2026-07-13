@@ -2121,25 +2121,40 @@ plumbing twice.
     every configured transport unavailable (SSH configured but
     `asyncssh` not installed). Verified by forcing an `ImportError` via
     `sys.modules`, not just asserted from reading the code.
-12. **One honest, explicitly-flagged verification gap, the same
-    standard rounds 23/24/25 already held SSH/Zmodem/xterm.js to:**
-    `_install_signal_handlers`'s own registration-and-callback logic
-    was verified directly (register the handler, invoke it exactly as
-    the OS would, confirm `shutdown_event` gets set —
-    `tests/test_main_lifecycle.py`), but genuine end-to-end OS signal
-    *delivery* through this sandboxed Windows/Git-Bash dev environment
-    could not be confirmed: `os.kill(pid, SIGINT)` on Windows calls
-    `TerminateProcess` directly for a non-zero pid (not a real,
-    Python-handleable signal), and even the correct broadcast form
-    (`os.kill(0, signal.CTRL_C_EVENT)`) didn't reliably reach Python's
-    signal machinery through Git Bash's console emulation — both
-    sandbox/OS artifacts, not defects in the implementation. The real
-    deployment target (NetBSD, POSIX) uses `loop.add_signal_handler`
-    directly instead of the Windows-only `signal.signal` fallback —
-    standard, well-tested asyncio behavior, not something this project
-    invented. Worth a direct `kill -TERM`/Ctrl+C check from Thiesi's
-    actual NetBSD machine before considering issue #15's graceful-
-    shutdown requirement fully closed out end-to-end.
+12. **The flagged verification gap from this round's first pass was
+    real, and Thiesi's own NetBSD machine caught an actual test bug in
+    it — not just a hypothetical worth checking.** The first version
+    of `tests/test_signal_handler_registration_triggers_shutdown_event`
+    called `signal.getsignal(SIGTERM)` after `_install_signal_handlers`
+    ran, then invoked whatever it returned directly. That's only a
+    valid test of the Windows-only `signal.signal` fallback branch. On
+    real POSIX (confirmed by an actual `pytest` run on Thiesi's NetBSD
+    machine — a genuine `AssertionError`, not passed on faith),
+    `_install_signal_handlers` takes the `loop.add_signal_handler`
+    branch instead, which installs asyncio's own internal no-op C
+    handler and dispatches the real callback later via a self-pipe —
+    `signal.getsignal(SIGTERM)` in that case returns *asyncio's*
+    placeholder, not this module's `_request_shutdown`, so the test was
+    silently exercising the wrong code path on the one platform that
+    actually matters (NetBSD is the deployment target; the Windows dev
+    sandbox this was originally written in only ever exercises the
+    fallback). Exactly the "actually run it, don't just reason about
+    it" lesson this project has hit before (round 5's nested-`wait_for`
+    bug), this time catching a test bug via real cross-platform
+    execution rather than a code bug. **Fixed**, not worked around: the
+    test now calls `signal.raise_signal(SIGTERM)` — a genuine C-level
+    `raise()` — which correctly reaches whichever dispatch mechanism is
+    actually installed on either platform, and then waits on
+    `shutdown_event` for real, rather than asserting immediately.
+    Deliberately not `os.kill(os.getpid(), sig)`: on Windows, `os.kill`
+    with a real (non-zero) pid calls `TerminateProcess` instead of
+    delivering a handleable signal (confirmed by hand earlier this
+    round) — it would have killed the test process outright rather
+    than exercised the fallback branch. Re-verified passing on the
+    Windows dev sandbox with this fix; **still worth Thiesi re-running
+    `pytest` on the NetBSD machine once more** to confirm the fix
+    itself is correct there too, since this session's environment
+    can't do that confirmation directly.
 13. **README's run instructions rewritten** — the stale "minimal
     manual-test entry point" framing and positional `db_path` argument
     are gone, replaced with the config-file/CLI-flag invocation, a
