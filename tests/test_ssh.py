@@ -98,6 +98,50 @@ def test_password_auth_fails_with_wrong_password(db):
     asyncio.run(scenario())
 
 
+def test_password_auth_runs_off_the_event_loop_thread(db, monkeypatch):
+    """SSH authenticates during the handshake itself, via
+    SSHServer.validate_password — a separate code path from the
+    Telnet/web login flow in netbbs.net.login_flow, which asyncssh
+    awaits directly on the event loop. It must go through the same
+    bounded off-loop Argon2 path (netbbs.auth.users.authenticate_password_async),
+    not the synchronous authenticate_password, or a burst of SSH login
+    attempts would stall every other session exactly like the bug
+    issue #2 fixed for Telnet."""
+    import threading
+
+    from netbbs.auth import users
+
+    create_user(db, "alice", password="hunter2", user_level=10)
+    event_loop_thread = threading.get_ident()
+    verify_threads = []
+
+    real_verify_password = users.verify_password
+
+    def spying_verify_password(password, stored_hash):
+        verify_threads.append(threading.get_ident())
+        return real_verify_password(password, stored_hash)
+
+    monkeypatch.setattr(users, "verify_password", spying_verify_password)
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(db, handler)
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+            ) as conn:
+                async with conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None):
+                    pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert len(verify_threads) == 1
+    assert verify_threads[0] != event_loop_thread
+
+
 def test_public_key_auth_succeeds_with_registered_key(db):
     key = _client_key_for(db, "bob")
     calls = []
