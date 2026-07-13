@@ -45,15 +45,35 @@ class Database:
 
     def _apply_migrations(self) -> None:
         current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+        latest_version = len(MIGRATIONS)
+        if current_version > latest_version:
+            raise RuntimeError(
+                f"database schema version {current_version} is newer than this "
+                f"NetBBS build supports ({latest_version})"
+            )
+
         pending = MIGRATIONS[current_version:]
         for offset, migration in enumerate(pending):
             new_version = current_version + offset + 1
-            self.connection.executescript(migration.sql)
-            # PRAGMA doesn't support bound parameters; safe here because
-            # new_version is an int we computed ourselves, never
-            # user-supplied input.
-            self.connection.execute(f"PRAGMA user_version = {new_version}")
-            self.connection.commit()
+            # executescript() commits any transaction which was already open,
+            # so the transaction must be part of the script itself. Updating
+            # user_version before COMMIT keeps both schema changes and the
+            # recorded version in the same atomic unit.
+            script = (
+                "BEGIN IMMEDIATE;\n"
+                f"{migration.sql}\n"
+                f"PRAGMA user_version = {new_version};\n"
+                "COMMIT;"
+            )
+            try:
+                self.connection.executescript(script)
+            except sqlite3.Error:
+                # A failing statement leaves the explicit transaction open.
+                # Roll it back so no earlier statement in this migration is
+                # retained and the connection remains usable by callers/tests.
+                if self.connection.in_transaction:
+                    self.connection.rollback()
+                raise
 
     def close(self) -> None:
         self.connection.close()
