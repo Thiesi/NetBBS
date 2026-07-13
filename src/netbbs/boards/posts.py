@@ -120,14 +120,138 @@ def get_post(db: Database, post_id: str) -> Post:
     return _row_to_post(row)
 
 
-def list_posts(db: Database, board: Board, requesting_user: User) -> list[Post]:
-    """List all posts on `board`, oldest first, after checking the
-    requesting user meets the board's `min_read_level`."""
+_DEFAULT_PAGE_SIZE = 5
+
+PostCursor = tuple[str, str]  # (created_at, post_id) -- see PostPage/list_posts_page
+
+
+@dataclass(frozen=True)
+class PostPage:
+    """One bounded page of posts, always in chronological (oldest-
+    first) order *within the page* regardless of which direction it
+    was fetched from — matches normal top-to-bottom reading order on
+    screen, even though page selection itself works backward from the
+    newest post (see `list_posts_page`)."""
+
+    posts: list[Post]
+    has_older: bool
+    has_newer: bool
+
+
+def list_posts_page(
+    db: Database,
+    board: Board,
+    requesting_user: User,
+    *,
+    before: PostCursor | None = None,
+    after: PostCursor | None = None,
+    limit: int = _DEFAULT_PAGE_SIZE,
+) -> PostPage:
+    """
+    Fetch one bounded page of posts on `board` (design doc round 30,
+    issue #10) — never the whole board, however large its history.
+    Enforces `board.min_read_level`, same as the unbounded function
+    this replaces.
+
+    Ordering is `(created_at, post_id)`, ascending, with `post_id`
+    (globally unique, per design doc §7) as a deterministic tie-
+    breaker for the rare case of two posts sharing a `created_at`
+    timestamp — `created_at` alone is not a total order. Matches the
+    composite index `idx_posts_board_id_created_at_post_id`.
+
+    Cursor-based (keyset) pagination, not `OFFSET`/`LIMIT`: stable
+    under concurrent inserts (a new post arriving between two page
+    loads can't shift already-seen posts into an adjacent page or
+    duplicate one across pages, the way an offset-based page boundary
+    would), and doesn't pay an ever-growing `OFFSET` scan cost when
+    paging deep into an old board's history.
+
+    Three mutually exclusive modes, matching how a caller navigates:
+    - Neither `before` nor `after`: the **newest** page — the default
+      view when opening a board (design doc round 30, confirmed with
+      Thiesi over keeping the old oldest-first default: an active
+      board's most recent activity, not its oldest history, is what's
+      actually useful to see first).
+    - `before=(created_at, post_id)`: the page of up to `limit` posts
+      immediately *older* than that cursor — paging backward through
+      history. Callers pass the oldest post's cursor from the
+      currently displayed page.
+    - `after=(created_at, post_id)`: the page of up to `limit` posts
+      immediately *newer* than that cursor — paging forward, back
+      toward now. Callers pass the newest post's cursor from the
+      currently displayed page.
+
+    `has_older`/`has_newer` are computed with their own small indexed
+    existence checks against the page's actual boundary, not inferred
+    from which mode was requested — correct regardless of navigation
+    direction, including the empty-page edge case (both `False`),
+    rather than assuming (for example) "arrived via `before`, so
+    there's always something newer", which doesn't hold if the cursor
+    passed in was already at the newest post.
+    """
     require_level(requesting_user, board.min_read_level)
-    rows = db.connection.execute(
-        "SELECT * FROM posts WHERE board_id = ? ORDER BY created_at", (board.id,)
-    ).fetchall()
-    return [_row_to_post(row) for row in rows]
+    if before is not None and after is not None:
+        raise ValueError("specify at most one of before/after")
+
+    if after is not None:
+        created_at, post_id = after
+        rows = db.connection.execute(
+            """
+            SELECT * FROM posts
+            WHERE board_id = ? AND (created_at, post_id) > (?, ?)
+            ORDER BY created_at ASC, post_id ASC
+            LIMIT ?
+            """,
+            (board.id, created_at, post_id, limit),
+        ).fetchall()
+        posts = [_row_to_post(row) for row in rows]
+    elif before is not None:
+        created_at, post_id = before
+        rows = db.connection.execute(
+            """
+            SELECT * FROM posts
+            WHERE board_id = ? AND (created_at, post_id) < (?, ?)
+            ORDER BY created_at DESC, post_id DESC
+            LIMIT ?
+            """,
+            (board.id, created_at, post_id, limit),
+        ).fetchall()
+        posts = [_row_to_post(row) for row in reversed(rows)]
+    else:
+        rows = db.connection.execute(
+            """
+            SELECT * FROM posts
+            WHERE board_id = ?
+            ORDER BY created_at DESC, post_id DESC
+            LIMIT ?
+            """,
+            (board.id, limit),
+        ).fetchall()
+        posts = [_row_to_post(row) for row in reversed(rows)]
+
+    if not posts:
+        return PostPage(posts=[], has_older=False, has_newer=False)
+
+    oldest, newest = posts[0], posts[-1]
+    has_older = db.connection.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM posts
+            WHERE board_id = ? AND (created_at, post_id) < (?, ?)
+        )
+        """,
+        (board.id, oldest.created_at, oldest.post_id),
+    ).fetchone()[0]
+    has_newer = db.connection.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM posts
+            WHERE board_id = ? AND (created_at, post_id) > (?, ?)
+        )
+        """,
+        (board.id, newest.created_at, newest.post_id),
+    ).fetchone()[0]
+    return PostPage(posts=posts, has_older=bool(has_older), has_newer=bool(has_newer))
 
 
 def _row_to_post(row: sqlite3.Row) -> Post:

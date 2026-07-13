@@ -21,7 +21,7 @@ import asyncio
 from enum import Enum, auto
 
 from netbbs.auth.users import AuthError, User, authenticate_password_async
-from netbbs.boards import Board, create_post, list_boards, list_posts
+from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub
 from netbbs.moderation import is_blocked
@@ -372,33 +372,48 @@ async def _browse_boards_in_category(
 
 
 async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:
+    """
+    Show `board`, one bounded page of posts at a time (design doc round
+    30, issue #10) — never the whole board, however large its history.
+
+    Opens on the *newest* page, confirmed with Thiesi over keeping the
+    old oldest-first default: an active board's most recent activity is
+    what's actually useful to see on arrival, not its oldest history —
+    directly answers the original complaint that returning to a board
+    re-rendered everything, most of which was already read.
+    """
     board_name = sanitize_text(board.name)
-    posts = list_posts(db, board, user)
-    if not posts:
+    page = list_posts_page(db, board, user)
+    if not page.posts:
         await session.write_line(f"\r\n[{board_name}] has no posts yet.")
     else:
-        header = colored(f"[{board_name}]", fg_color=HEADER_COLOR, bold=True)
-        await session.write_line(f"\r\n{header}")
-        for post in posts:
-            when = format_for_display(post.created_at, db)
-            post_header = colored(
-                f"{sanitize_text(post.subject)} -- {sanitize_text(post.author_label)} ({when})",
-                fg_color=ACCENT_COLOR,
-            )
-            await session.write_line(f"\r\n{post_header}")
-            # Reflowed to this specific session's actual detected width
-            # (NAWS-negotiated, or the 80-column default — see
-            # netbbs.net.session.Session.terminal_width), not a fixed
-            # assumption, per the design doc's "must degrade gracefully
-            # above 40x24 minimum" requirement. Sanitized *before*
-            # reflow, not after — textwrap's width math counts raw
-            # characters, so a stray control byte would also throw off
-            # wrapping, not just be a display-safety concern.
-            # allow_newlines=True: a post body is genuinely multi-line
-            # content (paragraph breaks), unlike the single-line fields
-            # above -- see sanitize_text's docstring.
-            body = sanitize_text(post.body, allow_newlines=True)
-            await session.write_line(reflow(body, width=session.terminal_width))
+        while True:
+            await _render_post_page(session, db, board_name, page)
+
+            options = []
+            if page.has_older:
+                options.append(menu_key("O", "lder"))
+            if page.has_newer:
+                options.append(menu_key("N", "ewer"))
+                options.append(menu_key("R", "ecent"))
+            options.append(menu_key("B", "ack") + " (or Enter)")
+            await session.write_line(f"\r\n{'  '.join(options)}")
+            await session.write("Choice: ")
+            choice = (await session.read_key()).lower()
+            await session.write_line("")
+
+            if choice == "o" and page.has_older:
+                oldest = page.posts[0]
+                page = list_posts_page(db, board, user, before=(oldest.created_at, oldest.post_id))
+            elif choice == "n" and page.has_newer:
+                newest = page.posts[-1]
+                page = list_posts_page(db, board, user, after=(newest.created_at, newest.post_id))
+            elif choice == "r" and page.has_newer:
+                page = list_posts_page(db, board, user)
+            elif choice in ("", "b"):
+                break
+            else:
+                await session.write_line("Unknown choice.")
 
     if not meets_level(user, board.min_write_level):
         return
@@ -412,3 +427,27 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     body = (await session.read_line()).strip()
     post = create_post(db, board, user, subject, body)
     await session.write_line(f"Posted (id {post.post_id[:12]}...).")
+
+
+async def _render_post_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
+    header = colored(f"[{board_name}]", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    for post in page.posts:
+        when = format_for_display(post.created_at, db)
+        post_header = colored(
+            f"{sanitize_text(post.subject)} -- {sanitize_text(post.author_label)} ({when})",
+            fg_color=ACCENT_COLOR,
+        )
+        await session.write_line(f"\r\n{post_header}")
+        # Reflowed to this specific session's actual detected width
+        # (NAWS-negotiated, or the 80-column default — see
+        # netbbs.net.session.Session.terminal_width), not a fixed
+        # assumption, per the design doc's "must degrade gracefully
+        # above 40x24 minimum" requirement. Sanitized *before* reflow,
+        # not after — textwrap's width math counts raw characters, so a
+        # stray control byte would also throw off wrapping, not just be
+        # a display-safety concern. allow_newlines=True: a post body is
+        # genuinely multi-line content (paragraph breaks), unlike the
+        # single-line fields above -- see sanitize_text's docstring.
+        body = sanitize_text(post.body, allow_newlines=True)
+        await session.write_line(reflow(body, width=session.terminal_width))

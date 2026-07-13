@@ -134,7 +134,7 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
       - "volume": total post count, highest first.
 
     Deliberately does *not* filter by any requesting user's level here —
-    unlike `netbbs.boards.posts.list_posts`, which enforces
+    unlike `netbbs.boards.posts.list_posts_page`, which enforces
     `min_read_level` before returning anything. "List every board for an
     admin view" and "list boards a given user can actually read" are both
     legitimate, different needs built on this same function; filtering

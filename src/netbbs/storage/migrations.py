@@ -295,4 +295,25 @@ MIGRATIONS = [
         CREATE INDEX idx_files_area_id ON files(area_id);
         """,
     ),
+    Migration(
+        description=(
+            "Composite index matching the paginated post-listing query pattern "
+            "(design doc round 30, issue #10)."
+        ),
+        sql="""
+        -- netbbs.boards.posts.list_posts_page orders/filters by exactly
+        -- (board_id, created_at, post_id) -- this index lets SQLite
+        -- satisfy that with an index range scan instead of a full table
+        -- scan + sort. Deliberately left idx_posts_board_id (round 2's
+        -- migration) in place rather than dropping it in this same
+        -- migration: this composite index's leading column already
+        -- makes the single-column one redundant for query planning, but
+        -- dropping a shipped index is its own separate, non-urgent
+        -- cleanup with no user-visible benefit at this project's
+        -- declared scale (design doc §14) -- not worth bundling into a
+        -- migration whose actual point is adding the new index.
+        CREATE INDEX idx_posts_board_id_created_at_post_id
+            ON posts(board_id, created_at, post_id);
+        """,
+    ),
 ]

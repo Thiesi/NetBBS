@@ -14,12 +14,39 @@ class Database:
     """
     Thin wrapper around a single node's SQLite connection.
 
-    One `Database` instance = one node's local SQLite file. WAL mode is
-    enabled for the connection's whole lifetime so concurrent asyncio
-    readers (someone browsing a board) and writers (someone else posting)
-    don't block each other more than necessary — relevant once the design
-    doc §14 scale numbers (dozens–low hundreds of concurrent users) are
-    actually being exercised.
+    One `Database` instance = one node's local SQLite file, and — this
+    is the part worth being precise about, corrected in design doc
+    round 30/issue #10 after an earlier version of this docstring
+    overclaimed what WAL mode buys here — **exactly one `sqlite3.
+    Connection`, shared for the whole node's lifetime and used
+    synchronously.** WAL mode's real-world benefit (readers and writers
+    on *separate* connections not blocking each other) does not apply
+    within a single connection: every `self.connection.execute(...)`
+    call here is a direct, synchronous DB-API call with no `await`
+    around it, so it runs to completion — and blocks the entire asyncio
+    event loop, not just the calling coroutine — before any other
+    session's coroutine gets to run. Concurrent *sessions* using this
+    node are not concurrent *database access*; they're serialized by
+    Python's own cooperative scheduling, the same as any other
+    synchronous call made from a coroutine. This is fine at today's
+    declared scale (design doc §14: dozens–low hundreds of users, small
+    fast queries) but is the real bottleneck implied by "before
+    targeting low hundreds of users, consider a bounded connection
+    pool, database actor, or off-loop execution for expensive queries"
+    (issue #10's own recommended direction) — a genuinely separate,
+    larger design question than this round attempts, deliberately not
+    taken on here (see round 30's sign-off note for the full reasoning
+    on why pagination, not a connection-model rewrite, is this round's
+    actual scope).
+
+    WAL mode is still worth keeping despite the above: it *does* help
+    the one place multiple independent connections against the same
+    file realistically exist today — an admin/dev script (e.g.
+    `scripts/create_test_board.py`) opened against a database file
+    while the node process is also running against it, a second OS
+    process rather than a second coroutine in this one. `busy_timeout`
+    (below) is what actually keeps that scenario from surfacing as a
+    raw "database is locked" error.
     """
 
     def __init__(self, path: Path):
@@ -31,9 +58,11 @@ class Database:
         self._apply_migrations()
 
     def _configure_pragmas(self) -> None:
-        # Readers don't block writers and vice versa — see design doc
-        # §14's note that write contention is the predicted first real
-        # bottleneck at scale; WAL is the cheapest available mitigation.
+        # See this class's docstring for what WAL does and doesn't buy
+        # with a single shared connection -- kept for the separate-
+        # process case (an admin script run against a live node's
+        # database file), not for concurrency between sessions within
+        # this one process/connection.
         self.connection.execute("PRAGMA journal_mode = WAL")
         # SQLite ignores declared foreign keys by default unless this is
         # set on every connection that needs them enforced.
@@ -42,6 +71,15 @@ class Database:
         # WAL's own crash-safety guarantees make FULL's extra fsyncs
         # unnecessary overhead here.
         self.connection.execute("PRAGMA synchronous = NORMAL")
+        # Retry for up to 5s before raising "database is locked", rather
+        # than SQLite's default of failing immediately -- the concrete
+        # fix for the separate-process contention case described above
+        # (design doc round 30, issue #10's "configure busy_timeout").
+        # 5000ms is a conservative, commonly-used default; not
+        # separately benchmarked against this project's actual access
+        # patterns, since the scenario it protects is occasional
+        # (an admin script, not routine node operation), not a hot path.
+        self.connection.execute("PRAGMA busy_timeout = 5000")
 
     def _apply_migrations(self) -> None:
         current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]

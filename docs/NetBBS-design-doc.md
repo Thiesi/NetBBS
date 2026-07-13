@@ -2307,3 +2307,139 @@ visually differ from its actual content.
    spoofing of usernames/board names) and moderation-side content
    filtering — both real, separate concerns from terminal-injection
    safety, worth their own design pass if/when they matter.
+
+## Sign-off notes, round 30 (board post pagination + honest concurrency docs — implemented)
+
+Issue #10: `list_posts()` fetched a board's *entire* history on every
+visit and `_show_board()` rendered all of it, oldest first — an active
+board only grows less pleasant to open over time, and the `Database`
+class's own docstring overclaimed what WAL mode buys given this
+project's actual single-connection architecture.
+
+1. **Default view flipped to newest-first, a genuine UX fork confirmed
+   with Thiesi rather than assumed:** opening a board now jumps to its
+   most recent activity, not its oldest post. The issue's own framing
+   (an active board's *full history* being what's unpleasant to
+   re-render on every visit) pointed at this directly, but it's a real,
+   user-facing behavior change worth confirming explicitly rather than
+   deciding unilaterally.
+2. **`netbbs.boards.posts.list_posts_page()` replaces `list_posts()`
+   entirely** — not added alongside it. The old function had exactly
+   one production caller (`login_flow._show_board`, now updated) and
+   no other real dependents; keeping an unbounded query function
+   sitting in the module would just be a footgun for some future
+   caller to reach for instead of the bounded one. `tests/test_boards.
+   py`'s three `list_posts` call sites were migrated to the paginated
+   function rather than left broken.
+3. **Cursor-based (keyset) pagination, not `OFFSET`/`LIMIT`** —
+   deliberate, not the simpler default: stable under concurrent
+   inserts (a new post arriving between two page loads can't shift
+   already-seen posts into an adjacent page or duplicate one across
+   pages the way an offset-based boundary would) and avoids an
+   ever-growing `OFFSET` scan cost when paging deep into an old
+   board's history. Ordering is `(created_at, post_id)` ascending,
+   `post_id` breaking ties deterministically (per the issue's own
+   recommended direction) since `created_at` alone is not a total
+   order — genuinely exercised, not just theoretical: a test
+   deliberately forces two posts to share an identical timestamp and
+   confirms the query result is both correct (sorted by `post_id`) and
+   *repeatable* across separate query executions, not incidental row-
+   storage-order luck.
+4. **`has_older`/`has_newer` are computed with their own small indexed
+   `EXISTS` queries against the fetched page's actual boundary posts,
+   not inferred from which of the three fetch modes (newest/`before`/
+   `after`) was used.** An earlier, simpler design considered inferring
+   "arrived via `before`, so `has_newer` must be true" — rejected once
+   it became clear that doesn't hold if the cursor passed in was
+   already the newest post available. The `EXISTS` approach costs two
+   cheap indexed lookups per page but is correct in every case, including
+   the empty-page edge case, without needing to reason about caller
+   behavior at all.
+5. **New composite index** `idx_posts_board_id_created_at_post_id ON
+   posts(board_id, created_at, post_id)`, matching the acceptance
+   criteria's `(board_id, created_at, post_id)` example exactly, added
+   as a new migration (never editing a shipped one, per this project's
+   existing migration discipline). The old single-column
+   `idx_posts_board_id` (round 2) was deliberately *not* dropped in
+   the same migration — the new composite index's leading column
+   already makes it redundant for query planning, but dropping a
+   shipped index is its own separate, non-urgent cleanup with no
+   user-visible benefit at this project's declared scale (§14), not
+   worth bundling into a migration whose actual point is the new
+   index.
+6. **`Database`'s docstring corrected, resolving the acceptance
+   criterion directly** — round 2's original version claimed WAL lets
+   "concurrent asyncio readers and writers... not block each other
+   more than necessary," true of WAL in general but not of *this*
+   architecture: exactly one `sqlite3.Connection`, called
+   synchronously with no `await` around any query, meaning every
+   `self.connection.execute(...)` blocks the *entire event loop* — not
+   just the calling coroutine — until it returns. Concurrent sessions
+   are not concurrent database access; they're serialized by Python's
+   own cooperative scheduling, same as any other synchronous call from
+   a coroutine. Rewritten to say this plainly, while explaining WAL is
+   still worth keeping for the one place multiple genuinely independent
+   connections against the same file exist today: an admin/dev script
+   (e.g. `scripts/create_test_board.py`) run against a live node's
+   database file — a second OS process, not a second coroutine.
+7. **`PRAGMA busy_timeout = 5000` added**, directly answering the
+   issue's "configure busy_timeout" — the concrete fix for that same
+   separate-process scenario: without it, SQLite's default is to fail
+   a locked-database access immediately rather than retry, so a
+   momentary overlap between a running node and an admin script would
+   surface as a raw `OperationalError` instead of the script simply
+   waiting a moment. 5000ms is a conservative, commonly-used default,
+   not separately benchmarked — the scenario it protects is
+   occasional, not a hot path.
+8. **The larger architectural question the issue itself only asks to
+   be *considered* — "before targeting low hundreds of users, consider
+   a bounded connection pool, database actor, or off-loop execution
+   for expensive queries" — is deliberately not attempted this round.**
+   Documented honestly (point 6) as a real, current limitation rather
+   than silently ignored, but actually redesigning the connection
+   model is a substantially larger, riskier change than pagination,
+   and the issue's own phrasing scopes it as forward-looking
+   groundwork rather than a Phase 1 requirement. Worth its own
+   dedicated design round if/when the declared scale (§14) is actually
+   being approached.
+9. **Interactive navigation**: `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack`
+   (or a bare Enter), only offering the options that currently apply
+   (`has_older`/`has_newer`) — a single-page board shows only `[B]ack`,
+   matching the acceptance criterion that navigation supports "at
+   least next/previous and newest content" without cluttering the
+   prompt with dead options. `[R]ecent` exists specifically so a user
+   who's paged deep into old history isn't stuck pressing `[N]ewer`
+   repeatedly to get back to now.
+10. **Explicit non-goals, consistent with the issue's own scope:**
+    first-unread state — the issue itself says "eventually", and no
+    read-tracking exists anywhere yet to build it on. File area
+    listings (`netbbs.files.entries.list_files`) have the exact same
+    unbounded-fetch shape `list_posts` used to, but were never named
+    in issue #10's affected code — left as an explicitly flagged,
+    known gap (see that function's updated docstring) for a future
+    round rather than silently inconsistent or silently expanded
+    scope. Chat scrollback (`netbbs.chat.scrollback.get_scrollback`)
+    does *not* have this problem at all — it's already bounded by a
+    different, earlier mechanism (round 19/20's trim-on-insert
+    retention cap), confirmed while auditing the doc-comment that used
+    to compare it to `list_posts`.
+11. **Testing**: `tests/test_post_pagination.py` (10 cases: empty/
+    single-page boards, newest-page-default correctness, paging both
+    directions, a full backward traversal visiting every post exactly
+    once, the timestamp-tie determinism check, input validation, and
+    the composite index's existence) exercises `list_posts_page`
+    directly against a real SQLite database. `tests/test_board_
+    pagination_ui.py` (6 cases) drives the real `_show_board` loop
+    with a fake session to confirm the bounded-rendering acceptance
+    criterion concretely (a board with three pages' worth of posts
+    renders exactly one page's worth, not the whole thing) and that
+    `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` actually navigate rather
+    than being inert labels. `tests/test_storage.py` gained a
+    `busy_timeout` pragma-value check, matching this file's existing
+    `journal_mode`/`foreign_keys` test pattern. One real test-
+    construction bug caught and fixed during this round, not shipped:
+    an early version of a UI test matched post content via bare
+    substring (`"Subject 1" in output`), which false-positived against
+    `"Subject 10"`/`"Subject 12"` etc. once board sizes reached double
+    digits — fixed by matching the exact post-header separator
+    (`"Subject 1 --"`) instead.

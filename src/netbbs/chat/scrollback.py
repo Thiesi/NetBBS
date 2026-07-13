@@ -144,8 +144,12 @@ def record_message(
 
 def get_scrollback(db: Database, channel: Channel) -> list[ChannelMessage]:
     """Return `channel`'s retained scrollback, oldest first — the order a
-    user reading back through history would expect, matching
-    `netbbs.boards.posts.list_posts`."""
+    user reading back through history would expect. Unlike board posts
+    (`netbbs.boards.posts.list_posts_page`), this doesn't need its own
+    pagination: `record_message` already trims retained scrollback down
+    to `get_scrollback_limit(db)` on every insert (round 19/20), so
+    what's fetched here is already small and bounded by construction,
+    not by a query-time LIMIT."""
     rows = db.connection.execute(
         "SELECT * FROM channel_messages WHERE channel_id = ? ORDER BY id ASC",
         (channel.id,),

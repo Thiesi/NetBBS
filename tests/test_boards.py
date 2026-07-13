@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from netbbs.auth.users import create_user
+from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import BoardError, create_board, get_board_by_name, list_boards
-from netbbs.boards.posts import PostError, create_post, get_post, list_posts
+from netbbs.boards.posts import PostError, create_post, get_post, list_posts_page
 from netbbs.permissions import InsufficientLevelError
 from netbbs.storage.database import Database
 
@@ -229,12 +230,21 @@ def test_reply_to_parent_on_different_board_fails(db, alice):
         create_post(db, board_b, alice, "Re: Hello", "A reply", parent_post_id=parent.post_id)
 
 
-def test_list_posts_returns_all_in_order(db, alice):
+def test_list_posts_page_returns_all_in_order(db, alice, monkeypatch):
+    # Explicit, distinct timestamps -- real wall-clock calls in quick
+    # succession can land on the same microsecond (this is exactly what
+    # happened when this test was first written against real timing;
+    # post_id, the deterministic tie-breaker list_posts_page now uses
+    # for same-timestamp posts, doesn't preserve creation order, since
+    # it's a content hash -- see design doc round 30).
+    timestamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:00.000001Z"])
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
+
     board = create_board(db, "general", creator=alice)
     create_post(db, board, alice, "First", "1")
     create_post(db, board, alice, "Second", "2")
-    posts = list_posts(db, board, alice)
-    assert [p.subject for p in posts] == ["First", "Second"]
+    page = list_posts_page(db, board, alice)
+    assert [p.subject for p in page.posts] == ["First", "Second"]
 
 
 # -- level-gating ---------------------------------------------------------
@@ -255,11 +265,11 @@ def test_write_allowed_at_exact_min_write_level(db, bob):
 def test_read_blocked_below_min_read_level(db, alice, bob):
     board = create_board(db, "staff-only", min_read_level=50, creator=alice)
     with pytest.raises(InsufficientLevelError):
-        list_posts(db, board, bob)
+        list_posts_page(db, board, bob)
 
 
 def test_read_allowed_at_sufficient_level(db, alice):
     board = create_board(db, "general", min_read_level=5, creator=alice)
     create_post(db, board, alice, "Hello", "Body")
-    posts = list_posts(db, board, alice)
-    assert len(posts) == 1
+    page = list_posts_page(db, board, alice)
+    assert len(page.posts) == 1

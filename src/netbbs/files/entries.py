@@ -128,8 +128,15 @@ def get_file(db: Database, file_id: str) -> FileEntry:
 
 def list_files(db: Database, area: FileArea, requesting_user: User) -> list[FileEntry]:
     """List all files in `area`, oldest first, after checking the
-    requesting user meets the area's `min_read_level` — mirrors
-    `netbbs.boards.posts.list_posts` exactly."""
+    requesting user meets the area's `min_read_level`.
+
+    Structurally identical to (and, before design doc round 30/issue
+    #10, mirrored) `netbbs.boards.posts`'s old unbounded `list_posts` —
+    unlike posts, file areas were **not** in scope for round 30's
+    pagination fix (issue #10 named board posts specifically). This
+    function has the same unbounded-growth exposure `list_posts` had;
+    left as a known, explicitly-flagged gap for a future round rather
+    than silently inconsistent with how posts now work."""
     require_level(requesting_user, area.min_read_level)
     rows = db.connection.execute(
         "SELECT * FROM files WHERE area_id = ? ORDER BY created_at", (area.id,)

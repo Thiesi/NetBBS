@@ -52,7 +52,11 @@ class FakeSession:
         return next(self._lines, "")
 
     async def read_key(self, echo: bool = True) -> str:
-        return next(self._keys)
+        # Falls back to "" once scripted keys run out -- for the board
+        # post-page navigation loop, "" is treated the same as "b"
+        # (back), so a test that doesn't care about paginating further
+        # doesn't need to script an explicit exit keystroke.
+        return next(self._keys, "")
 
     @property
     def output(self) -> str:

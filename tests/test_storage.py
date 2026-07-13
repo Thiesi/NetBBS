@@ -30,6 +30,17 @@ def test_database_enables_foreign_keys(tmp_path):
     db.close()
 
 
+def test_database_configures_busy_timeout(tmp_path):
+    """Design doc round 30, issue #10: retries on a locked database
+    (e.g. an admin script opening the same file the node process has
+    open) rather than failing immediately, which is SQLite's default
+    with no busy_timeout configured."""
+    db = Database(tmp_path / "node.db")
+    timeout_ms = db.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout_ms == 5000
+    db.close()
+
+
 def test_migrations_bring_user_version_to_latest(tmp_path):
     from netbbs.storage.migrations import MIGRATIONS
 
