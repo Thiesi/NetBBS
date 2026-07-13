@@ -38,7 +38,19 @@ class FakeSession:
         self.written.append(text + "\n")
 
     async def read_key(self, echo: bool = True) -> str:
-        return next(self._keys, "")
+        # Deliberately raises rather than falling back to "" once
+        # scripted keys run out: real transports never return "" from
+        # read_key() (Enter/CR/LF are discarded, not returned as a key —
+        # see netbbs.net.char_input.read_key), and _show_board no longer
+        # treats "" as an implicit "back" the way its old dead code path
+        # once did. Silently returning "" forever here would just trade
+        # one bug for another -- an under-scripted test hanging in an
+        # infinite loop instead of failing clearly. A test that actually
+        # needs the loop to end must script an explicit "b".
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_line(self, echo: bool = True) -> str:
         return next(self._lines, "")
@@ -62,7 +74,7 @@ def test_opening_a_multi_page_board_shows_only_the_newest_page(tmp_path, monkeyp
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 3 + 2
     board, user = _make_board_with_posts(db, total, monkeypatch)
-    session = FakeSession()  # no keys queued -> falls back to "" (back) immediately
+    session = FakeSession(keys=["b"])  # view the newest page, then back out
 
     asyncio.run(_show_board(session, db, board, user))
 
@@ -87,7 +99,7 @@ def test_older_key_navigates_to_the_previous_page(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 2
     board, user = _make_board_with_posts(db, total, monkeypatch)
-    session = FakeSession(keys=["o"])  # view newest page, go older, then fall back to "" (back)
+    session = FakeSession(keys=["o", "b"])  # view newest page, go older, then back out
 
     asyncio.run(_show_board(session, db, board, user))
 
@@ -105,7 +117,7 @@ def test_recent_key_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch
     # Page back twice, then jump straight to "recent" -- if this only
     # moved one page forward instead of jumping all the way, the
     # newest subject wouldn't be the last thing rendered.
-    session = FakeSession(keys=["o", "o", "r"])
+    session = FakeSession(keys=["o", "o", "r", "b"])
 
     asyncio.run(_show_board(session, db, board, user))
 
@@ -119,7 +131,7 @@ def test_recent_key_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch
 def test_single_page_board_offers_no_older_newer_recent_options(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     board, user = _make_board_with_posts(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession()
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_show_board(session, db, board, user))
 

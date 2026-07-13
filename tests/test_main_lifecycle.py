@@ -45,6 +45,32 @@ async def _run_until_ready_then_shut_down(config, ready_delay=0.1):
     await task
 
 
+async def _open_connection_when_ready(host: str, port: int, *, timeout: float = 5.0):
+    """
+    Repeatedly attempts a connection instead of assuming a fixed delay is
+    enough to have started it.
+
+    `run()` opens the database and applies every migration synchronously,
+    with no `await` in between (see `Database.__init__`/
+    `_apply_migrations`), before a listener ever gets a chance to bind --
+    real disk I/O for that can legitimately take longer than a guessed
+    sleep on some hardware. A fixed `asyncio.sleep(0.1)`-then-connect here
+    previously passed reliably on the Windows dev sandbox but failed with
+    `ConnectionRefusedError` on real NetBSD hardware. Treating a refused
+    connection as "not listening yet, try again" rather than picking a
+    bigger fixed delay avoids just moving the same race to whatever
+    machine is slower next.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        try:
+            return await asyncio.open_connection(host, port)
+        except (ConnectionRefusedError, OSError):
+            if asyncio.get_event_loop().time() >= deadline:
+                raise
+            await asyncio.sleep(0.02)
+
+
 # -- listeners actually start and are reachable ------------------------------
 
 
@@ -53,9 +79,8 @@ def test_configured_telnet_listener_on_known_port_accepts_connections(tmp_path):
         config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12399))
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
-        await asyncio.sleep(0.1)
         try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", 12399)
+            reader, writer = await _open_connection_when_ready("127.0.0.1", 12399)
             data = await reader.readexactly(1)  # first byte of Telnet negotiation
             assert data == b"\xff"  # IAC
             writer.close()
@@ -75,11 +100,10 @@ def test_shutdown_stops_listeners_and_closes_database(tmp_path):
         config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12398))
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
-        await asyncio.sleep(0.1)
 
         # Confirm it's actually up before shutting down, so a false
         # "shutdown worked" isn't just "it was never listening at all".
-        reader, writer = await asyncio.open_connection("127.0.0.1", 12398)
+        reader, writer = await _open_connection_when_ready("127.0.0.1", 12398)
         writer.close()
         await writer.wait_closed()
 

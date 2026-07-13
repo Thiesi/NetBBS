@@ -55,7 +55,7 @@ def _naws_subneg(width: int, height: int) -> bytes:
     return bytes([IAC, SB, NAWS]) + bytes(escaped) + bytes([IAC, SE])
 
 
-# -- empty list / basic selection / quit -------------------------------
+# -- empty list / basic selection / back --------------------------------
 
 
 def test_empty_list_shows_message_and_returns_none():
@@ -109,7 +109,7 @@ def test_select_by_two_digit_number():
     assert result["value"] == "beta"
 
 
-def test_quit_returns_none():
+def test_back_returns_none():
     result = {}
     items = ["alpha", "beta"]
 
@@ -124,7 +124,7 @@ def test_quit_returns_none():
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
             await reader.readexactly(9)
             await _read_until_quiet(reader)
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -136,7 +136,7 @@ def test_quit_returns_none():
     assert result["value"] is None
 
 
-def test_invalid_two_digit_selection_shows_error_and_stays_in_picker():
+def test_invalid_two_digit_selection_sounds_bell_and_stays_in_picker():
     result = {}
     items = ["a", "b"]
 
@@ -154,7 +154,11 @@ def test_invalid_two_digit_selection_shows_error_and_stays_in_picker():
             writer.write(b"99")  # only 2 items exist
             await writer.drain()
             data = await _read_until_quiet(reader)
-            assert b"Invalid selection." in data
+            # No redraw, no error message -- just a bell (design doc:
+            # "no redraw on invalid single-keystroke menu input").
+            assert b"\a" in data
+            assert b"Invalid selection." not in data
+            assert b"(page " not in data  # the page/nav block wasn't redrawn
             writer.write(b"01")
             await writer.drain()
             await _read_until_quiet(reader)
@@ -167,7 +171,7 @@ def test_invalid_two_digit_selection_shows_error_and_stays_in_picker():
     assert result["value"] == "a"
 
 
-def test_unknown_command_letter_shows_error_and_stays_in_picker():
+def test_unknown_command_letter_sounds_bell_and_stays_in_picker():
     result = {}
     items = ["a"]
 
@@ -185,8 +189,11 @@ def test_unknown_command_letter_shows_error_and_stays_in_picker():
             writer.write(b"z")
             await writer.drain()
             data = await _read_until_quiet(reader)
-            assert b"Unknown command." in data
-            writer.write(b"q")
+            # No redraw, no error message -- just a bell.
+            assert b"\a" in data
+            assert b"Unknown command." not in data
+            assert b"(page " not in data
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -286,7 +293,7 @@ def test_search_no_matches_reports_and_stays_in_picker():
             await writer.drain()
             data = await _read_until_quiet(reader)
             assert b"No matches." in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -320,7 +327,7 @@ def test_empty_search_clears_active_filter():
             await writer.drain()
             data = await _read_until_quiet(reader)
             assert b"3 total" in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -417,7 +424,7 @@ def test_goto_out_of_range_reports_and_stays_in_picker():
             await writer.drain()
             data = await _read_until_quiet(reader)
             assert b"Out of range." in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -451,7 +458,7 @@ def test_goto_non_numeric_input_reports_and_stays_in_picker():
             await writer.drain()
             data = await _read_until_quiet(reader)
             assert b"Not a number." in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -515,7 +522,7 @@ def test_pagination_adapts_to_negotiated_terminal_height():
     assert result["value"] == "item08"
 
 
-def test_prev_on_first_page_shows_notice_and_stays_in_picker():
+def test_prev_on_first_page_sounds_bell_and_stays_in_picker():
     result = {}
     items = ["a", "b"]
 
@@ -533,8 +540,12 @@ def test_prev_on_first_page_shows_notice_and_stays_in_picker():
             writer.write(b"p")
             await writer.drain()
             data = await _read_until_quiet(reader)
-            assert b"Already on the first page." in data
-            writer.write(b"q")
+            # No redraw, no notice message -- just a bell (nothing about
+            # the page actually changed).
+            assert b"\a" in data
+            assert b"Already on the first page." not in data
+            assert b"(page " not in data
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -546,7 +557,7 @@ def test_prev_on_first_page_shows_notice_and_stays_in_picker():
     assert result["value"] is None
 
 
-def test_next_on_last_page_shows_notice_and_stays_in_picker():
+def test_next_on_last_page_sounds_bell_and_stays_in_picker():
     result = {}
     items = ["a", "b"]
 
@@ -564,8 +575,12 @@ def test_next_on_last_page_shows_notice_and_stays_in_picker():
             writer.write(b"n")  # already on (only) last page with default-size terminal
             await writer.drain()
             data = await _read_until_quiet(reader)
-            assert b"Already on the last page." in data
-            writer.write(b"q")
+            # No redraw, no notice message -- just a bell (nothing about
+            # the page actually changed).
+            assert b"\a" in data
+            assert b"Already on the last page." not in data
+            assert b"(page " not in data
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -691,7 +706,7 @@ def test_stable_absolute_index_is_displayed_alongside_page_relative_number():
             data = await _read_until_quiet(reader)
             assert b"01. (#1) item1" in data
             assert b"02. (#2) item2" in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -725,7 +740,7 @@ def test_stable_index_correct_on_second_page():
             writer.write(b"n")
             await writer.drain()
             data = await _read_until_quiet(reader)
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()
@@ -811,7 +826,7 @@ def test_display_shows_caller_supplied_stable_id_not_position():
             # and position 2 ("02.") shows stable ID 7, not "2".
             assert b"01. (#205) gamma" in data
             assert b"02. (#7) alpha" in data
-            writer.write(b"q")
+            writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
             writer.close()

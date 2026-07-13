@@ -52,10 +52,11 @@ class FakeSession:
         return next(self._lines, "")
 
     async def read_key(self, echo: bool = True) -> str:
-        # Falls back to "" once scripted keys run out -- for the board
-        # post-page navigation loop, "" is treated the same as "b"
-        # (back), so a test that doesn't care about paginating further
-        # doesn't need to script an explicit exit keystroke.
+        # Falls back to "" once scripted keys run out. Note this is *not*
+        # treated as "b" (back) by production code (real transports never
+        # return "" from read_key() at all) -- tests using this fake must
+        # script an explicit trailing "b" to actually exit a choice loop,
+        # or risk an infinite loop of unrecognized-key bells.
         return next(self._keys, "")
 
     @property
@@ -93,7 +94,10 @@ def test_board_post_subject_body_and_author_are_sanitized(tmp_path):
     # write and will hit the trailing "post a new message?" prompt --
     # FakeSession.read_line() falls back to "" (skip) once past the
     # single scripted answer needed for the post-listing output above it.
-    session = FakeSession()
+    # The single post means the choice loop offers only [B]ack, so an
+    # explicit "b" is needed to get past it (read_key() no longer treats
+    # an exhausted "" the same way).
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_show_board(session, db, board, hostile_user))
 
@@ -118,7 +122,7 @@ def test_picker_sanitizes_hostile_names_and_descriptions(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     boards = [create_board(db, HOSTILE, description=HOSTILE, creator=user)]
-    session = FakeSession(keys=["q"])
+    session = FakeSession(keys=["b"])
 
     async def scenario():
         return await pick_item(
@@ -145,7 +149,7 @@ def test_pickers_own_trusted_ansi_styling_survives_sanitization(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     boards = [create_board(db, "Ordinary Board Name", creator=user)]
-    session = FakeSession(keys=["q"])
+    session = FakeSession(keys=["b"])
 
     async def scenario():
         await pick_item(
@@ -216,7 +220,7 @@ def test_file_area_listing_sanitizes_filename_description_and_uploader(tmp_path)
     area = create_file_area(db, "downloads", creator=user)
     upload_file(db, area, user, HOSTILE, b"file contents", description=HOSTILE)
 
-    session = FakeSession(lines=[""])  # Enter at the trailing command prompt -> go back
+    session = FakeSession(lines=["b"])  # back out of the one-page listing
 
     asyncio.run(_show_area(session, db, area, user))
 

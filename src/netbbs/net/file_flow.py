@@ -124,6 +124,29 @@ def _format_size(size_bytes: int) -> str:
         size /= 1024
 
 
+async def _render_area_page(
+    session: Session, db: Database, area_name: str, page: FileEntryPage, *, can_write: bool
+) -> None:
+    """Renders one page of files plus its navigation options and command
+    hints — the unit that should be redrawn on an actual page change
+    (initial entry, Older/Newer/Recent), not on every loop iteration
+    regardless of whether anything changed."""
+    await _render_file_page(session, db, area_name, page)
+    options = []
+    if page.has_older:
+        options.append(menu_key("O", "lder"))
+    if page.has_newer:
+        options.append(menu_key("N", "ewer"))
+        options.append(menu_key("R", "ecent"))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(f"\r\n{'  '.join(options)}")
+
+    hints = [menu_key("/download <filename>", " — receive via Zmodem")]
+    if can_write:
+        hints.append(menu_key("/upload", " — send via Zmodem"))
+    await session.write_line("  ".join(hints))
+
+
 async def _show_area(session: Session, db: Database, area: FileArea, user: User) -> None:
     """
     Show `area`, one bounded page of files at a time (design doc round
@@ -131,7 +154,10 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     pagination) — mirrors `netbbs.net.login_flow._show_board`'s
     pagination *semantics* exactly: same newest-first default, same
     `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` options, same reasoning for
-    both (see that function's docstring, not repeated here).
+    both (see that function's docstring, not repeated here) — including
+    only redrawing the listing on an actual page change, and `b` (not a
+    bare Enter, which used to also work here but no longer does) as the
+    one consistent way back.
 
     One deliberate mechanical difference from `_show_board`, not an
     inconsistency: this reads the choice via `read_line()`, not
@@ -155,35 +181,24 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
+        await _render_area_page(session, db, area_name, page, can_write=can_write)
         while True:
-            await _render_file_page(session, db, area_name, page)
-
-            options = []
-            if page.has_older:
-                options.append(menu_key("O", "lder"))
-            if page.has_newer:
-                options.append(menu_key("N", "ewer"))
-                options.append(menu_key("R", "ecent"))
-            options.append(menu_key("B", "ack") + " (or Enter)")
-            await session.write_line(f"\r\n{'  '.join(options)}")
-
-            hints = [menu_key("/download <filename>", " — receive via Zmodem")]
-            if can_write:
-                hints.append(menu_key("/upload", " — send via Zmodem"))
-            await session.write_line("  ".join(hints))
             await session.write("Choice or command: ")
             choice = (await session.read_line()).strip()
 
-            if choice == "" or choice.lower() == "b":
+            if choice.lower() == "b":
                 break
             elif choice.lower() == "o" and page.has_older:
                 oldest = page.entries[0]
                 page = list_files_page(db, area, user, before=(oldest.created_at, oldest.file_id))
+                await _render_area_page(session, db, area_name, page, can_write=can_write)
             elif choice.lower() == "n" and page.has_newer:
                 newest = page.entries[-1]
                 page = list_files_page(db, area, user, after=(newest.created_at, newest.file_id))
+                await _render_area_page(session, db, area_name, page, can_write=can_write)
             elif choice.lower() == "r" and page.has_newer:
                 page = list_files_page(db, area, user)
+                await _render_area_page(session, db, area_name, page, can_write=can_write)
             elif choice.lower() == "/upload" and can_write:
                 await _handle_upload(session, db, area, user)
                 return
@@ -192,7 +207,7 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
                 await _handle_download(session, db, area, filename, user)
                 return
             else:
-                await session.write_line("Unknown choice.")
+                await session.write("\a")
         return
 
     if not can_write:

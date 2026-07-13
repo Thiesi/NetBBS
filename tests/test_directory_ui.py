@@ -33,7 +33,15 @@ class FakeSession:
         self.written.append(text + "\n")
 
     async def read_key(self, echo: bool = True) -> str:
-        return next(self._keys, "")
+        # Deliberately raises rather than falling back to "" once
+        # scripted keys run out -- real transports never return "" from
+        # read_key() (see netbbs.net.char_input.read_key), so silently
+        # returning it forever here would just trade an under-scripted
+        # test hanging in an infinite loop for a clear, fast failure.
+        key = next(self._keys, None)
+        if key is None:
+            raise AssertionError("FakeSession.read_key() called with no more scripted keys")
+        return key
 
     async def read_line(self, echo: bool = True) -> str:
         return next(self._lines, "")
@@ -50,7 +58,7 @@ def test_browse_directory_lists_all_users(tmp_path):
     db = Database(tmp_path / "node.db")
     viewer = create_user(db, "alice", password="hunter2", user_level=10)
     create_user(db, "bob", password="hunter2", user_level=10)
-    session = FakeSession(keys=["q"])  # quit the picker without selecting
+    session = FakeSession(keys=["b"])  # back out of the picker without selecting
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -63,7 +71,7 @@ def test_browse_directory_shows_private_bio_state_by_default(tmp_path):
     db = Database(tmp_path / "node.db")
     viewer = create_user(db, "alice", password="hunter2", user_level=10)
     create_user(db, "bob", password="hunter2", user_level=10)
-    session = FakeSession(keys=["q"])
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -77,7 +85,7 @@ def test_browse_directory_shows_public_bio_state_once_visible(tmp_path):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
     set_bio(db, bob, "Hi there")
     set_bio_visible(db, bob, True)
-    session = FakeSession(keys=["q"])
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -121,7 +129,7 @@ def test_directory_of_one_still_lists_the_viewer_themselves(tmp_path):
     # a single-entry directory still renders and quits cleanly.
     db = Database(tmp_path / "node.db")
     viewer = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["q"])
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_browse_directory(session, db, viewer))
 
@@ -135,7 +143,7 @@ def test_directory_of_one_still_lists_the_viewer_themselves(tmp_path):
 def test_edit_profile_shows_current_state(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=[""])  # blank -> back
+    session = FakeSession(keys=["b"])
 
     asyncio.run(_edit_profile(session, db, user))
 
@@ -147,7 +155,7 @@ def test_edit_profile_shows_current_state(tmp_path):
 def test_edit_profile_bio_updates_stored_bio(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["e"], lines=["Hi, I'm Alice.", "I collect old modems.", ""])
+    session = FakeSession(keys=["e", "b"], lines=["Hi, I'm Alice.", "I collect old modems.", ""])
 
     asyncio.run(_edit_profile(session, db, user))
 
@@ -158,7 +166,7 @@ def test_edit_profile_bio_blank_first_line_clears_it(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_bio(db, user, "Old bio")
-    session = FakeSession(keys=["e"], lines=[""])
+    session = FakeSession(keys=["e", "b"], lines=[""])
 
     asyncio.run(_edit_profile(session, db, user))
 
@@ -168,7 +176,7 @@ def test_edit_profile_bio_blank_first_line_clears_it(tmp_path):
 def test_edit_profile_visibility_toggles_from_private_to_public(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(keys=["v"])
+    session = FakeSession(keys=["v", "b"])
 
     asyncio.run(_edit_profile(session, db, user))
 
@@ -179,7 +187,7 @@ def test_edit_profile_visibility_toggles_from_public_to_private(tmp_path):
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     set_bio_visible(db, user, True)
-    session = FakeSession(keys=["v"])
+    session = FakeSession(keys=["v", "b"])
 
     asyncio.run(_edit_profile(session, db, user))
 

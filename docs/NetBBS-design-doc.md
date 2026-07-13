@@ -3404,3 +3404,98 @@ commit/push checkpoint.** Remaining Track 5 scope: 5d (channel
 switching: `/join`, `/leave` redefined, `/topic`), 5e (private
 messaging: `/msg`, `/private`, `/close`), 5f (completion), 5g
 (invite-only/hidden channels).
+
+## Sign-off notes, round 44 (menu/navigation UX consistency — implemented)
+
+Prompted by Thiesi actually testing the current build and raising a batch
+of small, real UX inconsistencies — plus a separately-reported flaky test
+on Thiesi's NetBSD hardware, fixed in the same pass since it surfaced
+first.
+
+1. **Flaky test fixed, not just noted:**
+   `tests/test_main_lifecycle.py`'s Telnet-listener-reachability tests
+   raced a fixed `asyncio.sleep(0.1)` against `Database.__init__`'s fully
+   synchronous startup (opening the file plus all 20 migrations, no
+   `await` anywhere in between) — reliable on the Windows dev sandbox,
+   but failed with `ConnectionRefusedError` on Thiesi's real NetBSD
+   hardware, the same "wall-clock timing between two nearby operations"
+   hazard rounds 20/28 already hit elsewhere. Fixed with a bounded
+   retry-connect loop (`_open_connection_when_ready`) instead of a bigger
+   guessed delay, which would only move the same race to whatever machine
+   is slower next.
+2. **"Boards" → "Message Boards" everywhere user-facing**, matching
+   "File Areas"' full-name convention (main menu label, board-picker
+   title/empty-message). The main menu's `[B]oards` hotkey itself is
+   unchanged — rendered as `Message [B]oards` rather than switching the
+   highlighted letter to `M`, to avoid quietly changing a keybinding
+   nobody asked to change as a side effect of a label rename.
+3. **`[Q]uit` → `[B]ack`, scoped to `netbbs.net.picker.pick_item` only —
+   both the label and the actual keystroke, confirmed with Thiesi after
+   inventorying every place "quit"/"back"/"Enter" appears in the UI.**
+   The picker's `[Q]uit` was the one genuine mislabeling (it exits a
+   list without ending anything, same as every other `[B]ack` screen);
+   chat's typed `/quit` command and the main menu's `[L]ogoff` both
+   genuinely end something (chat participation; the connection) and were
+   confirmed to stay as-is — renaming `/quit` specifically would be a
+   functional/muscle-memory change, not a cosmetic one, and would blur
+   against Track 5d's upcoming `/leave` (a different action: back to the
+   channel picker, not out of chat entirely).
+4. **No redraw and no error message on an invalid single-keystroke menu
+   choice — a silent bell (`\a`) instead.** A holdover from the
+   pre-round-15 line-mode menu, no longer meaningful once dispatch is
+   immediate (single-keystroke `read_key()`): reprinting an entire
+   menu/page plus "Unknown choice" just because one stray key didn't
+   match anything. Fixed by separating "draw the menu/page" from
+   "prompt for a choice" in `_main_menu`, `pick_item`, `_show_board`, and
+   `_show_area` (the latter two weren't explicitly named in the original
+   report but have the identical pattern, caught while fixing the
+   others) — drawing now happens once on entry and again only after a
+   real state change (returning from a submenu, paging, a completed
+   search), never on a no-op keystroke. A sub-prompt a user deliberately
+   typed into (`pick_item`'s `search`/`goto`) still gets its own specific
+   text response on failure ("No matches.", "Not a number.") — a direct
+   answer to a specific question, unlike a stray top-level keystroke.
+5. **`_edit_profile` had a real, separate bug, found while checking the
+   "(or Enter)" claim below, not just a stale label:** it had no
+   `else`/unknown-choice branch at all, so any key that wasn't `e`/`v` —
+   not just `b` — silently exited back to the main menu. Fixed by
+   restructuring it into a loop (redrawing the profile after an edit or
+   toggle, same shape as the other screens above) with an explicit
+   `b`-only back check.
+6. **`_show_board`'s and `_edit_profile`'s "Back (or Enter)" label was
+   false — confirmed by reading the code, not just the report:**
+   `read_key()` never returns an empty string for Enter on any transport
+   (Telnet/SSH/Web all discard CR/LF internally and keep waiting for a
+   real keystroke) — `_show_board`'s old `elif choice in ("", "b")` had a
+   dead `""` branch that could never fire. Text removed from both;
+   `_show_area` (which reads its choice via `read_line()`, not
+   `read_key()`, since it also has to accept free-text `/download`/
+   `/upload`) genuinely *did* accept a bare Enter as "back" before this
+   round — removed there too for the same one-consistent-key reason,
+   confirmed with Thiesi as a deliberate extension of the principle
+   rather than left as a working exception.
+7. **A real, previously-latent test bug found and fixed, not just
+   papered over:** several `FakeSession` test doubles (in
+   `tests/test_board_pagination_ui.py`, `test_file_area_pagination_ui.py`,
+   `test_directory_ui.py`, `test_terminal_sanitization.py`) returned `""`
+   once their scripted keys ran out, and multiple tests silently relied
+   on the *old* `_show_board`/`_edit_profile`/picker code treating that
+   `""` the same as `"b"` — dead code for any real transport (confirmed
+   above), but load-bearing for these tests. Removing that dead branch as
+   part of point 4 turned those tests into infinite loops instead of
+   clean passes/failures, caught because the run hung rather than
+   finished. Fixed by scripting an explicit trailing `"b"` in every
+   affected test, and — in the two files where `read_key()` has no other
+   legitimate reason to return `""` — hardening the fake to raise a clear
+   `AssertionError` on exhaustion instead of looping forever, so a future
+   under-scripted test fails fast rather than hanging (left unchanged in
+   `test_terminal_sanitization.py`, where the same fake's `read_line()`
+   legitimately still relies on an `""` fallback for an unrelated
+   optional-prompt skip case, and blanket-raising there would conflate
+   the two).
+8. **Testing:** full suite re-run after every fix in this round
+   (771 passed, 1 skipped, unchanged from before — this round touched
+   behavior and test fixtures, not test count) — actually run, not just
+   syntax-checked, including the specific hung-test scenario reproduced
+   and confirmed fixed before moving on, not just assumed fixed from
+   reading the diff.

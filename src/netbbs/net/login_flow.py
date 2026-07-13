@@ -168,6 +168,21 @@ async def handle_session(
     await session.write_line("\r\nGoodbye!")
 
 
+async def _draw_main_menu(session: Session) -> None:
+    header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join(
+        [
+            f"Message {menu_key('B', 'oards')}",
+            menu_key("C", "hat"),
+            menu_key("F", "ile areas"),
+            menu_key("D", "irectory"),
+            menu_key("P", "rofile"),
+            menu_key("L", "ogoff"),
+        ]
+    )
+    await session.write_line(f"\r\n{header} {options}")
+
+
 async def _main_menu(
     session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, user: User
 ) -> None:
@@ -182,20 +197,16 @@ async def _main_menu(
     keep that — the whole point is acting on the very first keystroke,
     with no way to know whether more characters are about to follow.
     Only the single letter works now.
+
+    The menu is drawn once on entry and again after returning from a
+    submenu (a real context change worth re-showing), not on every loop
+    iteration — a holdover from the old line-mode menu that no longer
+    makes sense once dispatch is immediate. An unrecognized key doesn't
+    redraw or print an error message; there's no line to re-type or
+    correct, so it just sounds a bell and re-prompts.
     """
+    await _draw_main_menu(session)
     while True:
-        header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
-        options = "  ".join(
-            [
-                menu_key("B", "oards"),
-                menu_key("C", "hat"),
-                menu_key("F", "ile areas"),
-                menu_key("D", "irectory"),
-                menu_key("P", "rofile"),
-                menu_key("L", "ogoff"),
-            ]
-        )
-        await session.write_line(f"\r\n{header} {options}")
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
         await session.write_line("")  # move to a fresh line after the single-key echo
@@ -204,16 +215,21 @@ async def _main_menu(
             return
         elif choice == "b":
             await _browse_boards(session, db, user)
+            await _draw_main_menu(session)
         elif choice == "c":
             await browse_channels(session, db, hub, presence, user)
+            await _draw_main_menu(session)
         elif choice == "f":
             await browse_file_areas(session, db, user)
+            await _draw_main_menu(session)
         elif choice == "d":
             await _browse_directory(session, db, user)
+            await _draw_main_menu(session)
         elif choice == "p":
             await _edit_profile(session, db, user)
+            await _draw_main_menu(session)
         else:
-            await session.write_line("Unknown choice.")
+            await session.write("\a")
 
 
 async def _login(
@@ -364,8 +380,8 @@ async def _browse_boards_in_category(
             name_of=lambda b: b.name,
             stable_id_of=lambda b: b.id,
             description_of=lambda b: b.description,
-            title="Available boards",
-            empty_message="No boards are available to you yet.",
+            title="Available message boards",
+            empty_message="No message boards are available to you yet.",
         )
         if board is not None:
             await _show_board(session, db, board, user)
@@ -390,8 +406,8 @@ async def _browse_boards_in_category(
         name_of=render_name,
         stable_id_of=stable_id,
         description_of=render_description,
-        title="Available boards",
-        empty_message="No boards are available to you yet.",
+        title="Available message boards",
+        empty_message="No message boards are available to you yet.",
     )
     if selected is None:
         return
@@ -400,6 +416,22 @@ async def _browse_boards_in_category(
         await _browse_boards_in_category(session, db, user, category_id=selected.id)
     else:
         await _show_board(session, db, selected, user)
+
+
+async def _render_board_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
+    """Renders one page of posts plus its navigation options — the unit
+    that should be redrawn on an actual page change (initial entry,
+    Older/Newer/Recent), not on every loop iteration regardless of
+    whether anything changed."""
+    await _render_post_page(session, db, board_name, page)
+    options = []
+    if page.has_older:
+        options.append(menu_key("O", "lder"))
+    if page.has_newer:
+        options.append(menu_key("N", "ewer"))
+        options.append(menu_key("R", "ecent"))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(f"\r\n{'  '.join(options)}")
 
 
 async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:
@@ -418,17 +450,8 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     if not page.posts:
         await session.write_line(f"\r\n[{board_name}] has no posts yet.")
     else:
+        await _render_board_page(session, db, board_name, page)
         while True:
-            await _render_post_page(session, db, board_name, page)
-
-            options = []
-            if page.has_older:
-                options.append(menu_key("O", "lder"))
-            if page.has_newer:
-                options.append(menu_key("N", "ewer"))
-                options.append(menu_key("R", "ecent"))
-            options.append(menu_key("B", "ack") + " (or Enter)")
-            await session.write_line(f"\r\n{'  '.join(options)}")
             await session.write("Choice: ")
             choice = (await session.read_key()).lower()
             await session.write_line("")
@@ -436,15 +459,18 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             if choice == "o" and page.has_older:
                 oldest = page.posts[0]
                 page = list_posts_page(db, board, user, before=(oldest.created_at, oldest.post_id))
+                await _render_board_page(session, db, board_name, page)
             elif choice == "n" and page.has_newer:
                 newest = page.posts[-1]
                 page = list_posts_page(db, board, user, after=(newest.created_at, newest.post_id))
+                await _render_board_page(session, db, board_name, page)
             elif choice == "r" and page.has_newer:
                 page = list_posts_page(db, board, user)
-            elif choice in ("", "b"):
+                await _render_board_page(session, db, board_name, page)
+            elif choice == "b":
                 break
             else:
-                await session.write_line("Unknown choice.")
+                await session.write("\a")
 
     if not meets_level(user, board.min_write_level):
         return
@@ -539,31 +565,41 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
     codebase's existing "show state, then offer actions" shape (e.g.
     `netbbs.net.file_flow._show_area`) rather than jumping straight
     into an edit prompt.
+
+    Loops, redrawing the (possibly just-updated) state after an edit or
+    toggle, until `b` explicitly backs out — previously this ran once and
+    returned after *any* keystroke, including a genuinely unrecognized
+    one, which meant an invalid key silently exited the screen instead of
+    being ignored. An unrecognized key now sounds a bell and re-prompts,
+    same as the main menu.
     """
-    current_bio = get_bio(db, user)
-    visible = is_bio_visible(db, user)
+    while True:
+        current_bio = get_bio(db, user)
+        visible = is_bio_visible(db, user)
 
-    await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
-    if current_bio:
-        await session.write_line(
-            reflow(sanitize_text(current_bio, allow_newlines=True), width=session.terminal_width)
-        )
-    else:
-        await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
-    await session.write_line(f"Visibility: {'public' if visible else 'private'}")
+        await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
+        if current_bio:
+            await session.write_line(
+                reflow(sanitize_text(current_bio, allow_newlines=True), width=session.terminal_width)
+            )
+        else:
+            await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
+        await session.write_line(f"Visibility: {'public' if visible else 'private'}")
 
-    options = "  ".join(
-        [menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack") + " (or Enter)"]
-    )
-    await session.write_line(f"\r\n{options}")
-    await session.write("Choice: ")
-    choice = (await session.read_key()).lower()
-    await session.write_line("")
+        options = "  ".join([menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack")])
+        await session.write_line(f"\r\n{options}")
+        await session.write("Choice: ")
+        choice = (await session.read_key()).lower()
+        await session.write_line("")
 
-    if choice == "e":
-        await _edit_bio(session, db, user)
-    elif choice == "v":
-        await _toggle_bio_visibility(session, db, user, currently_visible=visible)
+        if choice == "b":
+            return
+        elif choice == "e":
+            await _edit_bio(session, db, user)
+        elif choice == "v":
+            await _toggle_bio_visibility(session, db, user, currently_visible=visible)
+        else:
+            await session.write("\a")
 
 
 async def _edit_bio(session: Session, db: Database, user: User) -> None:

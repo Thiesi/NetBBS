@@ -69,7 +69,7 @@ def test_opening_a_multi_page_area_shows_only_the_newest_page(tmp_path, monkeypa
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 3 + 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession()  # no input queued -> falls back to "" (back) immediately
+    session = FakeSession(lines=["b"])  # view the newest page, then back out
 
     asyncio.run(_show_area(session, db, area, user))
 
@@ -88,7 +88,7 @@ def test_older_command_navigates_to_the_previous_page(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(lines=["o"])  # newest page, then older, then "" (back)
+    session = FakeSession(lines=["o", "b"])  # newest page, then older, then back out
 
     asyncio.run(_show_area(session, db, area, user))
 
@@ -101,7 +101,7 @@ def test_recent_command_jumps_straight_back_to_the_newest_page(tmp_path, monkeyp
     db = Database(tmp_path / "node.db")
     total = _PAGE_SIZE * 3
     area, user = _make_area_with_files(db, total, monkeypatch)
-    session = FakeSession(lines=["o", "o", "r"])
+    session = FakeSession(lines=["o", "o", "r", "b"])
 
     asyncio.run(_show_area(session, db, area, user))
 
@@ -115,7 +115,7 @@ def test_recent_command_jumps_straight_back_to_the_newest_page(tmp_path, monkeyp
 def test_single_page_area_offers_no_older_newer_recent_options(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     area, user = _make_area_with_files(db, count=2, monkeypatch=monkeypatch)
-    session = FakeSession()
+    session = FakeSession(lines=["b"])
 
     asyncio.run(_show_area(session, db, area, user))
 

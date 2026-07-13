@@ -1,6 +1,6 @@
 """
 Generic paginated item picker: browse via [N]ext/[P]rev, [S]earch,
-[G]oto #, [Q]uit, or a 2-digit number to select an item on the current
+[G]oto #, [B]ack, or a 2-digit number to select an item on the current
 page.
 
 Built once, reused across boards, chat channels, and (once built) file
@@ -15,7 +15,7 @@ pure tab-completion (inconsistent with single-key navigation elsewhere —
 Thiesi's own observation — and doesn't solve "jump to item #769") and
 pure alphabetical single-letter menu-style navigation (caps out at 26
 items, and reserves letters that would collide with navigation commands
-like this module's own N/P/S/G/Q). Landed on: always-exactly-2-digit
+like this module's own N/P/S/G/B). Landed on: always-exactly-2-digit
 page-relative selection (matches the single-keystroke immediacy of the
 main menu) + a free-text search command (subsumes what tab completion
 would have offered, without redraw/cycling complexity) + a free-text
@@ -96,6 +96,17 @@ async def pick_item(
     name_of(item).lower()`) deliberately uses the *raw*, unsanitized
     name — matching is a text-comparison operation, not something
     written to the terminal, so there's nothing to protect there.
+
+    The page/nav block is drawn once on entry and again only after an
+    actual state change (paging that moves, a search that changes the
+    working set) — not on every prompt. An action that changes nothing
+    (paging past the last/first page, an unrecognized key, an
+    out-of-range 2-digit selection) just sounds a bell and re-prompts,
+    without redrawing the page or printing an error message. A
+    deliberately typed sub-prompt that fails on its own terms (`search`
+    with no matches, `goto` with an unparseable or out-of-range number)
+    still gets its own specific text response — that's a direct answer
+    to a specific question the user asked, not a stray keystroke.
     """
     if not items:
         await session.write_line(f"\r\n{empty_message}")
@@ -104,9 +115,13 @@ async def pick_item(
     working_set: Sequence[T] = items
     page_index = 0
 
-    while True:
+    def _total_pages() -> int:
+        return max(1, math.ceil(len(working_set) / _page_size(session)))
+
+    async def _render() -> Sequence[T]:
+        nonlocal page_index
         page_size = _page_size(session)
-        total_pages = max(1, math.ceil(len(working_set) / page_size))
+        total_pages = _total_pages()
         page_index = max(0, min(page_index, total_pages - 1))
         start = page_index * page_size
         page_items = working_set[start : start + page_size]
@@ -138,33 +153,39 @@ async def pick_item(
                 menu_key("P", "rev"),
                 menu_key("S", "earch"),
                 menu_key("G", "oto #"),
-                menu_key("Q", "uit"),
+                menu_key("B", "ack"),
             ]
         )
-        await session.write_line(f"\r\n{nav} \u2014 or type a 2-digit number to select")
+        await session.write_line(f"\r\n{nav} — or type a 2-digit number to select")
+        return page_items
+
+    page_items = await _render()
+    while True:
         await session.write("Choice: ")
 
         key = await session.read_key()
         key_lower = key.lower()
 
-        if key_lower == "q":
+        if key_lower == "b":
             await session.write_line("")
             return None
 
         if key_lower == "n":
             await session.write_line("")
-            if page_index < total_pages - 1:
+            if page_index < _total_pages() - 1:
                 page_index += 1
+                page_items = await _render()
             else:
-                await session.write_line("Already on the last page.")
+                await session.write("\a")
             continue
 
         if key_lower == "p":
             await session.write_line("")
             if page_index > 0:
                 page_index -= 1
+                page_items = await _render()
             else:
-                await session.write_line("Already on the first page.")
+                await session.write("\a")
             continue
 
         if key_lower == "s":
@@ -179,6 +200,7 @@ async def pick_item(
                 # two separate commands for what's really one action.
                 working_set = items
                 page_index = 0
+                page_items = await _render()
                 continue
             matches = [item for item in items if query.lower() in name_of(item).lower()]
             if not matches:
@@ -188,6 +210,7 @@ async def pick_item(
                 return matches[0]
             working_set = matches
             page_index = 0
+            page_items = await _render()
             continue
 
         if key_lower == "g":
@@ -217,16 +240,15 @@ async def pick_item(
             second = await session.read_key()
             await session.write_line("")
             if not second.isdigit():
-                await session.write_line("Invalid selection.")
+                await session.write("\a")
                 continue
             number = int(key + second)
             if 1 <= number <= len(page_items):
                 return page_items[number - 1]
-            await session.write_line("Invalid selection.")
+            await session.write("\a")
             continue
 
-        await session.write_line("")
-        await session.write_line("Unknown command.")
+        await session.write("\a")
 
 
 def _page_size(session: Session) -> int:
