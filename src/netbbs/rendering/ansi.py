@@ -2,12 +2,11 @@
 ANSI/VT100 escape sequence helpers: color, cursor control, screen
 clearing.
 
-Design doc §4/§15: the "ANSI half" of the hybrid rendering framework,
-built now since it benefits every existing feature (menu, boards, chat)
-immediately. The "TUI half" (character-mode input, screen-buffer
-diffing for heavy screens like a file browser or the fullscreen editor)
-is deliberately deferred until a real screen needs it — see the design
-doc's phasing sign-off notes for the reasoning.
+Design doc §4/§15: the ANSI rendering framework, built now since it
+benefits every existing feature (menu, boards, chat) immediately. A
+future screen-buffer/diff abstraction for heavy screens like a file
+browser or the fullscreen editor ("TUI") is Phase 2 scope — see design
+doc round 26.
 
 Targets 256-color / extended ANSI (SGR), per Thiesi's explicit choice —
 richer than classic 16-color BBS ANSI art, at the cost of some very old

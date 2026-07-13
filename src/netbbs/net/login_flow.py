@@ -8,11 +8,11 @@ rather than staying purely linear the way the board-only version of this
 file was, because there are genuinely two independent things to route
 between (boards, chat) — adding real menu structure now that it's
 actually needed is not the same as building it prematurely. Output now
-uses the "ANSI half" of the hybrid rendering framework (color, and
-reflow to each session's actual detected terminal width) — the "TUI
-half" (character-mode input, screen-buffer diffing) remains deferred
-until a real heavy screen (the fullscreen editor, a future file browser)
-needs it.
+uses the ANSI rendering framework (color, and reflow to each session's
+actual detected terminal width) plus transport-independent character-
+mode input; a future screen-buffer/diff ("TUI") abstraction for heavy
+cursor-addressable screens is Phase 2 scope, alongside the fullscreen
+editor that's the actual reason it's needed (design doc round 26).
 """
 
 from __future__ import annotations

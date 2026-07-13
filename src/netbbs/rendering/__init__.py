@@ -1,11 +1,12 @@
 """
-The "ANSI half" of the hybrid ANSI/TUI rendering framework (design doc
-§4/§15) — color/cursor/screen-clearing helpers plus text reflow.
+The ANSI rendering framework (design doc §4/§15) — color/cursor/
+screen-clearing helpers plus text reflow.
 
-The "TUI half" (character-mode input, screen-buffer diffing for heavy
-screens) is deliberately not part of this package yet — see the design
-doc's phasing sign-off notes for why it's deferred until a real screen
-needs it.
+Transport-independent character-mode input lives in
+`netbbs.net.char_input`, not here. A future screen-buffer/diff
+abstraction for heavy cursor-addressable screens ("TUI") is Phase 2
+scope, alongside the fullscreen editor it's actually needed for — see
+design doc round 26.
 """
 
 from netbbs.rendering.ansi import (

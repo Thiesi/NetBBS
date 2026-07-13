@@ -63,12 +63,13 @@ netbbs/
 │   │                     is in-memory only (chat isn't persisted)
 │   ├── moderation/       Local blocklist (moderation stub, pre-dates the
 │   │                     full reputation system)
-│   ├── rendering/        The "ANSI half" of the hybrid rendering
-│   │                     framework (§4/§15): 256-color/cursor helpers +
-│   │                     text reflow to each session's detected width.
-│   │                     The "TUI half" (character-mode input, screen-
-│   │                     buffer diffing) is deliberately deferred until
-│   │                     a real heavy screen needs it
+│   ├── rendering/        ANSI rendering framework (§4/§15):
+│   │                     256-color/cursor helpers + text reflow to each
+│   │                     session's detected width. Transport-independent
+│   │                     character-mode input lives in netbbs.net.
+│   │                     char_input. A future screen-buffer/diff
+│   │                     abstraction ("TUI") is Phase 2 scope, alongside
+│   │                     the fullscreen editor that needs it (round 26)
 │   ├── config.py         Node-wide key-value settings (currently just
 │   │                     display timestamp format)
 │   ├── __main__.py       Minimal runnable entry point for manual testing

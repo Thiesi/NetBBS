@@ -402,7 +402,9 @@ two phases had grown too large and one risky ordering issue. **Current
 **Phase 1 — Foundation (single node, no live Link yet)**
 - Keypair identity system (node + user)
 - Telnet / SSH / web (xterm.js) connectivity
-- Hybrid ANSI/TUI rendering framework
+- ANSI rendering + transport-independent character-mode input (the
+  "TUI half" — screen-buffer diffing for heavy cursor-addressable
+  screens — is Phase 2 scope; see round 26 sign-off note)
 - Password + keypair auth
 - SQLite storage layer
 - **Permission/level-gating plumbing in the menu/command dispatch layer**
@@ -433,9 +435,13 @@ any Link work begins, matching Thiesi's actual primary deployment target.
 - **User directory & vCard/finger system** (§13)
 - SysOp admin tools (user/board/node management, beyond blocklists)
 - ANSI art support for login/welcome screens
-- Fullscreen editor (see editor implementation notes, below) — a natural
-  fit here since post/PM editing is exercised heavily once moderation and
-  boards are both fully functional
+- The TUI half of the rendering framework — a transport-independent
+  screen-buffer/diff abstraction (moved from Phase 1; see round 26
+  sign-off note) — plus the fullscreen editor (see editor implementation
+  notes, below) that's the actual reason it's needed. Built together
+  deliberately: a screen-buffer abstraction designed without a real
+  heavy-screen consumer to validate its API against is more likely to
+  need reworking than one built alongside its first real use case.
 
 **Phase 3 — Link connectivity & sync core**
 - Seed-node bootstrapping
@@ -1844,3 +1850,92 @@ Phase 1 connectivity.
    page in a real browser. Worth a direct check from Thiesi (or a
    future session with browser tooling) before considering this fully
    done, the same standard round 23/24 already held SSH/Zmodem to.
+
+## Sign-off notes, round 26 (Phase 1 scope: TUI framework rescoped to Phase 2)
+
+Prompted by a post-Phase-1 external audit finding a real contradiction:
+§15 listed "Hybrid ANSI/TUI rendering framework" as Phase 1 scope, but
+round 13 had already confirmed with Thiesi that the TUI half (screen-
+buffer diffing for heavy cursor-addressable screens) would be deferred
+until a real heavy screen needed it — meaning Phase 1 was being
+declared complete while one of its own listed deliverables was still
+documented as unimplemented, an internal inconsistency rather than a
+new decision.
+
+1. **Formally rescoped, not just re-explained:** §15's Phase 1 bullet
+   now reads "ANSI rendering + transport-independent character-mode
+   input," with the TUI half moved to Phase 2's bullet list, alongside
+   the fullscreen editor — the actual first real consumer for a
+   screen-buffer/diff abstraction. This was a genuine two-way fork
+   (build the minimal TUI foundation now with no consumer to validate
+   it against, vs. formally move it) — confirmed with Thiesi rather
+   than assumed, per this project's design-before-code convention.
+   Rescoping was chosen: designing a screen-buffer/diff API in a
+   vacuum, months before the fullscreen editor that's supposed to
+   exercise it, risked getting the abstraction wrong and needing a
+   rework anyway once Phase 2's actual requirements were known.
+2. **No code changed.** This is a documentation/scope-alignment fix
+   only — `netbbs.rendering` already only ever implemented the ANSI
+   half (round 13); README and `netbbs.net.login_flow`'s docstring
+   already described the same ANSI-only reality, just without §15
+   agreeing with them. Updated both to stop calling the ANSI-only
+   framework "hybrid ANSI/TUI" now that the name would otherwise imply
+   a still-Phase-1 deliverable.
+3. **Phase 1 is now genuinely, not just declaratively, feature-complete**
+   — every bullet remaining under Phase 1 in §15 has shipped code and
+   tests behind it as of round 25.
+
+## Sign-off notes, round 27 (NetBBS Link canonical event format — placeholder only)
+
+An external audit flagged that content IDs (round 7: hashing sorted
+compact JSON) are meant to survive local boards moving to NetBBS Link
+unchanged, but the canonical wire format they'll eventually hash isn't
+actually specified yet — Unicode normalization, allowed value types,
+duplicate-key/unknown-field handling, versioning, event-type domain
+separation, and stable identity for password-only authors (username
+alone isn't globally unique without an origin node) are all still
+open. Explicitly a Phase 3 concern (§15) — this round records the
+open questions and a provisional shape, not final answers.
+
+1. **Deliberately not finalized now, confirmed with Thiesi rather than
+   assumed:** a two-way fork existed between writing the full formal
+   spec (with golden test vectors) immediately, or recording a
+   lightweight placeholder and deferring the real answers to when
+   Phase 3 work begins. The placeholder was chosen — freezing detailed
+   canonicalization semantics (e.g. nonce vs. author-local monotonic
+   sequence for distinguishing two identical posting actions) months
+   before there's a second implementation to test interop against
+   risks guessing wrong and needing a migration anyway, the exact
+   outcome content-addressing was originally adopted to avoid. No code
+   changes in this round — `netbbs.boards.content_id`'s current hash
+   remains a Phase-1-only, single-node, non-wire value; nothing today
+   depends on it surviving unchanged into Link.
+2. **Provisional envelope shape, for Phase 3 design work to start
+   from, not to implement against yet:**
+   ```json
+   {
+     "netbbs_protocol": 1,
+     "object_type": "board_post",
+     "payload": { ... }
+   }
+   ```
+   `netbbs_protocol` makes versioning mandatory from the first byte
+   rather than inferred; `object_type` makes event-type domain
+   separation a required envelope field rather than caller convention
+   (directly answering the audit's "mandatory, not caller convention"
+   criterion) — both decided now since they're cheap, low-regret
+   structural choices independent of the harder open questions below.
+3. **Open questions deliberately left open, to resolve when Phase 3
+   design work actually begins:** canonical JSON serialization rules
+   (key ordering, Unicode normalization form, whether floats are
+   forbidden, duplicate-key handling); absent-field vs. explicit-`null`
+   semantics; whether a nonce or an author-local monotonic sequence
+   distinguishes two visually-identical posting actions; the exact
+   shape of a node-vouched opaque local ID + origin-node fingerprint
+   for password-only authors (vs. keypair authors, who already have a
+   natural global identity — see §5); deterministic tie-break ordering
+   beyond `(created_at, post_id)`, which Phase 1 already uses locally
+   (round 7) but which hasn't been confirmed as the Link-wide rule.
+4. **Explicit non-goal for this round:** no golden test vectors,
+   since there is no second implementation yet for them to protect
+   interop against — premature this far ahead of Phase 3.
