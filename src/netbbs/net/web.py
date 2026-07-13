@@ -29,8 +29,9 @@ import json
 import logging
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
-from aiohttp import web
+from aiohttp import WSCloseCode, web
 
 from netbbs.net.session import Session, SessionClosedError
 
@@ -51,6 +52,15 @@ _ESC = "\x1b"
 # insurance against unbounded input from a broken or malicious client,
 # not a meaningful limit for any real use.
 _MAX_LINE_LENGTH = 4096
+
+# Bound every buffering layer exposed before authentication. The websocket
+# frame limit includes JSON overhead; individual key events and the decoded
+# character queue are intentionally smaller. Queue saturation is treated as
+# a protocol violation and closes the connection rather than moving the
+# unbounded buffer into aiohttp or the application task.
+_MAX_WS_MESSAGE_SIZE = 16 * 1024
+_MAX_KEY_EVENT_LENGTH = 4096
+_MAX_QUEUED_CHARS = 8192
 
 
 def _strip_escape_sequences(data: str) -> str:
@@ -89,8 +99,31 @@ class WebSession(Session):
 
     def __init__(self, ws: web.WebSocketResponse):
         self._ws = ws
-        self._char_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._char_queue: asyncio.Queue[str | None] = asyncio.Queue(
+            maxsize=_MAX_QUEUED_CHARS
+        )
+        self._input_error = "client disconnected"
         self._reader_task = asyncio.create_task(self._read_loop())
+
+    def _signal_input_closed(self, message: str) -> None:
+        self._input_error = message
+        try:
+            self._char_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            # Guarantee that a blocked reader is woken even when hostile input
+            # filled the queue completely. Dropping one queued character is
+            # irrelevant because this session is being terminated.
+            self._char_queue.get_nowait()
+            self._char_queue.put_nowait(None)
+
+    async def _reject_input(self, message: str) -> None:
+        self._signal_input_closed(message)
+        if not self._ws.closed:
+            await self._ws.close(
+                code=WSCloseCode.MESSAGE_TOO_BIG,
+                message=message.encode("utf-8"),
+            )
+        raise SessionClosedError(message)
 
     async def _read_loop(self) -> None:
         try:
@@ -108,19 +141,26 @@ class WebSession(Session):
                     web.WSMsgType.ERROR,
                 ):
                     break
+        except SessionClosedError:
+            pass
         finally:
             # Sentinel: wakes up any read_line/read_key blocked on the
             # queue so it can raise SessionClosedError, the same role
             # asyncio.IncompleteReadError plays for TelnetSession.
-            await self._char_queue.put(None)
+            self._signal_input_closed(self._input_error)
 
     async def _handle_event(self, event: dict) -> None:
         event_type = event.get("type")
         if event_type == "key":
             data = event.get("data")
             if isinstance(data, str):
+                if len(data) > _MAX_KEY_EVENT_LENGTH:
+                    await self._reject_input("web terminal key event is too large")
                 for char in _strip_escape_sequences(data):
-                    await self._char_queue.put(char)
+                    try:
+                        self._char_queue.put_nowait(char)
+                    except asyncio.QueueFull:
+                        await self._reject_input("web terminal input queue is full")
         elif event_type == "resize":
             cols, rows = event.get("cols"), event.get("rows")
             if isinstance(cols, int) and cols > 0:
@@ -135,7 +175,7 @@ class WebSession(Session):
     async def _read_char(self) -> str:
         char = await self._char_queue.get()
         if char is None:
-            raise SessionClosedError("client disconnected")
+            raise SessionClosedError(self._input_error)
         return char
 
     async def write(self, text: str) -> None:
@@ -209,12 +249,32 @@ class WebServer:
     caller-supplied `session_handler` coroutine — same shape and
     intended usage as `netbbs.net.telnet.TelnetServer`/
     `netbbs.net.ssh.SSHServer`.
+
+    Supplied browser `Origin` headers must be approved. By default, HTTP and
+    HTTPS origins whose authority exactly matches the request Host are
+    accepted. Deployments needing a different public origin (for example,
+    because a reverse proxy rewrites Host) can pass an explicit allowlist.
+    Requests without Origin are accepted deliberately for non-browser clients;
+    browsers send Origin for websocket handshakes, so this does not weaken the
+    cross-site protection the check is intended to provide.
     """
 
-    def __init__(self, host: str, port: int, session_handler: SessionHandler):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        session_handler: SessionHandler,
+        *,
+        allowed_origins: set[str] | None = None,
+    ):
         self._host = host
         self._port = port
         self._session_handler = session_handler
+        self._allowed_origins = (
+            {origin.rstrip("/") for origin in allowed_origins}
+            if allowed_origins is not None
+            else None
+        )
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -256,8 +316,21 @@ class WebServer:
     async def _handle_index(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
 
+    def _origin_is_allowed(self, request: web.Request) -> bool:
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        normalized = origin.rstrip("/")
+        if self._allowed_origins is not None:
+            return normalized in self._allowed_origins
+        parsed = urlsplit(normalized)
+        return parsed.scheme in {"http", "https"} and parsed.netloc == request.host
+
     async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
+        if not self._origin_is_allowed(request):
+            raise web.HTTPForbidden(text="WebSocket Origin is not allowed")
+
+        ws = web.WebSocketResponse(max_msg_size=_MAX_WS_MESSAGE_SIZE)
         await ws.prepare(request)
         session = WebSession(ws)
         try:
