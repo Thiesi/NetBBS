@@ -49,10 +49,10 @@ class PresenceRegistry:
         return self._session_counts.get(username, 0) > 0
 
     def online_usernames(self) -> set[str]:
-        """Every currently-online account — used by `/msg`/`/private`/
-        `/query`'s Tab completion (design doc round 49/Track 5g) to
-        suggest only reachable targets, distinct from `is_online`'s
-        single-account check."""
+        """Every currently-online account — used by `/msg`/`/private`'s
+        Tab completion (design doc round 49/Track 5g) to suggest only
+        reachable targets, distinct from `is_online`'s single-account
+        check."""
         return set(self._session_counts)
 
     def set_away(self, username: str, message: str) -> None:

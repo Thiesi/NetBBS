@@ -1,8 +1,8 @@
 """
 Tests for Phase 2 Track 5e (design doc round 32/33, sign-off round 46):
-`/msg`, `/private`/`/query`, `/close`, driven through the real
-`_chat_loop` dispatcher via the shared `FakeSession`
-(`test_chat_flow_moderation.py`).
+`/msg`, `/private`, `/close`, driven through the real `_chat_loop`
+dispatcher via the shared `FakeSession` (`test_chat_flow_moderation.py`).
+`/query` was removed in round 54 -- see `test_query_is_no_longer_a_command`.
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ def test_msg_is_never_written_to_scrollback_or_moderation_log(
     assert list_actions_for_object(db, "channel", channel.id) == []
 
 
-# -- /private, /close, /query --------------------------------------------
+# -- /private, /close --------------------------------------------------
 
 
 def test_private_to_offline_user_is_refused(db, hub, presence, mailbox, alice, bob, channel):
@@ -257,15 +257,16 @@ def test_close_without_being_in_private_mode_shows_message(
     assert "You are not in a private conversation." in _written(session)
 
 
-def test_query_is_an_alias_for_private(db, hub, presence, mailbox, alice, bob, channel):
+def test_query_is_no_longer_a_command(db, hub, presence, mailbox, alice, bob, channel):
+    # design doc round 54: removed as a bare, value-free alias for
+    # /private -- the only command that ever had two names.
     presence.enter("bob")
 
     session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/query bob", "hi", "/quit"])
+        _run(db, hub, presence, mailbox, channel, alice, ["/query bob", "/quit"])
     )
 
-    assert "Entering private conversation with bob" in _written(session)
-    assert len(mailbox.flush("bob")) == 1
+    assert "Unknown command: /query" in _written(session)
 
 
 class _SessionThatDropsBobAfterEnteringPrivateMode(FakeSession):

@@ -98,16 +98,21 @@ async def pick_item(
     name — matching is a text-comparison operation, not something
     written to the terminal, so there's nothing to protect there.
 
-    The page/nav block is drawn once on entry and again only after an
-    actual state change (paging that moves, a search that changes the
-    working set) — not on every prompt. An action that changes nothing
-    (paging past the last/first page, an unrecognized key, an
-    out-of-range 2-digit selection) just sounds a bell and re-prompts,
-    without redrawing the page or printing an error message. A
+    The page/nav block, and the `"Choice: "` prompt itself, are drawn
+    once on entry and again only after an actual state change (paging
+    that moves, a search that changes the working set, a sub-prompt's
+    specific answer) — not on every keystroke. An action that changes
+    nothing (paging past the last/first page, an unrecognized key, an
+    out-of-range 2-digit selection) sounds a bell and does *nothing*
+    else (design doc round 52) — no redraw, no reprinted prompt, no
+    error message; the screen is left exactly as it was, and the next
+    keystroke's own echo lands wherever the cursor already sits. A
     deliberately typed sub-prompt that fails on its own terms (`search`
     with no matches, `goto` with an unparseable or out-of-range number)
-    still gets its own specific text response — that's a direct answer
-    to a specific question the user asked, not a stray keystroke.
+    is different in kind, not a stray keystroke: it still gets its own
+    specific text response *and* a freshly reprinted prompt afterward,
+    since something was actually communicated that the user needs a
+    clean line to respond to.
     """
     if not items:
         await session.write_line(f"\r\n{empty_message}")
@@ -158,12 +163,11 @@ async def pick_item(
             ]
         )
         await session.write_line(f"\r\n{nav} — or type a 2-digit number to select")
+        await session.write("Choice: ")
         return page_items
 
     page_items = await _render()
     while True:
-        await session.write("Choice: ")
-
         key = await session.read_key()
         key_lower = key.lower()
 
@@ -172,8 +176,8 @@ async def pick_item(
             return None
 
         if key_lower == "n":
-            await session.write_line("")
             if page_index < _total_pages() - 1:
+                await session.write_line("")
                 page_index += 1
                 page_items = await _render()
             else:
@@ -181,8 +185,8 @@ async def pick_item(
             continue
 
         if key_lower == "p":
-            await session.write_line("")
             if page_index > 0:
+                await session.write_line("")
                 page_index -= 1
                 page_items = await _render()
             else:
@@ -207,6 +211,7 @@ async def pick_item(
             matches = [item for item in items if query.lower() in name_of(item).lower()]
             if not matches:
                 await session.write_line("No matches.")
+                await session.write("Choice: ")
                 continue
             if len(matches) == 1:
                 return matches[0]
@@ -223,6 +228,7 @@ async def pick_item(
                 target_id = int(raw)
             except ValueError:
                 await session.write_line("Not a number.")
+                await session.write("Choice: ")
                 continue
             # Always searches `items` (the full original list) by
             # stable_id_of, never `working_set` — a goto number means the
@@ -236,11 +242,11 @@ async def pick_item(
                 if stable_id_of(item) == target_id:
                     return item
             await session.write_line("Out of range.")
+            await session.write("Choice: ")
             continue
 
         if key.isdigit():
             second = await session.read_key()
-            await session.write_line("")
             if not second.isdigit():
                 await session.write("\a")
                 continue
@@ -250,7 +256,6 @@ async def pick_item(
             await session.write("\a")
             continue
 
-        await session.write_line("")
         await session.write("\a")
 
 

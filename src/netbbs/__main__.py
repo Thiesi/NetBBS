@@ -20,7 +20,9 @@ import sys
 
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.login_flow import handle_session
+from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
@@ -139,16 +141,29 @@ async def _start_servers(
     return started
 
 
-async def run(config: NodeConfig, *, shutdown_event: asyncio.Event | None = None) -> None:
+async def run(
+    config: NodeConfig,
+    *,
+    shutdown_event: asyncio.Event | None = None,
+    session_registry: ActiveSessionRegistry | None = None,
+    maintenance: MaintenanceMode | None = None,
+) -> None:
     """
     Run one node's lifetime: open the database, start every configured
     listener, and block until `shutdown_event` is set — then stop every
     listener and close the database, in that order, before returning.
 
-    `shutdown_event` is injectable specifically so this coordinated
-    shutdown path is testable without sending real OS signals (see
-    `tests/test_main_lifecycle.py`); the real top-level `main()` below
-    wires actual SIGTERM/SIGINT handling to it.
+    `shutdown_event`/`session_registry`/`maintenance` are all
+    injectable specifically so this coordinated shutdown path is
+    testable without sending real OS signals (see
+    `tests/test_main_lifecycle.py`/`tests/test_shutdown.py`); the real
+    top-level `main()` below constructs its own and wires actual
+    SIGTERM/SIGINT handling to them (design doc round 51) — by the time
+    `shutdown_event` is set, whatever triggered it (a real signal, or a
+    test setting it directly) has already had its chance to warn/
+    disconnect connected sessions first; this function itself doesn't
+    need to know anything about that, only that everything is already
+    gone by the time it proceeds to `server.stop()`/`db.close()`.
     """
     for warning in config.describe_insecure_bindings():
         _logger.warning(warning)
@@ -159,9 +174,15 @@ async def run(config: NodeConfig, *, shutdown_event: asyncio.Event | None = None
     mailbox = MessageMailbox()
     throttle = _build_throttle(config)
     throttle_config = config.throttle
+    if session_registry is None:
+        session_registry = ActiveSessionRegistry()
+    if maintenance is None:
+        maintenance = MaintenanceMode()
 
     async def session_handler(session):
-        await handle_session(session, db, hub, presence, mailbox, throttle, throttle_config)
+        await handle_session(
+            session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance
+        )
 
     servers: list = []
     try:
@@ -177,23 +198,80 @@ async def run(config: NodeConfig, *, shutdown_event: asyncio.Event | None = None
         _logger.info("NetBBS node shut down cleanly")
 
 
-def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event) -> None:
-    def _request_shutdown() -> None:
-        _logger.info("shutdown requested")
-        shutdown_event.set()
+async def _run_shutdown_sequence(
+    *,
+    graceful: bool,
+    session_registry: ActiveSessionRegistry,
+    maintenance: MaintenanceMode,
+    graceful_delay_seconds: float,
+    shutdown_event: asyncio.Event,
+) -> None:
+    """
+    What a signal actually triggers now (design doc round 51) — locks
+    out new logins, warns everyone already connected (regardless of
+    what screen they're on, or even whether they've logged in yet — see
+    `netbbs.net.session_registry.ActiveSessionRegistry`), then (a
+    *graceful* SIGTERM request only) gives them `graceful_delay_seconds`
+    to notice before forcibly disconnecting; an *immediate* SIGINT
+    request skips straight to disconnecting. Either way, `shutdown_event`
+    is set last, so `run()`'s existing `finally: server.stop() ->
+    db.close()` sequence only ever runs once every session is already
+    gone — a deliberate, awaited sequence, not the previous reliance on
+    `asyncio.run()`'s own implicit end-of-process task cancellation to
+    eventually reach connected sessions.
+    """
+    maintenance.activate()
+    if graceful:
+        await session_registry.broadcast_to_all(
+            f"\r\n*** This node is going down in {int(graceful_delay_seconds)} seconds. ***"
+        )
+        await asyncio.sleep(graceful_delay_seconds)
+    else:
+        await session_registry.broadcast_to_all("\r\n*** This node is going down now. ***")
+    await session_registry.disconnect_all()
+    shutdown_event.set()
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
+
+def _install_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    shutdown_event: asyncio.Event,
+    session_registry: ActiveSessionRegistry,
+    maintenance: MaintenanceMode,
+    graceful_delay_seconds: float,
+) -> None:
+    def _request_shutdown(graceful: bool) -> None:
+        _logger.info("shutdown requested (%s)", "graceful" if graceful else "immediate")
+        loop.create_task(
+            _run_shutdown_sequence(
+                graceful=graceful,
+                session_registry=session_registry,
+                maintenance=maintenance,
+                graceful_delay_seconds=graceful_delay_seconds,
+                shutdown_event=shutdown_event,
+            )
+        )
+
+    # SIGTERM is the conventional "please shut down properly" signal
+    # every process supervisor/rc.d script sends first, so it gets the
+    # graceful (warn, wait, then disconnect) path. SIGINT -- Ctrl+C in
+    # an attended terminal -- is immediate: warn, then disconnect right
+    # away, no wait.
+    for sig, graceful in ((signal.SIGTERM, True), (signal.SIGINT, False)):
         try:
-            loop.add_signal_handler(sig, _request_shutdown)
+            loop.add_signal_handler(sig, lambda graceful=graceful: _request_shutdown(graceful))
         except NotImplementedError:
             # add_signal_handler is Unix-only (see the stdlib asyncio
             # docs); the intended deployment target is NetBSD (see
             # CLAUDE.md), where this branch never runs. Windows dev
             # environments fall back to signal.signal, which can't
             # safely touch asyncio state directly from the handler —
-            # call_soon_threadsafe hands the actual event-setting back
-            # to the loop instead.
-            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(_request_shutdown))
+            # call_soon_threadsafe hands the actual scheduling back to
+            # the loop instead.
+            signal.signal(
+                sig,
+                lambda *_, graceful=graceful: loop.call_soon_threadsafe(_request_shutdown, graceful),
+            )
 
 
 async def main() -> None:
@@ -206,10 +284,23 @@ async def main() -> None:
         raise SystemExit(1) from exc
 
     shutdown_event = asyncio.Event()
-    _install_signal_handlers(asyncio.get_running_loop(), shutdown_event)
+    session_registry = ActiveSessionRegistry()
+    maintenance = MaintenanceMode()
+    _install_signal_handlers(
+        asyncio.get_running_loop(),
+        shutdown_event=shutdown_event,
+        session_registry=session_registry,
+        maintenance=maintenance,
+        graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+    )
 
     try:
-        await run(config, shutdown_event=shutdown_event)
+        await run(
+            config,
+            shutdown_event=shutdown_event,
+            session_registry=session_registry,
+            maintenance=maintenance,
+        )
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)
         raise SystemExit(1) from exc

@@ -33,7 +33,15 @@ from netbbs.chat.membership import (
     remove_member,
     revoke_invitation,
 )
-from netbbs.chat.nick import MAX_NICK_LENGTH, NickError, display_label, get_nick, set_nick
+from netbbs.chat.nick import (
+    MAX_NICK_LENGTH,
+    NICK_MARKER,
+    NickError,
+    chat_stream_label,
+    display_label,
+    get_nick,
+    set_nick,
+)
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.moderation import (
     ChannelRestriction,
@@ -78,7 +86,9 @@ __all__ = [
     "remove_member",
     "revoke_invitation",
     "MAX_NICK_LENGTH",
+    "NICK_MARKER",
     "NickError",
+    "chat_stream_label",
     "display_label",
     "get_nick",
     "set_nick",

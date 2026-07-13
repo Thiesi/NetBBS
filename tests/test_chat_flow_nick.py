@@ -135,7 +135,16 @@ def test_alias_shown_on_join(db, hub, presence, alice, bob, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    assert "DeepParse|alice has joined" in _written_text(watcher)
+    # Nick-only-plus-marker in the live stream, not both forms (design
+    # doc round 53) -- the canonical username is deliberately absent
+    # here now; still available via /whois. Checked as two separate
+    # substrings, not one spanning "~DeepParse~ has joined", since
+    # chat_stream_label's own trailing ANSI reset sits between the two
+    # once colored (design doc round 53's own documented tradeoff).
+    text = _written_text(watcher)
+    assert "~DeepParse~" in text
+    assert "has joined the channel." in text
+    assert "alice has joined" not in text
 
 
 def test_alias_shown_on_leave(db, hub, presence, alice, bob, channel):
@@ -160,19 +169,26 @@ def test_alias_shown_on_leave(db, hub, presence, alice, bob, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    assert "Bobby|bob has left" in _written_text(watcher)
+    text = _written_text(watcher)
+    assert "~Bobby~" in text
+    assert "has left the channel." in text
+    assert "bob has left" not in text
 
 
 def test_alias_shown_in_regular_message(db, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(db, hub, presence, channel, alice, ["hello", "/quit"]))
-    assert "<DeepParse|alice>" in _written_text(session)
+    assert "~DeepParse~" in _written_text(session)
+    assert "alice" not in _written_text(session)
 
 
 def test_alias_shown_in_me_action(db, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(db, hub, presence, channel, alice, ["/me waves", "/quit"]))
-    assert "* DeepParse|alice waves" in _written_text(session)
+    text = _written_text(session)
+    assert "~DeepParse~" in text
+    assert "waves" in text
+    assert "alice" not in text
 
 
 def test_alias_shown_on_scrollback_replay(db, hub, presence, alice, channel):
@@ -181,7 +197,33 @@ def test_alias_shown_on_scrollback_replay(db, hub, presence, alice, channel):
     # A second session replays scrollback -- current alias should show,
     # not whatever was canonical-only at storage time.
     session = asyncio.run(_run(db, hub, presence, channel, alice, ["/quit"]))
-    assert "<DeepParse|alice>" in _written_text(session)
+    assert "~DeepParse~" in _written_text(session)
+
+
+def test_names_still_shows_both_forms(db, hub, presence, alice, channel):
+    # /names/who/whois are directory-style listings, deliberately
+    # unaffected by round 53's chat-stream-only change -- both forms
+    # stay visible there, matching display_label exactly as before.
+    set_nick(db, alice, "DeepParse")
+    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/names", "/quit"]))
+    assert "DeepParse|alice" in _written_text(session)
+
+
+def test_who_still_shows_both_forms(db, hub, presence, alice, channel):
+    set_nick(db, alice, "DeepParse")
+    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/who", "/quit"]))
+    assert "DeepParse|alice" in _written_text(session)
+
+
+def test_whois_identity_header_is_canonical_only(db, hub, presence, alice, bob, channel):
+    # Not actually touched by round 53 at all -- /whois's identity
+    # header renders straight from vcard.username, never went through
+    # display_label in the first place (unlike /names and /who above).
+    # Confirmed here so that fact is on record, not just assumed.
+    set_nick(db, bob, "Bobby")
+    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/whois bob", "/quit"]))
+    assert "Bobby|bob" not in _written_text(session)
+    assert "bob" in _written_text(session)
 
 
 def test_moderation_notices_stay_canonical_only(db, hub, presence, alice, bob, channel):

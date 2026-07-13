@@ -37,9 +37,11 @@ from netbbs.moderation import is_blocked
 from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.file_flow import browse_file_areas
+from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
@@ -81,6 +83,8 @@ async def handle_session(
     mailbox: MessageMailbox,
     throttle: LoginThrottle,
     throttle_config: ThrottleConfig,
+    session_registry: ActiveSessionRegistry,
+    maintenance: MaintenanceMode,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -113,7 +117,38 @@ async def handle_session(
     depends on. Deliberately scoped to the authenticated portion only,
     same reasoning as the login-throttle budget above: an
     unauthenticated connection was never "present" as any account.
+
+    `session_registry`/`maintenance` (design doc round 51) are checked/
+    entered before any of that, right at the top — a deliberate node
+    shutdown needs to reach and reject connections regardless of
+    whether they ever authenticate at all, unlike `presence`, which
+    only ever needs to know about accounts.
     """
+    if maintenance.is_active():
+        await session.write_line(MAINTENANCE_MESSAGE)
+        return
+
+    session_registry.enter(session)
+    try:
+        await _run_authenticated_session(session, db, hub, presence, mailbox, throttle, throttle_config)
+    finally:
+        session_registry.leave(session)
+
+
+async def _run_authenticated_session(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    throttle: LoginThrottle,
+    throttle_config: ThrottleConfig,
+) -> None:
+    """The login-through-logoff body of a connection, wrapped by
+    `handle_session`'s maintenance-mode check and session-registry
+    bookkeeping (design doc round 51) — split out so those two concerns
+    stay a thin, easy-to-read wrapper rather than adding another level
+    of nesting to the whole function."""
     if not throttle.try_enter_unauthenticated():
         await session.write_line(
             "This server has too many pending logins right now. Please try again shortly."
@@ -204,6 +239,7 @@ async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User)
         ]
     )
     await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
 
 
 async def _main_menu(
@@ -227,34 +263,38 @@ async def _main_menu(
     with no way to know whether more characters are about to follow.
     Only the single letter works now.
 
-    The menu is drawn once on entry and again after returning from a
-    submenu (a real context change worth re-showing), not on every loop
-    iteration — a holdover from the old line-mode menu that no longer
-    makes sense once dispatch is immediate. An unrecognized key doesn't
-    redraw or print an error message; there's no line to re-type or
-    correct, so it just sounds a bell and re-prompts.
+    The menu, and its `Choice: ` prompt, are drawn once on entry and
+    again after returning from a submenu (a real context change worth
+    re-showing) — not on every loop iteration, and not at all on an
+    unrecognized key (design doc round 52): that just sounds a bell and
+    leaves the screen exactly as it was, no reprinted prompt, since
+    nothing was actually communicated worth a fresh line for.
     """
     await _draw_main_menu(session, mailbox, user)
     while True:
-        await session.write("Choice: ")
         choice = (await session.read_key()).lower()
-        await session.write_line("")  # move to a fresh line after the single-key echo
 
         if choice == "l":
+            await session.write_line("")
             return
         elif choice == "m":
+            await session.write_line("")
             await _browse_boards(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "c":
+            await session.write_line("")
             await browse_channels(session, db, hub, presence, mailbox, history, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "f":
+            await session.write_line("")
             await browse_file_areas(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "d":
+            await session.write_line("")
             await _browse_directory(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         elif choice == "p":
+            await session.write_line("")
             await _edit_profile(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         else:
@@ -461,6 +501,7 @@ async def _render_board_page(session: Session, db: Database, board_name: str, pa
         options.append(menu_key("R", "ecent"))
     options.append(menu_key("B", "ack"))
     await session.write_line(f"\r\n{'  '.join(options)}")
+    await session.write("Choice: ")
 
 
 async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:
@@ -481,22 +522,24 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     else:
         await _render_board_page(session, db, board_name, page)
         while True:
-            await session.write("Choice: ")
             choice = (await session.read_key()).lower()
-            await session.write_line("")
 
             if choice == "o" and page.has_older:
+                await session.write_line("")
                 oldest = page.posts[0]
                 page = list_posts_page(db, board, user, before=(oldest.created_at, oldest.post_id))
                 await _render_board_page(session, db, board_name, page)
             elif choice == "n" and page.has_newer:
+                await session.write_line("")
                 newest = page.posts[-1]
                 page = list_posts_page(db, board, user, after=(newest.created_at, newest.post_id))
                 await _render_board_page(session, db, board_name, page)
             elif choice == "r" and page.has_newer:
+                await session.write_line("")
                 page = list_posts_page(db, board, user)
                 await _render_board_page(session, db, board_name, page)
             elif choice == "b":
+                await session.write_line("")
                 break
             else:
                 await session.write("\a")
@@ -607,6 +650,7 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
 
     options = "  ".join([menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack")])
     await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
     return visible
 
 
@@ -621,21 +665,22 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
     Redraws the (possibly just-updated) state only after an edit or
     toggle actually happens, not on every loop iteration — mirrors
     `_show_board`'s `_render_board_page` split. An unrecognized key
-    sounds a bell and re-prompts without redrawing anything, same as
-    the main menu and the picker.
+    sounds a bell and leaves the screen exactly as it was, no reprinted
+    prompt (design doc round 52), same as the main menu and the picker.
     """
     visible = await _render_profile(session, db, user)
     while True:
-        await session.write("Choice: ")
         choice = (await session.read_key()).lower()
-        await session.write_line("")
 
         if choice == "b":
+            await session.write_line("")
             return
         elif choice == "e":
+            await session.write_line("")
             await _edit_bio(session, db, user)
             visible = await _render_profile(session, db, user)
         elif choice == "v":
+            await session.write_line("")
             await _toggle_bio_visibility(session, db, user, currently_visible=visible)
             visible = await _render_profile(session, db, user)
         else:

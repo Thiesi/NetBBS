@@ -23,7 +23,14 @@ from netbbs.rendering.ansi import (
 from netbbs.rendering.menu import menu_key
 from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow, truncate
 from netbbs.rendering.sanitize import sanitize_text
-from netbbs.rendering.theme import ACCENT_COLOR, HEADER_COLOR, MENU_KEY_COLOR, MUTED_COLOR, SELF_COLOR
+from netbbs.rendering.theme import (
+    ACCENT_COLOR,
+    HEADER_COLOR,
+    MENU_KEY_COLOR,
+    MUTED_COLOR,
+    NICK_COLOR,
+    SELF_COLOR,
+)
 
 __all__ = [
     "BOLD",
@@ -43,5 +50,6 @@ __all__ = [
     "HEADER_COLOR",
     "MENU_KEY_COLOR",
     "MUTED_COLOR",
+    "NICK_COLOR",
     "SELF_COLOR",
 ]

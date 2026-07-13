@@ -195,11 +195,11 @@ def test_edit_profile_visibility_toggles_from_public_to_private(tmp_path):
 
 
 def test_edit_profile_invalid_key_does_not_redraw_the_screen(tmp_path):
-    # Regression test for a real round-44 bug (design doc round 48):
-    # the profile loop redrew the whole "Your profile:" screen at the
-    # top of every iteration, including right after an invalid
-    # keystroke, contradicting the "no redraw on invalid input"
-    # agreement -- an unrecognized key should just bell and re-prompt.
+    # Regression test for a real round-44 bug (design doc round 48),
+    # further tightened in round 52: round 48's own fix still reprinted
+    # the "Choice: " prompt after the bell, which Thiesi later judged
+    # added no value -- an unrecognized key must now produce genuinely
+    # nothing beyond the bell, not even a fresh prompt line.
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)
     session = FakeSession(keys=["z", "b"])
@@ -207,4 +207,5 @@ def test_edit_profile_invalid_key_does_not_redraw_the_screen(tmp_path):
     asyncio.run(_edit_profile(session, db, user))
 
     assert session.output.count("Your profile:") == 1
+    assert session.output.count("Choice: ") == 1
     assert "\a" in session.output

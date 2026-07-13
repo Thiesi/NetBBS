@@ -94,6 +94,17 @@ class ThrottleConfig:
 
 
 @dataclass(frozen=True)
+class ShutdownConfig:
+    """Design doc round 51: how long a *graceful* shutdown (SIGTERM)
+    waits, after broadcasting the warning, before forcibly disconnecting
+    everyone still connected — an immediate shutdown (SIGINT) skips this
+    wait entirely. Operator-overridable via `[shutdown]`, matching
+    `[throttle]`'s precedent."""
+
+    graceful_delay_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class NodeConfig:
     db_path: Path = Path("netbbs.db")
     # SSH defaults enabled -- issue #1's "make SSH the secure default
@@ -115,6 +126,7 @@ class NodeConfig:
     ssh: TransportConfig = field(default_factory=lambda: TransportConfig(True, "0.0.0.0", 2222))
     web: TransportConfig = field(default_factory=lambda: TransportConfig(False, "127.0.0.1", 8080))
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
+    shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
 
     def validate(self) -> None:
         for name, transport in (("telnet", self.telnet), ("ssh", self.ssh), ("web", self.web)):
@@ -140,6 +152,12 @@ class NodeConfig:
         for name, value in _require_positive.items():
             if value <= 0:
                 raise ConfigError(f"throttle.{name} must be greater than 0, got {value}")
+
+        if self.shutdown.graceful_delay_seconds <= 0:
+            raise ConfigError(
+                "shutdown.graceful_delay_seconds must be greater than 0, got "
+                f"{self.shutdown.graceful_delay_seconds}"
+            )
 
         if not self.telnet.enabled and not self.ssh.enabled and not self.web.enabled:
             raise ConfigError(
@@ -227,8 +245,19 @@ def _throttle_from_toml(data: dict, current: ThrottleConfig) -> ThrottleConfig:
     return replace(current, **overrides)
 
 
+def _shutdown_from_toml(data: dict, current: ShutdownConfig) -> ShutdownConfig:
+    table = data.get("shutdown", {})
+    if not isinstance(table, dict):
+        raise ConfigError("[shutdown] in the config file must be a table")
+    overrides = {key: table[key] for key in table if key in ShutdownConfig.__dataclass_fields__}
+    unknown = set(table) - set(overrides)
+    if unknown:
+        raise ConfigError(f"[shutdown] has unknown setting(s): {', '.join(sorted(unknown))}")
+    return replace(current, **overrides)
+
+
 def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
-    known_tables = {"database", "telnet", "ssh", "web", "throttle"}
+    known_tables = {"database", "telnet", "ssh", "web", "throttle", "shutdown"}
     unknown = set(data) - known_tables
     if unknown:
         raise ConfigError(f"config file has unknown section(s): {', '.join(sorted(unknown))}")
@@ -244,6 +273,7 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
         ssh=_transport_from_toml(data, "ssh", config.ssh),
         web=_transport_from_toml(data, "web", config.web),
         throttle=_throttle_from_toml(data, config.throttle),
+        shutdown=_shutdown_from_toml(data, config.shutdown),
     )
 
 

@@ -205,14 +205,14 @@ def test_unknown_command_letter_sounds_bell_and_stays_in_picker():
     assert result["value"] is None
 
 
-def test_repeated_invalid_keys_each_land_on_their_own_line():
+def test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell():
     """
-    Regression test for a real round-44 bug (design doc round 48): the
-    unrecognized-key fallback never emitted a newline before the bell,
-    so consecutive invalid keys ran the re-prompted "Choice: " text
-    together with the previous echoed character on one line
-    ("Choice: zChoice: zChoice: z...") instead of each attempt getting
-    its own line, the way `_main_menu`/`_show_board` already did.
+    Design doc round 52 (revising round 48): an invalid keystroke gets
+    genuinely *nothing* beyond the bell -- no reprinted "Choice: "
+    prompt, no synthetic newline. Round 48's own fix still reprinted
+    the prompt after the bell, which Thiesi later judged added no
+    value (the prompt was already visible, reprinting it communicates
+    nothing new) -- this replaces that behavior, not just this test.
     """
     result = {}
     items = ["a"]
@@ -234,11 +234,10 @@ def test_repeated_invalid_keys_each_land_on_their_own_line():
             writer.write(b"y")
             await writer.drain()
             second = await _read_until_quiet(reader)
-            # Each invalid key's echo+bell is followed by a fresh-line
-            # "Choice: " reprompt -- not jammed onto the same line as the
-            # previous attempt.
-            assert first == b"z\r\n\aChoice: "
-            assert second == b"y\r\n\aChoice: "
+            # Just the echoed character plus a bell -- nothing else,
+            # each time, regardless of how many invalid keys precede it.
+            assert first == b"z\a"
+            assert second == b"y\a"
             writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)

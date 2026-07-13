@@ -21,7 +21,9 @@ import sys
 import pytest
 
 from netbbs.__main__ import StartupError, _install_signal_handlers, run
+from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import NodeConfig, TransportConfig
+from netbbs.net.session_registry import ActiveSessionRegistry
 
 
 def _config(tmp_path, **overrides) -> NodeConfig:
@@ -249,7 +251,16 @@ def test_signal_handler_registration_triggers_shutdown_event():
 
     async def scenario():
         loop = asyncio.get_running_loop()
-        _install_signal_handlers(loop, shutdown_event)
+        _install_signal_handlers(
+            loop,
+            shutdown_event=shutdown_event,
+            session_registry=ActiveSessionRegistry(),
+            maintenance=MaintenanceMode(),
+            # A tiny delay, not 0 -- confirms the graceful/SIGTERM path's
+            # `asyncio.sleep` actually runs (not skipped entirely) without
+            # this test waiting anywhere near the real default.
+            graceful_delay_seconds=0.01,
+        )
         signal.raise_signal(signal.SIGTERM)
         await asyncio.wait_for(shutdown_event.wait(), timeout=2.0)
 

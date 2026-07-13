@@ -4141,3 +4141,318 @@ now complete in its entirety.**
    perform that setup step, keeping the actual requester's grants at
    zero. Full suite re-run: **968 passed, 1 skipped** — actually run,
    not just syntax-checked.
+
+## Sign-off notes, round 51 (deliberate node shutdown: SIGTERM=graceful, SIGINT=immediate — implemented)
+
+Prompted by Thiesi testing real shutdown behavior directly: sending the
+node process a signal while users were connected acknowledged the
+request but didn't visibly finish until the last connection closed on
+its own — with no warning ever shown to anyone still connected.
+
+1. **Root cause identified by direct code reading, not assumed.**
+   `_install_signal_handlers` already wired both signals to
+   `shutdown_event.set()`; `run()`'s `finally` block already only calls
+   `server.stop()`, which just closes each *listening socket*
+   (`TelnetServer`/`SSHServer`/`WebServer` all follow this shape) —
+   none of them ever tracked or awaited already-connected sessions. The
+   thing actually reaching in-progress connections was
+   `asyncio.run(main())`'s own *implicit* end-of-process cleanup
+   (cancelling every remaining task once `main()` returns) — opaque,
+   undocumented, and not something to keep depending on. Replaced
+   outright with a deliberate, awaited sequence rather than further
+   diagnosed, since the fix needed regardless was the same either way.
+2. **Two new small node-wide pieces, each its own module, mirroring
+   existing precedent:** `netbbs.net.session_registry.
+   ActiveSessionRegistry` (structurally identical to
+   `netbbs.chat.presence.PresenceRegistry` — a `{Session: asyncio.Task}`
+   map, `enter`/`leave` via `asyncio.current_task()`) adds
+   `broadcast_to_all(text)` (writes directly to every session
+   regardless of what it's blocked reading — the same concurrent-
+   `write()` safety `netbbs.net.chat_flow`'s two-task chat loop already
+   established, and the same snapshot-not-live-dict iteration
+   `ChatHub.broadcast` already established after round 10's concurrency
+   bug) and `disconnect_all()` (cancels every tracked task, then awaits
+   `asyncio.gather(..., return_exceptions=True)` so the caller knows
+   every session has actually finished unwinding through its own
+   existing `finally: await session.close()`, not just that cancellation
+   was requested). `netbbs.net.maintenance.MaintenanceMode` is a single
+   plain flag, checked at the very top of `handle_session` — before
+   `throttle.try_enter_unauthenticated()` even runs — rejecting a new
+   connection immediately with a fixed message.
+3. **Registration covers a connection from the moment it arrives, not
+   just once authenticated** — deliberately different scope from
+   `presence`, which only ever knows about accounts. `handle_session`
+   now checks maintenance mode and enters the registry as its very
+   first actions, before login begins; the existing login/main-menu
+   body was extracted into `_run_authenticated_session` so that
+   wrapping stays a thin two-concern prologue rather than adding
+   another level of nesting to the whole function.
+4. **New `ShutdownConfig`/`[shutdown]`**, exactly mirroring
+   `ThrottleConfig`/`[throttle]`'s existing config-file precedent: one
+   field, `graceful_delay_seconds` (default 60 — Thiesi's own "a minute
+   or 90 seconds"). No configurable message text — scope stayed to the
+   one thing actually asked for.
+5. **SIGTERM = graceful, SIGINT = immediate — the conventional mapping,
+   confirmed with Thiesi after an initial proposal had it backwards.**
+   `netbbs.__main__._run_shutdown_sequence`: activates maintenance mode,
+   broadcasts a warning, then (graceful only) `asyncio.sleep`s the
+   configured delay before `disconnect_all()`; `shutdown_event` is set
+   last, so `run()`'s existing `finally: server.stop() → db.close()`
+   only ever runs once every session is confirmed gone. Signal handlers
+   now schedule this coroutine via `loop.create_task(...)` (both the
+   POSIX `add_signal_handler` path and the Windows `signal.signal` +
+   `call_soon_threadsafe` fallback ultimately reach it the same way)
+   instead of setting `shutdown_event` directly. `run()`'s existing
+   `shutdown_event` test-injection seam is unchanged in shape —
+   `session_registry`/`maintenance` became two more optional,
+   independently-injectable parameters alongside it, not a replacement
+   for that seam.
+6. **Known, accepted limitation, not solved here:** the broadcast text
+   can interleave oddly with whatever a user is mid-typing — the same
+   already-documented limitation ordinary chat messages have always
+   had.
+7. **Testing:** new `tests/test_shutdown.py` (13 cases) — the registry
+   in isolation (broadcast/disconnect, including a session that raises
+   `SessionClosedError` mid-broadcast not blocking the rest),
+   maintenance mode rejecting a new connection before `read_line` is
+   ever reached, and two real-socket integration tests through a real
+   `TelnetServer`/`run()`: the immediate path broadcasts and force-
+   closes the connection with no measurable wait, the graceful path's
+   total elapsed time is bounded *below* by the configured delay (a
+   lower-bound-only timing assertion, deliberately not an exact-timing
+   one, so it can't flake on a slower machine) confirming the wait
+   genuinely happened rather than being silently skipped. Every
+   existing direct `handle_session(...)` call site across three test
+   files threaded the two new parameters through — the same mechanical
+   "widening a parameter breaks many call sites" pattern rounds 42/46/
+   47 already described. Full suite re-run: **981 passed, 1 skipped**
+   — actually run, not just syntax-checked.
+8. **Flagged, not closed out here:** this is the one piece that can't
+   be fully proven by socket-level tests alone, the same category of
+   gap this project's history already carries for SSH/Zmodem/xterm.js —
+   worth a direct real-signal check (`kill -TERM`/`kill -INT` against a
+   running node) from Thiesi's own machine before considering it fully
+   verified end-to-end, flagged explicitly rather than silently assumed
+   correct from sandboxed tests alone.
+
+## Sign-off notes, round 52 (invalid-keystroke: bell only, genuinely nothing else — implemented)
+
+Revises round 48. Thiesi tested that round's fix directly and judged
+the reprinted `Choice: ` prompt after the bell to add no value — the
+prompt was already on screen, so reprinting it communicates nothing
+new. His original round-44 request ("we certainly shouldn't redraw the
+menu") was interpreted at the time as barring only a *full* redraw;
+this round settles that ambiguity the other way: **nothing** beyond the
+bell, for a genuinely invalid/inapplicable action.
+
+1. **Structural blocker identified and fixed at its root, not patched
+   per-symptom:** all four affected loops (`picker.py`'s `pick_item`,
+   `login_flow.py`'s `_main_menu`/`_show_board`/`_edit_profile`)
+   printed `Choice: ` unconditionally at the *top* of their `while
+   True` loop, every iteration — the actual reason "no reprint on
+   invalid input" was structurally impossible before this round, not
+   just an oversight in each individual bell branch. Fixed by moving
+   the prompt print out of the loop entirely and folding it into the
+   end of whatever function already redraws real content (`_render()`
+   in the picker, `_draw_main_menu`/`_render_board_page`/
+   `_render_profile` in `login_flow.py`) — the loop body itself now
+   never prints the prompt directly; it only ever appears as the last
+   line of an actual redraw.
+2. **The two-bucket distinction from round 48 survives, clarified, not
+   abandoned:** a *specific answer to a specific question* — the
+   picker's `No matches.`/`Not a number.`/`Out of range.` sub-prompt
+   responses — still gets its own text *and* a freshly printed prompt
+   afterward (added explicitly at each of those three call sites, since
+   they don't go through a `_render()` call), because something was
+   actually communicated that the user needs a clean line to respond
+   to. A bare invalid/inapplicable keystroke (unrecognized key, a page-
+   boundary bell, an out-of-range 2-digit selection) gets neither — the
+   picker's page-boundary branches (`N` on the last page, `P` on the
+   first) and the 2-digit-selection branch had their `write_line("")`
+   calls removed entirely, not just reordered, since even the
+   newline-only reprint no longer belongs there.
+3. **Testing:** `tests/test_picker.py`'s round-48 regression test
+   renamed and rewritten (`test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell`)
+   to assert the new exact byte sequence (`b"z\a"`, not
+   `b"z\r\n\aChoice: "`) — every other picker assertion in that file
+   only checked substring presence/absence, so they needed no changes,
+   confirmed by running them rather than assumed. New
+   `tests/test_menu_invalid_key.py` adds the same exact-write-sequence
+   proof for `_main_menu`/`_show_board`, not previously covered this
+   precisely — using a non-echoing `FakeSession` deliberately, since
+   character echo is a real transport's job (`netbbs.net.char_input.
+   read_key`), not something `login_flow`'s own code ever writes;
+   asserting the code's own `write()` calls for an invalid turn are
+   exactly one bell is a cleaner proof of the property than trying to
+   simulate transport echo. `tests/test_directory_ui.py`'s existing
+   `_edit_profile` regression test gained a
+   `session.output.count("Choice: ") == 1` assertion alongside its
+   existing `"Your profile:"`-count check. Full suite re-run: **983
+   passed, 1 skipped** — actually run, not just syntax-checked.
+
+## Sign-off notes, round 53 (`/nick` display: chat-stream marker+color, lists keep both forms — implemented)
+
+Reverses round 32 point 7 / round 41's original "every chat rendering
+must keep the canonical username plainly visible" mandate, specifically
+and only for the live conversational stream — Thiesi tested `nick|
+username` shown on every single line of live chat and judged it
+cluttered in practice, not just debatable in theory. Explicitly flagged
+by Thiesi as provisional, easy to revisit once seen live — this is not
+treated as a final word on the exact marker/color choice.
+
+1. **Two rendering forms, deliberately, not one changed in place.**
+   `netbbs.chat.nick.display_label` (`nick|username`, unchanged) stays
+   the form `/who`/`/whois`/`/names` use — directory-style listings
+   still show canonical identity alongside presentation, matching the
+   original anti-impersonation intent exactly. New `chat_stream_label`
+   (nick-only, marked `~nick~` and colored, or plain `username` if
+   unset) is used everywhere in the live conversational stream instead:
+   regular messages, `/me` actions, join/leave notices (live and
+   scrollback replay alike). Moderation notices already never called
+   either function (canonical-only, round 32 point 7) — untouched.
+   **Confirmed scope, including two points not obvious from the
+   original request:** `/whois`'s own identity header turned out to
+   already be canonical-only (`vcard.username` directly, never
+   `display_label` at all) — a pre-existing fact traced during
+   implementation, not something this round changed; scrollback replay
+   reuses whatever the live format is, per Thiesi's explicit answer,
+   itself given with the same "might revisit once I've seen it" caveat.
+2. **Marker character: `~` (tildes wrapping the nick), ASCII-safe by
+   the same reasoning that ruled out italics for this exact problem
+   earlier in the same discussion** — guaranteed to render identically
+   on a CP437-only classic BBS client, not font/encoding-dependent, and
+   not already used anywhere else in this codebase's chat rendering
+   conventions (unlike `*`, already overloaded for `/me` actions and
+   moderation notices). `netbbs.chat.nick.set_nick` gained one new
+   validation rule rejecting `NICK_MARKER` from submitted nick content
+   — today literally any character was accepted, so this is a real,
+   if small, behavior change, needed to make Thiesi's own requirement
+   ("nothing you could type in that `/nick` would ever accept") true
+   rather than just claimed.
+3. **New `NICK_COLOR` (sky blue, 39)** in `netbbs.rendering.theme`,
+   following the existing `SELF_COLOR`/`ACCENT_COLOR`/`MUTED_COLOR`
+   precedent — a new semantic color, not a reused one that already
+   means something else.
+4. **A real ANSI-nesting bug caught during design, not shipped:** an
+   earlier draft had `chat_stream_label` wrap its own colored segment
+   *inside* each call site's existing single `colored(whole line)`
+   call. Verified directly that `colored()`'s trailing reset always
+   returns to the terminal's *default*, not back to whatever color was
+   active before the nested call — meaning the text *after* a nick in,
+   e.g., a join notice would have visibly lost its `MUTED_COLOR`
+   styling for the remainder of that line, every time a nick was
+   involved. Fixed by having `chat_stream_label` own sanitization *and*
+   coloring itself as one atomic, self-contained unit, with callers
+   splicing its result into their template rather than wrapping the
+   whole line in one outer `colored()` call. **Known, accepted residual
+   quirk, not engineered around further:** the text immediately
+   *following* a nick within an already-colored line still reverts to
+   the terminal default rather than reapplying the surrounding color,
+   for the same reset-doesn't-stack reason — acceptable for now given
+   the whole feature is explicitly provisional.
+5. **Sanitize-before-color, not after — verified as the only safe
+   order, not assumed.** `chat_stream_label` sanitizes the raw nick/
+   username *before* wrapping it in `colored()`, never the reverse:
+   running `sanitize_text` on an already-colored string would risk
+   stripping this function's own legitimate SGR codes right alongside
+   (or instead of) any genuinely hostile content — the same "sanitize
+   on output, immediately before display" ordering this codebase has
+   followed since round 29, just newly relevant here because this is
+   the first function in the codebase to own both sanitization *and*
+   styling of the same value together.
+6. **Testing:** `tests/test_chat_flow_nick.py`'s five existing
+   alias-rendering tests updated for the new format — each split into
+   multiple substring assertions either side of `chat_stream_label`'s
+   own trailing ANSI reset, rather than one assertion spanning it,
+   after the first attempt at updating them tripped on exactly that
+   boundary. New tests confirming `/names`/`/who` still show both
+   forms unchanged, and the `/whois`-is-actually-canonical-only fact
+   from point 1. `tests/test_chat_nick.py` gained `chat_stream_label`
+   unit tests (bare-username case has no color codes at all; the nick
+   case is marked, colored, and never contains the canonical username)
+   and two `set_nick` marker-rejection tests. Full suite re-run: **992
+   passed, 1 skipped** — actually run, not just syntax-checked.
+
+## Sign-off notes, round 54 (`/query` removed entirely — implemented)
+
+Reverses round 33 point 1's original "`/query` accepted only as an
+IRC-compatibility alias" decision. Thiesi confirmed `_COMMANDS["query"]
+= _handle_private` was a bare alias with no behavior of its own, then
+asked for it gone outright: it was the only command in the entire
+surface with two names, and existing purely for a compatibility
+convention nobody had actually asked to keep. A future shell-alias-
+style user-defined-command-name feature was explicitly floated and
+explicitly deferred as out of scope for now.
+
+1. **Removed from every place it was registered, not just the
+   dispatch table:** the `_COMMANDS` entry itself, and `"/query "` from
+   Tab completion's `_ONLINE_USER_COMMAND_PREFIXES` (Track 5g) — a
+   second registration point that would have silently kept suggesting
+   a now-dead command if missed.
+2. **Testing:** `test_query_is_an_alias_for_private` in
+   `tests/test_chat_flow_private.py` replaced with
+   `test_query_is_no_longer_a_command`, asserting `/query` now produces
+   the ordinary "Unknown command" response every other unrecognized
+   slash-command gets — locking in the removal as a real, checked
+   behavior rather than just deleting the old test and losing coverage
+   of the boundary. `tests/test_chat_completion.py` gained the
+   equivalent for Tab completion (`/query` suggests nothing, and no
+   longer appears in the bare-`/` command list). Full suite re-run:
+   **993 passed, 1 skipped** — actually run, not just syntax-checked.
+
+## Sign-off notes, round 55 (`/help` overhaul + `/?` alias — implemented)
+
+Thiesi found the pre-existing `/help` "mostly useless": it printed the
+same bare command-name list Tab completion (round 49/Track 5g) already
+surfaces, adding nothing. Asked for a real upgrade — syntax plus a
+one-line description per command, permission-aware, `/help <command>`
+for single-command detail, and a `/?` alias — then, when asked whether
+to centralize command metadata or leave it scattered, said: "Centralize
+it, and yes to permission-aware and /help <command>."
+
+1. **`_COMMAND_INFO: dict[str, tuple[str, str]]`** — new single source
+   of truth for every command's syntax and one-line description (26
+   entries, including commands that take no arguments and previously
+   had no `Usage:` string at all, like `/quit`/`/who`/`/members`).
+   Replaces 16 independently-worded, scattered `"Usage: /command ..."`
+   literals with a single `_show_usage(session, command)` helper that
+   looks the syntax up from this table — both `_show_usage` and
+   `/help` itself are now generated from the same data, so the two can
+   no longer drift out of sync with each other.
+2. **Bare `/help`** lists every command visible to the caller, reusing
+   `_COMMAND_VISIBILITY` — the exact same predicate dict Tab completion
+   already applies — so the list a user sees matches what `/` + Tab
+   would offer them. This is the actual value-add over Tab completion
+   Thiesi asked for: syntax and description attached to each entry,
+   not just bare names.
+3. **`/help <command>`** looks up one `_COMMAND_INFO` entry directly
+   and shows full detail, **regardless of the caller's own visibility**
+   for that command — consistent with Track 5g's established framing
+   that `_COMMAND_VISIBILITY` is a suggestion filter, not an
+   authorization check. A non-moderator explicitly asking `/help mute`
+   gets a real answer; the handler itself remains the sole source of
+   truth for whether running it is actually allowed. An unrecognized
+   argument gets the same "Unknown command: /x" wording the top-level
+   dispatcher already uses elsewhere, for consistency.
+4. **`/?` alias**: `_COMMANDS["?"] = _handle_help`, a second dispatch
+   key mapped to the *same* handler — deliberately not the same shape
+   as round 54's `/query` removal. The distinction: `/query` was two
+   *names* for a command that already had one, existing purely as an
+   unused compatibility convention; `/?` is a genuinely distinct,
+   commonly-expected terse trigger being added on request, for a
+   command whose only other name is a full word. Recorded explicitly
+   so this doesn't read as quietly reintroducing what round 54 just
+   removed.
+5. **Testing:** new `tests/test_chat_help.py` — bare `/help` shows
+   syntax+description and hides moderation commands from a
+   non-moderator while showing them to a moderator; `/help <command>`
+   (with or without a leading `/` in the argument) shows detail
+   regardless of visibility; `/help <unknown>` gives the friendly
+   "Unknown command" message; `/?` behaves identically to `/help`,
+   bare and with an argument. `tests/test_chat_dispatch.py`'s
+   pre-existing `test_help_lists_known_commands` — which had asserted
+   `/mute` appears in a plain user's `/help` output — was updated to
+   drop that now-incorrect assumption (permission-gating is the new,
+   intended behavior) rather than deleted, keeping coverage of the
+   commands every user *does* see. Full suite re-run: **1001 passed, 1
+   skipped** — actually run, not just syntax-checked.

@@ -28,6 +28,7 @@ from netbbs.chat import (
     accept_invitation,
     add_member,
     ban_user,
+    chat_stream_label,
     create_invitation,
     display_label,
     get_channel_by_name,
@@ -217,21 +218,26 @@ def _channel_description(hub: ChatHub, channel: Channel) -> str:
     return f"{base} ({online} online)".strip()
 
 
-def _resolve_display_label(db: Database, author_label: str) -> str:
+def _resolve_chat_stream_label(db: Database, author_label: str) -> str:
     """
     Best-effort live alias lookup for scrollback replay (design doc
-    round 32/41): there's no per-message nick snapshot — an alias is
-    presentation metadata looked up live, not stored history — so
-    replay shows the author's *current* alias, not whatever was set at
-    the original moment. Falls back to the stored canonical label if
-    the account can no longer be found (defensive; no account-deletion
-    feature exists yet to actually trigger this).
+    round 32/41, switched to the marked nick-only form in round 53):
+    there's no per-message nick snapshot — an alias is presentation
+    metadata looked up live, not stored history — so replay shows the
+    author's *current* alias, not whatever was set at the original
+    moment. Falls back to the stored canonical label if the account can
+    no longer be found (defensive; no account-deletion feature exists
+    yet to actually trigger this).
+
+    `chat_stream_label` already sanitizes internally — no second
+    `sanitize_text` wrap here, which would risk stripping its own
+    legitimate color codes rather than just hostile content.
     """
     try:
         author = get_user_by_username(db, author_label)
     except AuthError:
         return sanitize_text(author_label)
-    return sanitize_text(display_label(db, author))
+    return chat_stream_label(db, author)
 
 
 def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
@@ -246,25 +252,26 @@ def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
     one originally sent it.
 
     `join`/`leave`/`action`/plain-message kinds show the author's
-    *current* alias (`_resolve_display_label`) alongside their
-    canonical username — moderation kinds (`_VERB_BY_KIND`) and `nick`
-    itself deliberately don't: moderation/auditing always shows
-    canonical identity only (design doc round 32, point 7), and a
-    `nick` event's own body text already fully describes the change.
+    *current* alias, nick-only-plus-marker if one is set
+    (`_resolve_chat_stream_label`, design doc round 53) — moderation
+    kinds (`_VERB_BY_KIND`) and `nick` itself deliberately don't:
+    moderation/auditing always shows canonical identity only (design
+    doc round 32, point 7), and a `nick` event's own body text already
+    fully describes the change.
     """
     if message.kind == "join":
         return colored(
-            f"*** {_resolve_display_label(db, message.author_label)} has joined the channel.",
+            f"*** {_resolve_chat_stream_label(db, message.author_label)} has joined the channel.",
             fg_color=MUTED_COLOR,
         )
     if message.kind == "leave":
         return colored(
-            f"*** {_resolve_display_label(db, message.author_label)} has left the channel.",
+            f"*** {_resolve_chat_stream_label(db, message.author_label)} has left the channel.",
             fg_color=MUTED_COLOR,
         )
     if message.kind == "action":
         return colored(
-            f"* {_resolve_display_label(db, message.author_label)} {sanitize_text(message.body)}",
+            f"* {_resolve_chat_stream_label(db, message.author_label)} {sanitize_text(message.body)}",
             fg_color=MUTED_COLOR,
         )
     if message.kind == "nick":
@@ -278,7 +285,7 @@ def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
         return colored(
             f"*** {author_label} was {_VERB_BY_KIND[message.kind]}{detail}.", fg_color=MUTED_COLOR
         )
-    label = colored(f"<{_resolve_display_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
+    label = colored(f"<{_resolve_chat_stream_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
     return f"{label} {sanitize_text(message.body)}"
 
 
@@ -383,7 +390,7 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     """
     channel_name = args.strip()
     if not channel_name:
-        await ctx.session.write_line(colored("Usage: /join <channel>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "join")
         return None
 
     try:
@@ -526,7 +533,7 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     """
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
-        await ctx.session.write_line(colored("Usage: /msg <user> <text>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "msg")
         return
     target_name, body = parts
 
@@ -547,13 +554,14 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
     """
     `/private <user>` (design doc round 33 point 1): enters a temporary
     private-conversation mode layered on `/msg` — ordinary (non-slash)
-    input is sent privately to `target` until `/close`. `/query` is
-    registered as a plain alias for this same handler in `_COMMANDS`
-    (round 33 point 1: "accepted only as an IRC-compatibility alias").
+    input is sent privately to `target` until `/close`. The old `/query`
+    IRC-compatibility alias for this handler was removed in round 54 —
+    it was the only command with two names and added no value beyond
+    what `/private` already provides.
     """
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /private <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "private")
         return None
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -582,8 +590,46 @@ async def _handle_close(ctx: ChatCommandContext, args: str) -> ChatAction:
 
 
 async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
-    names = ", ".join(f"/{name}" for name in sorted(_COMMANDS))
-    await ctx.session.write_line(colored(f"Available commands: {names}", fg_color=MUTED_COLOR))
+    """
+    `/help` (no args, design doc round 55): lists every command visible
+    to the caller — reuses the exact same `_COMMAND_VISIBILITY`
+    predicate Tab completion (round 49/Track 5g) already applies, so
+    the list matches what `/` + Tab would offer, with syntax and a
+    one-line description attached to each command — the actual
+    value-add over Tab completion this round was built to provide (the
+    old version just printed the same bare name list Tab completion
+    already surfaces).
+
+    `/help <command>` shows one command's full detail regardless of the
+    caller's own visibility for it — consistent with Track 5g's
+    established framing that visibility gating is a suggestion filter,
+    not an authorization check: asking about a command by name is a
+    deliberate, explicit request, not a passive listing a non-moderator
+    shouldn't be nudged toward.
+    """
+    target = args.strip().lstrip("/").lower()
+    if target:
+        info = _COMMAND_INFO.get(target)
+        if info is None:
+            await ctx.session.write_line(
+                colored(f"Unknown command: /{sanitize_text(target)}", fg_color=MUTED_COLOR)
+            )
+            return
+        syntax, description = info
+        await ctx.session.write_line(colored(syntax, fg_color=MUTED_COLOR, bold=True))
+        await ctx.session.write_line(description)
+        return
+
+    await ctx.session.write_line(colored("Available commands:", fg_color=MUTED_COLOR, bold=True))
+    visible_names = sorted(
+        name
+        for name in _COMMANDS
+        if name in _COMMAND_INFO
+        and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](ctx.db, ctx.channel, ctx.user))
+    )
+    for name in visible_names:
+        syntax, description = _COMMAND_INFO[name]
+        await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
 
 
 async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
@@ -689,6 +735,16 @@ async def _announce_moderation(
     await hub.broadcast(channel.name, notice)
 
 
+async def _show_usage(session: Session, command: str) -> None:
+    """Writes the standard `"Usage: /command <args>"` message for
+    `command`, generated from `_COMMAND_INFO` (design doc round 55) —
+    the single source of truth for command syntax, also used by
+    `_handle_help`, instead of each handler carrying its own
+    independently-maintained copy of the same text."""
+    syntax, _ = _COMMAND_INFO[command]
+    await session.write_line(colored(f"Usage: {syntax}", fg_color=MUTED_COLOR))
+
+
 async def _resolve_target(session: Session, db: Database, username: str) -> User | None:
     """Look up a mute/ban/kick command's target username, writing a
     friendly message and returning `None` if there's no such account —
@@ -716,7 +772,7 @@ async def _kick_live_sessions(hub: ChatHub, channel: Channel, target: User, *, r
 async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
     parts = args.split(maxsplit=1)
     if not parts:
-        await ctx.session.write_line(colored("Usage: /mute <user> [duration] [reason]", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "mute")
         return
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
@@ -740,7 +796,7 @@ async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
 async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /unmute <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "unmute")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -764,7 +820,7 @@ async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
 async def _handle_ban(ctx: ChatCommandContext, args: str) -> None:
     parts = args.split(maxsplit=1)
     if not parts:
-        await ctx.session.write_line(colored("Usage: /ban <user> [duration] [reason]", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "ban")
         return
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
@@ -789,7 +845,7 @@ async def _handle_ban(ctx: ChatCommandContext, args: str) -> None:
 async def _handle_unban(ctx: ChatCommandContext, args: str) -> None:
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /unban <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "unban")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -813,7 +869,7 @@ async def _handle_unban(ctx: ChatCommandContext, args: str) -> None:
 async def _handle_kick(ctx: ChatCommandContext, args: str) -> None:
     parts = args.split(maxsplit=1)
     if not parts:
-        await ctx.session.write_line(colored("Usage: /kick <user> [reason]", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "kick")
         return
     target_name = parts[0]
     reason = parts[1] if len(parts) > 1 else None
@@ -857,7 +913,7 @@ async def _handle_finger(ctx: ChatCommandContext, args: str) -> None:
     """
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /finger <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "finger")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -878,10 +934,10 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
     worth making for a shared narrative-style action.
     """
     if not args:
-        await ctx.session.write_line(colored("Usage: /me <action>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "me")
         return
 
-    label = sanitize_text(display_label(ctx.db, ctx.user))
+    label = chat_stream_label(ctx.db, ctx.user)
     notice = colored(f"* {label} {sanitize_text(args)}", fg_color=MUTED_COLOR)
 
     await ctx.session.write_line(notice)
@@ -909,9 +965,7 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
         if current:
             await ctx.session.write_line(f"Your current alias: {sanitize_text(current)}")
         else:
-            await ctx.session.write_line(
-                colored("Usage: /nick <name> (or /nick off to clear)", fg_color=MUTED_COLOR)
-            )
+            await _show_usage(ctx.session, "nick")
         return
 
     if args.lower() == "off":
@@ -1085,7 +1139,7 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
     """
     target_name = args.split(maxsplit=1)[0] if args.split() else ""
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /whois <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "whois")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -1127,7 +1181,7 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     """
     target_name = args.strip()
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /invite <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "invite")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -1153,7 +1207,7 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
 async def _handle_uninvite(ctx: ChatCommandContext, args: str) -> None:
     target_name = args.strip()
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /uninvite <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "uninvite")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -1180,7 +1234,7 @@ async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
     alternate way to trigger the same thing."""
     target_name = args.strip()
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /grantaccess <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "grantaccess")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -1208,7 +1262,7 @@ async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
     connected stays connected until they leave or reconnect."""
     target_name = args.strip()
     if not target_name:
-        await ctx.session.write_line(colored("Usage: /revokeaccess <user>", fg_color=MUTED_COLOR))
+        await _show_usage(ctx.session, "revokeaccess")
         return
 
     target = await _resolve_target(ctx.session, ctx.db, target_name)
@@ -1241,6 +1295,43 @@ async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(f"Members: {names}")
 
 
+# Design doc round 55: the single source of truth for every command's
+# syntax and a one-line description -- `_show_usage` generates each
+# handler's own "Usage: ..." error message from this same table
+# (replacing what used to be ~16 independently-maintained copies of the
+# same text), and `_handle_help` is built entirely from it. Deliberately
+# excludes "?" (registered only in `_COMMANDS`, as a bare alias for
+# "help") -- an alias needs no documentation entry of its own, and
+# `_handle_help`'s bare listing skips any `_COMMANDS` name absent here.
+_COMMAND_INFO: dict[str, tuple[str, str]] = {
+    "quit": ("/quit", "Leave chat and return to the main menu."),
+    "leave": ("/leave", "Leave this channel and return to the channel picker."),
+    "join": ("/join <channel>", "Switch to another channel."),
+    "topic": ("/topic [text]", "View the channel topic, or change it (requires edit permission)."),
+    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user."),
+    "private": ("/private <user>", "Enter a private conversation with an online user."),
+    "close": ("/close", "Leave the current private conversation."),
+    "help": ("/help [command]", "List available commands, or show detail for one."),
+    "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
+    "nick": ("/nick [name|off]", "Set, view, or clear your display alias."),
+    "away": ("/away [message]", "Mark yourself away, or clear away status."),
+    "mute": ("/mute <user> [duration] [reason]", "Silence a user's messages in this channel."),
+    "unmute": ("/unmute <user>", "Lift a mute."),
+    "ban": ("/ban <user> [duration] [reason]", "Bar a user from this channel."),
+    "unban": ("/unban <user>", "Lift a ban."),
+    "kick": ("/kick <user> [reason]", "Force a user out of this channel right now."),
+    "finger": ("/finger <user>", "Show a user's public profile."),
+    "names": ("/names", "List everyone currently in this channel."),
+    "who": ("/who", "List everyone in this channel, with away status."),
+    "list": ("/list", "List every channel you can see."),
+    "whois": ("/whois <user>", "Show a user's profile plus online/away/channel status."),
+    "invite": ("/invite <user>", "Invite a user to a members-only channel."),
+    "uninvite": ("/uninvite <user>", "Revoke a pending invitation."),
+    "grantaccess": ("/grantaccess <user>", "Directly grant a user access to this channel."),
+    "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this channel."),
+    "members": ("/members", "List users with direct access to this channel."),
+}
+
 _COMMANDS: dict[str, CommandHandler] = {
     "quit": _handle_quit,
     "leave": _handle_leave,
@@ -1248,9 +1339,12 @@ _COMMANDS: dict[str, CommandHandler] = {
     "topic": _handle_topic,
     "msg": _handle_msg,
     "private": _handle_private,
-    "query": _handle_private,  # IRC-compatibility alias (design doc round 33 point 1)
     "close": _handle_close,
     "help": _handle_help,
+    "?": _handle_help,  # terse alias (design doc round 55) -- a genuinely
+                         # distinct trigger for /help, not a second name
+                         # for a command that already has one (see round
+                         # 54's removal of /query for the contrast)
     "me": _handle_me,
     "nick": _handle_nick,
     "away": _handle_away,
@@ -1317,13 +1411,13 @@ _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
 }
 
 # The commands whose first argument is a username -- distinguished by
-# whether it must currently be *online* (/msg, /private, /query -- a
-# live conversation can't reach an offline account, matching those
-# commands' own online_usernames() and the online refusal on send)
-# versus any registered account at all (/whois, /finger -- both work
-# for offline accounts too). /invite is its own case just below --
-# eligible candidates are registered users who aren't already members.
-_ONLINE_USER_COMMAND_PREFIXES = ("/msg ", "/private ", "/query ")
+# whether it must currently be *online* (/msg, /private -- a live
+# conversation can't reach an offline account, matching those commands'
+# own online_usernames() and the online refusal on send) versus any
+# registered account at all (/whois, /finger -- both work for offline
+# accounts too). /invite is its own case just below -- eligible
+# candidates are registered users who aren't already members.
+_ONLINE_USER_COMMAND_PREFIXES = ("/msg ", "/private ")
 _ANY_USER_COMMAND_PREFIXES = ("/whois ", "/finger ")
 _INVITE_COMMAND_PREFIX = "/invite "
 
@@ -1480,14 +1574,15 @@ async def _chat_loop(
     # author_label is stored raw here (user.username, not a sanitized/
     # alias-aware label) -- sanitize on output, not on storage, per
     # sanitize_text's docstring; only the broadcast text below is
-    # actually rendered to a terminal. display_label looked up fresh
-    # here (not cached) since it can change mid-session via /nick.
+    # actually rendered to a terminal. chat_stream_label (design doc
+    # round 53) looked up fresh here (not cached) since it can change
+    # mid-session via /nick.
     record_message(
         db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
     )
     await hub.broadcast(
         channel.name,
-        colored(f"*** {sanitize_text(display_label(db, user))} has joined the channel.", fg_color=MUTED_COLOR),
+        colored(f"*** {chat_stream_label(db, user)} has joined the channel.", fg_color=MUTED_COLOR),
         exclude={participant_id},
     )
 
@@ -1598,8 +1693,11 @@ async def _chat_loop(
             # text per recipient.
             # Looked up fresh on every message, not cached from join
             # time -- an alias set via /nick mid-session must show up
-            # immediately, not just after the next rejoin.
-            current_label = sanitize_text(display_label(db, user))
+            # immediately, not just after the next rejoin. Nick-only-
+            # plus-marker, not both forms (design doc round 53) --
+            # chat_stream_label already sanitizes internally, unlike
+            # display_label, so no separate sanitize_text wrap here.
+            current_label = chat_stream_label(db, user)
             self_label = colored(f"<{current_label}>", fg_color=SELF_COLOR, bold=True)
             others_label = colored(f"<{current_label}>", fg_color=ACCENT_COLOR)
             # Sanitized once here, used for both the direct self-write
@@ -1659,6 +1757,6 @@ async def _chat_loop(
         )
         await hub.broadcast(
             channel.name,
-            colored(f"*** {sanitize_text(display_label(db, user))} has left the channel.", fg_color=MUTED_COLOR),
+            colored(f"*** {chat_stream_label(db, user)} has left the channel.", fg_color=MUTED_COLOR),
             exclude={participant_id},
         )

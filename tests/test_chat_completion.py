@@ -2,11 +2,11 @@
 Tests for the BBS-specific Tab completer built in netbbs.net.chat_flow
 (design doc round 49/Track 5g): command-name completion (permission-
 aware for moderation commands), and username completion for /msg,
-/private, /query (online accounts only) vs /whois, /finger (every
-registered account). The generic word-replacement mechanics themselves
-are covered separately in tests/test_char_input_completion.py; this
-file only exercises what `_build_completer`'s closure returns for a
-given line of text.
+/private (online accounts only) vs /whois, /finger (every registered
+account). The generic word-replacement mechanics themselves are covered
+separately in tests/test_char_input_completion.py; this file only
+exercises what `_build_completer`'s closure returns for a given line of
+text. `/query` was removed in round 54.
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ def test_invite_is_suggested_to_a_plain_member_when_the_channel_opts_in(db, pres
     assert "/uninvite" not in candidates
 
 
-# -- /msg, /private, /query: online usernames only ---------------------
+# -- /msg, /private: online usernames only ------------------------------
 
 
 def test_msg_completes_against_online_usernames(db, presence, alice, bob, channel):
@@ -176,11 +176,18 @@ def test_msg_does_not_suggest_an_offline_user(db, presence, alice, bob, channel)
     assert completer("/msg bo") == []
 
 
-def test_private_and_query_complete_the_same_way_as_msg(db, presence, alice, bob, channel):
+def test_private_completes_the_same_way_as_msg(db, presence, alice, bob, channel):
     presence.enter("bob")
     completer = chat_flow._build_completer(db, presence, channel, alice)
     assert completer("/private bo") == ["bob"]
-    assert completer("/query bo") == ["bob"]
+
+
+def test_query_is_no_longer_a_recognized_command_prefix(db, presence, alice, bob, channel):
+    # design doc round 54: /query removed -- no longer completes at all.
+    presence.enter("bob")
+    completer = chat_flow._build_completer(db, presence, channel, alice)
+    assert completer("/query bo") == []
+    assert "/query" not in completer("/")
 
 
 def test_msg_completion_is_case_insensitive(db, presence, alice, bob, channel):

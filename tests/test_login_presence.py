@@ -15,7 +15,9 @@ import asyncio
 from netbbs.auth.users import User
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
+from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
 
 
@@ -101,7 +103,7 @@ def test_handle_session_enters_and_leaves_presence_around_the_main_menu(monkeypa
         presence = _SpyPresence()
         session = FakeSession(["alice", "correct-password"], keys=["l"])  # "l" = logoff immediately
         config = _throttle_config()
-        await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config)
+        await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
 
         assert presence.entered == ["alice"]
         assert presence.left == ["alice"]
@@ -138,7 +140,7 @@ def test_presence_left_even_if_main_menu_raises(monkeypatch):
         session = FakeSession(["alice", "correct-password"])
         config = _throttle_config()
         try:
-            await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config)
+            await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
         except RuntimeError:
             pass
 

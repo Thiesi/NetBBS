@@ -118,10 +118,12 @@ def test_leave_also_exits_the_loop(db, hub, presence, alice, channel):
 
 
 def test_help_lists_known_commands(db, hub, presence, alice, channel):
+    # /mute etc. deliberately excluded here -- alice is a plain user,
+    # and /help is permission-aware since design doc round 55 (see
+    # tests/test_chat_help.py for the full behavior, including what a
+    # moderator sees).
     session = asyncio.run(_run(db, hub, presence, channel, alice, ["/help", "/quit"]))
     output = _written_text(session)
-    assert "/mute" in output
-    assert "/kick" in output
     assert "/finger" in output
     assert "/quit" in output
 
