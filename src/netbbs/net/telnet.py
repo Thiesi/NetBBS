@@ -62,6 +62,12 @@ NAWS = 0x1F  # Negotiate About Window Size (RFC 1073)
 
 _logger = logging.getLogger(__name__)
 
+# Subnegotiations are control messages, not bulk data. Bound both their
+# decoded body size and total completion time so a pre-authentication client
+# cannot retain a session forever or grow an unbounded bytearray.
+_MAX_SUBNEGOTIATION_BODY = 1024
+_SUBNEGOTIATION_TIMEOUT = 1.0
+
 
 class TelnetSession(Session):
     """A single Telnet client connection."""
@@ -253,8 +259,14 @@ class TelnetSession(Session):
         have a literal 0xFF byte in its NAWS payload, which per RFC 854
         must arrive doubled (IAC IAC) same as any other data byte.
         """
-        option = (await self._reader.readexactly(1))[0]
-        body = await self._read_subnegotiation_body()
+        try:
+            option, body = await asyncio.wait_for(
+                self._read_subnegotiation(), timeout=_SUBNEGOTIATION_TIMEOUT
+            )
+        except asyncio.TimeoutError as exc:
+            raise SessionClosedError("Telnet subnegotiation timed out") from exc
+        except asyncio.IncompleteReadError as exc:
+            raise SessionClosedError("client disconnected during subnegotiation") from exc
 
         if option == NAWS and len(body) >= 4:
             width = (body[0] << 8) | body[1]
@@ -267,6 +279,11 @@ class TelnetSession(Session):
                 self.terminal_width = width
             if height > 0:
                 self.terminal_height = height
+
+    async def _read_subnegotiation(self) -> tuple[int, bytes]:
+        option = (await self._reader.readexactly(1))[0]
+        body = await self._read_subnegotiation_body()
+        return option, body
 
     async def _read_subnegotiation_body(self) -> bytes:
         """
@@ -282,14 +299,16 @@ class TelnetSession(Session):
                     return bytes(body)
                 if nxt == IAC:
                     body.append(0xFF)
+                else:
+                    # IAC followed by something else inside a
+                    # subnegotiation is malformed. Discard the command and
+                    # continue, but still enforce the same decoded-body cap.
                     continue
-                # IAC followed by something else inside a subnegotiation
-                # is technically malformed, but a real client shouldn't
-                # produce it — rather than raising and killing the whole
-                # connection over a protocol oddity, discard the
-                # unexpected byte and keep reading the body.
-                continue
-            body.append(b)
+            else:
+                body.append(b)
+
+            if len(body) > _MAX_SUBNEGOTIATION_BODY:
+                raise SessionClosedError("Telnet subnegotiation body is too large")
 
 
 SessionHandler = Callable[[Session], Awaitable[None]]
