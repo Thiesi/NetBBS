@@ -174,11 +174,57 @@ during testing.
 
 ## 8. Real-time chat
 
-Explicitly **not** routed through the DAG/store-and-forward system — real
-time chat needs low latency, board/PM sync doesn't need to be real-time.
-Direct relay between currently-connected nodes; if a node is offline, its
-users simply miss chat traffic until reconnect rather than the system trying
-to replay chat history through the propagation layer.
+Explicitly **not** routed through the DAG/store-and-forward system — real-time chat needs low latency, while boards and Link messages value reliable asynchronous delivery.
+
+### Chat event model
+
+Chat traffic consists of typed events rather than formatted text. Initial event types are:
+
+- `message` — ordinary channel message.
+- `action` — `/me`, rendered IRC-style (`* user waves`).
+- `private` — online-only `/msg` traffic, visually distinct from channel traffic.
+- `join` / `leave` — presence events.
+- `nick` — transparent display-alias changes.
+- `system` — server-generated notices.
+
+Using typed events avoids reparsing display text when features later extend across NetBBS Link.
+
+### Identity
+
+Chat may display an optional user alias (`/nick`), but aliases are presentation metadata only. Every rendering keeps the authenticated canonical identity visible in plain text. Moderation, permissions, blocking, reputation and message addressing continue to use canonical identity.
+
+### Presence and discovery
+
+Phase 2 introduces local node-wide away status (`/away`) shared across all active sessions, plus local `/who`, `/whois`, `/names`, and `/list` commands. `/whois` reuses the user-directory/vCard system and must respect profile privacy and hidden-channel visibility. `/names` is a compact channel roster; `/who` is the more detailed presence view.
+
+Phase 5 extends presence and discovery across NetBBS Link with per-node and per-user privacy controls.
+
+### Private conversation
+
+`/msg <user> <text>` sends a one-off, online-only private message. `/private <user>` enters a temporary private-conversation mode layered on top of `/msg`; ordinary input is sent privately to that recipient until `/close` returns to normal channel input. `/query` is accepted only as an IRC-compatibility alias.
+
+Live private messages remain ephemeral and do not fall back to asynchronous Link messages. A user-facing `/notice` command is deliberately omitted: human private communication uses `/msg`/`/private`, while server and service notifications use typed `system` events.
+
+### Channels and commands
+
+Phase 2 keeps one active channel per session. `/join <channel>` switches from the current channel to another visible/authorized channel, and `/leave` returns to channel selection or the main menu. `/list` exposes visible channels without joining them. `/topic` displays the current topic; changing it is privilege-gated.
+
+Multiple simultaneous channel memberships are deferred until Phase 5, when the richer presence, background-traffic, unread-state, and Link-wide chat machinery exists to justify the added complexity.
+
+### Completion
+
+Slash-command tab completion is Phase 2 scope and belongs in the shared character-input layer so Telnet, SSH, and web sessions behave consistently. Completion is case-insensitive, context-aware, and permission-aware.
+
+Username completion is also Phase 2 scope, but candidate sources are command-specific and visibility-aware: online visible users for `/msg` and `/private`, visible directory entries for `/whois`, and invite-eligible users for `/invite`. Completion always targets canonical usernames, not display aliases. Link-wide identity completion waits until Phase 5 has remote presence/directory data.
+
+### Persistence
+
+Channel traffic retains bounded channel scrollback. Private `/msg` conversations are intentionally ephemeral and are not written to channel scrollback. Asynchronous Link messages remain a separate store-and-forward feature introduced in Phase 3.
+
+### Link extension
+
+Phase 5 carries typed chat events (`message`, `action`, `private`, presence and alias changes) over the authenticated Noise transport. Live `/msg` and `/private` remain distinct from asynchronous Link messages and do not silently fall back to store-and-forward delivery.
+
 
 ## 9. File areas
 
@@ -264,6 +310,17 @@ what caused the original rewrite.
   (seconds/minutes/hours/days/weeks/years). All actions logged and echoed
   in-channel for transparency.
 - Chat moderators (non-SysOp) can `kick`/`mute`/`ban` within their scope.
+
+
+**Channel membership and invitations:**
+- New `manage_members` permission, deliberately separate from `edit`: membership management is authorization, not metadata editing.
+- Covers sending/revoking invitations, viewing members, granting/removing persistent channel access, and configuring whether ordinary members may invite.
+- Invite-only channels use an invitation-plus-acceptance workflow; an invitation alone never creates membership.
+- Channel visibility and join policy are independent axes: listed vs. hidden, and open-to-eligible vs. members-only. `hidden + open` is permitted but documented as obscurity rather than access control.
+- Local invitations may be delivered immediately to online users and retained as pending invitations for offline users, with configurable expiry. Membership persists until revoked unless explicitly configured otherwise.
+- Default invitation policy is moderators/SysOp only; channels may opt into ordinary members being allowed to invite.
+- Linked-channel membership is Phase 6 scope: invitations, acceptances, grants, removals, and revocations become signed governance events.
+- Access-restricted Linked channels are not described as end-to-end confidential from participating node operators. True encrypted group confidentiality requires a separate future design covering group keys, rotation, history access, and compromised members.
 
 **Moderator scope tiers** (three levels, each reusing the same underlying
 permission primitives — a "global" moderator is just "moderator of every
@@ -433,8 +490,18 @@ any Link work begins, matching Thiesi's actual primary deployment target.
   active → expired → deleted state machine with grace period,
   pin/exempt (under `edit` permission)
 - **User directory & vCard/finger system** (§13)
+- **Local chat command set and conversation UX:** `/private` (with `/query` compatibility alias), `/close`, `/who`, `/whois`, `/join`, `/leave`, `/names`, `/list`, and local `/topic`; one active channel per session in this phase.
+- **Command and identity completion:** permission-aware slash-command tab completion plus visibility-aware canonical-username completion for commands that address users.
+- **Invite-only/hidden local channels:** independent visibility and join-policy controls, pending invitations with expiry, explicit acceptance, and a new `manage_members` permission.
+
 - SysOp admin tools (user/board/node management, beyond blocklists)
 - ANSI art support for login/welcome screens
+- **Local real-time private messages (`/msg`)**: online-only, node-wide private chat between currently connected users. Private messages are visually distinct from channel traffic, are not written to channel scrollback, and remain intentionally separate from asynchronous Link messages (Phase 3).
+- **Per-user chat timestamp preference**: persistent user preference controlling timestamps for live chat, scrollback replay, join/leave notices, actions, and private messages.
+- **Chat action events (`/me`)**: first-class action events stored distinctly from ordinary chat messages and rendered in IRC style.
+- **Local away state (`/away`)**: node-wide away status with optional message, shared across all active sessions, surfaced through presence and private-message feedback.
+- **Transparent chat display aliases (`/nick`)**: optional persistent aliases that never replace canonical identity. Chat always renders both alias and canonical username; moderation, permissions, blocking, and addressing continue to use canonical identity.
+
 - The TUI half of the rendering framework — a transport-independent
   screen-buffer/diff abstraction (moved from Phase 1; see round 26
   sign-off note) — plus the fullscreen editor (see editor implementation
@@ -476,7 +543,13 @@ abuse has zero defense — too close to recreating the original incident's
 risk profile.
 - Noise Protocol Framework transport + mutual auth (§11), used only here
 - Real-time Link-wide chat (separate low-latency path per §8)
+- Link-wide `/private`, `/who`, `/whois`, `/names`, `/list`, and identity completion where remote presence/directory visibility permits.
+- Multiple simultaneous channel memberships, with active-channel selection, background delivery, and unread-state handling.
+
 - Who's-online (local + Link-wide)
+- Link-wide extension of `/msg` over the real-time Noise transport for currently-online recipients only; asynchronous Link messages remain a separate store-and-forward mechanism.
+- Link-wide propagation of `/me`, `/away`, and transparent display aliases as typed presence/chat events.
+
 - On-demand cross-node file area discovery/download
 - **Open question, deliberately deferred to whenever this phase actually
   starts:** should a newly-joining Link node be fed recent scrollback
@@ -498,6 +571,8 @@ it depends on (trust system, chat) is already proven by this point.
 - **Global-moderator board/channel creation & closure** (§13): signed
   announcement/opt-in-carry model, default-carry-with-visible-opt-out
   policy
+- **Linked-channel membership governance:** signed invitations, acceptances, grants, removals, and revocations under `manage_members`; access-restricted but not represented as end-to-end confidential from participating node operators.
+- **Linked-channel topic changes:** signed metadata events authorized against the applicable moderator grant.
 - **Link governance log (board) + Link activity feed (channel)** — a
   capstone deliverable, deliberately placed last in this phase since it
   depends on everything else already existing (Link chat transport from
