@@ -6,8 +6,11 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
-from netbbs.boards.boards import BoardError, create_board, get_board_by_name, list_boards
+from netbbs.boards.boards import BoardError, create_board, delete_board, get_board_by_name, list_boards, update_board
+from netbbs.boards.categories import create_category
 from netbbs.boards.posts import PostError, create_post, get_post, list_posts_page
+from netbbs.moderation.log import list_actions_for_object
+from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.permissions import InsufficientLevelError
 from netbbs.storage.database import Database
 
@@ -273,3 +276,73 @@ def test_read_allowed_at_sufficient_level(db, alice):
     create_post(db, board, alice, "Hello", "Body")
     page = list_posts_page(db, board, alice)
     assert len(page.posts) == 1
+
+
+# -- update/delete (design doc -- board/area management round) -------------
+
+
+def test_create_board_records_an_audit_entry(db, alice):
+    board = create_board(db, "general", creator=alice)
+    entries = list_actions_for_object(db, "board", board.id)
+    assert any(e.action == "create_board" for e in entries)
+
+
+def test_update_board_replaces_the_full_state(db, alice):
+    board = create_board(db, "general", creator=alice)
+    updated = update_board(
+        db, board, name="general2", description="new desc", min_read_level=1, min_write_level=2,
+        category_id=None, pinned=True, moderated=True, max_post_age_days=30, changed_by=alice,
+    )
+    assert updated.name == "general2"
+    assert updated.description == "new desc"
+    assert updated.min_read_level == 1
+    assert updated.min_write_level == 2
+    assert updated.pinned is True
+    assert updated.moderated is True
+    assert updated.max_post_age_days == 30
+    entries = list_actions_for_object(db, "board", board.id)
+    assert any(e.action == "update_board" for e in entries)
+
+
+def test_update_board_rejects_a_name_collision(db, alice):
+    create_board(db, "taken", creator=alice)
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(BoardError):
+        update_board(
+            db, board, name="taken", description=None, min_read_level=0, min_write_level=0,
+            category_id=None, pinned=False, moderated=False, max_post_age_days=None, changed_by=alice,
+        )
+
+
+def test_delete_board_removes_posts_and_moderator_grants(db, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Hello", "Body")
+    grant_permissions(
+        db, bob, object_type="board", object_id=board.id, permissions=BoardPermission.APPROVE,
+        granted_by=alice,
+    )
+
+    delete_board(db, board, deleted_by=alice)
+
+    with pytest.raises(BoardError):
+        get_board_by_name(db, "general")
+    assert db.connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0
+    assert db.connection.execute("SELECT COUNT(*) FROM moderator_grants").fetchone()[0] == 0
+
+
+def test_delete_board_does_not_touch_its_category(db, alice):
+    category = create_category(db, "Vintage", created_by=alice)
+    board = create_board(db, "general", category_id=category.id, creator=alice)
+    delete_board(db, board, deleted_by=alice)
+    from netbbs.boards.categories import get_category_by_id
+
+    still_there = get_category_by_id(db, category.id)
+    assert still_there.name == "Vintage"
+
+
+def test_delete_board_records_an_audit_entry_before_deleting(db, alice):
+    board = create_board(db, "general", creator=alice)
+    board_id = board.id
+    delete_board(db, board, deleted_by=alice)
+    entries = list_actions_for_object(db, "board", board_id)
+    assert any(e.action == "delete_board" for e in entries)

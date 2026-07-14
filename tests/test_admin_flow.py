@@ -378,3 +378,156 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, sysop):
         assert node_controls.maintenance.is_active() is False
 
     asyncio.run(scenario())
+
+
+# -- boards & areas (design doc -- board/area management round) -----------
+
+
+def test_create_board_flow(db, sysop):
+    inputs = [
+        "m", "m", "c",
+        "General", "A general board", "0", "0",
+        "n",  # assign category? no
+        "n",  # pinned? no
+        "y",  # moderated? yes
+        "",   # max age blank = unlimited
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    from netbbs.boards.boards import list_boards
+
+    boards = list_boards(db)
+    assert [b.name for b in boards] == ["General"]
+    assert boards[0].moderated is True
+    assert "Created board" in _written_text(session)
+
+
+def test_edit_and_delete_board_flow(db, sysop):
+    from netbbs.boards.boards import create_board, list_boards
+
+    create_board(db, "General", creator=sysop)
+
+    # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
+    # read level(keep), blank write level(keep), n(don't change
+    # category), y(pin), n(mod), 'none'(unlimited) -> back to detail ->
+    # d(elete) -> retype new name -> back x3
+    inputs = [
+        "m", "m", "l", "0", "1", "e",
+        "General2", "", "", "",
+        "n", "y", "n", "none",
+        "d", "General2",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "Updated 'General2'" in text
+    assert "'General2' deleted." in text
+    assert list_boards(db) == []
+
+
+def test_sysop_approves_a_pending_post_with_zero_grants(db, sysop):
+    """Proves the has_permission SysOp bypass reaches this real admin
+    UI path, not just the library function in isolation."""
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post, get_post
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True)
+    post = create_post(db, board, alice, "Hello", "Body text")
+    assert post.status == "pending"
+
+    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    assert "Approved" in _written_text(session)
+    assert get_post(db, post.post_id).status == "approved"
+
+
+def test_create_and_delete_area_flow(db, sysop):
+    inputs = [
+        "m", "a", "c",
+        "Docs", "Documents area", "0", "0",
+        "n", "n", "n", "",
+        "l", "0", "1", "d", "Docs",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    from netbbs.files.areas import list_file_areas
+
+    text = _written_text(session)
+    assert "Created file area 'Docs'." in text
+    assert "'Docs' deleted." in text
+    assert list_file_areas(db) == []
+
+
+def test_sysop_approves_a_pending_file_with_zero_grants(db, sysop):
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import get_file, upload_file
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "Docs", creator=sysop, moderated=True)
+    entry = upload_file(db, area, alice, "readme.txt", b"hello")
+    assert entry.status == "pending"
+
+    inputs = ["m", "a", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    assert "Approved" in _written_text(session)
+    assert get_file(db, entry.file_id).status == "approved"
+
+
+def test_create_and_delete_board_category_flow(db, sysop):
+    from netbbs.boards.categories import list_top_level_categories
+
+    inputs = [
+        "m", "c", "m", "c",
+        "Vintage", "Old computers", "n",  # not a sub-category
+        "l", "0", "1", "Vintage",
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "Created category 'Vintage'." in text
+    assert "'Vintage' deleted." in text
+    assert list_top_level_categories(db) == []
+
+
+def test_grant_and_revoke_moderator_flow(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.moderation.roles import BoardPermission, has_permission
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop)
+
+    grant_inputs = ["m", "g", "0", "1", "b", "0", "1", "a", "y", "b", "b"]
+    session = FakeSession(grant_inputs)
+    _run(session, db, sysop)
+    assert "Granted" in _written_text(session)
+    assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE)
+
+    revoke_inputs = ["m", "r", "0", "1", "b", "0", "1", "y", "b", "b"]
+    session2 = FakeSession(revoke_inputs)
+    _run(session2, db, sysop)
+    assert "Revoked" in _written_text(session2)
+    assert not has_permission(
+        db, alice, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE
+    )
+
+
+def test_grant_blanket_across_all_boards(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.moderation.roles import BoardPermission, has_permission
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop)
+
+    # scope 'x' = blanket across all boards, no board picker needed.
+    inputs = ["m", "g", "0", "1", "x", "f", "y", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    assert "Granted" in _written_text(session)
+    assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)

@@ -16,8 +16,10 @@ from netbbs.files.areas import (
     FileArea,
     FileAreaError,
     create_file_area,
+    delete_file_area,
     get_file_area_by_name,
     list_file_areas,
+    update_file_area,
 )
 from netbbs.files.entries import (
     FileEntry,
@@ -41,8 +43,10 @@ __all__ = [
     "FileArea",
     "FileAreaError",
     "create_file_area",
+    "delete_file_area",
     "get_file_area_by_name",
     "list_file_areas",
+    "update_file_area",
     "FileEntry",
     "FileEntryCursor",
     "FileEntryError",

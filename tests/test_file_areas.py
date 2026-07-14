@@ -14,12 +14,18 @@ from netbbs.files import (
     FileAreaError,
     FileEntryError,
     create_file_area,
+    delete_file_area,
     download_file,
     get_file,
+    get_file_area_by_name,
     list_file_areas,
     list_files_page,
+    update_file_area,
     upload_file,
 )
+from netbbs.files.categories import create_category
+from netbbs.moderation.log import list_actions_for_object
+from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.permissions import InsufficientLevelError
 from netbbs.storage.database import Database
 
@@ -268,3 +274,73 @@ def test_list_files_allowed_at_sufficient_level(db, alice):
     upload_file(db, area, alice, "readme.txt", b"hello")
     page = list_files_page(db, area, alice)
     assert len(page.entries) == 1
+
+
+# -- update/delete (design doc -- board/area management round) -------------
+
+
+def test_create_file_area_records_an_audit_entry(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    entries = list_actions_for_object(db, "file_area", area.id)
+    assert any(e.action == "create_file_area" for e in entries)
+
+
+def test_update_file_area_replaces_the_full_state(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    updated = update_file_area(
+        db, area, name="docs2", description="new desc", min_read_level=1, min_write_level=2,
+        category_id=None, pinned=True, moderated=True, max_file_age_days=30, changed_by=alice,
+    )
+    assert updated.name == "docs2"
+    assert updated.description == "new desc"
+    assert updated.min_read_level == 1
+    assert updated.min_write_level == 2
+    assert updated.pinned is True
+    assert updated.moderated is True
+    assert updated.max_file_age_days == 30
+    entries = list_actions_for_object(db, "file_area", area.id)
+    assert any(e.action == "update_file_area" for e in entries)
+
+
+def test_update_file_area_rejects_a_name_collision(db, alice):
+    create_file_area(db, "taken", creator=alice)
+    area = create_file_area(db, "docs", creator=alice)
+    with pytest.raises(FileAreaError):
+        update_file_area(
+            db, area, name="taken", description=None, min_read_level=0, min_write_level=0,
+            category_id=None, pinned=False, moderated=False, max_file_age_days=None, changed_by=alice,
+        )
+
+
+def test_delete_file_area_removes_files_and_moderator_grants(db, alice, bob):
+    area = create_file_area(db, "docs", creator=alice)
+    upload_file(db, area, alice, "readme.txt", b"hello")
+    grant_permissions(
+        db, bob, object_type="file_area", object_id=area.id, permissions=BoardPermission.APPROVE,
+        granted_by=alice,
+    )
+
+    delete_file_area(db, area, deleted_by=alice)
+
+    with pytest.raises(FileAreaError):
+        get_file_area_by_name(db, "docs")
+    assert db.connection.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
+    assert db.connection.execute("SELECT COUNT(*) FROM moderator_grants").fetchone()[0] == 0
+
+
+def test_delete_file_area_does_not_touch_its_category(db, alice):
+    category = create_category(db, "Software", created_by=alice)
+    area = create_file_area(db, "docs", category_id=category.id, creator=alice)
+    delete_file_area(db, area, deleted_by=alice)
+    from netbbs.files.categories import get_category_by_id
+
+    still_there = get_category_by_id(db, category.id)
+    assert still_there.name == "Software"
+
+
+def test_delete_file_area_records_an_audit_entry_before_deleting(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    area_id = area.id
+    delete_file_area(db, area, deleted_by=alice)
+    entries = list_actions_for_object(db, "file_area", area_id)
+    assert any(e.action == "delete_file_area" for e in entries)

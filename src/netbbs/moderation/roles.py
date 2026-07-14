@@ -26,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from enum import IntFlag, auto
 
-from netbbs.auth.users import User
+from netbbs.auth.users import SYSOP_LEVEL, User
 from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -195,8 +195,22 @@ def has_permission(
     on it specifically, or a local-blanket grant covering every local
     object of `object_type`? (Deliberately no partial-exception
     blanket grants — see design doc sign-off round 34.)
+
+    SysOp-level always satisfies this, with zero grant rows required
+    (design doc -- board/area management round, a deliberate, cross-
+    cutting decision -- confirmed to also apply to every existing
+    consumer of this function, not just new board/area moderation:
+    chat's `/mute`/`/ban`/`/kick`, Tab-completion visibility, etc.).
+    Input validation still runs first regardless of caller identity, so
+    a SysOp passing a nonsensical `object_type`/`permission`
+    combination still gets caught rather than silently bypassed.
+    `get_grant`/`list_grants_for_object` are deliberately *not* given
+    the same treatment -- those answer "what grants actually exist",
+    used for admin displays, and must stay literal.
     """
     _validate_permission_type(object_type, permission)
+    if user.user_level >= SYSOP_LEVEL:
+        return True
     rows = db.connection.execute(
         "SELECT permissions FROM moderator_grants "
         "WHERE user_id = ? AND object_type = ? AND (object_id = ? OR object_id IS NULL)",

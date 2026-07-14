@@ -33,13 +33,43 @@ from netbbs.auth.users import (
     set_user_disabled,
     set_user_level,
 )
+from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
+from netbbs.boards.categories import Category, CategoryError
+from netbbs.boards.categories import create_category as create_board_category
+from netbbs.boards.categories import delete_category as delete_board_category
+from netbbs.boards.categories import list_subcategories as list_board_subcategories
+from netbbs.boards.categories import list_top_level_categories as list_top_level_board_categories
+from netbbs.boards.posts import (
+    Post,
+    approve_post,
+    delete_post,
+    list_pending_posts,
+    set_post_exempt,
+    set_post_pinned,
+)
+from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
+from netbbs.files.categories import FileAreaCategory
+from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
+from netbbs.files.categories import create_category as create_file_category
+from netbbs.files.categories import delete_category as delete_file_category
+from netbbs.files.categories import list_subcategories as list_file_subcategories
+from netbbs.files.categories import list_top_level_categories as list_top_level_file_categories
+from netbbs.files.entries import (
+    FileEntry,
+    approve_file,
+    delete_file,
+    list_pending_files,
+    set_file_exempt,
+    set_file_pinned,
+)
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import list_actions_for_target_user, record_action
+from netbbs.moderation.roles import BoardPermission, get_grant, grant_permissions, revoke_permissions
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
-from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, sanitize_text
+from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -92,6 +122,10 @@ async def admin_menu(
             await session.write_line("")
             await _node_menu(session, db, user, node_controls)
             await _draw_admin_menu(session, node_controls)
+        elif choice == "m":
+            await session.write_line("")
+            await _content_menu(session, db, user)
+            await _draw_admin_menu(session, node_controls)
         else:
             await session.write("\a")
 
@@ -104,6 +138,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
         menu_key("P", "romote/demote"),
         menu_key("E", "nable/disable"),
         menu_key("D", "elete user"),
+        menu_key("M", "anage boards/areas"),
     ]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
@@ -443,3 +478,931 @@ async def _shutdown_screen(session: Session, db: Database, actor: User, node_con
         )
     )
     await session.write_line("Shutdown sequence started.")
+
+
+# -- boards & areas (design doc -- board/area management round) -----------
+#
+# Boards and file areas share an identical schema shape and permission
+# model (BoardPermission is reused for both object_type='board' and
+# 'file_area', see netbbs.moderation.roles) but diverge in terminology
+# ("post" vs "file", max_post_age_days vs max_file_age_days) -- written
+# as two structurally-parallel but separately-coded sections here,
+# matching this file's existing style for user management rather than
+# building a shared abstraction for just two call sites.
+
+
+async def _content_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_content_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "m":
+            await session.write_line("")
+            await _board_menu(session, db, actor)
+            await _draw_content_menu(session)
+        elif choice == "a":
+            await session.write_line("")
+            await _area_menu(session, db, actor)
+            await _draw_content_menu(session)
+        elif choice == "c":
+            await session.write_line("")
+            await _category_menu(session, db, actor)
+            await _draw_content_menu(session)
+        elif choice == "g":
+            await session.write_line("")
+            await _grant_moderator_screen(session, db, actor)
+            await _draw_content_menu(session)
+        elif choice == "r":
+            await session.write_line("")
+            await _revoke_moderator_screen(session, db, actor)
+            await _draw_content_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_content_menu(session: Session) -> None:
+    header = colored("Manage boards/areas:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join(
+        [
+            menu_key("M", "essage boards"),
+            menu_key("A", "reas"),
+            menu_key("C", "ategories"),
+            menu_key("G", "rant moderator"),
+            menu_key("R", "evoke moderator"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _read_int(session: Session, *, default: int) -> int | None:
+    """Reads a line: blank keeps `default`, a valid integer replaces
+    it, anything else shows a cancellation message and returns `None`
+    -- callers should treat `None` as "abort the current screen"."""
+    raw = (await session.read_line()).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        return None
+
+
+async def _pick_optional_category(session: Session, db: Database, *, list_top_level, list_subcategories, title: str):
+    """Optional category picker shared by board/area create+edit
+    screens. Top-level categories are shown first; picking one that has
+    sub-categories offers picking one of those instead, matching the
+    two-level design (`netbbs.boards.categories`/`netbbs.files.
+    categories`). Returns the chosen category's id, or `None` if
+    declined or none exist."""
+    await session.write("Assign a category? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return None
+    top_level = list_top_level(db)
+    selected = await pick_item(
+        session, top_level,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        title=title,
+        empty_message="No categories exist yet.",
+    )
+    if selected is None:
+        return None
+    subs = list_subcategories(db, selected.id)
+    if not subs:
+        return selected.id
+    await session.write(f"Use a sub-category of {selected.name!r} instead? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return selected.id
+    sub_selected = await pick_item(
+        session, subs,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        title=f"Sub-category of {selected.name!r}",
+        empty_message="No sub-categories.",
+    )
+    return sub_selected.id if sub_selected is not None else selected.id
+
+
+# -- message boards ----------------------------------------------------
+
+
+async def _board_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_board_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _create_board_screen(session, db, actor)
+            await _draw_board_menu(session)
+        elif choice == "l":
+            await session.write_line("")
+            await _list_boards_screen(session, db, actor)
+            await _draw_board_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_board_menu(session: Session) -> None:
+    header = colored("Message boards:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _create_board_screen(session: Session, db: Database, actor: User) -> None:
+    await session.write_line(colored("\r\nCreate board", fg_color=HEADER_COLOR, bold=True))
+    await session.write("Name: ")
+    name = (await session.read_line()).strip()
+    if not name:
+        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
+        return
+    await session.write("Description (optional): ")
+    description = (await session.read_line()).strip() or None
+    await session.write("Minimum read level [0]: ")
+    min_read_level = await _read_int(session, default=0)
+    if min_read_level is None:
+        return
+    await session.write("Minimum write level [0]: ")
+    min_write_level = await _read_int(session, default=0)
+    if min_write_level is None:
+        return
+    category_id = await _pick_optional_category(
+        session, db, list_top_level=list_top_level_board_categories,
+        list_subcategories=list_board_subcategories, title="Board category",
+    )
+    await session.write("Pinned? [y/N]: ")
+    pinned = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Moderated (posts need approval)? [y/N]: ")
+    moderated = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Max post age in days (blank = unlimited): ")
+    max_age_raw = (await session.read_line()).strip()
+    max_post_age_days = None
+    if max_age_raw:
+        try:
+            max_post_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+
+    try:
+        board = create_board(
+            db, name, description=description, min_read_level=min_read_level,
+            min_write_level=min_write_level, category_id=category_id, pinned=pinned,
+            moderated=moderated, max_post_age_days=max_post_age_days, creator=actor,
+        )
+    except BoardError as exc:
+        await session.write_line(colored(f"Could not create board: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Created board {board.name!r}.")
+
+
+async def _list_boards_screen(session: Session, db: Database, actor: User) -> None:
+    boards = list_boards(db, order_by="alphabetical")
+    selected = await pick_item(
+        session, boards,
+        name_of=lambda b: b.name,
+        stable_id_of=lambda b: b.id,
+        description_of=_board_description,
+        title="Boards",
+        empty_message="No boards yet.",
+    )
+    if selected is not None:
+        await _board_detail_screen(session, db, actor, selected)
+
+
+def _board_description(board: Board) -> str:
+    status = "moderated" if board.moderated else "open"
+    return f"read {board.min_read_level}/write {board.min_write_level}, {status}"
+
+
+async def _board_detail_screen(session: Session, db: Database, actor: User, board: Board) -> None:
+    await _draw_board_detail(session, board)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "e":
+            await session.write_line("")
+            updated = await _edit_board_screen(session, db, actor, board)
+            if updated is not None:
+                board = updated
+            await _draw_board_detail(session, board)
+        elif choice == "d":
+            await session.write_line("")
+            deleted = await _delete_board_screen(session, db, actor, board)
+            if deleted:
+                return
+            await _draw_board_detail(session, board)
+        elif choice == "p":
+            await session.write_line("")
+            await _pending_posts_screen(session, db, actor, board)
+            await _draw_board_detail(session, board)
+        else:
+            await session.write("\a")
+
+
+async def _draw_board_detail(session: Session, board: Board) -> None:
+    header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
+    await session.write_line(f"Read level: {board.min_read_level}  Write level: {board.min_write_level}")
+    await session.write_line(
+        f"Pinned: {'yes' if board.pinned else 'no'}  Moderated: {'yes' if board.moderated else 'no'}"
+    )
+    age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
+    await session.write_line(f"Max post age: {age} days")
+    options = "  ".join(
+        [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts"), menu_key("B", "ack")]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _edit_board_screen(session: Session, db: Database, actor: User, board: Board) -> Board | None:
+    await session.write(f"Name [{board.name}]: ")
+    name = (await session.read_line()).strip() or board.name
+    await session.write(f"Description [{board.description or '(none)'}]: ")
+    description = (await session.read_line()).strip() or board.description
+    await session.write(f"Minimum read level [{board.min_read_level}]: ")
+    min_read_level = await _read_int(session, default=board.min_read_level)
+    if min_read_level is None:
+        return None
+    await session.write(f"Minimum write level [{board.min_write_level}]: ")
+    min_write_level = await _read_int(session, default=board.min_write_level)
+    if min_write_level is None:
+        return None
+    await session.write("Change category? [y/N]: ")
+    change_category = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    category_id = board.category_id
+    if change_category:
+        category_id = await _pick_optional_category(
+            session, db, list_top_level=list_top_level_board_categories,
+            list_subcategories=list_board_subcategories, title="Board category",
+        )
+    await session.write(f"Pinned? [{'y' if board.pinned else 'N'}]: ")
+    pinned_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else board.pinned
+    await session.write(f"Moderated? [{'y' if board.moderated else 'N'}]: ")
+    moderated_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else board.moderated
+    current_age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
+    await session.write(f"Max post age in days [{current_age}] (blank = keep, 'none' = unlimited): ")
+    max_age_raw = (await session.read_line()).strip()
+    max_post_age_days = board.max_post_age_days
+    if max_age_raw.lower() == "none":
+        max_post_age_days = None
+    elif max_age_raw:
+        try:
+            max_post_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return None
+
+    try:
+        updated = update_board(
+            db, board, name=name, description=description, min_read_level=min_read_level,
+            min_write_level=min_write_level, category_id=category_id, pinned=pinned,
+            moderated=moderated, max_post_age_days=max_post_age_days, changed_by=actor,
+        )
+    except BoardError as exc:
+        await session.write_line(colored(f"Could not update board: {exc}", fg_color=MUTED_COLOR))
+        return None
+    await session.write_line(f"Updated {updated.name!r}.")
+    return updated
+
+
+async def _delete_board_screen(session: Session, db: Database, actor: User, board: Board) -> bool:
+    await session.write_line(
+        colored(
+            "\r\nThis permanently deletes the board, all of its posts, and any "
+            "moderator grants scoped to it. This cannot be undone.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"Type the board name {board.name!r} to confirm, or anything else to cancel: ")
+    confirmation = (await session.read_line()).strip()
+    if confirmation != board.name:
+        await session.write_line("Cancelled.")
+        return False
+    delete_board(db, board, deleted_by=actor)
+    await session.write_line(f"{board.name!r} deleted.")
+    return True
+
+
+async def _pending_posts_screen(session: Session, db: Database, actor: User, board: Board) -> None:
+    while True:
+        posts = list_pending_posts(db, board, requesting_user=actor)
+        selected = await pick_item(
+            session, posts,
+            name_of=lambda p: p.subject,
+            stable_id_of=lambda p: p.id,
+            description_of=lambda p: f"by {p.author_label}",
+            title=f"Pending posts in {board.name!r}",
+            empty_message="No pending posts.",
+        )
+        if selected is None:
+            return
+        await _post_action_screen(session, db, actor, selected)
+
+
+async def _draw_post_action(session: Session, post: Post) -> None:
+    header = colored(sanitize_text(post.subject), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(f"By: {sanitize_text(post.author_label)}")
+    await session.write_line(reflow(sanitize_text(post.body, allow_newlines=True), width=session.terminal_width))
+    options = "  ".join(
+        [
+            menu_key("A", "pprove"),
+            menu_key("R", "eject"),
+            menu_key("P", "in toggle"),
+            menu_key("X", "empt toggle"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _post_action_screen(session: Session, db: Database, actor: User, post: Post) -> None:
+    await _draw_post_action(session, post)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "a":
+            await session.write_line("")
+            approve_post(db, post, approved_by=actor)
+            await session.write_line("Approved.")
+            return
+        elif choice == "r":
+            await session.write_line("")
+            delete_post(db, post, deleted_by=actor)
+            await session.write_line("Rejected.")
+            return
+        elif choice == "p":
+            await session.write_line("")
+            post = set_post_pinned(db, post, not post.pinned, changed_by=actor)
+            await _draw_post_action(session, post)
+        elif choice == "x":
+            await session.write_line("")
+            post = set_post_exempt(db, post, not post.exempt_from_expiry, changed_by=actor)
+            await _draw_post_action(session, post)
+        else:
+            await session.write("\a")
+
+
+# -- file areas ----------------------------------------------------------
+
+
+async def _area_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_area_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _create_area_screen(session, db, actor)
+            await _draw_area_menu(session)
+        elif choice == "l":
+            await session.write_line("")
+            await _list_areas_screen(session, db, actor)
+            await _draw_area_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_area_menu(session: Session) -> None:
+    header = colored("File areas:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _create_area_screen(session: Session, db: Database, actor: User) -> None:
+    await session.write_line(colored("\r\nCreate file area", fg_color=HEADER_COLOR, bold=True))
+    await session.write("Name: ")
+    name = (await session.read_line()).strip()
+    if not name:
+        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
+        return
+    await session.write("Description (optional): ")
+    description = (await session.read_line()).strip() or None
+    await session.write("Minimum read level [0]: ")
+    min_read_level = await _read_int(session, default=0)
+    if min_read_level is None:
+        return
+    await session.write("Minimum write level [0]: ")
+    min_write_level = await _read_int(session, default=0)
+    if min_write_level is None:
+        return
+    category_id = await _pick_optional_category(
+        session, db, list_top_level=list_top_level_file_categories,
+        list_subcategories=list_file_subcategories, title="File-area category",
+    )
+    await session.write("Pinned? [y/N]: ")
+    pinned = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Moderated (uploads need approval)? [y/N]: ")
+    moderated = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Max file age in days (blank = unlimited): ")
+    max_age_raw = (await session.read_line()).strip()
+    max_file_age_days = None
+    if max_age_raw:
+        try:
+            max_file_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+
+    try:
+        area = create_file_area(
+            db, name, description=description, min_read_level=min_read_level,
+            min_write_level=min_write_level, category_id=category_id, pinned=pinned,
+            moderated=moderated, max_file_age_days=max_file_age_days, creator=actor,
+        )
+    except FileAreaError as exc:
+        await session.write_line(colored(f"Could not create file area: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Created file area {area.name!r}.")
+
+
+async def _list_areas_screen(session: Session, db: Database, actor: User) -> None:
+    areas = list_file_areas(db, order_by="alphabetical")
+    selected = await pick_item(
+        session, areas,
+        name_of=lambda a: a.name,
+        stable_id_of=lambda a: a.id,
+        description_of=_area_description,
+        title="File areas",
+        empty_message="No file areas yet.",
+    )
+    if selected is not None:
+        await _area_detail_screen(session, db, actor, selected)
+
+
+def _area_description(area: FileArea) -> str:
+    status = "moderated" if area.moderated else "open"
+    return f"read {area.min_read_level}/write {area.min_write_level}, {status}"
+
+
+async def _area_detail_screen(session: Session, db: Database, actor: User, area: FileArea) -> None:
+    await _draw_area_detail(session, area)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "e":
+            await session.write_line("")
+            updated = await _edit_area_screen(session, db, actor, area)
+            if updated is not None:
+                area = updated
+            await _draw_area_detail(session, area)
+        elif choice == "d":
+            await session.write_line("")
+            deleted = await _delete_area_screen(session, db, actor, area)
+            if deleted:
+                return
+            await _draw_area_detail(session, area)
+        elif choice == "p":
+            await session.write_line("")
+            await _pending_files_screen(session, db, actor, area)
+            await _draw_area_detail(session, area)
+        else:
+            await session.write("\a")
+
+
+async def _draw_area_detail(session: Session, area: FileArea) -> None:
+    header = colored(sanitize_text(area.name), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(f"Description: {sanitize_text(area.description) if area.description else '(none)'}")
+    await session.write_line(f"Read level: {area.min_read_level}  Write level: {area.min_write_level}")
+    await session.write_line(
+        f"Pinned: {'yes' if area.pinned else 'no'}  Moderated: {'yes' if area.moderated else 'no'}"
+    )
+    age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
+    await session.write_line(f"Max file age: {age} days")
+    options = "  ".join(
+        [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending files"), menu_key("B", "ack")]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _edit_area_screen(session: Session, db: Database, actor: User, area: FileArea) -> FileArea | None:
+    await session.write(f"Name [{area.name}]: ")
+    name = (await session.read_line()).strip() or area.name
+    await session.write(f"Description [{area.description or '(none)'}]: ")
+    description = (await session.read_line()).strip() or area.description
+    await session.write(f"Minimum read level [{area.min_read_level}]: ")
+    min_read_level = await _read_int(session, default=area.min_read_level)
+    if min_read_level is None:
+        return None
+    await session.write(f"Minimum write level [{area.min_write_level}]: ")
+    min_write_level = await _read_int(session, default=area.min_write_level)
+    if min_write_level is None:
+        return None
+    await session.write("Change category? [y/N]: ")
+    change_category = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    category_id = area.category_id
+    if change_category:
+        category_id = await _pick_optional_category(
+            session, db, list_top_level=list_top_level_file_categories,
+            list_subcategories=list_file_subcategories, title="File-area category",
+        )
+    await session.write(f"Pinned? [{'y' if area.pinned else 'N'}]: ")
+    pinned_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else area.pinned
+    await session.write(f"Moderated? [{'y' if area.moderated else 'N'}]: ")
+    moderated_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else area.moderated
+    current_age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
+    await session.write(f"Max file age in days [{current_age}] (blank = keep, 'none' = unlimited): ")
+    max_age_raw = (await session.read_line()).strip()
+    max_file_age_days = area.max_file_age_days
+    if max_age_raw.lower() == "none":
+        max_file_age_days = None
+    elif max_age_raw:
+        try:
+            max_file_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return None
+
+    try:
+        updated = update_file_area(
+            db, area, name=name, description=description, min_read_level=min_read_level,
+            min_write_level=min_write_level, category_id=category_id, pinned=pinned,
+            moderated=moderated, max_file_age_days=max_file_age_days, changed_by=actor,
+        )
+    except FileAreaError as exc:
+        await session.write_line(colored(f"Could not update file area: {exc}", fg_color=MUTED_COLOR))
+        return None
+    await session.write_line(f"Updated {updated.name!r}.")
+    return updated
+
+
+async def _delete_area_screen(session: Session, db: Database, actor: User, area: FileArea) -> bool:
+    await session.write_line(
+        colored(
+            "\r\nThis permanently deletes the file area, all of its files, and any "
+            "moderator grants scoped to it. This cannot be undone.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"Type the area name {area.name!r} to confirm, or anything else to cancel: ")
+    confirmation = (await session.read_line()).strip()
+    if confirmation != area.name:
+        await session.write_line("Cancelled.")
+        return False
+    delete_file_area(db, area, deleted_by=actor)
+    await session.write_line(f"{area.name!r} deleted.")
+    return True
+
+
+async def _pending_files_screen(session: Session, db: Database, actor: User, area: FileArea) -> None:
+    while True:
+        files = list_pending_files(db, area, requesting_user=actor)
+        selected = await pick_item(
+            session, files,
+            name_of=lambda f: f.filename,
+            stable_id_of=lambda f: f.id,
+            description_of=lambda f: f"by {f.uploader_label}",
+            title=f"Pending files in {area.name!r}",
+            empty_message="No pending files.",
+        )
+        if selected is None:
+            return
+        await _file_action_screen(session, db, actor, selected)
+
+
+async def _draw_file_action(session: Session, entry: FileEntry) -> None:
+    header = colored(sanitize_text(entry.filename), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(f"By: {sanitize_text(entry.uploader_label)}")
+    if entry.description:
+        await session.write_line(sanitize_text(entry.description))
+    await session.write_line(f"Size: {entry.size_bytes} bytes")
+    options = "  ".join(
+        [
+            menu_key("A", "pprove"),
+            menu_key("R", "eject"),
+            menu_key("P", "in toggle"),
+            menu_key("X", "empt toggle"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _file_action_screen(session: Session, db: Database, actor: User, entry: FileEntry) -> None:
+    await _draw_file_action(session, entry)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "a":
+            await session.write_line("")
+            approve_file(db, entry, approved_by=actor)
+            await session.write_line("Approved.")
+            return
+        elif choice == "r":
+            await session.write_line("")
+            delete_file(db, entry, deleted_by=actor)
+            await session.write_line("Rejected.")
+            return
+        elif choice == "p":
+            await session.write_line("")
+            entry = set_file_pinned(db, entry, not entry.pinned, changed_by=actor)
+            await _draw_file_action(session, entry)
+        elif choice == "x":
+            await session.write_line("")
+            entry = set_file_exempt(db, entry, not entry.exempt_from_expiry, changed_by=actor)
+            await _draw_file_action(session, entry)
+        else:
+            await session.write("\a")
+
+
+# -- categories ----------------------------------------------------------
+
+
+async def _category_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_category_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "m":
+            await session.write_line("")
+            await _generic_category_screen(
+                session, db, actor,
+                create=create_board_category, list_top_level=list_top_level_board_categories,
+                list_subcategories=list_board_subcategories, delete=delete_board_category,
+                error_type=CategoryError, title="Board categories",
+            )
+            await _draw_category_menu(session)
+        elif choice == "f":
+            await session.write_line("")
+            await _generic_category_screen(
+                session, db, actor,
+                create=create_file_category, list_top_level=list_top_level_file_categories,
+                list_subcategories=list_file_subcategories, delete=delete_file_category,
+                error_type=FileCategoryError, title="File-area categories",
+            )
+            await _draw_category_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_category_menu(session: Session) -> None:
+    header = colored("Categories:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join(
+        [menu_key("M", "essage board category"), menu_key("F", "ile-area category"), menu_key("B", "ack")]
+    )
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _generic_category_screen(
+    session: Session, db: Database, actor: User, *, create, list_top_level, list_subcategories, delete,
+    error_type, title: str,
+) -> None:
+    await _draw_generic_category_menu(session, title)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _create_category_screen(
+                session, db, actor, create=create, list_top_level=list_top_level, error_type=error_type,
+            )
+            await _draw_generic_category_menu(session, title)
+        elif choice == "l":
+            await session.write_line("")
+            await _list_categories_screen(
+                session, db, actor, list_top_level=list_top_level,
+                list_subcategories=list_subcategories, delete=delete,
+            )
+            await _draw_generic_category_menu(session, title)
+        else:
+            await session.write("\a")
+
+
+async def _draw_generic_category_menu(session: Session, title: str) -> None:
+    header = colored(f"{title}:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist/delete"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _create_category_screen(
+    session: Session, db: Database, actor: User, *, create, list_top_level, error_type
+) -> None:
+    await session.write("Name: ")
+    name = (await session.read_line()).strip()
+    if not name:
+        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
+        return
+    await session.write("Description (optional): ")
+    description = (await session.read_line()).strip() or None
+    await session.write("Make this a sub-category of an existing one? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    parent_category_id = None
+    if answer == "y":
+        parent = await pick_item(
+            session, list_top_level(db),
+            name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
+            title="Parent category", empty_message="No top-level categories exist yet.",
+        )
+        parent_category_id = parent.id if parent is not None else None
+    try:
+        category = create(
+            db, name, description=description, parent_category_id=parent_category_id, created_by=actor
+        )
+    except error_type as exc:
+        await session.write_line(colored(f"Could not create category: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Created category {category.name!r}.")
+
+
+async def _list_categories_screen(
+    session: Session, db: Database, actor: User, *, list_top_level, list_subcategories, delete
+) -> None:
+    top_level = list_top_level(db)
+    all_categories = list(top_level)
+    for top in top_level:
+        all_categories.extend(list_subcategories(db, top.id))
+    selected = await pick_item(
+        session, all_categories,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        description_of=lambda c: "top-level" if c.is_top_level else "sub-category",
+        title="Categories",
+        empty_message="No categories yet.",
+    )
+    if selected is None:
+        return
+    await session.write_line(
+        colored(
+            "\r\nDeleting this category sets any boards/areas assigned to it "
+            "(and any of its own sub-categories) back to uncategorized.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"Type the category name {selected.name!r} to confirm deletion, or anything else to cancel: ")
+    confirmation = (await session.read_line()).strip()
+    if confirmation != selected.name:
+        await session.write_line("Cancelled.")
+        return
+    delete(db, selected, deleted_by=actor)
+    await session.write_line(f"{selected.name!r} deleted.")
+
+
+# -- moderator grants -----------------------------------------------------
+
+
+async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, int | None, str] | None:
+    """Returns `(object_type, object_id, human label)`, or `None` if
+    cancelled. `object_id=None` means a local-blanket grant (design doc
+    -- board/area management round)."""
+    await session.write(
+        "Scope: [B]oard, [A]rea, blanket across all boards [X], blanket across all areas [Y]: "
+    )
+    scope_key = (await session.read_key()).lower()
+    await session.write_line("")
+    if scope_key == "b":
+        board = await pick_item(
+            session, list_boards(db, order_by="alphabetical"),
+            name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
+            title="Which board?", empty_message="No boards yet.",
+        )
+        if board is None:
+            return None
+        return "board", board.id, f"board {board.name!r}"
+    elif scope_key == "a":
+        area = await pick_item(
+            session, list_file_areas(db, order_by="alphabetical"),
+            name_of=lambda a: a.name, stable_id_of=lambda a: a.id,
+            title="Which file area?", empty_message="No file areas yet.",
+        )
+        if area is None:
+            return None
+        return "file_area", area.id, f"file area {area.name!r}"
+    elif scope_key == "x":
+        return "board", None, "all boards (blanket)"
+    elif scope_key == "y":
+        return "file_area", None, "all file areas (blanket)"
+    else:
+        await session.write_line(colored("Not a valid scope -- cancelled.", fg_color=MUTED_COLOR))
+        return None
+
+
+async def _grant_moderator_screen(session: Session, db: Database, actor: User) -> None:
+    target = await pick_item(
+        session, list_users(db),
+        name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
+        title="Grant moderator to which user?", empty_message="No registered users yet.",
+    )
+    if target is None:
+        return
+    scope = await _pick_moderator_scope(session, db)
+    if scope is None:
+        return
+    object_type, object_id, label = scope
+
+    await session.write("Preset: [F]ull moderator (edit+delete+approve), [A]pprover only: ")
+    preset_key = (await session.read_key()).lower()
+    await session.write_line("")
+    if preset_key == "f":
+        permissions = BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
+        preset_label = "Full moderator"
+    elif preset_key == "a":
+        permissions = BoardPermission.APPROVE
+        preset_label = "Approver only"
+    else:
+        await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
+        return
+
+    await session.write(f"Grant {preset_label!r} on {label} to {target.username!r}? [y/N]: ")
+    confirm = (await session.read_key()).lower()
+    await session.write_line("")
+    if confirm != "y":
+        await session.write_line("Cancelled.")
+        return
+
+    grant_permissions(
+        db, target, object_type=object_type, object_id=object_id, permissions=permissions, granted_by=actor
+    )
+    await session.write_line(f"Granted {preset_label} on {label} to {target.username!r}.")
+
+
+async def _revoke_moderator_screen(session: Session, db: Database, actor: User) -> None:
+    target = await pick_item(
+        session, list_users(db),
+        name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
+        title="Revoke moderator from which user?", empty_message="No registered users yet.",
+    )
+    if target is None:
+        return
+    scope = await _pick_moderator_scope(session, db)
+    if scope is None:
+        return
+    object_type, object_id, label = scope
+
+    grant = get_grant(db, target, object_type=object_type, object_id=object_id)
+    if grant is None:
+        await session.write_line(colored(f"{target.username!r} has no grant on {label}.", fg_color=MUTED_COLOR))
+        return
+
+    await session.write(f"Revoke all permissions for {target.username!r} on {label}? [y/N]: ")
+    confirm = (await session.read_key()).lower()
+    await session.write_line("")
+    if confirm != "y":
+        await session.write_line("Cancelled.")
+        return
+
+    revoke_permissions(
+        db, target, object_type=object_type, object_id=object_id,
+        permissions=BoardPermission(grant.permissions), revoked_by=actor,
+    )
+    await session.write_line(f"Revoked {target.username!r}'s grant on {label}.")

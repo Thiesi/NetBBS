@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from netbbs.auth.users import create_user
+from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.moderation import (
     BoardPermission,
     ChannelPermission,
@@ -230,3 +230,64 @@ def test_revoke_permissions_records_moderation_log_entry(db, sysop, alice):
     revoke_permissions(db, alice, object_type="board", object_id=1, permissions=BoardPermission.EDIT, revoked_by=sysop)
     entries = list_actions_for_target_user(db, alice.id)
     assert [e.action for e in entries] == ["grant", "revoke"]
+
+
+# -- SysOp bypass (design doc -- board/area management round) --------------
+#
+# The `sysop` fixture above is level 100 -- a pre-existing test-suite
+# convention, not the real SYSOP_LEVEL (255) constant -- so it does NOT
+# trigger the bypass below; `real_sysop` is a separate fixture for
+# exactly that.
+
+
+@pytest.fixture
+def real_sysop(db):
+    return create_user(db, "real_sysop", password="hunter2", user_level=SYSOP_LEVEL)
+
+
+def test_sysop_satisfies_board_permission_with_zero_grants(db, real_sysop):
+    assert has_permission(
+        db, real_sysop, object_type="board", object_id=1, permission=BoardPermission.APPROVE
+    )
+
+
+def test_sysop_satisfies_file_area_permission_with_zero_grants(db, real_sysop):
+    assert has_permission(
+        db, real_sysop, object_type="file_area", object_id=1, permission=BoardPermission.DELETE
+    )
+
+
+def test_sysop_satisfies_channel_permission_with_zero_grants(db, real_sysop):
+    assert has_permission(
+        db, real_sysop, object_type="channel", object_id=1, permission=ChannelPermission.MODERATE
+    )
+
+
+def test_a_level_100_user_does_not_get_the_bypass(db, sysop):
+    """Confirms the bypass is keyed on the real SYSOP_LEVEL (255), not
+    just "some elevated level" -- the pre-existing `sysop` fixture
+    (level 100) must still need a real grant, same as anyone else."""
+    assert not has_permission(
+        db, sysop, object_type="board", object_id=1, permission=BoardPermission.APPROVE
+    )
+
+
+def test_sysop_bypass_does_not_affect_get_grant(db, real_sysop):
+    """get_grant/list_grants_for_object answer "what grants actually
+    exist", used for admin displays -- these must stay literal, not
+    synthesize a fake grant for a SysOp."""
+    assert get_grant(db, real_sysop, object_type="board", object_id=1) is None
+
+
+def test_sysop_bypass_does_not_affect_list_grants_for_object(db, real_sysop):
+    assert list_grants_for_object(db, object_type="board", object_id=1) == []
+
+
+def test_sysop_bypass_still_validates_the_permission_type(db, real_sysop):
+    """Input validation runs before the bypass check -- a SysOp passing
+    a nonsensical object_type/permission combination is still caught,
+    not silently waved through."""
+    with pytest.raises(ModeratorGrantError):
+        has_permission(
+            db, real_sysop, object_type="board", object_id=1, permission=ChannelPermission.MODERATE
+        )

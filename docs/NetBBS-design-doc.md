@@ -4874,3 +4874,131 @@ clients, not just this sandbox's scripted `FakeSession` tests, hasn't
 been done. Worth a direct check from Thiesi's own machine, especially
 since round 58's original bug report came from exactly that kind of
 real-world use this sandbox can't reproduce.
+
+## Sign-off notes, round 60 (board & file-area management: [M]anage boards/areas admin menu — implemented)
+
+Third and final planned slice of §15's "SysOp admin tools" line, scoped
+to boards and file areas — channels explicitly deferred to a follow-up
+round (Thiesi's own call: "Boards and Areas first, then channels").
+
+Investigation before implementation found the gap was bigger than the
+roadmap's one-liner suggested: `create_board`/`create_file_area`/
+`create_category` (both category tables) all had zero permission gating
+and no command path to reach any of them on a running node at all
+(direct calls from tests/dev scripts only); no edit or delete function
+existed for boards, file areas, or either category table; deleting a
+board/area today would hit the same FK problem hard-deleting a user
+had before round 57 fixed it; and individual post/file moderation
+(`approve_post`/`delete_post`/`set_post_pinned`/`set_post_exempt`/
+`list_pending_posts` and their file equivalents) already existed as
+fully permission-gated library functions with zero UI anywhere.
+Confirmed in scope for this round, on Thiesi's own calls: the last of
+these (post/file moderation), category deletion (falls back
+boards/areas/child-categories to "uncategorized"), and moderator-grant
+assignment via named presets rather than raw per-flag toggles, with
+both per-object and local-blanket grants exposed.
+
+1. **No schema migration for board/area/category deletion — a design
+   correction made mid-implementation, not originally planned.** The
+   first attempt followed round 57's user-deletion migration pattern
+   directly: rebuild `posts`/`files`/`boards`/`file_areas`/
+   `board_categories`/`file_area_categories` with real `ON DELETE`
+   clauses. Tested before trusting it, the same discipline that's
+   caught real bugs before in this project: seeded a board with one
+   post, ran the exact rebuild sequence, and found the post silently
+   deleted by the `DROP TABLE boards` step *before `posts` was ever
+   touched* — no error, no warning. A second test confirmed the same
+   mechanism nulls out nullable referencing columns instead when the
+   child column allows it. **SQLite's `DROP TABLE` under `PRAGMA
+   foreign_keys = ON` applies its own SET-NULL/cascade-delete fallback
+   to any row in another table still referencing it, regardless of
+   that column's actual declared `ON DELETE` behavior (or lack of
+   one) — a real, silent side effect of the rebuild itself.** Round 57
+   never hit this because it rebuilt nine tables that reference
+   `users(id)` without ever rebuilding `users` itself, so it never
+   dropped a table that was simultaneously a live parent of another
+   table also being touched in the same migration; boards/areas don't
+   have that luxury (`boards` is both a child of `board_categories` and
+   a parent of `posts` in the same migration). A fully correct schema
+   fix exists (strip every cross-table FK in one pass, rebuild
+   everything, re-add the real FKs in a topologically-ordered second
+   pass) but roughly doubles the migration's size for six interlocking
+   tables. Simpler and just as correct: no schema change at all —
+   `delete_board`/`delete_file_area`/`delete_category` handle cascade/
+   cleanup at the application level with explicit `DELETE`/`UPDATE`
+   statements in the right order, the same way `moderator_grants`
+   cleanup already had to be (it has no FK at all, being polymorphic).
+2. **A genuinely cross-cutting decision, confirmed with Thiesi over the
+   narrower alternative**: `has_permission` (`netbbs/moderation/
+   roles.py`) now short-circuits to `True` for any `SYSOP_LEVEL`
+   caller, with zero grant rows required — input validation still runs
+   first regardless of caller identity, so a nonsensical `object_type`/
+   `permission` combination is still caught. This is not scoped to
+   board/area moderation specifically: it applies to *every* existing
+   consumer of `has_permission`, retroactively — chat's `/mute`/`/ban`/
+   `/kick`, membership-admin gating, and Tab-completion's visibility
+   predicates all now also implicitly pass for a SysOp with no explicit
+   grant. Deliberately *not* extended to `get_grant`/
+   `list_grants_for_object`, which answer "what grants actually exist"
+   for admin displays and must stay literal, not synthesize a grant
+   that isn't really there. The full existing suite was re-run
+   immediately after this one change, before building anything on top
+   of it, specifically to catch any regression in already-shipped
+   moderation behavior — none found.
+3. **New library functions**, one set each for `netbbs/boards/boards.py`
+   and `netbbs/files/areas.py` (structurally identical, written
+   separately rather than sharing an abstraction — see this round's
+   plan for why): `update_board`/`update_file_area` (full-state
+   replacement, not partial/PATCH — the admin UI pre-fills current
+   values as editable defaults) and `delete_board`/`delete_file_area`
+   (explicit cascade per point 1, logged before deleting, same
+   ordering reasoning as round 57's `delete_user`). `create_board`/
+   `create_file_area` gained audit-log entries now that they're
+   finally reachable through a real command with a known actor.
+   `netbbs/boards/categories.py`/`netbbs/files/categories.py` gained
+   `delete_category` (falls back referencing boards/areas/child-
+   categories to uncategorized/top-level) and `created_by`-logged
+   `create_category` — the latter required adding a new required
+   parameter to a function that previously took no actor at all,
+   updating ~40 existing call sites across two test files
+   mechanically.
+4. **Admin UI** (`netbbs/net/admin_flow.py`): new top-level `[M]anage
+   boards/areas` option opening `_content_menu` — `[M]essage boards`/
+   `[A]reas` (create/list/edit/delete, each board/area's detail screen
+   also reaching a `[P]ending posts`/`[P]ending files` approve/reject/
+   pin/exempt queue), `[C]ategories` (create/list-with-delete for both
+   kinds), `[G]rant moderator`/`[R]evoke moderator` (pick a user, a
+   scope — one board, one area, or a local-blanket grant across all
+   boards/all areas — and a preset: "Full moderator"
+   (EDIT+DELETE+APPROVE) or "Approver only"). Revoke removes a target's
+   *entire* existing grant on the chosen scope in one action, not a
+   partial per-flag revoke, matching the enable/disable screen's
+   existing "one clean toggle" precedent.
+5. **Testing:** `tests/test_boards.py`/`tests/test_file_areas.py`
+   extended for `update_*`/`delete_*` (including that deleting a board/
+   area does *not* touch its category) and audit logging on create;
+   `tests/test_board_categories.py`/`tests/test_file_area_categories.py`
+   extended for `delete_category`'s uncategorized/top-level fallback;
+   `tests/test_moderator_roles.py` gained a dedicated `real_sysop`
+   fixture (`SYSOP_LEVEL`, distinct from the pre-existing `sysop`
+   fixture in that file, which is level 100 and does *not* trigger the
+   bypass — confirmed as its own explicit test) covering the bypass for
+   every `object_type`, that `get_grant`/`list_grants_for_object` stay
+   unaffected, and that input validation still runs first.
+   `tests/test_admin_flow.py` extended with end-to-end flows through
+   the real UI: create/edit/delete a board and an area, category
+   create/delete, and — the test that actually proves the bypass
+   reaches production code, not just the library function in isolation
+   — a SysOp with zero prior grants successfully approving a pending
+   post and a pending file purely through the admin menu. Full suite
+   re-run: **1111 passed, 3 skipped** — actually run, not just
+   syntax-checked.
+
+**Flagged, not blocking further work:** same as every prior round's
+equivalent note — real interactive verification of the full `[M]anage
+boards/areas` tree (creating/editing/deleting real boards and areas,
+approving real pending posts/files, granting/revoking moderator status)
+from an actual connected client hasn't been done outside this sandbox's
+scripted `FakeSession` tests. Worth a direct check from Thiesi's own
+machine before considering "SysOp admin tools" as a whole closed out —
+channel management remains the one deliberately deferred piece.

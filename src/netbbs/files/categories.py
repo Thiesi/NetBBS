@@ -13,6 +13,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from netbbs.auth.users import User
+from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -41,10 +43,12 @@ def create_category(
     *,
     description: str | None = None,
     parent_category_id: int | None = None,
+    created_by: User,
 ) -> FileAreaCategory:
     """Create a new file area category, optionally as a sub-category of
     an existing top-level category. No permission check here — same
-    precedent as board/channel category creation."""
+    precedent as board/channel category creation. `created_by` is only
+    for the audit-log entry (design doc -- board/area management round)."""
     if parent_category_id is not None:
         parent = get_category_by_id(db, parent_category_id)
         if not parent.is_top_level:
@@ -68,7 +72,12 @@ def create_category(
             f"could not create category {name!r} — name already in use?"
         ) from exc
 
-    return get_category_by_name(db, name)
+    new_category = get_category_by_name(db, name)
+    record_action(
+        db, actor=created_by, action="create_file_area_category", object_type="file_area_category",
+        object_id=new_category.id, detail=f"created category {name!r}",
+    )
+    return new_category
 
 
 def get_category_by_id(db: Database, category_id: int) -> FileAreaCategory:
@@ -102,6 +111,23 @@ def list_subcategories(db: Database, parent_category_id: int) -> list[FileAreaCa
         (parent_category_id,),
     ).fetchall()
     return [_row_to_category(row) for row in rows]
+
+
+def delete_category(db: Database, category: FileAreaCategory, *, deleted_by: User) -> None:
+    """Permanently remove `category` -- mirrors
+    `netbbs.boards.categories.delete_category` exactly, see that
+    function's docstring for the full reasoning."""
+    record_action(
+        db, actor=deleted_by, action="delete_file_area_category", object_type="file_area_category",
+        object_id=category.id, detail=f"deleted category {category.name!r} (id {category.id})",
+    )
+    db.connection.execute("UPDATE file_areas SET category_id = NULL WHERE category_id = ?", (category.id,))
+    db.connection.execute(
+        "UPDATE file_area_categories SET parent_category_id = NULL WHERE parent_category_id = ?",
+        (category.id,),
+    )
+    db.connection.execute("DELETE FROM file_area_categories WHERE id = ?", (category.id,))
+    db.connection.commit()
 
 
 def _row_to_category(row: sqlite3.Row) -> FileAreaCategory:

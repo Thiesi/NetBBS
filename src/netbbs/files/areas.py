@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
+from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -120,7 +121,12 @@ def create_file_area(
     except sqlite3.IntegrityError as exc:
         raise FileAreaError(f"could not create file area {name!r} — name already in use?") from exc
 
-    return get_file_area_by_name(db, name)
+    new_area = get_file_area_by_name(db, name)
+    record_action(
+        db, actor=creator, action="create_file_area", object_type="file_area", object_id=new_area.id,
+        detail=f"created file area {name!r}",
+    )
+    return new_area
 
 
 def get_file_area_by_name(db: Database, name: str) -> FileArea:
@@ -177,6 +183,66 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
         ).fetchall()
 
     return [_row_to_file_area(row) for row in rows]
+
+
+def update_file_area(
+    db: Database,
+    area: FileArea,
+    *,
+    name: str,
+    description: str | None,
+    min_read_level: int,
+    min_write_level: int,
+    category_id: int | None,
+    pinned: bool,
+    moderated: bool,
+    max_file_age_days: int | None,
+    changed_by: User,
+) -> FileArea:
+    """Replace `area`'s editable settings with the given full state --
+    mirrors `netbbs.boards.boards.update_board` exactly, see that
+    function's docstring for the full reasoning."""
+    try:
+        db.connection.execute(
+            """
+            UPDATE file_areas
+            SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
+                category_id = ?, pinned = ?, moderated = ?, max_file_age_days = ?
+            WHERE id = ?
+            """,
+            (
+                name, description, min_read_level, min_write_level,
+                category_id, int(pinned), int(moderated), max_file_age_days, area.id,
+            ),
+        )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise FileAreaError(f"could not update file area {area.name!r} — name already in use?") from exc
+
+    updated = get_file_area_by_name(db, name)
+    record_action(
+        db, actor=changed_by, action="update_file_area", object_type="file_area", object_id=area.id,
+        detail=f"updated file area {area.name!r}",
+    )
+    return updated
+
+
+def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
+    """Permanently remove `area`, along with its files and any
+    moderator grants scoped to it -- mirrors
+    `netbbs.boards.boards.delete_board` exactly, see that function's
+    docstring for the full reasoning (including why this is handled at
+    the application level rather than via a schema ON DELETE clause)."""
+    record_action(
+        db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
+        detail=f"deleted file area {area.name!r} (id {area.id})",
+    )
+    db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
+    db.connection.execute(
+        "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+    )
+    db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
+    db.connection.commit()
 
 
 def _row_to_file_area(row: sqlite3.Row) -> FileArea:

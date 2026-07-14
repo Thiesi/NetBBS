@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
+from netbbs.moderation.log import record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -127,7 +128,12 @@ def create_board(
     except sqlite3.IntegrityError as exc:
         raise BoardError(f"could not create board {name!r} — name already in use?") from exc
 
-    return get_board_by_name(db, name)
+    new_board = get_board_by_name(db, name)
+    record_action(
+        db, actor=creator, action="create_board", object_type="board", object_id=new_board.id,
+        detail=f"created board {name!r}",
+    )
+    return new_board
 
 
 def get_board_by_name(db: Database, name: str) -> Board:
@@ -184,6 +190,83 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
         ).fetchall()
 
     return [_row_to_board(row) for row in rows]
+
+
+def update_board(
+    db: Database,
+    board: Board,
+    *,
+    name: str,
+    description: str | None,
+    min_read_level: int,
+    min_write_level: int,
+    category_id: int | None,
+    pinned: bool,
+    moderated: bool,
+    max_post_age_days: int | None,
+    changed_by: User,
+) -> Board:
+    """
+    Replace `board`'s editable settings with the given full state
+    (design doc -- board/area management round) -- every field is
+    required, not a partial/PATCH-style update; the admin UI is
+    responsible for pre-filling a caller's edits with the board's
+    current values as defaults, keeping this function itself simple.
+    `board_id`/`created_at` are immutable, not accepted here.
+    """
+    try:
+        db.connection.execute(
+            """
+            UPDATE boards
+            SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
+                category_id = ?, pinned = ?, moderated = ?, max_post_age_days = ?
+            WHERE id = ?
+            """,
+            (
+                name, description, min_read_level, min_write_level,
+                category_id, int(pinned), int(moderated), max_post_age_days, board.id,
+            ),
+        )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise BoardError(f"could not update board {board.name!r} — name already in use?") from exc
+
+    updated = get_board_by_name(db, name)
+    record_action(
+        db, actor=changed_by, action="update_board", object_type="board", object_id=board.id,
+        detail=f"updated board {board.name!r}",
+    )
+    return updated
+
+
+def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
+    """
+    Permanently remove `board`, along with its posts and any moderator
+    grants scoped to it (design doc -- board/area management round).
+
+    No `ON DELETE` behavior exists in the schema for this -- rebuilding
+    `boards`/`posts` together to add it was found, by direct testing
+    rather than by inspection, to risk silently deleting/nulling rows
+    in *other*, not-yet-rebuilt tables as a side effect of the rebuild
+    itself (SQLite's `DROP TABLE` under FK enforcement applies its own
+    SET-NULL/cascade-delete fallback to referencing rows regardless of
+    the referencing column's actual declared behavior). Handled here at
+    the application level instead, the same way `moderator_grants`
+    cleanup already has to be (it has no FK at all, being polymorphic)
+    -- explicit deletes, in the correct order, inside one transaction.
+    Logged before deleting, not after, matching `delete_user`'s own
+    "log first" reasoning (design doc round 57).
+    """
+    record_action(
+        db, actor=deleted_by, action="delete_board", object_type="board", object_id=board.id,
+        detail=f"deleted board {board.name!r} (id {board.id})",
+    )
+    db.connection.execute("DELETE FROM posts WHERE board_id = ?", (board.id,))
+    db.connection.execute(
+        "DELETE FROM moderator_grants WHERE object_type = 'board' AND object_id = ?", (board.id,)
+    )
+    db.connection.execute("DELETE FROM boards WHERE id = ?", (board.id,))
+    db.connection.commit()
 
 
 def _row_to_board(row: sqlite3.Row) -> Board:
