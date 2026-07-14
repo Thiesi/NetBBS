@@ -5632,3 +5632,108 @@ been made for either.
    different-case-succeeds case each for password login, keypair
    login, and `authorize_public_key`. Full suite re-run: **1258
    passed, 3 skipped**.
+
+## Sign-off notes, round 66 (ANSI editor status line overran the canvas width — fixed)
+
+1. **The bug, and how it was found**: Thiesi ran the round B1 WYSIWYG
+   ANSI editor over a real telnet session (NetBSD's native telnet
+   client, via an SSH-tunneled PuTTY session on the deployment host —
+   exactly the kind of real third-party-client verification round 64
+   flagged as not yet done from this sandboxed dev environment) and
+   saw the status line render as a garbled, ever-growing stack of
+   near-duplicate lines instead of a single line updating in place.
+   Root cause: `_flush`'s status text (`"Row N/H  Col N/W  fg=... bg=...
+   Ctrl+G glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+S save  Esc quit"`) is 98-99
+   characters even in its shortest form (`fg=White bg=default`) and
+   longer with any real palette selection (e.g. `"Bright Magenta"`) —
+   comfortably past the 80-column canvas width `_flush` implicitly
+   assumed it would fit in, on every single redraw, not just an edge
+   case. A real terminal auto-wraps text that overruns the current
+   line, so the overflow landed on the row *below* the status line;
+   `_flush`'s `clear_line()` only ever clears the status row itself, so
+   that spillover was never erased and simply accumulated fresh
+   garbage underneath on every subsequent keystroke's redraw — matching
+   exactly what Thiesi saw.
+2. **Fix**: clip the assembled status text to `state.buffer.width`
+   before writing, via the existing `netbbs.rendering.reflow.truncate`
+   helper — already the established pattern for this exact class of
+   problem elsewhere in the codebase (`netbbs.net.picker` truncates
+   list lines to `session.terminal_width`). Canvas width was chosen
+   over the real negotiated terminal width deliberately: this editor's
+   entire rendering model already assumes the real terminal is at
+   least as wide as the canvas it's editing (the canvas itself would
+   render incorrectly first, well before the status line, if that
+   assumption were violated) — so the canvas width is the correct
+   ceiling `_flush` already has in hand, not a new dependency.
+3. **Left as-is, deliberately**: no change to the status line's
+   *content* — it isn't shortened or abbreviated, since a real 80+
+   column terminal (the overwhelming common case, and this project's
+   assumed floor per the existing canvas-width default) always sees it
+   in full; truncation only ever bites on a narrower-than-assumed
+   terminal, where losing the tail end of the shortcut hints is a much
+   smaller problem than the corruption this round fixes.
+4. **Testing**: `tests/test_ansi_editor.py` gained
+   `test_status_line_never_exceeds_the_canvas_width`, which drives the
+   real foreground/background color pickers to `"Bright Magenta"` (the
+   longest palette name) and asserts every status-line redraw, with SGR
+   codes stripped, stays within the canvas width — confirmed to fail
+   against the pre-fix code (98 columns on the *default* colors alone,
+   no picker interaction needed to trigger it) and pass after. Full
+   suite re-run: **1259 passed, 3 skipped**.
+
+## Sign-off notes, round 67 (ANSI editor quit confirmation now single-keystroke; Telnet TCP_NODELAY — fixed)
+
+1. **ANSI editor quit confirmation, single keystroke**: `_confirm_quit`
+   (the "Unsaved changes. [S]ave, [D]iscard, or [C]ancel?" prompt
+   round B1 added) read a full line via `session.read_line()`,
+   requiring Enter — the only sub-interaction in the entire editor
+   that did, everything else (cursor movement, typing, Ctrl+combos,
+   Esc itself) already dispatches on the keystroke alone. Switched to
+   `session.read_key()`; same `s`/`d`/else-is-cancel mapping as
+   before, just without waiting for a line terminator that was never
+   part of the editor's own interaction model to begin with.
+   `tests/test_ansi_editor.py` gained
+   `test_quit_confirmation_acts_on_a_single_keystroke_without_enter`,
+   which makes `read_line` raise on the scripted session to prove
+   `_confirm_quit` never calls it — a regression here would otherwise
+   pass silently, since `FakeSession`'s shared input queue doesn't
+   itself distinguish which read method consumed a given token.
+2. **Telnet bell/echo not reaching a real client — root cause and
+   fix**: Thiesi reported the round B1 ANSI editor status line
+   corruption (round 66) *and*, separately, that invalid main-menu
+   keystrokes stopped ringing the bell and just printed the pressed
+   key, over a real telnet session (PuTTY -> SSH -> NetBSD's native
+   `telnet` client -> this node, exactly the kind of real-client
+   verification round 64 flagged as not yet done here). Extensive
+   live testing (a real `TelnetServer` instance driven by a script
+   speaking actual Telnet IAC negotiation, not just raw bytes)
+   confirmed the server always puts the correct bytes on the wire --
+   byte-identical between the commit immediately before and the
+   commit introducing round B1's TUI work, ruling that commit out
+   directly rather than by inspection alone -- and `printf '\a'`
+   confirmed Thiesi's terminal itself rings a bell fine. The actual
+   gap: `netbbs.net.telnet.TelnetServer` never set `TCP_NODELAY` on
+   accepted sockets. This server took over character-mode input
+   entirely (this module's own docstring, from the original Backspace/
+   ^M fix) specifically so every keystroke's echo -- and a bare bell
+   -- goes out as its own small, immediate write; Nagle's algorithm
+   (on by default) is a well-documented source of exactly that traffic
+   shape being held back on a real network path instead of sent
+   promptly, unlike over a bare loopback `asyncio` test client where
+   the effect is negligible -- which is exactly why the live tests
+   above showed correct bytes while Thiesi's real client still didn't
+   render them. Fixed by setting `TCP_NODELAY` on every accepted
+   connection's socket in `TelnetServer._handle_connection`, the
+   standard fix for any interactive character-mode server.
+3. **Left as-is, deliberately**: SSH (`netbbs.net.ssh`, via `asyncssh`)
+   and the web transport (`netbbs.net.web`, WebSocket framing) were
+   not touched -- neither was implicated by Thiesi's report, and both
+   already carry per-message framing overhead (SSH channel packets,
+   WebSocket frames) that isn't the same bare-single-byte-write shape
+   this fix targets. Worth the same fix if a real report ever
+   implicates them, not preemptively.
+4. **Testing**: `tests/test_telnet.py` gained
+   `test_accepted_connections_have_tcp_nodelay_set`, spinning up a
+   real `TelnetServer`, connecting a real client, and asserting the
+   accepted socket's `TCP_NODELAY` option is `1`. Full suite re-run:
+   **1261 passed, 3 skipped**.

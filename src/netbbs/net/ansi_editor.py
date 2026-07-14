@@ -41,6 +41,7 @@ from netbbs.rendering import (
     full_render_ansi,
     move_cursor,
     parse_ansi_into_buffer,
+    truncate,
 )
 
 _logger = logging.getLogger(__name__)
@@ -285,6 +286,13 @@ async def _flush(session: Session, state: _EditorState) -> None:
         f"fg={fg_label} bg={bg_label}  "
         f"Ctrl+G glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+S save  Esc quit"
     )
+    # Must never exceed the canvas width: a status line long enough to
+    # wrap (the palette names alone push this well past 80 columns,
+    # e.g. "Bright Magenta") corrupts every subsequent redraw -- the
+    # wrapped remainder lands on the row below, which this function's
+    # single clear_line() never touches, so it accumulates garbage
+    # there on every redraw instead of being overwritten in place.
+    status = truncate(status, state.buffer.width)
     await session.write(move_cursor(state.buffer.height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())
     await session.write(colored(status, fg_color=MUTED_COLOR))
@@ -305,12 +313,19 @@ async def _offer_draft_recovery(session: Session) -> bool:
 
 
 async def _confirm_quit(session: Session) -> str:
-    """Returns `"save"`, `"discard"`, or `"cancel"`."""
+    """Returns `"save"`, `"discard"`, or `"cancel"`.
+
+    A single keystroke, like every other editor command -- Esc to get
+    here in the first place already didn't need Enter, so requiring it
+    only for this one sub-prompt would be the odd one out. Any key
+    other than S/D defaults to "cancel" (dropping the SysOp back into
+    the editor with nothing lost), same fallback `read_line`'s
+    startswith-based check used before."""
     await session.write("\r\nUnsaved changes. [S]ave, [D]iscard, or [C]ancel? ")
-    answer = (await session.read_line()).strip().lower()
-    if answer.startswith("s"):
+    answer = (await session.read_key()).lower()
+    if answer == "s":
         return "save"
-    if answer.startswith("d"):
+    if answer == "d":
         return "discard"
     return "cancel"
 

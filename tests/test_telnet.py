@@ -14,6 +14,7 @@ the specific byte sequences each test cares about.
 from __future__ import annotations
 
 import asyncio
+import socket
 import time
 
 from netbbs.net.session import Session
@@ -74,6 +75,37 @@ def test_server_runs_handler_and_sends_output():
 
     asyncio.run(scenario())
     assert calls == ["called"]
+
+
+def test_accepted_connections_have_tcp_nodelay_set():
+    """
+    Nagle's algorithm is on by default and, left on, is a well-known
+    source of interactive small-write traffic (a single echoed
+    character, a bare bell) not going out promptly on a real client --
+    exactly the traffic shape this server-driven character-mode
+    transport produces on every keystroke. Regression coverage for
+    that fix: every accepted connection's socket must have
+    `TCP_NODELAY` enabled.
+    """
+    seen_nodelay = []
+
+    async def handler(session: Session):
+        sock = session._writer.get_extra_info("socket")
+        seen_nodelay.append(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            await asyncio.sleep(0.05)  # let the handler run and record the option
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert seen_nodelay == [1]
 
 
 # -- character-mode echo & Enter handling ------------------------------

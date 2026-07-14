@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from typing import Awaitable, Callable
 
 from netbbs.net import char_input
@@ -381,6 +382,22 @@ class TelnetServer:
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        # This server takes over echo/Backspace/Enter itself (see the
+        # module docstring) specifically so every keystroke -- and every
+        # single-byte reply like an echoed character or a bare bell --
+        # goes out as its own small write, immediately. Nagle's
+        # algorithm (on by default) is well known to hold exactly that
+        # shape of traffic back, waiting to coalesce it with whatever's
+        # written next or for the peer's ACK of the previous write,
+        # instead of sending it right away -- a real, if often
+        # intermittent/hard-to-notice, source of "my keystroke echo/bell
+        # didn't show up (promptly)" on a real client. TCP_NODELAY is
+        # the standard fix for an interactive character-mode server;
+        # asyncio's default socket options don't set it.
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         peer = writer.get_extra_info("peername")
         peer_address = peer[0] if peer else None
         session = TelnetSession(reader, writer, peer_address)

@@ -10,6 +10,7 @@ established convention."""
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -92,6 +93,18 @@ def _buffer_from(result: bytes, width: int = 80, height: int = 24) -> ScreenBuff
     buf = ScreenBuffer(width, height)
     parse_ansi_into_buffer(decode_ansi_bytes(result), buf)
     return buf
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _status_line_texts(session: FakeSession) -> list[str]:
+    """Every distinct status-line redraw `_flush` wrote, with SGR color
+    codes stripped so what's left is exactly the on-screen column count
+    -- the thing that must never exceed the canvas width, on pain of
+    wrapping onto the row below (see the regression test below)."""
+    stripped = [_ANSI_ESCAPE_RE.sub("", text) for text in session.written]
+    return [text for text in stripped if text.startswith("Row ")]
 
 
 # -- typing / cursor movement ----------------------------------------------
@@ -254,6 +267,38 @@ def test_background_color_picker_changes_what_typing_places(tmp_path):
     assert buf.get_cell(0, 0).bg == 3
 
 
+# -- status line -------------------------------------------------------------
+
+
+def test_status_line_never_exceeds_the_canvas_width(tmp_path):
+    # The unpadded status line ("Row N/H  Col N/W  fg=... bg=...
+    # Ctrl+G glyph  ...") already runs past 80 columns on a plain
+    # default-width canvas with no picker involved at all -- the
+    # longest palette names (e.g. "Bright Magenta") just make it worse.
+    # A status line wider than the canvas wraps onto the row below,
+    # which the fixed-position redraw in `_flush` never clears, so
+    # every subsequent redraw piles more stale text there instead of
+    # overwriting in place -- exactly the garbled, ever-growing output
+    # a SysOp reported seeing over a real telnet session.
+    async def scenario():
+        session = FakeSession([
+            "CTRL+P", "1", "4",  # foreground -> "Bright Magenta"
+            "CTRL+B", "1", "4",  # background -> "Bright Magenta"
+            "A", "CTRL+S",
+        ])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft",
+            autosave_interval_seconds=9999,
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    status_lines = _status_line_texts(session)
+    assert status_lines, "expected at least one status-line redraw"
+    for line in status_lines:
+        assert len(line) <= 80, f"status line exceeded canvas width: {line!r}"
+
+
 # -- save / quit ------------------------------------------------------------
 
 
@@ -315,6 +360,28 @@ def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):
     result = asyncio.run(scenario())
     buf = _buffer_from(result)
     assert buf.get_cell(0, 0).char == "A"
+
+
+def test_quit_confirmation_acts_on_a_single_keystroke_without_enter(tmp_path):
+    """The Save/Discard/Cancel prompt must dispatch on the keystroke
+    itself, like every other editor command -- not wait for a line +
+    Enter. `read_line` raising here is the proof: if `_confirm_quit`
+    regressed to line-based input, this test would fail loudly instead
+    of silently passing because FakeSession's shared input queue
+    doesn't otherwise distinguish the two read methods."""
+
+    class NoReadLineSession(FakeSession):
+        async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+            raise AssertionError("_confirm_quit must use read_key, not read_line")
+
+    async def scenario():
+        session = NoReadLineSession(["A", "ESCAPE", "d"])
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+
+    result = asyncio.run(scenario())
+    assert result is None
 
 
 # -- loading existing content -----------------------------------------------
