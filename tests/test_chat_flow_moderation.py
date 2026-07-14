@@ -63,6 +63,9 @@ class FakeSession(Session):
     async def read_key(self, echo: bool = True) -> str:
         raise NotImplementedError
 
+    async def read_editor_key(self):
+        raise NotImplementedError
+
     async def close(self) -> None:
         self.closed = True
 

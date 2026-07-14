@@ -125,6 +125,9 @@ class SSHSession(Session):
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)
 
+    async def read_editor_key(self) -> char_input.EditorKey:
+        return await char_input.read_editor_key(self)
+
     async def close(self) -> None:
         self._process.exit(0)
 

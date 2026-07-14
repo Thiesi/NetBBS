@@ -81,8 +81,10 @@ from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
+from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
+    banner_path,
     load_welcome_banner,
     set_welcome_banner_enabled,
     welcome_banner_status,
@@ -527,6 +529,10 @@ async def _welcome_banner_menu(session: Session, db: Database, actor: User) -> N
             await session.write_line("")
             await _disable_welcome_banner_screen(session, db, actor)
             await _draw_welcome_banner_menu(session, db)
+        elif choice == "x":
+            await session.write_line("")
+            await _edit_welcome_banner_screen(session, db, actor)
+            await _draw_welcome_banner_menu(session, db)
         else:
             await session.write("\a")
 
@@ -541,7 +547,13 @@ async def _draw_welcome_banner_menu(session: Session, db: Database) -> None:
     header = colored("Welcome banner:", fg_color=HEADER_COLOR, bold=True)
     detail = f"{state} -- file: {status.path} ({file_state})"
     options = "  ".join(
-        [menu_key("P", "review"), menu_key("E", "nable"), menu_key("D", "isable"), menu_key("B", "ack")]
+        [
+            menu_key("P", "review"),
+            menu_key("E", "nable"),
+            menu_key("D", "isable"),
+            menu_key("X", " edit"),
+            menu_key("B", "ack"),
+        ]
     )
     await session.write_line(f"\r\n{header} {detail}\r\n{options}")
     await session.write("Choice: ")
@@ -597,6 +609,26 @@ async def _disable_welcome_banner_screen(session: Session, db: Database, actor: 
     await session.write_line(
         f"Reverted to the default banner. Your file at {status.path} was left in place."
     )
+
+
+async def _edit_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
+    """Opens the WYSIWYG ANSI art editor (design doc -- welcome banner
+    round B1) against the current banner file, if any. `edit_ansi_art`
+    itself knows nothing about "welcome banner" -- this screen is
+    responsible for loading the existing file, computing the draft
+    path, and writing a real save back to `banner_path(db)`."""
+    path = banner_path(db)
+    initial_bytes = path.read_bytes() if path.exists() else None
+    draft_path = path.parent / f"{path.name}.draft"
+
+    result = await edit_ansi_art(session, initial_bytes=initial_bytes, draft_path=draft_path)
+    if result is None:
+        await session.write_line(colored("\r\nNo changes saved.", fg_color=MUTED_COLOR))
+        return
+
+    path.write_bytes(result)
+    record_action(db, actor=actor, action="edit_welcome_banner", detail=str(path))
+    await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
 # -- boards & areas (design doc -- board/area management round) -----------

@@ -18,12 +18,35 @@ import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, count_sysops, create_user, list_users
 from netbbs.net.admin_flow import admin_menu
+from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
 from netbbs.storage.database import Database
 from tests.test_shutdown import _hold_registered
+
+# Sentinel strings in FakeSession's single scripted-input queue that
+# read_editor_key (design doc -- welcome banner round B1) maps to
+# non-CHAR EditorKeyKinds, rather than treating them as literal typed
+# text -- keeps the whole file's "one ordered queue for every kind of
+# read" convention intact instead of adding a second, incompatible
+# queue just for editor-driven tests.
+_EDITOR_KEY_SENTINELS: dict[str, EditorKeyKind] = {
+    "ENTER": EditorKeyKind.ENTER,
+    "BACKSPACE": EditorKeyKind.BACKSPACE,
+    "DELETE": EditorKeyKind.DELETE,
+    "TAB": EditorKeyKind.TAB,
+    "ESCAPE": EditorKeyKind.ESCAPE,
+    "UP": EditorKeyKind.UP,
+    "DOWN": EditorKeyKind.DOWN,
+    "LEFT": EditorKeyKind.LEFT,
+    "RIGHT": EditorKeyKind.RIGHT,
+    "HOME": EditorKeyKind.HOME,
+    "END": EditorKeyKind.END,
+    "PAGE_UP": EditorKeyKind.PAGE_UP,
+    "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
+}
 
 
 class FakeSession(Session):
@@ -46,6 +69,16 @@ class FakeSession(Session):
         if not self._inputs:
             raise AssertionError("FakeSession ran out of scripted input (read_key)")
         return self._inputs.pop(0)
+
+    async def read_editor_key(self) -> EditorKey:
+        if not self._inputs:
+            raise AssertionError("FakeSession ran out of scripted input (read_editor_key)")
+        raw = self._inputs.pop(0)
+        if raw in _EDITOR_KEY_SENTINELS:
+            return EditorKey(_EDITOR_KEY_SENTINELS[raw])
+        if raw.startswith("CTRL+"):
+            return EditorKey(EditorKeyKind.CTRL, char=raw[len("CTRL+") :].lower())
+        return EditorKey(EditorKeyKind.CHAR, char=raw)
 
     async def close(self) -> None:
         pass
@@ -713,3 +746,37 @@ def test_preview_screen_when_disabled_shows_default_and_says_so(db, sysop):
     text = _written_text(session)
     assert "showing the DEFAULT banner" in text
     assert "enabled=False" in text
+
+
+def test_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_path(db, sysop):
+    from netbbs.net.welcome_banner import banner_path
+    from netbbs.rendering.ansi_art import decode_ansi_bytes
+    from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
+    from netbbs.rendering.screen_buffer import ScreenBuffer
+
+    session = FakeSession(["w", "x", "A", "CTRL+S", "b", "b"])
+    _run(session, db, sysop)
+    assert "Saved" in _written_text(session)
+
+    saved = banner_path(db)
+    assert saved.exists()
+    buf = ScreenBuffer(80, 24)
+    parse_ansi_into_buffer(decode_ansi_bytes(saved.read_bytes()), buf)
+    assert buf.get_cell(0, 0).char == "A"
+
+    rows = db.connection.execute(
+        "SELECT actor_user_id FROM moderation_log WHERE action = 'edit_welcome_banner'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["actor_user_id"] == sysop.id
+
+
+def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, sysop):
+    from netbbs.net.welcome_banner import banner_path
+
+    banner_path(db).write_bytes(b"ORIGINAL")
+
+    session = FakeSession(["w", "x", "A", "ESCAPE", "d", "b", "b"])
+    _run(session, db, sysop)
+    assert "No changes saved" in _written_text(session)
+    assert banner_path(db).read_bytes() == b"ORIGINAL"

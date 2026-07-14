@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Awaitable, Callable, Protocol, Sequence
 
 from netbbs.net.session import SessionClosedError
@@ -104,13 +105,16 @@ _CSI_FINAL_TO_KEY: dict[int, str] = {
 }
 
 # Recognized CSI "tilde" forms: ESC [ <param> ~ -- the alternate Home/
-# End encoding some terminals use, plus Delete/Insert, which have no
-# plain-letter CSI form at all.
+# End encoding some terminals use, plus Delete/Insert and Page Up/Down
+# (design doc -- welcome banner round B1, for netbbs.net.ansi_editor),
+# none of which have a plain-letter CSI form at all.
 _CSI_TILDE_TO_KEY: dict[bytes, str] = {
     b"1": "HOME",
     b"4": "END",
     b"3": "DELETE",
     b"2": "INSERT",
+    b"5": "PAGE_UP",
+    b"6": "PAGE_DOWN",
 }
 
 # SS3 forms (ESC O <letter>) -- some terminals' "application cursor key
@@ -602,6 +606,119 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
 
         await write(char if echo else "*")
         return char
+
+
+class EditorKeyKind(Enum):
+    """Design doc -- welcome banner round B1: the structured key-event
+    vocabulary a full-screen editor (`netbbs.net.ansi_editor`) needs,
+    which neither `read_line` (line-oriented, returns a finished `str`)
+    nor `read_key` (discards every escape sequence outright, since a
+    single-keystroke menu has no line for a cursor to move within) can
+    provide."""
+
+    CHAR = auto()
+    ENTER = auto()
+    BACKSPACE = auto()
+    DELETE = auto()
+    TAB = auto()
+    ESCAPE = auto()
+    UP = auto()
+    DOWN = auto()
+    LEFT = auto()
+    RIGHT = auto()
+    HOME = auto()
+    END = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
+    CTRL = auto()
+
+
+@dataclass(frozen=True)
+class EditorKey:
+    kind: EditorKeyKind
+    char: str | None = None  # the literal character for CHAR/CTRL, else None
+
+
+_SYMBOLIC_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
+    "UP": EditorKeyKind.UP,
+    "DOWN": EditorKeyKind.DOWN,
+    "LEFT": EditorKeyKind.LEFT,
+    "RIGHT": EditorKeyKind.RIGHT,
+    "HOME": EditorKeyKind.HOME,
+    "END": EditorKeyKind.END,
+    "DELETE": EditorKeyKind.DELETE,
+    "PAGE_UP": EditorKeyKind.PAGE_UP,
+    "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
+    # INSERT has no meaning for the ANSI editor in this round's scope
+    # (typing always overwrites the cell at the cursor already, no
+    # separate overwrite-mode toggle) -- a real INSERT keypress simply
+    # isn't surfaced as anything by read_editor_key below.
+}
+
+
+async def read_editor_key(source: ByteSource) -> EditorKey:
+    """
+    Read one structured key event for a full-screen editor.
+
+    Unlike `read_key` (which discards every escape sequence outright)
+    or `read_line` (line-oriented, returns a finished `str` only on
+    Enter), this surfaces arrows, Home/End, Page Up/Down, and a real
+    standalone Escape press as first-class events, alongside ordinary
+    characters, Enter, Backspace, Delete, Tab, and Ctrl+letter combos
+    (returned as `EditorKeyKind.CTRL` with the lowercase letter, e.g.
+    Ctrl+S -> `char="s"`) -- everything a screen editor needs that
+    `read_line`'s line-oriented model has no use for.
+    """
+    while True:
+        b = await _read_byte(source)
+        if b is None:
+            continue  # pure transport-level action, no data produced
+
+        if b in (_CR, _LF):
+            if b == _CR:
+                await _consume_optional_lf_or_nul(source)
+            return EditorKey(EditorKeyKind.ENTER)
+
+        if b in (_BS, _DEL):
+            return EditorKey(EditorKeyKind.BACKSPACE)
+
+        if b == _TAB:
+            return EditorKey(EditorKeyKind.TAB)
+
+        if b == _ESC:
+            # _read_escape_sequence's `None` is ambiguous on its own --
+            # it means both "nothing followed ESC" (a real standalone
+            # Escape press) and "something followed but wasn't in our
+            # recognized table" (discard, not an Escape press at all).
+            # read_line/read_key never needed to tell these apart (both
+            # cases are already "not a match, keep going" for them) but
+            # a real standalone Escape is a first-class, meaningful key
+            # here (typically "exit the editor"), so it's peeked
+            # explicitly first, using the same pushback mechanism
+            # _consume_optional_lf_or_nul relies on for an analogous
+            # lookahead-then-replay need.
+            peek = await _read_byte_with_timeout(source, _FOLLOWUP_BYTE_TIMEOUT)
+            if peek is None:
+                return EditorKey(EditorKeyKind.ESCAPE)
+            _push_back(source, peek)
+            key = await _read_escape_sequence(source)
+            if key is not None:
+                kind = _SYMBOLIC_TO_EDITOR_KIND.get(key)
+                if kind is not None:
+                    return EditorKey(kind)
+            continue  # an unrecognized/unsupported escape shape -- keep reading
+
+        if b < 0x20:
+            return EditorKey(EditorKeyKind.CTRL, char=chr(b + 0x60))  # Ctrl+A -> 'a', etc.
+
+        if b < 0x80:
+            char = chr(b)
+        else:
+            char = await _read_utf8_continuation(source, b)
+            if char is None:
+                continue  # malformed/interrupted multi-byte sequence
+
+        return EditorKey(EditorKeyKind.CHAR, char=char)
 
 
 async def _read_utf8_continuation(source: ByteSource, lead_byte: int) -> str | None:

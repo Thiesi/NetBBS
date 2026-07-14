@@ -41,7 +41,15 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, web
 
-from netbbs.net.char_input import Completer, InputHistory, apply_tab_completion, move_cursor, redraw_tail
+from netbbs.net.char_input import (
+    Completer,
+    EditorKey,
+    EditorKeyKind,
+    InputHistory,
+    apply_tab_completion,
+    move_cursor,
+    redraw_tail,
+)
 from netbbs.net.session import Session, SessionClosedError
 
 _logger = logging.getLogger(__name__)
@@ -76,9 +84,29 @@ _MAX_QUEUED_CHARS = 8192
 # _CSI_FINAL_TO_KEY/_CSI_TILDE_TO_KEY/_SS3_TO_KEY exactly (same key set,
 # same reasoning) but keyed by already-decoded characters rather than
 # raw byte values, since that's what a browser's onData event delivers.
+# Page Up/Down (design doc -- welcome banner round B1, for
+# netbbs.net.ansi_editor) added here in lockstep with char_input's own
+# table -- this decoder is independently maintained, not shared code,
+# so both need updating together (see read_editor_key's docstring).
 _CSI_FINAL_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
-_CSI_TILDE_TO_KEY = {"1": "HOME", "4": "END", "3": "DELETE", "2": "INSERT"}
+_CSI_TILDE_TO_KEY = {"1": "HOME", "4": "END", "3": "DELETE", "2": "INSERT", "5": "PAGE_UP", "6": "PAGE_DOWN"}
 _SS3_TO_KEY = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT", "H": "HOME", "F": "END"}
+
+# netbbs.net.char_input.EditorKeyKind equivalents for every _SpecialKey
+# name this module's own decoder can produce.
+_SPECIAL_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
+    "UP": EditorKeyKind.UP,
+    "DOWN": EditorKeyKind.DOWN,
+    "LEFT": EditorKeyKind.LEFT,
+    "RIGHT": EditorKeyKind.RIGHT,
+    "HOME": EditorKeyKind.HOME,
+    "END": EditorKeyKind.END,
+    "DELETE": EditorKeyKind.DELETE,
+    "PAGE_UP": EditorKeyKind.PAGE_UP,
+    "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
+    # INSERT has no meaning for the ANSI editor in this round's scope --
+    # see char_input.py's own _SYMBOLIC_TO_EDITOR_KIND for the same note.
+}
 
 
 @dataclass(frozen=True)
@@ -420,6 +448,43 @@ class WebSession(Session):
                 continue
             await self.write(char if echo else "*")
             return char
+
+    async def read_editor_key(self) -> EditorKey:
+        """
+        See the `Session.read_editor_key` docstring. Built directly on
+        `_read_item` (the same queue `read_line`'s cursor-aware path
+        already reads from) rather than `_read_char`, since this needs
+        to see recognized special keys (`_SpecialKey`), not just plain
+        characters.
+
+        This module's escape-sequence decoder (`_parse_input_events`/
+        `_CSI_*_TO_KEY` above) is independently maintained from
+        `netbbs.net.char_input`'s -- not shared code, a known, accepted
+        duplication (design doc -- welcome banner round B1) rather than
+        an unscoped refactor to unify two transports' worth of
+        already-working decoding. `_SPECIAL_TO_EDITOR_KIND` is the
+        translation from this module's own `_SpecialKey` vocabulary to
+        the shared `EditorKey` type both transports expose.
+        """
+        item = await self._read_item()
+        if isinstance(item, _SpecialKey):
+            kind = _SPECIAL_TO_EDITOR_KIND.get(item.name)
+            if kind is not None:
+                return EditorKey(kind)
+            return await self.read_editor_key()  # e.g. INSERT -- not surfaced, keep reading
+
+        char = item
+        if char in (_CR, _LF):
+            return EditorKey(EditorKeyKind.ENTER)
+        if char in (_BS, _DEL):
+            return EditorKey(EditorKeyKind.BACKSPACE)
+        if char == _TAB:
+            return EditorKey(EditorKeyKind.TAB)
+        if char == _ESC:
+            return EditorKey(EditorKeyKind.ESCAPE)
+        if len(char) == 1 and ord(char) < 0x20:
+            return EditorKey(EditorKeyKind.CTRL, char=chr(ord(char) + 0x60))
+        return EditorKey(EditorKeyKind.CHAR, char=char)
 
     async def close(self) -> None:
         self._reader_task.cancel()

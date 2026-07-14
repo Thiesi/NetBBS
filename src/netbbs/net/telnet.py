@@ -193,6 +193,11 @@ class TelnetSession(Session):
         """
         return await char_input.read_key(self, self.write, echo)
 
+    async def read_editor_key(self) -> char_input.EditorKey:
+        """See the `Session.read_editor_key` docstring — the actual
+        logic lives in `netbbs.net.char_input.read_editor_key`."""
+        return await char_input.read_editor_key(self)
+
     async def close(self) -> None:
         if not self._writer.is_closing():
             self._writer.close()

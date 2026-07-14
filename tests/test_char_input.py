@@ -18,7 +18,7 @@ import asyncio
 import pytest
 
 import netbbs.net.char_input as char_input_module
-from netbbs.net.char_input import read_key, read_line
+from netbbs.net.char_input import EditorKeyKind, read_editor_key, read_key, read_line
 from netbbs.net.session import SessionClosedError
 
 
@@ -310,5 +310,139 @@ def test_valid_csi_and_ss3_sequences_still_work_within_new_bounds():
         writer = Writer()
         line = await read_line(source, writer)
         assert line == "abc"
+
+    asyncio.run(scenario())
+
+
+# -- read_editor_key (design doc -- welcome banner round B1) ----------------
+
+
+def test_read_editor_key_page_up_and_page_down():
+    async def scenario():
+        source = FakeByteSource(b"\x1b[5~\x1b[6~")
+        assert (await read_editor_key(source)).kind == EditorKeyKind.PAGE_UP
+        assert (await read_editor_key(source)).kind == EditorKeyKind.PAGE_DOWN
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_arrows_and_home_end():
+    async def scenario():
+        source = FakeByteSource(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F")
+        for expected in (
+            EditorKeyKind.UP,
+            EditorKeyKind.DOWN,
+            EditorKeyKind.RIGHT,
+            EditorKeyKind.LEFT,
+            EditorKeyKind.HOME,
+            EditorKeyKind.END,
+        ):
+            assert (await read_editor_key(source)).kind == expected
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_plain_character():
+    async def scenario():
+        source = FakeByteSource(b"X")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.CHAR
+        assert key.char == "X"
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_utf8_character():
+    async def scenario():
+        source = FakeByteSource("ü".encode("utf-8"))
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.CHAR
+        assert key.char == "ü"
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_enter_from_crlf():
+    async def scenario():
+        source = FakeByteSource(b"\r\n")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.ENTER
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_enter_from_bare_lf():
+    async def scenario():
+        source = FakeByteSource(b"\n")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.ENTER
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_backspace_and_delete_byte():
+    async def scenario():
+        source = FakeByteSource(b"\x08\x7f")
+        assert (await read_editor_key(source)).kind == EditorKeyKind.BACKSPACE
+        assert (await read_editor_key(source)).kind == EditorKeyKind.BACKSPACE
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_delete_key_via_csi_tilde():
+    async def scenario():
+        source = FakeByteSource(b"\x1b[3~")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.DELETE
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_tab():
+    async def scenario():
+        source = FakeByteSource(b"\t")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.TAB
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_lone_escape():
+    async def scenario():
+        source = FakeByteSource(b"\x1b")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.ESCAPE
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_ctrl_letter():
+    async def scenario():
+        source = FakeByteSource(bytes([0x13]))  # Ctrl+S
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.CTRL
+        assert key.char == "s"
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_unrecognized_escape_is_skipped_not_returned():
+    async def scenario():
+        # ESC[1;5A (Ctrl+Up, a modified combo -- outside this project's
+        # recognized set) must not surface as anything; the next real
+        # key after it is what read_editor_key returns.
+        source = FakeByteSource(b"\x1b[1;5AZ")
+        key = await read_editor_key(source)
+        assert key.kind == EditorKeyKind.CHAR
+        assert key.char == "Z"
+
+    asyncio.run(scenario())
+
+
+def test_read_editor_key_connection_closed_raises():
+    async def scenario():
+        source = FakeByteSource(b"")
+        with pytest.raises(SessionClosedError):
+            await read_editor_key(source)
 
     asyncio.run(scenario())

@@ -1,10 +1,12 @@
-"""Tests for netbbs.rendering.ansi_art.decode_ansi_bytes (design doc --
-welcome banner round) -- pure CP437-fallback decode logic, no
-Database/session involved."""
+"""Tests for netbbs.rendering.ansi_art (design doc -- welcome banner
+rounds A and B1) -- pure decode (CP437-fallback) and encode
+(ScreenBuffer -> CP437 bytes) logic, no Database/session involved."""
 
 from __future__ import annotations
 
-from netbbs.rendering.ansi_art import decode_ansi_bytes
+from netbbs.rendering.ansi_art import decode_ansi_bytes, encode_ansi_bytes
+from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
+from netbbs.rendering.screen_buffer import ScreenBuffer
 
 
 def test_ascii_only_content_decodes_via_utf8_path():
@@ -54,3 +56,49 @@ def test_decode_never_raises_for_arbitrary_high_bit_sequences():
     for data in sequences:
         result = decode_ansi_bytes(data)
         assert isinstance(result, str)
+
+
+# -- encode_ansi_bytes (design doc -- welcome banner round B1) --------------
+
+
+def test_encode_plain_text():
+    buf = ScreenBuffer(3, 1)
+    buf.write_cell(0, 0, "a")
+    buf.write_cell(0, 1, "b")
+    buf.write_cell(0, 2, "c")
+    encoded = encode_ansi_bytes(buf)
+    assert b"abc" in encoded
+
+
+def test_encode_cp437_glyph_round_trips_through_the_real_codec():
+    buf = ScreenBuffer(1, 1)
+    buf.write_cell(0, 0, "█")  # FULL BLOCK
+    encoded = encode_ansi_bytes(buf)
+    assert 0xDB in encoded
+
+
+def test_encode_never_raises_for_a_character_outside_cp437():
+    buf = ScreenBuffer(1, 1)
+    buf.write_cell(0, 0, "中")  # a CJK character, not in CP437 at all
+    encoded = encode_ansi_bytes(buf)  # must not raise
+    assert isinstance(encoded, bytes)
+
+
+def test_encode_then_decode_then_parse_round_trips_a_styled_buffer():
+    buf = ScreenBuffer(10, 2)
+    buf.write_cell(0, 0, "█", fg=1, bold=True)
+    buf.write_cell(0, 1, "X", fg=1, bold=True)
+    buf.write_cell(1, 0, "Y", fg=2)
+
+    encoded = encode_ansi_bytes(buf)
+    decoded_text = decode_ansi_bytes(encoded)
+    result = ScreenBuffer(10, 2)
+    parse_ansi_into_buffer(decoded_text, result)
+
+    assert result.snapshot() == buf.snapshot()
+
+
+def test_encode_of_an_empty_buffer_does_not_raise():
+    buf = ScreenBuffer(5, 3)
+    encoded = encode_ansi_bytes(buf)
+    assert isinstance(encoded, bytes)

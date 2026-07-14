@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     # already makes every annotation in this file a lazily-evaluated
     # string at runtime; this block exists only so type checkers/IDEs
     # can resolve `InputHistory` by name.
-    from netbbs.net.char_input import Completer, InputHistory
+    from netbbs.net.char_input import Completer, EditorKey, InputHistory
 
 
 class SessionClosedError(Exception):
@@ -134,6 +134,23 @@ class Session(ABC):
         client-side line buffering has no way to return before the user
         presses Enter, since the whole line arrives as one chunk only
         after that.
+        """
+
+    @abstractmethod
+    async def read_editor_key(self) -> EditorKey:
+        """
+        Read one structured key event for a full-screen editor (design
+        doc -- welcome banner round B1, `netbbs.net.ansi_editor`).
+
+        Unlike `read_key` (which discards every escape sequence
+        outright -- there's no line for a cursor to move within in a
+        single-keystroke menu) or `read_line` (line-oriented, returns
+        a finished `str` only on Enter), this surfaces arrows, Home/
+        End, Page Up/Down, and a real standalone Escape press as
+        first-class `netbbs.net.char_input.EditorKey` events, alongside
+        ordinary characters, Enter, Backspace, Delete, Tab, and
+        Ctrl+letter combos -- everything a screen editor needs that
+        neither of the other two read methods has a use for.
         """
 
     @abstractmethod

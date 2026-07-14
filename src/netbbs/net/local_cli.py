@@ -73,6 +73,9 @@ class LocalCLISession(Session):
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)
 
+    async def read_editor_key(self) -> char_input.EditorKey:
+        return await char_input.read_editor_key(self)
+
     async def close(self) -> None:
         # Nothing to close -- stdin/stdout live for the process's whole
         # lifetime, unlike a network socket. Restoring the terminal mode

@@ -5401,3 +5401,188 @@ with a real `.ans` file before Round B (the WYSIWYG editor) builds on
 top of this. Round B and Round C remain fully unplanned beyond the
 shape agreed in point 1 — no implementation decisions have been made
 for either.
+
+## Sign-off notes, round 64 (TUI screen-buffer core + WYSIWYG ANSI editor, Round B1 of the skinning initiative — implemented)
+
+1. **Round B split into B1/B2, confirmed with Thiesi rather than
+   assumed** — round 63 scoped "Round B" as the screen-buffer core plus
+   *both* eventual editors (WYSIWYG ANSI art and the originally-planned
+   prose post/message editor) together. Given this is, by design doc
+   round 26's own framing, the largest remaining piece of Phase 2 —
+   confirmed by direct investigation that nothing like a screen-buffer/
+   diff abstraction or structured key-event handling existed anywhere
+   in this codebase (`Session.read_key()` discarded arrow keys
+   outright; the closest existing "editor" was `_edit_bio`'s plain
+   `read_line()`-per-line-until-blank loop) — this was split the same
+   way every other multi-part feature in this project has been:
+   **Round B1** (this round) ships the screen-buffer core, structured
+   key events, and a basic WYSIWYG ANSI editor wired into Round A's
+   `[W]elcome banner` screen; **Round B2** (future, separate round)
+   reuses B1's foundation for the prose editor. Also confirmed:
+   periodic **autosave** to a draft file (nothing else in this codebase
+   saves in-progress work on disconnect, but for a real art-editing
+   session that's a worse loss than a paragraph of prose), and a
+   **cursor + type + color-picker** first-version scope with undo/redo,
+   block copy/fill/select, and line/box-drawing tools explicitly
+   confirmed as a real, planned *later* phase, not abandoned.
+2. **`netbbs.rendering.screen_buffer`**: `Cell`/`ScreenBuffer`/
+   `diff_ansi`/`full_render_ansi`, pure and I/O-free, built entirely on
+   the existing `netbbs.rendering.ansi` primitives (`move_cursor`,
+   `colored`, `clear_screen`) rather than inventing new escape-sequence
+   handling. Both diff functions group consecutive same-style cells on
+   a row into one `colored()` call rather than one per cell — verified
+   directly (`test_diff_groups_consecutive_same_style_cells_into_one_
+   run`) rather than assumed, since minimizing write count/size is a
+   real saving on the web transport (confirmed by this round's own
+   investigation: every `Session.write()` there is one full WebSocket
+   message with no server-side batching).
+3. **A gap round 63 didn't anticipate, surfaced by this round's own
+   investigation**: `decode_ansi_bytes` (Round A) only ever does byte
+   decoding — it never interprets a file's embedded cursor-positioning/
+   SGR-color escape sequences, since Round A only needed to *display* a
+   banner (hand decoded text to a real terminal emulator and let it
+   interpret the codes). *Editing* an existing file needs the server
+   side to actually know what's in each cell. `netbbs.rendering.
+   ansi_parse.parse_ansi_into_buffer` fills this gap — a minimal,
+   best-effort ANSI interpreter (CSI cursor movement, SGR color/bold,
+   bare CR/LF), scoped the same honest way this project's Zmodem
+   implementation already is ("CRC-16 only, no resume, no batch,"
+   stated plainly rather than silently gapped).
+4. **A real bug found only by testing a full round-trip, not by
+   inspection**: `parse_ansi_into_buffer`'s first version eagerly
+   advanced to the next row the instant the last column of a row was
+   written. Real scene `.ans` art is almost always authored at exactly
+   the canvas width (80 columns), so a full-width row immediately
+   followed by an explicit CRLF — the overwhelmingly common case, not
+   an edge case — double-advanced: once from the eager wrap, once more
+   from the CRLF, silently skipping a row. Caught by writing an actual
+   `encode -> decode -> parse` round-trip test and finding the last row
+   of content missing, not by reasoning about the code. Fixed with
+   proper deferred-wrap semantics (a real terminal's own "pending wrap"
+   behavior: filling the last column marks a wrap as pending without
+   moving the cursor yet; only writing another character forces the
+   actual advance, and any explicit cursor move — CR, LF, CSI
+   positioning — clears the pending flag with no effect). Both the
+   round-trip test and a dedicated regression test
+   (`test_full_width_row_immediately_followed_by_crlf_does_not_skip_a_
+   row`) lock this in.
+5. **Structured key events — the actual foundation a screen editor
+   needs, which nothing in this codebase provided before this round.**
+   `Session.read_key()` discards every escape sequence outright (no
+   line for a cursor to move within in a single-keystroke menu); a new
+   `Session.read_editor_key() -> EditorKey` (mirroring how `read_key`/
+   `read_line` are already abstract per-transport methods) surfaces
+   arrows, Home/End, Page Up/Down (newly added to `char_input`'s
+   decode tables), and a real standalone Escape press as first-class
+   events, alongside characters/Enter/Backspace/Delete/Tab/Ctrl+letter.
+   `TelnetSession`/`SSHSession` delegate to a new `char_input.
+   read_editor_key`, sharing the byte-oriented decode tables; `WebSession`
+   keeps its own independently-maintained escape decoder (confirmed
+   pre-existing, not shared with `char_input`'s) and translates its own
+   events to the same `EditorKey` type at the boundary — a known,
+   accepted duplication rather than an unscoped refactor to unify two
+   already-working transports' decoders.
+6. **A second real bug, caught by a failing test, not by inspection**:
+   `_read_escape_sequence`'s `None` return is genuinely ambiguous — it
+   means both "nothing followed ESC at all" (a real standalone Escape
+   press) and "something followed but wasn't in the recognized table"
+   (e.g. a modified combo like Ctrl+Up). `read_line`/`read_key` never
+   needed to tell these apart (both are already "not a match, keep
+   going" for them), but `read_editor_key`'s first version collapsed
+   both into `EditorKeyKind.ESCAPE`, meaning any unrecognized escape
+   sequence would incorrectly look like the SysOp pressing Escape to
+   quit. Fixed by peeking the byte following ESC explicitly (reusing
+   the same pushback mechanism `_consume_optional_lf_or_nul` already
+   relies on for an analogous lookahead-then-replay need) before
+   delegating to `_read_escape_sequence` — only a genuinely empty peek
+   becomes `ESCAPE`; anything else, recognized or not, is handled or
+   silently discarded the same as it always was.
+7. **This round's `Session.read_editor_key()` addition made the method
+   abstract, so every concrete `Session` subclass needed one — caught
+   immediately by 61 test failures, not discovered later.** Beyond the
+   three real transports and the standalone admin CLI's
+   `LocalCLISession`, three test-only `FakeSession(Session)` doubles
+   (`tests/test_admin_flow.py`, `tests/test_chat_flow_moderation.py`,
+   `tests/test_zmodem.py`) needed one too. Two got a `raise
+   NotImplementedError` stub, matching their existing `read_byte`/
+   `write_raw` precedent (never exercised in those contexts);
+   `test_admin_flow.py`'s got a real implementation (needed for this
+   round's own `[X] edit` end-to-end tests), extending that file's
+   existing single-ordered-input-queue convention with a small sentinel
+   vocabulary (`"ENTER"`, `"CTRL+S"`, etc.) rather than adding a second,
+   incompatible queue just for editor-driven tests.
+8. **`netbbs.rendering.ansi_art.encode_ansi_bytes`**: the save-side
+   counterpart to `decode_ansi_bytes`, walking a `ScreenBuffer` and
+   emitting SGR changes only where style actually changes (not
+   per-cell), each character CP437-encoded with `errors="replace"` —
+   always succeeds, matching `decode_ansi_bytes`'s own "cannot fail by
+   construction" property — producing a genuine CP437-encoded `.ans`
+   file real scene tools expect, not merely something that displays
+   correctly in this project's own clients.
+9. **A real design correction made during this round's own testing,
+   not assumed correct from the plan text**: the plan described the
+   glyph picker (for CP437 block/line-drawing characters no keyboard
+   can type directly) as something that "becomes what typing places
+   until changed again," suggesting `state.current_char` as persistent
+   brush state separate from literally-typed characters. The first
+   implementation kept a `current_char` field but the actual paint
+   dispatch always wrote the *literally typed* character
+   (`key.char`), never `current_char` — dead state, caught immediately
+   by a failing picker test (`assert 'A' == '█'`) rather than
+   surfacing later as a silent no-op feature. Resolved by removing
+   `current_char` entirely: selecting a glyph now paints it
+   immediately, exactly as if that glyph had been typed — the only
+   sensible behavior once the actual constraint is stated plainly: a
+   real keyboard has no key that ever sends `EditorKeyKind.CHAR` with
+   `char="█"`, so there is no future "typing" event for a lingering
+   brush mode to apply to. Ordinary typing continues to place the
+   literal typed character (colored per the current fg/bg, which *do*
+   remain persistent state — genuinely different from the glyph case,
+   since a keyboard letter typed after picking a color should keep
+   that color, unlike a keyboard letter typed after picking a glyph,
+   which should type itself, not repaint the glyph).
+10. **`netbbs.net.ansi_editor.edit_ansi_art`**: deliberately generic —
+    knows nothing about "welcome banner" specifically, returning bytes
+    for the caller to persist wherever it wants, so Round B2/Round C
+    can reuse it unchanged later. Fixed 80x24 canvas (matches Round A's
+    own "80 columns is the classic BBS standard" precedent); a 16-color
+    palette (not the full 256-color range `colored()` elsewhere
+    supports — real scene ANSI art overwhelmingly targets the classic
+    16, and it keeps the color picker a single unpaginated screen); a
+    genuine independent `asyncio.create_task` autosave loop (not a
+    "check between keystrokes" approximation, which wouldn't help if a
+    long pause precedes a disconnect) that survives the interactive
+    session dying, by design; draft recovery offered on entry when a
+    prior disconnect/crash left one behind.
+11. **Wired into `netbbs.net.admin_flow`'s `[W]elcome banner` screen**
+    as a new `[X] edit` option (letter chosen to avoid the existing
+    `[E]nable` collision). The screen owns loading the existing file,
+    computing the draft path, and writing a real save back to
+    `banner_path(db)` — `edit_ansi_art` itself touches no file but the
+    draft.
+12. **Testing**: `tests/test_screen_buffer.py`, `tests/test_ansi_
+    parse.py` (new) — pure unit tests, including the deferred-wrap
+    regression and a full encode-decode-parse round trip.
+    `tests/test_ansi_art.py` extended for `encode_ansi_bytes`.
+    `tests/test_char_input.py` extended for Page Up/Down recognition
+    and `read_editor_key`'s full dispatch, including the ESC-ambiguity
+    fix. `tests/test_ansi_editor.py` (new) — `FakeSession`-driven
+    integration tests: cursor bounds, typing/wraparound, both pickers
+    actually changing what gets painted, save/discard/cancel, draft
+    recovery, and autosave writing (or correctly not writing, when
+    nothing changed) via an injectable interval so tests don't wait 30
+    real seconds. `tests/test_admin_flow.py` extended with the real
+    `[X] edit` flow end-to-end, including that a saved edit round-trips
+    into `banner_path(db)` and logs an audit entry, and that quitting
+    without saving leaves an existing file untouched. Full suite
+    re-run: **1253 passed, 3 skipped**.
+
+**Flagged, not blocking further work:** same category of gap as Round
+A's own note — actual visual verification of the editor (cursor
+movement, painting, the glyph/color pickers, save/load) from a real
+connected client across Telnet/SSH/web hasn't been done outside this
+sandbox's scripted `FakeSession` tests. Worth a direct check from
+Thiesi's own machine before Round B2 (the prose editor) builds on this
+same foundation. Round B2 and Round C remain fully unplanned beyond the
+shape already agreed in round 63 — no implementation decisions have
+been made for either.
