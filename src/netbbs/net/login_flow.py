@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum, auto
+from pathlib import Path
 
 from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
-from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
+from netbbs.boards import Board, Post, PostPage, create_post, edit_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry, format_with_preference
 from netbbs.directory import (
@@ -33,14 +34,16 @@ from netbbs.directory import (
     set_bio,
     set_bio_visible,
 )
-from netbbs.moderation import is_blocked
+from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import browse_channels
+from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.file_flow import browse_file_areas
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
+from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
@@ -594,10 +597,45 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     if not subject:
         return
 
-    await session.write("Body: ")
-    body = (await session.read_line()).strip()
+    body = await _compose_body(
+        session, db, user, draft_path=_post_draft_path(db, kind="new", board=board, user=user)
+    )
+    if body is None:
+        await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
+        return
     post = create_post(db, board, user, subject, body)
     await session.write_line(f"Posted (id {post.post_id[:12]}...).")
+
+
+def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:
+    """A stable per-(user, board, [post]) autosave draft location for
+    `netbbs.net.prose_editor.edit_prose`, colocated with the node's
+    database the same way `netbbs.net.welcome_banner.banner_path`
+    already colocates its own single global draft -- there just needs
+    to be more than one slot here, one per in-progress
+    composition/edit, so this lives in its own subdirectory rather than
+    a single flat sibling file."""
+    directory = db.path.parent / f"{db.path.name}_drafts"
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{root_post_id}" if root_post_id else ""
+    return directory / f"{kind}_{board.id}_{user.id}{suffix}.draft"
+
+
+async def _compose_body(
+    session: Session, db: Database, user: User, *, initial_text: str | None = None, draft_path: Path
+) -> str | None:
+    """The single place a post body (or an edit of one) is actually
+    entered: the fullscreen prose editor if `user` has opted in
+    (`netbbs.net.editor_preference`), otherwise the original plain
+    single-line prompt every account still sees by default. Returns
+    `None` only for the fullscreen path's genuine cancel (quit without
+    saving) -- the plain-line fallback has no equivalent "cancel"
+    concept and always returns a string, matching its unchanged
+    existing behavior for every account that hasn't opted in."""
+    if fullscreen_editor_enabled(db, user):
+        return await edit_prose(session, initial_text=initial_text, draft_path=draft_path)
+    await session.write("Body: ")
+    return (await session.read_line()).strip()
 
 
 async def _render_post_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
@@ -680,6 +718,7 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
     the caller to pass into `_toggle_bio_visibility`."""
     current_bio = get_bio(db, user)
     visible = is_bio_visible(db, user)
+    editor_on = fullscreen_editor_enabled(db, user)
 
     await session.write_line(colored("\r\nYour profile:", fg_color=HEADER_COLOR, bold=True))
     if current_bio:
@@ -689,8 +728,11 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
     else:
         await session.write_line(colored("(no bio set)", fg_color=MUTED_COLOR))
     await session.write_line(f"Visibility: {'public' if visible else 'private'}")
+    await session.write_line(f"Fullscreen editor for posts/bio: {'on' if editor_on else 'off'}")
 
-    options = "  ".join([menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("B", "ack")])
+    options = "  ".join(
+        [menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("F", "ullscreen editor"), menu_key("B", "ack")]
+    )
     await session.write_line(f"\r\n{options}")
     await session.write("Choice: ")
     return visible
@@ -698,11 +740,12 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
 
 async def _edit_profile(session: Session, db: Database, user: User) -> None:
     """
-    Edit your own vCard: the bio and its visibility toggle. Shows the
-    current state first, then a small sub-menu — matches this
-    codebase's existing "show state, then offer actions" shape (e.g.
-    `netbbs.net.file_flow._show_area`) rather than jumping straight
-    into an edit prompt.
+    Edit your own vCard: the bio, its visibility toggle, and the
+    fullscreen-editor composition preference (design doc -- prose
+    editor round B2). Shows the current state first, then a small
+    sub-menu — matches this codebase's existing "show state, then
+    offer actions" shape (e.g. `netbbs.net.file_flow._show_area`)
+    rather than jumping straight into an edit prompt.
 
     Redraws the (possibly just-updated) state only after an edit or
     toggle actually happens, not on every loop iteration — mirrors
@@ -725,35 +768,59 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
             await session.write_line("")
             await _toggle_bio_visibility(session, db, user, currently_visible=visible)
             visible = await _render_profile(session, db, user)
+        elif choice == "f":
+            await session.write_line("")
+            set_fullscreen_editor_enabled(db, user, not fullscreen_editor_enabled(db, user))
+            await session.write_line(
+                f"Fullscreen editor is now {'on' if fullscreen_editor_enabled(db, user) else 'off'}."
+            )
+            visible = await _render_profile(session, db, user)
         else:
             await session.write(reject_keystroke())
 
 
 async def _edit_bio(session: Session, db: Database, user: User) -> None:
     """
-    Collects up to `MAX_BIO_LINES` lines via repeated `read_line`
-    calls, ending early on a blank line — there is no multi-line/
-    cursor-addressable text entry anywhere in this codebase yet (the
-    fullscreen editor is still-unbuilt Phase 2 Track 6), so this is
-    the same repeated-single-line-read shape every other multi-step
-    prompt here already uses. A blank first line clears the bio
-    entirely, rather than leaving it unchanged — choosing not to edit
-    at all is what the profile screen's own [B]ack option is for.
+    Edits the bio via the fullscreen prose editor if `user` has opted
+    in (`netbbs.net.editor_preference`), otherwise the original
+    repeated-`read_line`-until-blank-line flow every account still sees
+    by default. Either way, `set_bio`'s own `MAX_BIO_LINES` validation
+    is the single place the line cap is actually enforced — the
+    fullscreen editor doesn't duplicate that check, it just gets the
+    same rejection message back if exceeded.
     """
-    await session.write_line(f"\r\nEnter your bio, up to {MAX_BIO_LINES} lines. Blank line to finish.")
-    lines: list[str] = []
-    for _ in range(MAX_BIO_LINES):
-        line = (await session.read_line()).strip()
-        if not line:
-            break
-        lines.append(line)
+    if fullscreen_editor_enabled(db, user):
+        current = get_bio(db, user) or ""
+        result = await edit_prose(
+            session, initial_text=current, draft_path=_bio_draft_path(db, user)
+        )
+        if result is None:
+            return
+        text = result
+    else:
+        await session.write_line(
+            f"\r\nEnter your bio, up to {MAX_BIO_LINES} lines. Blank line to finish."
+        )
+        lines: list[str] = []
+        for _ in range(MAX_BIO_LINES):
+            line = (await session.read_line()).strip()
+            if not line:
+                break
+            lines.append(line)
+        text = "\n".join(lines)
 
     try:
-        set_bio(db, user, "\n".join(lines))
+        set_bio(db, user, text)
     except BioError as exc:
         await session.write_line(colored(f"Could not save bio: {exc}", fg_color=MUTED_COLOR))
         return
     await session.write_line("Bio updated.")
+
+
+def _bio_draft_path(db: Database, user: User) -> Path:
+    directory = db.path.parent / f"{db.path.name}_drafts"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"bio_{user.id}.draft"
 
 
 async def _toggle_bio_visibility(

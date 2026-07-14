@@ -963,4 +963,39 @@ MIGRATIONS = [
         CREATE UNIQUE INDEX idx_users_username_nocase ON users(username COLLATE NOCASE);
         """,
     ),
+    Migration(
+        description=(
+            "Post editing (design doc -- prose editor round B2, planning "
+            "phase): `posts.root_post_id` groups every revision of the same "
+            "logical post together (a post's own post_id for an original "
+            "creation; the *original* post's post_id for every edit of it, "
+            "not the immediately-preceding revision's), and "
+            "`posts.edit_of_post_id` records the specific immediate "
+            "predecessor each edit revises -- kept for a future edit-history "
+            "view, not surfaced anywhere yet. Editing never mutates a row "
+            "in place: post_id is a content hash of the body itself "
+            "(netbbs.boards.content_id), so an in-place UPDATE would leave "
+            "post_id silently mismatched against its own row's content, and "
+            "existing replies reference a specific post_id directly -- "
+            "mutating it out from under them would orphan every reply to a "
+            "since-edited parent. An edit is instead a brand-new row with "
+            "its own fresh content-addressed post_id, chained back via "
+            "these two columns. Plain ADD COLUMN, not a table rebuild -- "
+            "posts is a live parent of several other tables' foreign keys, "
+            "and design doc sign-off round 60 already found the hard way "
+            "that SQLite's DROP TABLE (the rebuild pattern's first step) "
+            "applies its own cascade/SET-NULL side effects to *any* row "
+            "still referencing the dropped table, independent of that "
+            "column's declared ON DELETE behavior -- avoided entirely by "
+            "not dropping posts at all here. Every pre-existing post "
+            "becomes the root of its own single-row group."
+        ),
+        sql="""
+        ALTER TABLE posts ADD COLUMN root_post_id TEXT REFERENCES posts(post_id);
+        ALTER TABLE posts ADD COLUMN edit_of_post_id TEXT REFERENCES posts(post_id);
+        UPDATE posts SET root_post_id = post_id WHERE root_post_id IS NULL;
+        CREATE INDEX idx_posts_root_post_id_board_id_status_created_at
+            ON posts(root_post_id, board_id, status, created_at);
+        """,
+    ),
 ]

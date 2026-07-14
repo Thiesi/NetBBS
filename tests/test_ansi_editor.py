@@ -112,7 +112,7 @@ def _status_line_texts(session: FakeSession) -> list[str]:
 
 def test_typing_paints_and_advances_the_cursor(tmp_path):
     async def scenario():
-        session = FakeSession(["A", "B", "C", "CTRL+S"])
+        session = FakeSession(["A", "B", "C", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -126,7 +126,7 @@ def test_typing_paints_and_advances_the_cursor(tmp_path):
 
 def test_typing_wraps_to_the_next_row_at_the_canvas_width(tmp_path):
     async def scenario():
-        session = FakeSession(["X"] * 80 + ["Y", "CTRL+S"])
+        session = FakeSession(["X"] * 80 + ["Y", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=80, height=3, autosave_interval_seconds=9999,
@@ -140,7 +140,7 @@ def test_typing_wraps_to_the_next_row_at_the_canvas_width(tmp_path):
 
 def test_arrow_keys_move_the_cursor(tmp_path):
     async def scenario():
-        session = FakeSession(["RIGHT", "RIGHT", "DOWN", "A", "CTRL+S"])
+        session = FakeSession(["RIGHT", "RIGHT", "DOWN", "A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=5, autosave_interval_seconds=9999,
@@ -153,7 +153,7 @@ def test_arrow_keys_move_the_cursor(tmp_path):
 
 def test_cursor_cannot_move_above_row_zero(tmp_path):
     async def scenario():
-        session = FakeSession(["UP", "UP", "UP", "A", "CTRL+S"])
+        session = FakeSession(["UP", "UP", "UP", "A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=5, autosave_interval_seconds=9999,
@@ -166,7 +166,7 @@ def test_cursor_cannot_move_above_row_zero(tmp_path):
 
 def test_cursor_cannot_move_past_the_last_row_or_column(tmp_path):
     async def scenario():
-        session = FakeSession(["DOWN"] * 10 + ["RIGHT"] * 10 + ["A", "CTRL+S"])
+        session = FakeSession(["DOWN"] * 10 + ["RIGHT"] * 10 + ["A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=3, height=3, autosave_interval_seconds=9999,
@@ -179,7 +179,7 @@ def test_cursor_cannot_move_past_the_last_row_or_column(tmp_path):
 
 def test_home_and_end_jump_within_the_row(tmp_path):
     async def scenario():
-        session = FakeSession(["RIGHT", "RIGHT", "HOME", "A", "END", "B", "CTRL+S"])
+        session = FakeSession(["RIGHT", "RIGHT", "HOME", "A", "END", "B", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=5, height=2, autosave_interval_seconds=9999,
@@ -193,7 +193,7 @@ def test_home_and_end_jump_within_the_row(tmp_path):
 
 def test_backspace_erases_and_moves_the_cursor_back(tmp_path):
     async def scenario():
-        session = FakeSession(["A", "B", "BACKSPACE", "C", "CTRL+S"])
+        session = FakeSession(["A", "B", "BACKSPACE", "C", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=2, autosave_interval_seconds=9999,
@@ -207,7 +207,7 @@ def test_backspace_erases_and_moves_the_cursor_back(tmp_path):
 
 def test_delete_clears_the_cell_without_moving_the_cursor(tmp_path):
     async def scenario():
-        session = FakeSession(["A", "LEFT", "DELETE", "CTRL+S"])
+        session = FakeSession(["A", "LEFT", "DELETE", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=2, autosave_interval_seconds=9999,
@@ -226,7 +226,7 @@ def test_glyph_picker_changes_what_typing_places(tmp_path):
         # Ctrl+G opens the glyph picker; "0","1" selects the first item
         # (Full block, per _GLYPHS' own ordering) via pick_item's
         # two-digit selection.
-        session = FakeSession(["CTRL+G", "0", "1", "A", "CTRL+S"])
+        session = FakeSession(["CTRL+T", "0", "1", "A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=2, autosave_interval_seconds=9999,
@@ -242,7 +242,7 @@ def test_foreground_color_picker_changes_what_typing_places(tmp_path):
         # Ctrl+P opens the foreground picker; pick_item's selection is
         # 1-indexed page position, so "0","3" selects the 3rd item --
         # index 2, "Green".
-        session = FakeSession(["CTRL+P", "0", "3", "A", "CTRL+S"])
+        session = FakeSession(["CTRL+P", "0", "3", "A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=2, autosave_interval_seconds=9999,
@@ -256,7 +256,7 @@ def test_foreground_color_picker_changes_what_typing_places(tmp_path):
 def test_background_color_picker_changes_what_typing_places(tmp_path):
     async def scenario():
         # 4th page position (index 3, "Yellow").
-        session = FakeSession(["CTRL+B", "0", "4", "A", "CTRL+S"])
+        session = FakeSession(["CTRL+B", "0", "4", "A", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
             width=10, height=2, autosave_interval_seconds=9999,
@@ -284,7 +284,7 @@ def test_status_line_never_exceeds_the_canvas_width(tmp_path):
         session = FakeSession([
             "CTRL+P", "1", "4",  # foreground -> "Bright Magenta"
             "CTRL+B", "1", "4",  # background -> "Bright Magenta"
-            "A", "CTRL+S",
+            "A", "CTRL+O",
         ])
         await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft",
@@ -307,7 +307,7 @@ def test_save_returns_bytes_and_deletes_the_draft(tmp_path):
     draft.write_bytes(b"stale draft that should be cleaned up")
 
     async def scenario():
-        session = FakeSession(["n", "A", "CTRL+S"])  # decline resuming the stale draft
+        session = FakeSession(["n", "A", "CTRL+O"])  # decline resuming the stale draft
         return await edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
 
     result = asyncio.run(scenario())
@@ -317,7 +317,7 @@ def test_save_returns_bytes_and_deletes_the_draft(tmp_path):
 
 def test_quit_without_editing_returns_none_with_no_prompt(tmp_path):
     async def scenario():
-        session = FakeSession(["ESCAPE"])  # nothing typed -- no confirm prompt expected
+        session = FakeSession(["CTRL+X"])  # nothing typed -- no confirm prompt expected
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -326,11 +326,30 @@ def test_quit_without_editing_returns_none_with_no_prompt(tmp_path):
     assert result is None
 
 
+def test_bare_escape_no_longer_quits(tmp_path):
+    """Nano keybindings (round B2 lump-in): Esc is a Meta-combo prefix in
+    nano, not "exit" -- Ctrl+X owns quit now, so a standalone Esc press
+    must be inert. Types both before and after it, and saves rather than
+    quitting, to prove the editor kept running and accepting input right
+    through the Esc press rather than it doing anything at all."""
+
+    async def scenario():
+        session = FakeSession(["A", "ESCAPE", "B", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result)
+    assert buf.get_cell(0, 0).char == "A"
+    assert buf.get_cell(0, 1).char == "B"
+
+
 def test_quit_after_editing_prompts_and_discard_returns_none(tmp_path):
     draft = tmp_path / "d.draft"
 
     async def scenario():
-        session = FakeSession(["A", "ESCAPE", "d"])
+        session = FakeSession(["A", "CTRL+X", "d"])
         return await edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
 
     result = asyncio.run(scenario())
@@ -340,7 +359,7 @@ def test_quit_after_editing_prompts_and_discard_returns_none(tmp_path):
 
 def test_quit_after_editing_save_choice_saves_and_returns_bytes(tmp_path):
     async def scenario():
-        session = FakeSession(["A", "ESCAPE", "s"])
+        session = FakeSession(["A", "CTRL+X", "s"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -352,7 +371,7 @@ def test_quit_after_editing_save_choice_saves_and_returns_bytes(tmp_path):
 
 def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):
     async def scenario():
-        session = FakeSession(["A", "ESCAPE", "c", "CTRL+S"])
+        session = FakeSession(["A", "CTRL+X", "c", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -375,7 +394,7 @@ def test_quit_confirmation_acts_on_a_single_keystroke_without_enter(tmp_path):
             raise AssertionError("_confirm_quit must use read_key, not read_line")
 
     async def scenario():
-        session = NoReadLineSession(["A", "ESCAPE", "d"])
+        session = NoReadLineSession(["A", "CTRL+X", "d"])
         return await edit_ansi_art(
             session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -389,7 +408,7 @@ def test_quit_confirmation_acts_on_a_single_keystroke_without_enter(tmp_path):
 
 def test_initial_bytes_are_loaded_into_the_canvas(tmp_path):
     async def scenario():
-        session = FakeSession(["CTRL+S"])
+        session = FakeSession(["CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=b"Hello", draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
         )
@@ -407,7 +426,7 @@ def test_pre_existing_draft_is_offered_and_resumed(tmp_path):
     draft.write_bytes(b"DRAFT")
 
     async def scenario():
-        session = FakeSession(["y", "CTRL+S"])  # resume the draft
+        session = FakeSession(["y", "CTRL+O"])  # resume the draft
         return await edit_ansi_art(
             session, initial_bytes=b"INITIAL", draft_path=draft, autosave_interval_seconds=9999
         )
@@ -422,7 +441,7 @@ def test_declining_a_pre_existing_draft_uses_initial_bytes_instead(tmp_path):
     draft.write_bytes(b"DRAFT")
 
     async def scenario():
-        session = FakeSession(["n", "CTRL+S"])
+        session = FakeSession(["n", "CTRL+O"])
         return await edit_ansi_art(
             session, initial_bytes=b"INITIAL", draft_path=draft, autosave_interval_seconds=9999
         )

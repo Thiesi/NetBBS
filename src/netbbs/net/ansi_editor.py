@@ -17,6 +17,15 @@ foreground/background), save/quit, and periodic autosave with
 crash/disconnect recovery. No undo/redo, no block copy/fill/select, no
 line/box-drawing tools, no canvas resize -- a real, planned later
 phase, not abandoned.
+
+Ctrl-key bindings deliberately follow nano's scheme wherever nano has
+an equivalent action (Ctrl+O save, Ctrl+X quit), shared with the
+prose editor (round B2) for one consistent muscle-memory set across
+both fullscreen editors. Ctrl+G (nano's Help) and Ctrl+S (legacy
+terminal XOFF) were both avoided for exactly that reason -- glyph
+picking uses Ctrl+T instead. Foreground/background color picking
+(Ctrl+P/Ctrl+B) has no nano equivalent to defer to, so those keys were
+kept as originally chosen.
 """
 
 from __future__ import annotations
@@ -154,7 +163,7 @@ async def edit_ansi_art(
         while True:
             key = await session.read_editor_key()
 
-            if key.kind == EditorKeyKind.ESCAPE:
+            if key.kind == EditorKeyKind.CTRL and key.char == "x":
                 if not state.dirty:
                     return None
                 outcome = await _confirm_quit(session)
@@ -168,12 +177,12 @@ async def edit_ansi_art(
                 previous = await _redraw(session, state, previous)
                 continue
 
-            if key.kind == EditorKeyKind.CTRL and key.char == "s":
+            if key.kind == EditorKeyKind.CTRL and key.char == "o":
                 result = encode_ansi_bytes(buffer)
                 _delete_draft(draft_path)
                 return result
 
-            if key.kind == EditorKeyKind.CTRL and key.char == "g":
+            if key.kind == EditorKeyKind.CTRL and key.char == "t":
                 # A chosen glyph is painted immediately, like a typed
                 # character would be -- CP437's block/line-drawing
                 # glyphs are this picker's whole reason for existing
@@ -284,7 +293,7 @@ async def _flush(session: Session, state: _EditorState) -> None:
     status = (
         f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
         f"fg={fg_label} bg={bg_label}  "
-        f"Ctrl+G glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+S save  Esc quit"
+        f"Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+O save  Ctrl+X quit"
     )
     # Must never exceed the canvas width: a status line long enough to
     # wrap (the palette names alone push this well past 80 columns,
@@ -315,9 +324,9 @@ async def _offer_draft_recovery(session: Session) -> bool:
 async def _confirm_quit(session: Session) -> str:
     """Returns `"save"`, `"discard"`, or `"cancel"`.
 
-    A single keystroke, like every other editor command -- Esc to get
-    here in the first place already didn't need Enter, so requiring it
-    only for this one sub-prompt would be the odd one out. Any key
+    A single keystroke, like every other editor command -- Ctrl+X to
+    get here in the first place already didn't need Enter, so requiring
+    it only for this one sub-prompt would be the odd one out. Any key
     other than S/D defaults to "cancel" (dropping the SysOp back into
     the editor with nothing lost), same fallback `read_line`'s
     startswith-based check used before."""

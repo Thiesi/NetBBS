@@ -105,7 +105,11 @@ def test_accepted_connections_have_tcp_nodelay_set():
             await server.stop()
 
     asyncio.run(scenario())
-    assert seen_nodelay == [1]
+    # Nonzero, not `== [1]`: a platform's getsockopt is free to return
+    # whatever nonzero representation it stores a boolean option as --
+    # confirmed on Thiesi's real NetBSD deployment target, where this
+    # came back as `4`, not `1`. Only "was it actually enabled" matters.
+    assert seen_nodelay and all(value != 0 for value in seen_nodelay)
 
 
 # -- character-mode echo & Enter handling ------------------------------

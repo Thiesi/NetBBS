@@ -754,7 +754,7 @@ def test_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_pa
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["w", "x", "A", "CTRL+S", "b", "b"])
+    session = FakeSession(["w", "x", "A", "CTRL+O", "b", "b"])
     _run(session, db, sysop)
     assert "Saved" in _written_text(session)
 
@@ -776,7 +776,7 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, sysop):
 
     banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["w", "x", "A", "ESCAPE", "d", "b", "b"])
+    session = FakeSession(["w", "x", "A", "CTRL+X", "d", "b", "b"])
     _run(session, db, sysop)
     assert "No changes saved" in _written_text(session)
     assert banner_path(db).read_bytes() == b"ORIGINAL"

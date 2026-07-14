@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
@@ -50,6 +50,14 @@ class Post:
     status: str
     pinned: bool
     exempt_from_expiry: bool
+    root_post_id: str
+    edit_of_post_id: str | None
+    # True only on a Post resolved by list_posts_page/list_pinned_posts
+    # whose displayed subject/body came from a later edit, not this row
+    # itself -- see _resolve_current_version. Always False on a Post
+    # from get_post/list_pending_posts, which return exact, unresolved
+    # rows and have no concept of "is there a newer version of this."
+    is_edited: bool = False
 
 
 def create_post(
@@ -110,8 +118,8 @@ def create_post(
             """
             INSERT INTO posts
                 (post_id, board_id, parent_post_id, author_user_id, author_label,
-                 author_fingerprint, subject, body, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 author_fingerprint, subject, body, created_at, status, root_post_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 post_id,
@@ -124,6 +132,7 @@ def create_post(
                 body,
                 created_at,
                 status,
+                post_id,  # a fresh post is the root of its own edit chain
             ),
         )
         db.connection.commit()
@@ -133,6 +142,113 @@ def create_post(
         ) from exc
 
     return get_post(db, post_id)
+
+
+def edit_post(
+    db: Database,
+    post: Post,
+    board: Board,
+    *,
+    subject: str,
+    body: str,
+    edited_by: User,
+) -> Post:
+    """
+    Create a new revision of `post` (design doc -- prose editor round
+    B2 planning). Never mutates the existing row in place: `post_id` is
+    a content hash of the subject/body themselves
+    (`netbbs.boards.content_id.compute_content_id`), so an in-place
+    `UPDATE` would leave a row's own `post_id` silently mismatched
+    against its current content, and an existing reply's
+    `parent_post_id` references a specific `post_id` directly, which an
+    in-place edit would orphan. Instead inserts a brand-new row with a
+    fresh content-addressed `post_id`, chained back via
+    `root_post_id`/`edit_of_post_id` -- see `_resolve_current_version`
+    for how readers only ever see the latest approved revision, at the
+    original post's stable feed position.
+
+    Allowed for the post's own original author, no permission grant
+    needed -- this project has no other "you may act on it because you
+    own it" concept for posts today, but that's exactly the point of a
+    personal composer -- or for anyone holding `BoardPermission.EDIT`
+    on `board`, matching the existing moderator-edit model (design doc
+    §13). `post` may be any resolved or raw `Post` for the post being
+    edited (e.g. from `list_posts_page`); this always re-resolves the
+    actual current approved version itself via `post.root_post_id`
+    rather than trusting `post.post_id`, which is the *root's* id, not
+    necessarily the immediate predecessor being amended if the post has
+    already been edited before.
+    """
+    if post.author_user_id != edited_by.id:
+        _require_board_permission(db, post, edited_by, BoardPermission.EDIT)
+
+    current = db.connection.execute(
+        """
+        SELECT * FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
+        ORDER BY created_at DESC, post_id DESC
+        LIMIT 1
+        """,
+        (post.root_post_id, board.id),
+    ).fetchone()
+    if current is None:
+        raise PostError("no currently-approved version of this post exists to edit")
+
+    status = "pending" if board.moderated else "approved"
+    created_at = utc_now_iso()
+    author_identifier = post.author_fingerprint or post.author_label
+    new_post_id = compute_content_id(
+        {
+            "type": "board_post",
+            "board_id": board.board_id,
+            "parent_post_id": post.parent_post_id,
+            "author": author_identifier,
+            "subject": subject,
+            "body": body,
+            "created_at": created_at,
+        }
+    )
+
+    try:
+        db.connection.execute(
+            """
+            INSERT INTO posts
+                (post_id, board_id, parent_post_id, author_user_id, author_label,
+                 author_fingerprint, subject, body, created_at, status,
+                 root_post_id, edit_of_post_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_post_id,
+                board.id,
+                post.parent_post_id,
+                post.author_user_id,
+                post.author_label,
+                post.author_fingerprint,
+                subject,
+                body,
+                created_at,
+                status,
+                post.root_post_id,
+                current["post_id"],
+            ),
+        )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise PostError(
+            "could not save edit — identical content already exists for this post?"
+        ) from exc
+
+    record_action(
+        db,
+        actor=edited_by,
+        action="edit",
+        object_type="board",
+        object_id=board.id,
+        target_user_id=post.author_user_id,
+        detail=new_post_id,
+    )
+    return get_post(db, new_post_id)
 
 
 def get_post(db: Database, post_id: str) -> Post:
@@ -152,6 +268,31 @@ def get_post(db: Database, post_id: str) -> Post:
     if row is None:
         raise PostError(f"no such post: {post_id!r}")
     return _row_to_post(row)
+
+
+def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
+    """Given a root post's raw row, build the `Post` actually shown to
+    readers (design doc -- prose editor round B2 planning): identity/
+    position fields (id, post_id, created_at, pinned, exempt_from_expiry,
+    author_*) always come from the root row itself, so a page's cursors
+    and a post's feed position never move just because it was edited --
+    only `subject`/`body` are substituted from whichever row sharing its
+    `root_post_id` is the newest currently `'approved'` one, which is
+    the root row itself if it's never been edited (or no edit has been
+    approved yet)."""
+    latest = db.connection.execute(
+        """
+        SELECT * FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
+        ORDER BY created_at DESC, post_id DESC
+        LIMIT 1
+        """,
+        (root_row["root_post_id"], root_row["board_id"]),
+    ).fetchone()
+    root = _row_to_post(root_row)
+    if latest is None or latest["post_id"] == root.post_id:
+        return root
+    return replace(root, subject=latest["subject"], body=latest["body"], is_edited=True)
 
 
 _DEFAULT_PAGE_SIZE = 5
@@ -223,14 +364,29 @@ def list_posts_page(
     there's always something newer", which doesn't hold if the cursor
     passed in was already at the newest post.
 
-    Only `status = 'approved'` posts are ever included here (design doc
-    sign-off round 35) — `'pending'` posts belong to the moderation
-    queue (`list_pending_posts`), and `'expired'` posts are delisted
-    from normal browsing, though still individually reachable (see
-    `get_post`). Sweeps the board's own posts for expiry/deletion
-    first (`_sweep_expired_posts`) so this always reflects an
-    up-to-date view, given there's no background job doing that
-    separately.
+    Post identity/position here is always the *root* of a post's edit
+    chain (design doc -- prose editor round B2 planning), regardless of
+    whether it's the currently-displayed content: `post_id`/`created_at`
+    on every returned `Post` are the root's, so pagination cursors
+    (built from a page's own boundary posts, see below) stay stable
+    across edits -- editing a post never bumps its position or breaks
+    an in-flight cursor. Displayed `subject`/`body`/`status` are
+    resolved to whichever row sharing that root is the newest currently
+    `'approved'` one (`_resolve_current_version`) -- which may be the
+    root row itself (never edited, or every edit still pending/
+    rejected) or a later edit. A root eligible for the page only needs
+    *some* row in its chain currently approved, not the root row
+    itself: an old root can expire on its own schedule while a fresher
+    edit keeps the post alive, exactly as if editing had refreshed it.
+
+    `'pending'` posts/edits belong to the moderation queue
+    (`list_pending_posts`, unchanged -- it already returns exact,
+    unresolved rows regardless of root/edit status), and `'expired'`
+    content is delisted from normal browsing, though still individually
+    reachable (see `get_post`). Sweeps the board's own posts for
+    expiry/deletion first (`_sweep_expired_posts`) so this always
+    reflects an up-to-date view, given there's no background job doing
+    that separately.
     """
     require_level(requesting_user, board.min_read_level)
     if before is not None and after is not None:
@@ -238,60 +394,84 @@ def list_posts_page(
 
     _sweep_expired_posts(db, board)
 
+    # A root qualifies as long as *some* row sharing its root_post_id is
+    # currently approved -- not necessarily the root row itself, which
+    # may have expired while a later edit stayed fresh. Position/cursor
+    # ordering still uses the root's own (created_at, post_id), never
+    # the approved row's, so editing can't reorder the feed.
+    _has_approved_version = """
+        EXISTS (
+            SELECT 1 FROM posts v
+            WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
+              AND v.status = 'approved'
+        )
+    """
+
     if after is not None:
         created_at, post_id = after
         rows = db.connection.execute(
-            """
-            SELECT * FROM posts
-            WHERE board_id = ? AND status = 'approved' AND (created_at, post_id) > (?, ?)
-            ORDER BY created_at ASC, post_id ASC
+            f"""
+            SELECT root.* FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND (root.created_at, root.post_id) > (?, ?)
+              AND {_has_approved_version}
+            ORDER BY root.created_at ASC, root.post_id ASC
             LIMIT ?
             """,
             (board.id, created_at, post_id, limit),
         ).fetchall()
-        posts = [_row_to_post(row) for row in rows]
+        roots = list(rows)
     elif before is not None:
         created_at, post_id = before
         rows = db.connection.execute(
-            """
-            SELECT * FROM posts
-            WHERE board_id = ? AND status = 'approved' AND (created_at, post_id) < (?, ?)
-            ORDER BY created_at DESC, post_id DESC
+            f"""
+            SELECT root.* FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND (root.created_at, root.post_id) < (?, ?)
+              AND {_has_approved_version}
+            ORDER BY root.created_at DESC, root.post_id DESC
             LIMIT ?
             """,
             (board.id, created_at, post_id, limit),
         ).fetchall()
-        posts = [_row_to_post(row) for row in reversed(rows)]
+        roots = list(reversed(rows))
     else:
         rows = db.connection.execute(
-            """
-            SELECT * FROM posts
-            WHERE board_id = ? AND status = 'approved'
-            ORDER BY created_at DESC, post_id DESC
+            f"""
+            SELECT root.* FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND {_has_approved_version}
+            ORDER BY root.created_at DESC, root.post_id DESC
             LIMIT ?
             """,
             (board.id, limit),
         ).fetchall()
-        posts = [_row_to_post(row) for row in reversed(rows)]
+        roots = list(reversed(rows))
+
+    posts = [_resolve_current_version(db, row) for row in roots]
 
     if not posts:
         return PostPage(posts=[], has_older=False, has_newer=False)
 
     oldest, newest = posts[0], posts[-1]
     has_older = db.connection.execute(
-        """
+        f"""
         SELECT EXISTS(
-            SELECT 1 FROM posts
-            WHERE board_id = ? AND status = 'approved' AND (created_at, post_id) < (?, ?)
+            SELECT 1 FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND (root.created_at, root.post_id) < (?, ?)
+              AND {_has_approved_version}
         )
         """,
         (board.id, oldest.created_at, oldest.post_id),
     ).fetchone()[0]
     has_newer = db.connection.execute(
-        """
+        f"""
         SELECT EXISTS(
-            SELECT 1 FROM posts
-            WHERE board_id = ? AND status = 'approved' AND (created_at, post_id) > (?, ?)
+            SELECT 1 FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND (root.created_at, root.post_id) > (?, ?)
+              AND {_has_approved_version}
         )
         """,
         (board.id, newest.created_at, newest.post_id),
@@ -432,6 +612,14 @@ def list_pinned_posts(db: Database, board: Board, *, requesting_user: User) -> l
     convenience, not an access restriction, so anyone who can read the
     board can see what's pinned. A dedicated view rather than
     reordering `list_posts_page`'s feed (see `set_post_pinned`).
+
+    `pinned` is a root-level property (`set_post_pinned` operates on
+    whatever `Post` it's given, and every caller passes it an already-
+    resolved, root-identified `Post` -- see `_resolve_current_version`),
+    so filtering on it here already naturally selects root rows only;
+    each is still resolved to its current content the same as
+    `list_posts_page`, so a pinned-then-edited post shows its latest
+    body here too, not a stale snapshot from when it was pinned.
     """
     require_level(requesting_user, board.min_read_level)
     rows = db.connection.execute(
@@ -441,7 +629,7 @@ def list_pinned_posts(db: Database, board: Board, *, requesting_user: User) -> l
         """,
         (board.id,),
     ).fetchall()
-    return [_row_to_post(row) for row in rows]
+    return [_resolve_current_version(db, row) for row in rows]
 
 
 def _require_board_permission(db: Database, post: Post, user: User, permission: BoardPermission) -> None:
@@ -502,7 +690,7 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
     db.connection.commit()
 
 
-def _row_to_post(row: sqlite3.Row) -> Post:
+def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:
     return Post(
         id=row["id"],
         post_id=row["post_id"],
@@ -517,4 +705,7 @@ def _row_to_post(row: sqlite3.Row) -> Post:
         status=row["status"],
         pinned=bool(row["pinned"]),
         exempt_from_expiry=bool(row["exempt_from_expiry"]),
+        root_post_id=row["root_post_id"],
+        edit_of_post_id=row["edit_of_post_id"],
+        is_edited=is_edited,
     )

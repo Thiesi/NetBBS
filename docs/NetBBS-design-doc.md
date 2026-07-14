@@ -5799,3 +5799,231 @@ been made for either.
    `login_flow`/`admin_flow` tests use). Tests that only checked bell
    *presence* as a substring needed no change. Full suite re-run:
    **1261 passed, 3 skipped**.
+
+## Sign-off notes, round 69 (nano keybindings; post editing; prose editor round B2 — implemented)
+
+Three related pieces of work, confirmed with Thiesi across several
+rounds of discussion before any of it was written, then implemented
+together: (1) nano-style keybindings, applied retroactively to the
+round B1 ANSI editor and shared with the new prose editor; (2) the
+post-editing data model this needed answered first, since it collided
+with content-addressing; (3) the fullscreen prose editor itself
+(design doc round 63/64's "Round B2"), plus the per-user opt-in
+preference and its wiring into composing a post and editing a bio.
+
+**1. Nano keybindings (round B1 ANSI editor, retroactive):** Ctrl+X
+quit (was Esc), Ctrl+O save (was Ctrl+S — sidesteps that key's legacy
+terminal-XOFF baggage as a side effect, not the primary motivation),
+Ctrl+T glyph picker (was Ctrl+G, which collides with nano's own Help
+binding — freed up, not wired to anything yet). Ctrl+P/Ctrl+B
+(foreground/background color pickers) kept as-is: nano has no color
+concept to defer to, so no collision existed to resolve. A bare Esc
+press is now a genuine no-op (nano treats it as a Meta-combo prefix,
+not "exit"), locked in by a new regression test
+(`test_bare_escape_no_longer_quits`) rather than left unverified.
+
+**2. Post editing — the data model question, settled before any editor
+code, per this project's design-before-code convention:**
+1. **The core tension**: `posts.post_id` is a content hash computed
+   from the body itself (`netbbs.boards.content_id.compute_content_id`,
+   design doc §7). An in-place `UPDATE` on edit would leave a row's own
+   `post_id` silently mismatched against its current content, and
+   would orphan any existing reply's `parent_post_id` (a specific,
+   fixed reference). Resolved the way §13 already described for
+   *moderator* edits on Linked boards ("a new, signed event that
+   references and amends" the original) — generalized here to local
+   self-edits too, confirmed with Thiesi as the "do it properly, not
+   the simpler in-place shortcut" option over two others (in-place
+   mutation; defer editing entirely).
+2. **Schema**: `posts.root_post_id` (a post's own `post_id` if never
+   edited; the *original* post's `post_id` for every edit of it, not
+   the immediately-preceding revision) and `posts.edit_of_post_id`
+   (the specific immediate predecessor each edit amends — kept for a
+   future edit-history view, not surfaced anywhere yet). Plain `ADD
+   COLUMN`, not the drop/rebuild pattern rounds 37/40/41/56-57/60 used
+   for other tables — `posts` is a live parent of several tables' own
+   foreign keys, and round 60 already found the hard way that SQLite's
+   `DROP TABLE` (that pattern's first step) applies its own cascade/
+   SET-NULL side effects to *any* row still referencing the dropped
+   table, independent of that column's own declared `ON DELETE`
+   behavior; avoided entirely by never dropping `posts` here.
+3. **`netbbs.boards.posts.edit_post(db, post, board, *, subject, body,
+   edited_by)`**: allowed for the post's own original author with no
+   grant needed (this project's first "you may act on it because you
+   own it" concept for posts — everything else here is purely grant-
+   based), or anyone holding `BoardPermission.EDIT`, matching the
+   existing moderator model. Always inserts a fresh row; re-resolves
+   the actual current approved version itself via `post.root_post_id`
+   rather than trusting the passed-in `post.post_id` for the new row's
+   `edit_of_post_id` — necessary because a caller's `Post` may already
+   be root-identified (see point 4) rather than the immediate
+   predecessor, if the post's been edited more than once.
+4. **`list_posts_page`/`list_pinned_posts` resolve each result to its
+   root's identity, not the row shown.** `post_id`/`created_at`
+   (and every other identity/curation field — `pinned`,
+   `exempt_from_expiry`, `author_*`) always come from the *root* row;
+   only `subject`/`body`/`status` are substituted from whichever row
+   sharing that `root_post_id` is the newest currently `'approved'`
+   one, via a new `is_edited` flag on `Post` telling callers which
+   happened. This is what makes editing invisible to pagination:
+   cursors and feed position never move on edit, confirmed by a
+   dedicated test that edits the *older* of two posts and asserts it
+   doesn't jump ahead of the newer one. A root only needs *some* row in
+   its chain currently approved to stay listed — not the root row
+   itself, which can independently age out via the existing expiry
+   sweep (round 35) while a fresher edit keeps the logical post alive,
+   the same way editing an old post would refresh it in any ordinary
+   forum. On a moderated board, an edit re-enters moderation exactly
+   like a new post (starts `'pending'`); the feed keeps showing the
+   last-*approved* content until the edit itself is approved — an edit
+   must not be a way to bypass moderation.
+5. **A real, pre-existing bug found during testing, unrelated to this
+   round's own changes — flagged, not fixed here:** deleting a post
+   that still has a live reply referencing it via `parent_post_id`
+   already raises `sqlite3.IntegrityError: FOREIGN KEY constraint
+   failed` on current `main`, independent of anything built in this
+   round (confirmed by reproducing it against `parent_post_id` alone,
+   with none of this round's new columns involved). `_sweep_expired_
+   posts`'s hard-delete step has apparently never been exercised
+   against a post with a surviving reply. Not fixed here — the right
+   answer (does the reply lose its parent reference? get excluded from
+   the sweep? something else?) is its own design decision, out of
+   scope for a round about editing. This round's own tests route around
+   it (age a post just past `'expired'`, never all the way to the
+   delete threshold) rather than silently relying on undefined
+   behavior.
+6. **Testing**: new `tests/test_post_editing.py` (12 cases — chain
+   integrity across repeated edits, both authorization paths, the
+   moderated-board re-entry behavior, the expiry interaction, pinned-
+   post resolution). Caught and fixed two of its own early mistakes,
+   not shipped: a wrong test expectation for `logical_position`'s
+   row-index clamping (unrelated module, see point 8), and several
+   tests initially flaky from two posts landing on the exact same
+   microsecond `created_at` — the identical "two nearby timestamps
+   need to provably differ" hazard rounds 20/21 already document,
+   fixed the same way (explicit backdating), not by changing production
+   code, since arbitrary-but-deterministic tie-breaking under a genuine
+   same-microsecond collision is already an accepted class of edge case
+   elsewhere in this codebase.
+
+**3. The prose editor itself (design doc round 63/64's "Round B2"):**
+1. **A genuinely different editing core from the round B1 ANSI
+   editor, not a reskin** — confirmed by investigation before writing
+   any code: the ANSI editor is a fixed-grid paint tool (arrows move a
+   clamped cursor, typing overwrites a cell, no insertion, no wrap);
+   prose needs real insert-mode text, word-wrap, and scrolling for
+   content taller than the screen. Only the *shell* is shared (control
+   loop shape, nano keybindings, quit-confirm, autosave, the screen-
+   buffer/diff redraw discipline) — confirmed during B2's own planning
+   research, not assumed from B1's "deliberately generic/reusable"
+   framing alone.
+2. **New `netbbs.rendering.prose_buffer`**: pure, I/O-free, mirroring
+   `screen_buffer.py`'s own "no session/terminal dependency" shape.
+   `ProseBuffer` holds logical lines (exactly what the SysOp typed
+   between real Enter presses — never auto-rewrapped) plus a cursor;
+   every edit operation (`insert_char`/`insert_newline`/`backspace`/
+   `delete`/`move_left`/`move_right`/`move_home`/`move_end`) works
+   purely on that logical model, entirely unaware of word-wrap.
+   `wrap_lines` is the only place wrapping enters the picture, using
+   the same stdlib `textwrap` primitives `netbbs.rendering.reflow`
+   already relies on for consistency between what's shown while
+   editing and what a posted body looks like once reflowed for
+   display — but deliberately *not* `reflow()` itself, which collapses
+   and rewraps a whole finished multi-paragraph text, wrong for
+   something being actively edited a character at a time.
+3. **A real bug caught by an exhaustive round-trip test, not by
+   inspection**: `visual_position`/`logical_position` (converting a
+   logical cursor position to its on-screen row/column and back) failed
+   to round-trip whenever the cursor landed exactly on a consumed
+   wrap-point space — `textwrap` discards the separating whitespace
+   between two wrapped segments, so a cursor sitting exactly there
+   (a real, reachable position — typing to the end of a wrapped row
+   lands here) matched neither segment under a naive half-open range
+   check, falling through to a nonsense fallback. Caught by a test
+   that fuzzes every cursor position across several wrapped, blank, and
+   short lines and asserts the round trip holds for all of them — a
+   narrower test targeting only "typical" positions would have missed
+   it, exactly the same "test at the actual boundary, not just the
+   common case" lesson this project's history keeps re-learning. Fixed
+   by making the matching range inclusive of a row's own end position.
+4. **`netbbs.net.prose_editor.edit_prose`**: same control-loop/
+   autosave/quit-confirm shape as `netbbs.net.ansi_editor.edit_ansi_art`
+   (see point 1), painting each redraw's visible window of wrapped rows
+   into a `ScreenBuffer` purely for the existing diffed-render
+   machinery — text editing itself never touches `ScreenBuffer`
+   directly. Up/Down move by *visual* (soft-wrapped) row, not logical
+   line — pressing Down from the middle of a long wrapped paragraph
+   moves one screen line, not past the whole paragraph in one keypress,
+   confirmed by a dedicated test. **Viewport size is the session's own
+   negotiated terminal size** (`terminal_width`/`terminal_height`, with
+   a 40x10 floor matching design doc §4's general rendering floor), not
+   a fixed canvas — a deliberate difference from the ANSI editor, where
+   80x24 is the *content's* own dimensions; prose has no fixed size of
+   its own, so this follows the session-adaptive sizing
+   `netbbs.net.picker` already established (round 16) rather than
+   inventing a new fixed default.
+5. **Explicit V1 scope boundary, not silently dropped**: no cut/copy/
+   paste, no search/replace, no syntax highlighting or spell-check —
+   nano has all of these, but nothing this round's planning discussion
+   settled required them, and building them now would be guessing at
+   scope nothing asked for, the same restraint round 64 already applied
+   to the ANSI editor's own "undo/redo, block copy/fill/select" list.
+   Worth its own follow-up if actually wanted.
+6. **New `netbbs.net.editor_preference`**: a per-user "compose with the
+   fullscreen editor" opt-in, defaulting off, the exact same thin-
+   typed-wrapper-over-`netbbs.user_preferences` shape
+   `netbbs.chat.timestamps` already established for `/timestamps`.
+   Surfaced as a new `[F]ullscreen editor` toggle on the Profile screen
+   (confirmed with Thiesi over a chat-style slash command — this
+   preference has nothing to do with chat, so it belongs where bio/
+   visibility settings already live, not reachable only from inside a
+   channel).
+7. **Wired into composing a new board post and editing the bio** — the
+   two candidates identified during B2's own planning survey (posts:
+   the biggest real gap, previously single-line only despite multi-
+   paragraph display; bio: previously a crude 6-line repeated-
+   `read_line` loop). A new shared `_compose_body` helper in
+   `netbbs.net.login_flow` is the one place that branches on the
+   preference; `set_bio`'s own existing `MAX_BIO_LINES` validation is
+   still the sole place that cap is enforced, not duplicated in the
+   editor. **Not wired in this round, deliberately flagged rather than
+   guessed at**: an `[E]dit` entry point on an *existing* post from the
+   board-reading screen — `_render_board_page` has no mechanism today
+   for selecting one specific post out of a displayed page at all
+   (posts aren't numbered/selectable, just listed), and inventing a
+   selection scheme without the same care design doc round 16 gave the
+   picker's own "how do you pick one item from a list" problem would
+   be exactly the kind of unilateral mid-implementation design call
+   this project's process exists to avoid. The `edit_post` backend
+   (point 2 above) is fully built and tested; only its UI entry point
+   remains.
+8. **A test-authoring mistake caught by its own failure, not shipped
+   unnoticed**: an early integration test scripted a leading "b" (back)
+   keystroke before composing a post against a freshly-created, empty
+   board — `_show_board` skips its own `read_key()` reading loop
+   entirely when a board has no posts yet (straight to the compose
+   prompt), so that "b" was silently consumed as the post *subject*
+   instead, and the next scripted token fed into the fullscreen
+   editor's first keystroke read as one long multi-character "typed"
+   insertion. Caught immediately by the resulting `AssertionError`
+   once the input queue ran dry, not a silent false-pass — fixed in
+   the test's own scripted input, not the code, which was correct
+   throughout.
+9. **Testing**: `tests/test_prose_buffer.py` (31 cases — wrap
+   correctness including the round-trip fuzz test above, every
+   `ProseBuffer` edit operation including line-merge boundaries),
+   `tests/test_prose_editor.py` (16 cases — typing, word-wrap-aware
+   navigation, save/quit/cancel, draft recovery, autosave), `tests/
+   test_editor_preference.py` (4 cases), `tests/
+   test_login_flow_fullscreen_editor.py` (10 cases — the Profile
+   toggle, both post-composition paths with an exact saved-content
+   assertion, bio editing and pre-fill, and the fullscreen-cancel-
+   means-no-post path). Every pre-existing directory/board UI test
+   re-run unchanged and still passing, confirming the opt-in-default-
+   off preference leaves every existing account's behavior untouched.
+   Full suite re-run: **1331 passed, 3 skipped**.
+
+**Flagged, not blocking further work:** the pre-existing `parent_post_id`
+delete/FK bug (point 2.5) and the edit-existing-post UI entry point
+(point 3.7) are both real, known gaps going into whatever's next —
+neither silently papered over nor guessed at unilaterally.
