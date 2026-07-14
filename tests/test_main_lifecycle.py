@@ -21,12 +21,22 @@ import sys
 import pytest
 
 from netbbs.__main__ import StartupError, _install_signal_handlers, run
+from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import NodeConfig, TransportConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.storage.database import Database
 
 
-def _config(tmp_path, **overrides) -> NodeConfig:
+def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
+    """
+    `seed_sysop=True` by default: `run()` refuses to start at all with
+    zero SysOp-level accounts (design doc -- SysOp foundation round),
+    and every test in this file except the one that specifically
+    exercises that refusal wants a normally-startable node -- seeding
+    here once, centrally, avoids repeating a create_user call at every
+    call site.
+    """
     defaults = dict(
         db_path=tmp_path / "node.db",
         telnet=TransportConfig(True, "127.0.0.1", 0),
@@ -34,7 +44,12 @@ def _config(tmp_path, **overrides) -> NodeConfig:
         web=TransportConfig(False, "127.0.0.1", 0),
     )
     defaults.update(overrides)
-    return NodeConfig(**defaults)
+    config = NodeConfig(**defaults)
+    if seed_sysop:
+        db = Database(config.db_path)
+        create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+        db.close()
+    return config
 
 
 async def _run_until_ready_then_shut_down(config, ready_delay=0.1):
@@ -139,6 +154,59 @@ def test_shutdown_closes_the_database(tmp_path):
         conn.execute("SELECT 1")
     finally:
         conn.close()
+
+
+# -- zero-SysOp startup refusal (design doc -- SysOp foundation round) ------
+
+
+def test_zero_sysops_raises_startup_error(tmp_path):
+    """A node with no SysOp-level account could never be administered
+    once it's running -- run() must refuse to start at all, before any
+    listener binds, rather than starting degraded."""
+
+    async def scenario():
+        config = _config(tmp_path, seed_sysop=False)
+        with pytest.raises(StartupError, match="no SysOp-level account"):
+            await run(config)
+
+    asyncio.run(scenario())
+
+
+def test_zero_sysops_still_closes_the_database(tmp_path):
+    captured_db_path = tmp_path / "node.db"
+
+    async def scenario():
+        config = _config(tmp_path, db_path=captured_db_path, seed_sysop=False)
+        with pytest.raises(StartupError, match="no SysOp-level account"):
+            await run(config)
+
+    asyncio.run(scenario())
+
+    conn = sqlite3.connect(str(captured_db_path))
+    try:
+        conn.execute("SELECT 1")
+    finally:
+        conn.close()
+
+
+def test_a_disabled_sysop_does_not_count_and_still_raises_startup_error(tmp_path):
+    config = _config(tmp_path, seed_sysop=False)
+    db = Database(config.db_path)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    # Raw SQL, not set_user_disabled: disabling the sole active SysOp
+    # through the normal API is exactly what that function's own
+    # lockout guard refuses -- this test needs the resulting state
+    # (a disabled SysOp, zero *active* ones) to exist regardless of how
+    # it came about, to confirm run()'s own check treats it correctly.
+    db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", ("2026-01-01T00:00:00+00:00", sysop.id))
+    db.connection.commit()
+    db.close()
+
+    async def scenario():
+        with pytest.raises(StartupError, match="no SysOp-level account"):
+            await run(config)
+
+    asyncio.run(scenario())
 
 
 # -- partial-start failure cleanup --------------------------------------------

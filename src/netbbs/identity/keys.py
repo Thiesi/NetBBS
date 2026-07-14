@@ -30,6 +30,11 @@ from netbbs.timeutil import utc_now_iso
 # silently misread.
 _FILE_FORMAT_VERSION = 1
 
+# Raw Ed25519 public key length in bytes -- fixed by the algorithm, not
+# configurable. nacl.signing.VerifyKey has no public SIZE constant to
+# reference instead.
+_ED25519_PUBLIC_KEY_BYTES = 32
+
 # Fingerprint length in raw bytes before encoding. 20 bytes (160 bits) of
 # BLAKE2b output gives a very comfortable safety margin against collision
 # for a namespace of node/user identities, while staying short enough to
@@ -317,6 +322,76 @@ class Identity:
 def load_identity(path: Path, passphrase: bytes | None = None) -> Identity:
     """Module-level convenience wrapper around `Identity.load`."""
     return Identity.load(path, passphrase=passphrase)
+
+
+def parse_verify_key(text: str) -> nacl.signing.VerifyKey:
+    """
+    Parse a public key pasted by a human (design doc -- SysOp foundation
+    round, the admin account-creation flow) into a `VerifyKey`.
+
+    Accepts either this project's own base64 raw-key form (what
+    `users.public_key` stores) or a standard OpenSSH public-key line
+    ("ssh-ed25519 AAAA... comment", e.g. the contents of
+    ~/.ssh/id_ed25519.pub) — the two forms a SysOp is realistically going
+    to have on hand. Raises `IdentityError` for anything malformed,
+    matching every other failure mode in this module.
+    """
+    text = text.strip()
+    if text.startswith("ssh-ed25519 "):
+        fields = text.split()
+        if len(fields) < 2:
+            raise IdentityError("malformed ssh-ed25519 line: missing key data")
+        try:
+            blob = base64.b64decode(fields[1], validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise IdentityError("malformed ssh-ed25519 line: key data is not valid base64") from exc
+        raw = _decode_openssh_ed25519_pubkey(blob)
+    else:
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise IdentityError("public key is not valid base64") from exc
+
+    if len(raw) != _ED25519_PUBLIC_KEY_BYTES:
+        raise IdentityError(
+            f"an Ed25519 public key is exactly {_ED25519_PUBLIC_KEY_BYTES} bytes "
+            f"(got {len(raw)})"
+        )
+    return nacl.signing.VerifyKey(raw)
+
+
+def _decode_openssh_ed25519_pubkey(blob: bytes) -> bytes:
+    """
+    Minimal OpenSSH wire-format decoder: two length-prefixed strings, the
+    algorithm name and the raw key. No certificates, no other key types —
+    this project only ever stores/verifies Ed25519 keys, so anything else
+    is rejected rather than silently accepted and mishandled later.
+    """
+    offset = 0
+
+    def read_string() -> bytes:
+        nonlocal offset
+        if offset + 4 > len(blob):
+            raise IdentityError("malformed ssh-ed25519 key: truncated field")
+        length = int.from_bytes(blob[offset : offset + 4], "big")
+        offset += 4
+        if offset + length > len(blob):
+            raise IdentityError("malformed ssh-ed25519 key: truncated field")
+        value = blob[offset : offset + length]
+        offset += length
+        return value
+
+    algorithm = read_string()
+    if algorithm != b"ssh-ed25519":
+        raise IdentityError(
+            f"unsupported key algorithm {algorithm!r}; only ssh-ed25519 is supported"
+        )
+    key = read_string()
+    if len(key) != _ED25519_PUBLIC_KEY_BYTES:
+        raise IdentityError(
+            f"malformed ssh-ed25519 key: expected {_ED25519_PUBLIC_KEY_BYTES} raw key bytes"
+        )
+    return key
 
 
 def verify_signature(verify_key: nacl.signing.VerifyKey, message: bytes, signature: bytes) -> bool:

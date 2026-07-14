@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from enum import Enum, auto
 
-from netbbs.auth.users import AuthError, User, authenticate_password_async, list_users
+from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
 from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
@@ -34,6 +34,7 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.moderation import is_blocked
+from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.file_flow import browse_file_areas
@@ -56,12 +57,6 @@ WELCOME_BANNER = colored(
     fg_color=HEADER_COLOR,
     bold=True,
 )
-
-# Arbitrary placeholder threshold demonstrating that level-gating works
-# end-to-end over a real connection. Not a real SysOp-level constant yet
-# — that belongs with the actual permission model once boards/moderators
-# exist in Phase 2.
-_DEMO_ELEVATED_LEVEL = 100
 
 _MAX_LOGIN_ATTEMPTS = 3
 
@@ -193,9 +188,6 @@ async def _run_authenticated_session(
         f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
     )
 
-    if meets_level(user, _DEMO_ELEVATED_LEVEL):
-        await session.write_line("(You have elevated access.)")
-
     # One InputHistory per connection (design doc round 47/Track 5f),
     # not node-wide like hub/presence/mailbox -- constructed here rather
     # than passed in from netbbs.__main__, so each connected session
@@ -228,16 +220,17 @@ async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User)
         await session.write_line(message)
 
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
-    options = "  ".join(
-        [
-            menu_key("M", "essage Boards"),
-            menu_key("C", "hat"),
-            menu_key("F", "ile areas"),
-            menu_key("D", "irectory"),
-            menu_key("P", "rofile"),
-            menu_key("L", "ogoff"),
-        ]
-    )
+    option_list = [
+        menu_key("M", "essage Boards"),
+        menu_key("C", "hat"),
+        menu_key("F", "ile areas"),
+        menu_key("D", "irectory"),
+        menu_key("P", "rofile"),
+    ]
+    if meets_level(user, SYSOP_LEVEL):
+        option_list.append(menu_key("A", "dmin"))
+    option_list.append(menu_key("L", "ogoff"))
+    options = "  ".join(option_list)
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
 
@@ -296,6 +289,10 @@ async def _main_menu(
         elif choice == "p":
             await session.write_line("")
             await _edit_profile(session, db, user)
+            await _draw_main_menu(session, mailbox, user)
+        elif choice == "a" and meets_level(user, SYSOP_LEVEL):
+            await session.write_line("")
+            await admin_menu(session, db, user)
             await _draw_main_menu(session, mailbox, user)
         else:
             await session.write("\a")

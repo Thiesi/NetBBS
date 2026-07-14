@@ -30,7 +30,10 @@ from netbbs.timeutil import utc_now_iso
 @dataclass(frozen=True)
 class ModerationLogEntry:
     id: int
-    actor_user_id: int
+    # Nullable since design doc's SysOp-foundation round: the account
+    # that performed an action can later be hard-deleted (ON DELETE SET
+    # NULL) without destroying the audit trail that names it.
+    actor_user_id: int | None
     action: str
     object_type: str | None
     object_id: int | None

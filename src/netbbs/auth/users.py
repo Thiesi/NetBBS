@@ -49,6 +49,14 @@ _DUMMY_PASSWORD_HASH = (
 
 _T = TypeVar("_T")
 
+# The top of the user_level range, reserved for SysOps (design doc --
+# SysOp foundation round). A level, not a separate flag/table, so it
+# composes with the existing meets_level/require_level gating everywhere
+# else already uses levels. 255 rather than some lower round number was
+# a deliberate choice (Thiesi's own) to make it visually unmistakable as
+# "the top of the range" rather than just another elevated tier.
+SYSOP_LEVEL = 255
+
 
 class AuthError(Exception):
     """
@@ -66,6 +74,18 @@ class AuthError(Exception):
     """
 
 
+class UserManagementError(Exception):
+    """
+    Raised by SysOp user-management operations (level changes, disable/
+    enable, hard delete) for failures that need a specific, actionable
+    message — unlike `AuthError`, which is deliberately generic for
+    anything reaching a real login attempt. Callers here are already
+    authenticated, trusted SysOps, not anonymous connections probing for
+    account existence, so there's no enumeration concern to protect
+    against by staying vague.
+    """
+
+
 @dataclass(frozen=True)
 class User:
     id: int
@@ -74,6 +94,11 @@ class User:
     fingerprint: str | None
     created_at: str
     last_login_at: str | None
+    # Trailing, defaulted so existing direct User(...) construction call
+    # sites (e.g. tests/test_permissions.py's _make_user) keep working
+    # unmodified. NULL/None = not disabled (design doc -- SysOp
+    # foundation round).
+    disabled_at: str | None = None
 
 
 def _password_work_semaphore() -> asyncio.Semaphore:
@@ -256,6 +281,11 @@ def _finish_password_login(
 ) -> User:
     if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
+    # Same generic failure a wrong password produces -- a disabled
+    # account shouldn't be distinguishable from a wrong credential (see
+    # AuthError's own anti-enumeration docstring).
+    if row["disabled_at"] is not None:
+        raise AuthError("login failed")
     return _touch_last_login(db, row)
 
 
@@ -302,6 +332,9 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     if not verify_signature(stored_key, challenge, signature):
         raise AuthError("login failed")
 
+    if row["disabled_at"] is not None:
+        raise AuthError("login failed")
+
     return _touch_last_login(db, row)
 
 
@@ -334,6 +367,9 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     if stored_key != bytes(verify_key):
         raise AuthError("login failed")
 
+    if row["disabled_at"] is not None:
+        raise AuthError("login failed")
+
     return _touch_last_login(db, row)
 
 
@@ -360,4 +396,107 @@ def _row_to_user(row: sqlite3.Row) -> User:
         fingerprint=row["fingerprint"],
         created_at=row["created_at"],
         last_login_at=row["last_login_at"],
+        disabled_at=row["disabled_at"],
     )
+
+
+def _get_user_by_id(db: Database, user_id: int) -> User:
+    row = db.connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise UserManagementError(f"user id {user_id} no longer exists")
+    return _row_to_user(row)
+
+
+def count_sysops(db: Database) -> int:
+    """
+    Number of currently-usable (not disabled) SysOp-level accounts.
+
+    Deliberately excludes already-disabled accounts: a disabled SysOp
+    can't rescue a lockout, so it shouldn't count toward preventing one
+    (see `_refuse_if_last_sysop`).
+    """
+    row = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM users WHERE user_level >= ? AND disabled_at IS NULL",
+        (SYSOP_LEVEL,),
+    ).fetchone()
+    return row["n"]
+
+
+def _refuse_if_last_sysop(db: Database, target: User, *, removes_active_sysop: bool) -> None:
+    if not removes_active_sysop:
+        return
+    if target.user_level < SYSOP_LEVEL or target.disabled_at is not None:
+        return  # target isn't currently an active SysOp; nothing to protect
+    if count_sysops(db) <= 1:
+        raise UserManagementError(
+            f"cannot proceed: {target.username!r} is the only active SysOp-level "
+            "account on this node; this action would leave it with no SysOp"
+        )
+
+
+def set_user_level(db: Database, target: User, new_level: int, *, changed_by: User) -> User:
+    """Promote or demote `target` to `new_level`, refusing a demotion
+    that would leave the node with no active SysOp."""
+    # Deferred import: netbbs.moderation.log imports User from this
+    # module for record_action's own type hint, so a module-level import
+    # here would be circular.
+    from netbbs.moderation.log import record_action
+
+    if new_level == target.user_level:
+        return target
+    _refuse_if_last_sysop(db, target, removes_active_sysop=new_level < SYSOP_LEVEL)
+    db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, target.id))
+    db.connection.commit()
+    record_action(
+        db, actor=changed_by,
+        action="promote" if new_level > target.user_level else "demote",
+        target_user_id=target.id,
+        detail=f"user_level {target.user_level} -> {new_level}",
+    )
+    return _get_user_by_id(db, target.id)
+
+
+def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by: User) -> User:
+    """Disable or re-enable login for `target`, refusing a disable that
+    would leave the node with no active SysOp."""
+    from netbbs.moderation.log import record_action
+
+    currently_disabled = target.disabled_at is not None
+    if disabled == currently_disabled:
+        return target
+    _refuse_if_last_sysop(db, target, removes_active_sysop=disabled)
+    new_value = utc_now_iso() if disabled else None
+    db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, target.id))
+    db.connection.commit()
+    record_action(db, actor=changed_by, action="disable" if disabled else "enable", target_user_id=target.id)
+    return _get_user_by_id(db, target.id)
+
+
+def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
+    """
+    Permanently remove `target`'s account, refusing to delete the last
+    active SysOp.
+
+    Content authorship (posts/files) survives via each row's already-
+    denormalized author/uploader label; moderator grants, channel
+    membership/invitations, preferences, and blocklist entries tied to
+    the account are cascade-removed; audit-log rows are preserved with
+    their actor/target references set to NULL (see the migration that
+    adds these ON DELETE behaviors for the full table-by-table
+    reasoning) -- all as a single atomic DELETE.
+    """
+    from netbbs.moderation.log import record_action
+
+    _refuse_if_last_sysop(db, target, removes_active_sysop=True)
+    # Logged *before* deleting, not after: on a self-delete
+    # (deleted_by == target), record_action's own actor_user_id FK would
+    # otherwise reference a row that's already gone. Logging first also
+    # means target_user_id naturally goes NULL via the same ON DELETE SET
+    # NULL once the row disappears, with detail keeping the username on
+    # record either way.
+    record_action(
+        db, actor=deleted_by, action="delete_user", target_user_id=target.id,
+        detail=f"deleted user {target.username!r} (id {target.id}, was level {target.user_level})",
+    )
+    db.connection.execute("DELETE FROM users WHERE id = ?", (target.id,))
+    db.connection.commit()

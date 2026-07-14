@@ -18,6 +18,7 @@ import logging
 import signal
 import sys
 
+from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.login_flow import handle_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -186,6 +187,13 @@ async def run(
 
     servers: list = []
     try:
+        if count_sysops(db) == 0:
+            raise StartupError(
+                "no SysOp-level account exists on this node -- run "
+                "`python -m netbbs.admin` to create one before starting "
+                "the network-facing server; a node with no SysOp could "
+                "never be administered once it's running"
+            )
         servers = await _start_servers(config, db, session_handler, throttle)
 
         if shutdown_event is None:

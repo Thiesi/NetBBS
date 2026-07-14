@@ -697,4 +697,238 @@ MIGRATIONS = [
             ON channel_invitations(channel_id, invited_user_id, status);
         """,
     ),
+    Migration(
+        description=(
+            "SysOp soft-disable (design doc -- SysOp foundation round): "
+            "a nullable ISO timestamp marking an account as reversibly "
+            "login-blocked, following the created_at/last_login_at "
+            "TEXT-ISO convention already used on this table. NULL means "
+            "not disabled."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN disabled_at TEXT;
+        """,
+    ),
+    Migration(
+        description=(
+            "Hard-delete support for user accounts (design doc -- SysOp "
+            "foundation round): every foreign key into users(id) "
+            "currently uses SQLite's bare default (NO ACTION), so "
+            "deleting a user row today just raises IntegrityError if "
+            "anything still references it. This adds real ON DELETE "
+            "behavior across every referencing table, via the same "
+            "table-rebuild pattern rounds 37/40/41 already used for "
+            "channel_messages (SQLite has no ALTER TABLE to add a "
+            "foreign-key clause in place). Two shapes, chosen per "
+            "table: content authorship (posts/files) goes ON DELETE SET "
+            "NULL -- both tables already carry a denormalized "
+            "author/uploader label+fingerprint specifically so display "
+            "survives account removal, so only the live FK needs to go; "
+            "everything else referencing users(id) is administrative "
+            "data that's meaningless once the account is gone "
+            "(moderator grants, channel membership/invitations, "
+            "preferences, restrictions, and both blocklist columns), "
+            "so those go ON DELETE CASCADE -- blocklist.local_user_id "
+            "specifically cannot be SET NULL despite being nullable: "
+            "its own CHECK requires exactly one of fingerprint/"
+            "local_user_id to be set, and a locally-blocked row has no "
+            "fingerprint to fall back on, so SET NULL would leave both "
+            "columns NULL and violate that CHECK the moment the "
+            "blocked account is deleted (caught by actually running "
+            "the migration-cascade test against a seeded row, not by "
+            "inspection). The "
+            "audit log is its own case: both actor and target go ON "
+            "DELETE SET NULL, since an audit trail should survive the "
+            "account it names, not be truncated or blocked by its "
+            "removal. posts.parent_post_id's self-reference is safe to "
+            "rebuild the same way as every other table here -- SQLite "
+            "only checks foreign-key constraints at the end of a "
+            "statement, not per-row, so the implicit DELETE a DROP "
+            "TABLE performs under a table that is its own parent still "
+            "ends with zero rows and nothing left to violate. Nothing "
+            "outside this migration's own nine tables holds a foreign "
+            "key into any of them except that one self-reference."
+        ),
+        sql="""
+        CREATE TABLE posts_new (
+            id                  INTEGER PRIMARY KEY,
+            post_id             TEXT NOT NULL UNIQUE,
+            board_id            INTEGER NOT NULL REFERENCES boards(id),
+            parent_post_id      TEXT REFERENCES posts(post_id),
+            author_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            author_label        TEXT NOT NULL,
+            author_fingerprint  TEXT,
+            subject             TEXT NOT NULL,
+            body                TEXT NOT NULL,
+            created_at          TEXT NOT NULL,
+            status              TEXT NOT NULL DEFAULT 'approved' CHECK (status IN ('pending', 'approved', 'expired')),
+            pinned              INTEGER NOT NULL DEFAULT 0,
+            exempt_from_expiry  INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO posts_new
+            SELECT id, post_id, board_id, parent_post_id, author_user_id, author_label,
+                author_fingerprint, subject, body, created_at, status, pinned, exempt_from_expiry
+            FROM posts;
+        DROP TABLE posts;
+        ALTER TABLE posts_new RENAME TO posts;
+        CREATE INDEX idx_posts_board_id ON posts(board_id);
+        CREATE INDEX idx_posts_board_id_created_at_post_id ON posts(board_id, created_at, post_id);
+        CREATE INDEX idx_posts_board_id_status_created_at_post_id ON posts(board_id, status, created_at, post_id);
+
+        CREATE TABLE files_new (
+            id                    INTEGER PRIMARY KEY,
+            file_id               TEXT NOT NULL UNIQUE,
+            area_id               INTEGER NOT NULL REFERENCES file_areas(id),
+            filename              TEXT NOT NULL,
+            description           TEXT,
+            size_bytes            INTEGER NOT NULL,
+            sha256                TEXT NOT NULL,
+            storage_path          TEXT NOT NULL,
+            uploader_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            uploader_label        TEXT NOT NULL,
+            uploader_fingerprint  TEXT,
+            created_at            TEXT NOT NULL,
+            status                TEXT NOT NULL DEFAULT 'approved' CHECK (status IN ('pending', 'approved', 'expired')),
+            pinned                INTEGER NOT NULL DEFAULT 0,
+            exempt_from_expiry    INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO files_new
+            SELECT id, file_id, area_id, filename, description, size_bytes, sha256, storage_path,
+                uploader_user_id, uploader_label, uploader_fingerprint, created_at, status, pinned,
+                exempt_from_expiry
+            FROM files;
+        DROP TABLE files;
+        ALTER TABLE files_new RENAME TO files;
+        CREATE INDEX idx_files_area_id ON files(area_id);
+        CREATE INDEX idx_files_area_id_created_at_file_id ON files(area_id, created_at, file_id);
+        CREATE INDEX idx_files_area_id_status_created_at_file_id ON files(area_id, status, created_at, file_id);
+
+        CREATE TABLE moderator_grants_new (
+            id                  INTEGER PRIMARY KEY,
+            user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            object_type         TEXT NOT NULL CHECK (object_type IN ('board', 'file_area', 'channel')),
+            object_id           INTEGER,
+            permissions         INTEGER NOT NULL,
+            granted_by_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at          TEXT NOT NULL
+        );
+        INSERT INTO moderator_grants_new
+            SELECT id, user_id, object_type, object_id, permissions, granted_by_user_id, created_at
+            FROM moderator_grants;
+        DROP TABLE moderator_grants;
+        ALTER TABLE moderator_grants_new RENAME TO moderator_grants;
+        CREATE UNIQUE INDEX idx_moderator_grants_per_object
+            ON moderator_grants(user_id, object_type, object_id)
+            WHERE object_id IS NOT NULL;
+        CREATE UNIQUE INDEX idx_moderator_grants_blanket
+            ON moderator_grants(user_id, object_type)
+            WHERE object_id IS NULL;
+        CREATE INDEX idx_moderator_grants_object
+            ON moderator_grants(object_type, object_id);
+
+        CREATE TABLE channel_restrictions_new (
+            id                   INTEGER PRIMARY KEY,
+            channel_id           INTEGER NOT NULL REFERENCES channels(id),
+            user_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind                 TEXT NOT NULL CHECK (kind IN ('mute', 'ban')),
+            expires_at           TEXT,
+            imposed_by_user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            reason               TEXT,
+            created_at           TEXT NOT NULL,
+            UNIQUE (channel_id, user_id, kind)
+        );
+        INSERT INTO channel_restrictions_new
+            SELECT id, channel_id, user_id, kind, expires_at, imposed_by_user_id, reason, created_at
+            FROM channel_restrictions;
+        DROP TABLE channel_restrictions;
+        ALTER TABLE channel_restrictions_new RENAME TO channel_restrictions;
+        CREATE INDEX idx_channel_restrictions_lookup
+            ON channel_restrictions(channel_id, user_id, kind);
+
+        CREATE TABLE channel_members_new (
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            granted_by_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at          TEXT NOT NULL,
+            PRIMARY KEY (channel_id, user_id)
+        );
+        INSERT INTO channel_members_new
+            SELECT channel_id, user_id, granted_by_user_id, created_at
+            FROM channel_members;
+        DROP TABLE channel_members;
+        ALTER TABLE channel_members_new RENAME TO channel_members;
+
+        CREATE TABLE channel_invitations_new (
+            id                   INTEGER PRIMARY KEY,
+            channel_id           INTEGER NOT NULL REFERENCES channels(id),
+            invited_user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            invited_by_user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status               TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'revoked')),
+            created_at           TEXT NOT NULL,
+            expires_at           TEXT,
+            UNIQUE (channel_id, invited_user_id)
+        );
+        INSERT INTO channel_invitations_new
+            SELECT id, channel_id, invited_user_id, invited_by_user_id, status, created_at, expires_at
+            FROM channel_invitations;
+        DROP TABLE channel_invitations;
+        ALTER TABLE channel_invitations_new RENAME TO channel_invitations;
+        CREATE INDEX idx_channel_invitations_lookup
+            ON channel_invitations(channel_id, invited_user_id, status);
+
+        CREATE TABLE user_preferences_new (
+            user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            key      TEXT NOT NULL,
+            value    TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
+        );
+        INSERT INTO user_preferences_new SELECT user_id, key, value FROM user_preferences;
+        DROP TABLE user_preferences;
+        ALTER TABLE user_preferences_new RENAME TO user_preferences;
+
+        CREATE TABLE blocklist_new (
+            id                  INTEGER PRIMARY KEY,
+            fingerprint         TEXT,
+            -- CASCADE, not SET NULL: this table's own CHECK requires
+            -- exactly one of fingerprint/local_user_id to be set, and
+            -- a locally-blocked row has no fingerprint to fall back on
+            -- -- SET NULL would leave both columns NULL and violate
+            -- the CHECK the moment the blocked account is deleted.
+            -- With no persistent (fingerprint-based) identity left to
+            -- keep blocking, removing the row entirely is correct.
+            local_user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            reason              TEXT,
+            blocked_by_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at          TEXT NOT NULL,
+            CHECK ((fingerprint IS NOT NULL) != (local_user_id IS NOT NULL))
+        );
+        INSERT INTO blocklist_new
+            SELECT id, fingerprint, local_user_id, reason, blocked_by_user_id, created_at
+            FROM blocklist;
+        DROP TABLE blocklist;
+        ALTER TABLE blocklist_new RENAME TO blocklist;
+        CREATE UNIQUE INDEX idx_blocklist_fingerprint
+            ON blocklist(fingerprint) WHERE fingerprint IS NOT NULL;
+        CREATE UNIQUE INDEX idx_blocklist_local_user_id
+            ON blocklist(local_user_id) WHERE local_user_id IS NOT NULL;
+
+        CREATE TABLE moderation_log_new (
+            id                INTEGER PRIMARY KEY,
+            actor_user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            action            TEXT NOT NULL,
+            object_type       TEXT,
+            object_id         INTEGER,
+            target_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            detail            TEXT,
+            created_at        TEXT NOT NULL
+        );
+        INSERT INTO moderation_log_new
+            SELECT id, actor_user_id, action, object_type, object_id, target_user_id, detail, created_at
+            FROM moderation_log;
+        DROP TABLE moderation_log;
+        ALTER TABLE moderation_log_new RENAME TO moderation_log;
+        CREATE INDEX idx_moderation_log_object ON moderation_log(object_type, object_id, created_at);
+        CREATE INDEX idx_moderation_log_target_user ON moderation_log(target_user_id, created_at);
+        """,
+    ),
 ]

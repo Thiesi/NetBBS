@@ -4456,3 +4456,241 @@ it, and yes to permission-aware and /help <command>."
    intended behavior) rather than deleted, keeping coverage of the
    commands every user *does* see. Full suite re-run: **1001 passed, 1
    skipped** — actually run, not just syntax-checked.
+
+## Sign-off notes, round 56 (SysOp foundation: SYSOP_LEVEL, dual-purpose admin tool, bootstrap — implemented)
+
+First slice of §15's "SysOp admin tools (user/board/node management,
+beyond blocklists)" line — scoped, on Thiesi's confirmation, to the
+foundation plus user management only; node management (exposing the
+round-51 shutdown/session-registry machinery as an in-session command)
+and board/channel management are explicitly deferred to later rounds.
+
+Investigation before implementation turned up two things the one-line
+roadmap entry didn't anticipate: (1) there was no way to create a user
+account through the running system at all — `create_user`/
+`create_user_async` were only ever called by tests and a dev script —
+so this round had to add real account creation, not just management of
+accounts that already somehow exist; (2) accounts can be pubkey-only
+(no password at all, enforced by a CHECK constraint on `users`), which
+directly shaped the admin CLI tool's auth design below.
+
+1. **`SYSOP_LEVEL = 255`** (`netbbs/auth/users.py`) — a level, not a
+   separate flag/table, so it composes with the existing
+   `meets_level`/`require_level` gating everywhere else already uses
+   levels. Thiesi's own choice of 255 over a lower round number, to
+   make it visually unmistakable as the top of the range. Replaces the
+   `_DEMO_ELEVATED_LEVEL = 100` placeholder in `login_flow.py`, which
+   only ever printed "(You have elevated access.)" after login and was
+   explicitly documented as not a real SysOp constant.
+2. **Dual-purpose admin tool — one shared implementation, two entry
+   points.** Thiesi's own idea, refined during discussion: a gated
+   `[A]dmin` option on the main menu inside an authenticated BBS
+   session (`login_flow.py`, gated on `meets_level(user, SYSOP_LEVEL)`
+   both for the menu letter's visibility and its dispatch, so a client
+   typing "a" blind still gets refused), and a standalone local CLI
+   tool run as `python -m netbbs.admin` (mirroring how the node itself
+   runs as `python -m netbbs` — no `[project.scripts]` entries exist in
+   `pyproject.toml`, so this follows that existing convention rather
+   than introducing packaging). Both call the exact same
+   `netbbs.net.admin_flow.admin_menu(session, db, user)` — no command
+   logic is duplicated between them.
+3. **`LocalCLISession`** (`netbbs/net/local_cli.py`) — a new `Session`
+   implementation over local stdin/stdout, modeled directly on
+   `TelnetSession`: `read_line`/`read_key` delegate entirely to
+   `netbbs.net.char_input` (echo, backspace, UTF-8, history, Tab
+   completion all reused, none of it reimplemented), so this class only
+   supplies raw bytes in and CRLF-normalized text out. The one
+   genuinely new, platform-specific piece — putting the local terminal
+   into raw/cbreak mode for single-keystroke `read_key()` to work over
+   real stdin — is isolated in its own small module,
+   `netbbs/net/local_terminal.py` (POSIX `termios`/`tty.setraw`;
+   Windows no-op, since `msvcrt.getch()` already reads unbuffered per
+   call). `LocalCLISession`'s byte-read functions are constructor-
+   injectable specifically so the class itself stays unit-testable via
+   a fake byte source, with the untestable-here platform sliver kept as
+   thin as possible around it.
+4. **CLI auth: no credential check, ever, when run locally.** Local
+   shell/filesystem access to the database file is already the real
+   trust boundary — the same reasoning `sudo` relies on for a shell
+   that already has root-equivalent access. This resolved a genuine
+   design gap Thiesi caught directly: a password prompt would
+   permanently lock out a pubkey-only SysOp, since SSH's own handshake
+   already proves private-key possession before `authorize_public_key`
+   is ever called (see that function's docstring) and there is no local
+   equivalent to fall back on at a bare terminal. Instead,
+   `netbbs/admin/__main__.py`'s `_resolve_actor` only determines *which*
+   SysOp to attribute actions to, for the audit log: `--as <username>`
+   if given; auto-selected if there is exactly one active SysOp
+   (unambiguous, no cross-system name-guessing involved — an earlier
+   idea to default to the local OS shell username was explicitly
+   rejected during discussion, since BBS usernames have no required
+   relationship to OS account names and a coincidental match could
+   silently misattribute an action); an interactive picker
+   (`netbbs.net.picker.pick_item`) otherwise. Disabled SysOp accounts
+   are excluded from all three paths, matching `count_sysops`.
+5. **Bootstrap.** If zero active SysOp accounts exist, `_resolve_actor`
+   skips the above entirely and calls `_bootstrap_first_sysop`, which
+   walks through the same create-account prompts the admin menu's own
+   create screen uses and creates the first `SYSOP_LEVEL` account. Its
+   audit-log entry has a genuine chicken-and-egg problem — no actor
+   exists yet to attribute the action to — resolved by self-attributing
+   the entry to the account it just created, with a `detail` string
+   recording that it was a bootstrap creation.
+6. **The network-facing server refuses to start at all with zero
+   SysOps.** `netbbs.__main__.run()` now checks `count_sysops(db) == 0`
+   as the first statement inside its existing `try:` block, before any
+   listener starts, and raises the existing `StartupError` (already
+   caught by `main()`) rather than a new exception type. A node with no
+   SysOp could never be administered once running over the network — no
+   one could create a second account, disable a rogue one, or recover
+   from any mistake — so this fails loudly at startup rather than
+   running in a permanently-stuck state. Every pre-existing test in
+   `tests/test_main_lifecycle.py` needed its shared `_config()` helper
+   updated to seed a SysOp by default (a real regression this change
+   would otherwise have caused across that whole file, caught by
+   actually running the suite, not by inspection) — a `seed_sysop=False`
+   opt-out was added specifically for the new tests exercising the
+   refusal itself.
+7. **Testing:** `tests/test_admin_flow.py` (the shared menu, via a
+   scripted `FakeSession`), `tests/test_local_cli_session.py`
+   (`LocalCLISession` via an injected fake byte source — no real
+   terminal), `tests/test_admin_cli.py` (`_resolve_actor`/
+   `_bootstrap_first_sysop`/`run_admin_session`), extensions to
+   `tests/test_main_lifecycle.py` (zero-SysOp refusal, including a
+   disabled-sole-SysOp variant constructed via raw SQL since the normal
+   `set_user_disabled` API's own lockout guard makes that state
+   unreachable through it), and `tests/test_local_terminal_raw_mode.py`
+   — a POSIX-only, `pty`-based test of `raw_terminal()`'s actual mode
+   switching, skipped on Windows. That last one cannot be run or
+   verified in the current Windows dev sandbox — flagged the same way
+   this project already flags SSH/Zmodem/xterm.js interop as needing a
+   real check on POSIX/NetBSD hardware before being considered fully
+   closed out. A `LocalCLISession` unit test itself surfaced a real,
+   separate pytest-capture gotcha (not a bug in the code under test):
+   patching `sys.stdout` from inside a `@pytest.fixture` function
+   silently didn't take effect under plain `pytest -q`, because
+   pytest's own capture plugin resets `sys.stdout` at the start of each
+   test's "call" phase, after fixture "setup" has already run — fixed
+   by moving the patch into the test bodies themselves. Full suite
+   re-run alongside round 57 below.
+
+## Sign-off notes, round 57 (SysOp user management: create/promote/demote/disable/delete — implemented)
+
+Built on round 56's foundation. The five actions Thiesi asked for,
+confirmed during discussion: create (SysOp-only for now — public self-
+registration is a separate, deferred feature), promote/demote, soft-
+disable/enable, and hard delete — all reachable identically from both
+the in-BBS `[A]dmin` menu and `python -m netbbs.admin`, since both call
+`netbbs.net.admin_flow.admin_menu`.
+
+1. **Schema: `users.disabled_at`** — a nullable ISO timestamp, `NULL` =
+   not disabled, following the existing `created_at`/`last_login_at`
+   TEXT-ISO convention already on that table. Checked at all three auth
+   entry points (`_finish_password_login`, `authenticate_keypair`,
+   `authorize_public_key`) with the same generic failure a wrong
+   credential produces — a disabled account isn't distinguishable from
+   a wrong password/signature, per `AuthError`'s existing anti-
+   enumeration docstring.
+2. **Schema: real `ON DELETE` behavior for hard delete.** Every foreign
+   key into `users(id)` previously used SQLite's bare default (`NO
+   ACTION`), so deleting a user row would just raise `IntegrityError`.
+   Added via the same table-rebuild pattern rounds 37/40/41 already
+   used for `channel_messages` (SQLite has no `ALTER TABLE` to add a
+   foreign-key clause in place), across all nine referencing tables in
+   one migration. Two shapes: `posts.author_user_id`/
+   `files.uploader_user_id` go `SET NULL` (both tables already carry a
+   denormalized author/uploader label+fingerprint specifically so
+   display survives account removal — confirmed by reading the existing
+   round-2/round-18 comments before designing this, not reinvented);
+   `moderator_grants`, `channel_restrictions`, `channel_members`,
+   `channel_invitations`, `user_preferences`, and `blocklist.
+   blocked_by_user_id` go `CASCADE` (administrative data, meaningless
+   once the account is gone); `moderation_log.actor_user_id`/
+   `target_user_id` (the latter already nullable, the former newly
+   made so) go `SET NULL`, since an audit trail should survive the
+   account it names rather than being truncated or blocked by its
+   removal. `posts.parent_post_id`'s self-reference — the one foreign
+   key pointing *into* any of these nine tables — needed no special
+   handling: SQLite only checks foreign-key constraints at the end of a
+   statement, not per row, so the implicit `DELETE` a `DROP TABLE`
+   performs on a table that's its own parent still ends with zero rows
+   and nothing left to violate.
+   - **A real bug in the original design, caught by actually running
+     the migration-cascade test against seeded data, not by
+     inspection:** `blocklist.local_user_id` was first written as `SET
+     NULL`, matching the posts/files pattern. But that table's own
+     `CHECK ((fingerprint IS NOT NULL) != (local_user_id IS NOT NULL))`
+     requires *exactly one* of the two columns to be set — a locally-
+     blocked row (no fingerprint) hitting `SET NULL` on
+     `local_user_id` would leave both columns `NULL` simultaneously and
+     violate its own table's `CHECK` the moment the blocked account was
+     deleted. Fixed to `CASCADE` instead: with no fingerprint to fall
+     back on, the block itself is no longer meaningful once the account
+     is gone, so removing the row is correct, not just constraint-
+     satisfying. Recorded here specifically because this is exactly the
+     kind of latent bug this project's testing discipline exists to
+     catch — a plausible-looking `SET NULL` that only breaks under a
+     specific, easy-to-miss-by-inspection combination of an existing
+     CHECK constraint and nullable-but-not-independently-nullable
+     columns.
+3. **`netbbs/auth/users.py`: `UserManagementError`, `count_sysops`,
+   `set_user_level`, `set_user_disabled`, `delete_user`.** All three
+   mutating functions share one lockout guard
+   (`_refuse_if_last_sysop`): refuses an action that would leave the
+   node with zero *active* SysOps, where "active" deliberately excludes
+   already-disabled accounts — an already-disabled SysOp can't rescue a
+   lockout, so it shouldn't count toward preventing one; this is an
+   interpretation call beyond the literal "count SysOp accounts" spec,
+   made explicit here rather than left implicit. Self-delete/self-
+   disable of the account you're currently attributed as is allowed,
+   gated only by that same lockout guard — confirmed with Thiesi, no
+   extra special-casing. All three audit-log via the existing
+   `netbbs.moderation.log.record_action` (no second logging mechanism
+   built). `delete_user` logs *before* deleting, not after: on a self-
+   delete, `record_action`'s own `actor_user_id` insert would otherwise
+   reference a row that's already gone by the time it ran; logging
+   first also means `target_user_id` naturally goes `NULL` via the same
+   cascade once the row disappears, with `detail` preserving the
+   deleted username regardless. `auth/users.py` importing
+   `netbbs.moderation.log.record_action` at module level would be
+   circular (that module already imports `User` from `auth.users` for
+   its own type hint), resolved with a small function-local import in
+   each of the three call sites rather than restructuring either
+   module.
+4. **`netbbs/identity/keys.py`: `parse_verify_key`.** Accepts either
+   this project's own base64 raw-key form or a standard OpenSSH public-
+   key line (`ssh-ed25519 AAAA... comment`) — the two forms a SysOp
+   realistically has on hand when creating a pubkey account, needed
+   because the admin create-user flow has to support password, pubkey,
+   or both, matching what `create_user` already allows underneath
+   (otherwise the tool would be strictly less capable than the library
+   it wraps, and a key-only account could never be created through it).
+5. **`netbbs/net/admin_flow.py`: the shared menu itself** — Create/
+   List/Promote-demote/Enable-disable/Delete/Back, following the
+   existing submenu shape (`_edit_profile`'s own draw-function-plus-
+   dispatch-loop pattern, bell-only-on-invalid-key per round 52).
+   Delete requires re-typing the exact username to confirm before
+   proceeding — the first destructive-confirmation prompt of its kind
+   in this codebase (mute/ban/kick execute directly today) — given
+   Thiesi's choice to support hard delete alongside soft-disable and
+   its irreversibility.
+6. **Testing:** `tests/test_user_management.py` (the five functions,
+   the lockout guard both firing and correctly *not* firing once a
+   second active SysOp exists, disabled-account rejection at all three
+   auth entry points), `tests/test_migration_user_cascade.py` (real
+   end-to-end cascade/`SET NULL` verification against a seeded SQLite
+   file, including the self-reference regression check and the
+   blocklist fix above), plus the create/list/promote/disable/delete
+   coverage already listed under round 56's `test_admin_flow.py`. Full
+   suite re-run across both rounds: **1062 passed, 3 skipped** (1 pre-
+   existing plus the 2 new POSIX-only local-terminal tests) — actually
+   run, not just syntax-checked.
+
+**Flagged, not blocking further work:** the same category of gap this
+project's history already carries for SSH/Zmodem/xterm.js — real
+interactive verification of `python -m netbbs.admin` and the in-BBS
+`[A]dmin` menu from an actual terminal (not just this sandbox's scripted
+`FakeSession` tests), and of `raw_terminal()`'s POSIX behavior on real
+NetBSD hardware, haven't been done from this sandboxed dev environment.
+Worth a direct check from Thiesi's own machine before considering this
+round fully closed out.
