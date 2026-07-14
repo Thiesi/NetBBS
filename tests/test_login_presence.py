@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from netbbs.auth.users import User
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
@@ -19,6 +21,14 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
+from netbbs.storage.database import Database
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
 
 
 def _throttle_config(**overrides) -> ThrottleConfig:
@@ -83,7 +93,7 @@ class _SpyPresence(PresenceRegistry):
         super().leave(username)
 
 
-def test_handle_session_enters_and_leaves_presence_around_the_main_menu(monkeypatch):
+def test_handle_session_enters_and_leaves_presence_around_the_main_menu(db, monkeypatch):
     user = User(
         id=1,
         username="alice",
@@ -103,7 +113,7 @@ def test_handle_session_enters_and_leaves_presence_around_the_main_menu(monkeypa
         presence = _SpyPresence()
         session = FakeSession(["alice", "correct-password"], keys=["l"])  # "l" = logoff immediately
         config = _throttle_config()
-        await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
 
         assert presence.entered == ["alice"]
         assert presence.left == ["alice"]
@@ -112,7 +122,7 @@ def test_handle_session_enters_and_leaves_presence_around_the_main_menu(monkeypa
     asyncio.run(scenario())
 
 
-def test_presence_left_even_if_main_menu_raises(monkeypatch):
+def test_presence_left_even_if_main_menu_raises(db, monkeypatch):
     """The leave() side of the hook is in a `finally`, so an
     exception during the authenticated portion must not leak an
     "online forever" session count."""
@@ -140,7 +150,7 @@ def test_presence_left_even_if_main_menu_raises(monkeypatch):
         session = FakeSession(["alice", "correct-password"])
         config = _throttle_config()
         try:
-            await login_flow.handle_session(session, object(), ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
+            await login_flow.handle_session(session, db, ChatHub(), presence, MessageMailbox(), _throttle(config), config, ActiveSessionRegistry(), MaintenanceMode())
         except RuntimeError:
             pass
 

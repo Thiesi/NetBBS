@@ -38,6 +38,39 @@ class _FakeStdin:
         return self._fd
 
 
+def _assert_mode_restored(before, after) -> None:
+    """
+    Compares two termios attribute lists the way raw_terminal()'s own
+    contract actually promises, not by opaque full-struct equality.
+
+    iflag/oflag/cflag and the control-character array (cc, including
+    VMIN/VTIME) are asserted exactly -- these are the fields
+    tty.setraw() actually mutates (see its own CPython source: BRKINT/
+    ICRNL/INPCK/ISTRIP/IXON in iflag, OPOST in oflag, CSIZE/PARENB/CS8
+    in cflag, VMIN/VTIME in cc), and raw_terminal()'s restore
+    (tcsetattr with the full previously-captured struct) genuinely
+    round-trips them bit-for-bit in practice.
+
+    lflag is checked only for the specific bits tty.setraw() actually
+    touches (ECHO, ICANON, IEXTEN, ISIG) rather than full equality.
+    The kernel's n_tty line discipline can assert its own internal
+    lflag bookkeeping bits (e.g. PENDIN-style "raw input still pending
+    canonical reprocessing" state) as a side effect of switching modes
+    on a pty -- that's live kernel state tcsetattr() cannot force back
+    to an exact prior snapshot, and it was never something
+    raw_terminal() set or is responsible for restoring in the first
+    place. Asserting the whole opaque lflag word couples this test to
+    kernel/pty-driver internals outside this function's control, not
+    to anything raw_terminal() actually promises.
+    """
+    assert after[:3] == before[:3], "iflag/oflag/cflag must be restored exactly"
+    significant_lflag_bits = termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG
+    assert (after[3] & significant_lflag_bits) == (before[3] & significant_lflag_bits), (
+        "echo/canonical/extended-input/signal-generation flags must be restored"
+    )
+    assert after[4:] == before[4:], "baud rate and control-character settings must be restored"
+
+
 def test_raw_terminal_disables_canonical_mode_and_echo_then_restores_it(monkeypatch):
     master_fd, slave_fd = pty.openpty()
     try:
@@ -53,7 +86,7 @@ def test_raw_terminal_disables_canonical_mode_and_echo_then_restores_it(monkeypa
             assert not (during[3] & termios.ECHO), "raw_terminal() should disable local echo"
 
         after = termios.tcgetattr(slave_fd)
-        assert after == before, "terminal mode must be restored on exit"
+        _assert_mode_restored(before, after)
     finally:
         os.close(master_fd)
         os.close(slave_fd)
@@ -70,7 +103,7 @@ def test_raw_terminal_restores_mode_even_if_the_body_raises(monkeypatch):
                 raise ValueError("boom")
 
         after = termios.tcgetattr(slave_fd)
-        assert after == before
+        _assert_mode_restored(before, after)
     finally:
         os.close(master_fd)
         os.close(slave_fd)

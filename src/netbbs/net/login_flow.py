@@ -45,19 +45,11 @@ from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.throttle import LoginThrottle
+from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
-
-WELCOME_BANNER = colored(
-    "================================================\r\n"
-    "  Welcome to NetBBS\r\n"
-    "  NetBBS Link -- coming soon\r\n"
-    "================================================",
-    fg_color=HEADER_COLOR,
-    bold=True,
-)
 
 _MAX_LOGIN_ATTEMPTS = 3
 
@@ -183,7 +175,7 @@ async def _run_authenticated_session(
         return
 
     try:
-        await session.write_line(WELCOME_BANNER)
+        await session.write_line(load_welcome_banner(db))
         try:
             login_result = await asyncio.wait_for(
                 _login(

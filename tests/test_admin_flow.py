@@ -638,3 +638,78 @@ def test_grant_blanket_across_all_channels(db, sysop):
     assert has_permission(
         db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MANAGE_MEMBERS
     )
+
+
+# -- welcome banner (design doc -- welcome banner round) -------------------
+
+
+def test_welcome_banner_option_appears_in_admin_menu(db, sysop):
+    # menu_key("W", "elcome banner") highlights the "W" separately, so
+    # the contiguous literal text is "elcome banner", not "Welcome banner".
+    session = FakeSession(["b"])
+    _run(session, db, sysop)
+    assert "elcome banner" in _written_text(session)
+
+
+def test_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, sysop):
+    from netbbs.net.welcome_banner import is_welcome_banner_enabled
+
+    session = FakeSession(["w", "e", "b", "b"])
+    _run(session, db, sysop)
+    assert "No banner file found" in _written_text(session)
+    assert is_welcome_banner_enabled(db) is False
+
+
+def test_enable_with_oversized_file_shows_friendly_error_and_leaves_flag_disabled(db, sysop):
+    from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path, is_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
+    session = FakeSession(["w", "e", "b", "b"])
+    _run(session, db, sysop)
+    assert "over the" in _written_text(session)
+    assert "byte limit" in _written_text(session)
+    assert is_welcome_banner_enabled(db) is False
+
+
+def test_enable_with_valid_file_present_succeeds_and_sets_flag(db, sysop):
+    from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"MY CUSTOM BANNER")
+    session = FakeSession(["w", "e", "b", "b"])
+    _run(session, db, sysop)
+    assert "Welcome banner enabled" in _written_text(session)
+    assert is_welcome_banner_enabled(db) is True
+
+
+def test_disable_reverts_flag_without_deleting_file(db, sysop):
+    from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"MY CUSTOM BANNER")
+    set_welcome_banner_enabled(db, True)
+
+    session = FakeSession(["w", "d", "b", "b"])
+    _run(session, db, sysop)
+    assert "Reverted to the default banner" in _written_text(session)
+    assert is_welcome_banner_enabled(db) is False
+    assert banner_path(db).read_bytes() == b"MY CUSTOM BANNER"
+
+
+def test_preview_screen_renders_resolved_banner_content(db, sysop):
+    from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(b"MY DISTINCTIVE BANNER TEXT")
+    set_welcome_banner_enabled(db, True)
+
+    session = FakeSession(["w", "p", "b", "b"])
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "MY DISTINCTIVE BANNER TEXT" in text
+    assert "(showing your custom file)" in text
+
+
+def test_preview_screen_when_disabled_shows_default_and_says_so(db, sysop):
+    session = FakeSession(["w", "p", "b", "b"])
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "showing the DEFAULT banner" in text
+    assert "enabled=False" in text

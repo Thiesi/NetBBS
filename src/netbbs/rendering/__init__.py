@@ -20,6 +20,7 @@ from netbbs.rendering.ansi import (
     fg,
     move_cursor,
 )
+from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.menu import menu_key
 from netbbs.rendering.reflow import DEFAULT_WIDTH, reflow, truncate
 from netbbs.rendering.sanitize import sanitize_text
@@ -39,6 +40,7 @@ __all__ = [
     "clear_line",
     "clear_screen",
     "colored",
+    "decode_ansi_bytes",
     "fg",
     "move_cursor",
     "menu_key",

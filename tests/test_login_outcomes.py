@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from netbbs.auth.users import AuthError, User
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
@@ -9,6 +11,14 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
+from netbbs.storage.database import Database
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
 
 
 def _throttle_config(**overrides) -> ThrottleConfig:
@@ -54,7 +64,7 @@ class FakeSession:
         return "".join(self.written)
 
 
-def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
+def test_blocked_user_does_not_receive_failed_attempt_message(db, monkeypatch):
     user = User(
         id=1,
         username="blocked",
@@ -72,7 +82,7 @@ def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
 
     async def scenario() -> None:
         session = FakeSession(["blocked", "correct-password"])
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), _throttle(), _throttle_config(), ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), _throttle(), _throttle_config(), ActiveSessionRegistry(), MaintenanceMode())
         assert "Your access to this system has been revoked." in session.output
         assert "Too many failed attempts" not in session.output
         assert "Welcome, blocked" not in session.output
@@ -80,7 +90,7 @@ def test_blocked_user_does_not_receive_failed_attempt_message(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_exhausted_attempts_receive_failed_attempt_message(monkeypatch):
+def test_exhausted_attempts_receive_failed_attempt_message(db, monkeypatch):
     async def reject(db, username, password):
         raise AuthError("login failed")
 
@@ -97,7 +107,7 @@ def test_exhausted_attempts_receive_failed_attempt_message(monkeypatch):
                 "wrong-3",
             ]
         )
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), _throttle(), _throttle_config(), ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), _throttle(), _throttle_config(), ActiveSessionRegistry(), MaintenanceMode())
         assert "Too many failed attempts. Goodbye." in session.output
         assert "Your access to this system has been revoked." not in session.output
 

@@ -81,6 +81,12 @@ from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
+from netbbs.net.welcome_banner import (
+    MAX_BANNER_SIZE_BYTES,
+    load_welcome_banner,
+    set_welcome_banner_enabled,
+    welcome_banner_status,
+)
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
@@ -134,6 +140,10 @@ async def admin_menu(
             await session.write_line("")
             await _node_menu(session, db, user, node_controls)
             await _draw_admin_menu(session, node_controls)
+        elif choice == "w":
+            await session.write_line("")
+            await _welcome_banner_menu(session, db, user)
+            await _draw_admin_menu(session, node_controls)
         elif choice == "m":
             await session.write_line("")
             await _content_menu(session, db, user)
@@ -151,6 +161,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
         menu_key("E", "nable/disable"),
         menu_key("D", "elete user"),
         menu_key("M", "anage boards/areas/channels"),
+        menu_key("W", "elcome banner"),
     ]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
@@ -490,6 +501,102 @@ async def _shutdown_screen(session: Session, db: Database, actor: User, node_con
         )
     )
     await session.write_line("Shutdown sequence started.")
+
+
+# -- welcome banner (design doc -- welcome banner round, Round A of a
+# three-part skinning initiative) -------------------------------------
+
+
+async def _welcome_banner_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_welcome_banner_menu(session, db)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "p":
+            await session.write_line("")
+            await _preview_welcome_banner_screen(session, db)
+            await _draw_welcome_banner_menu(session, db)
+        elif choice == "e":
+            await session.write_line("")
+            await _enable_welcome_banner_screen(session, db, actor)
+            await _draw_welcome_banner_menu(session, db)
+        elif choice == "d":
+            await session.write_line("")
+            await _disable_welcome_banner_screen(session, db, actor)
+            await _draw_welcome_banner_menu(session, db)
+        else:
+            await session.write("\a")
+
+
+async def _draw_welcome_banner_menu(session: Session, db: Database) -> None:
+    status = welcome_banner_status(db)
+    state = "ENABLED" if status.enabled else "disabled"
+    if status.exists:
+        file_state = f"{status.size_bytes} bytes"
+    else:
+        file_state = "missing"
+    header = colored("Welcome banner:", fg_color=HEADER_COLOR, bold=True)
+    detail = f"{state} -- file: {status.path} ({file_state})"
+    options = "  ".join(
+        [menu_key("P", "review"), menu_key("E", "nable"), menu_key("D", "isable"), menu_key("B", "ack")]
+    )
+    await session.write_line(f"\r\n{header} {detail}\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _preview_welcome_banner_screen(session: Session, db: Database) -> None:
+    """Renders the exact banner `netbbs.net.login_flow` would show at
+    login right now -- the same `load_welcome_banner` call, used as a
+    smoke test of the loading path itself, not a separate rendering."""
+    status = welcome_banner_status(db)
+    await session.write_line(colored("\r\nPreviewing welcome banner as shown at login:", fg_color=MUTED_COLOR))
+    await session.write_line(load_welcome_banner(db))
+    if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
+        await session.write_line(colored("(showing your custom file)", fg_color=MUTED_COLOR))
+    else:
+        await session.write_line(
+            colored(
+                f"(showing the DEFAULT banner -- enabled={status.enabled}, file exists={status.exists})",
+                fg_color=MUTED_COLOR,
+            )
+        )
+
+
+async def _enable_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
+    status = welcome_banner_status(db)
+    if not status.exists:
+        await session.write_line(
+            colored(
+                f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
+    if (status.size_bytes or 0) > MAX_BANNER_SIZE_BYTES:
+        await session.write_line(
+            colored(
+                f"Banner file at {status.path} is {status.size_bytes} bytes, over the "
+                f"{MAX_BANNER_SIZE_BYTES} byte limit -- not enabling.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
+
+    set_welcome_banner_enabled(db, True)
+    record_action(db, actor=actor, action="enable_welcome_banner", detail=str(status.path))
+    await session.write_line("Welcome banner enabled. Use [P]review to verify it looks right.")
+
+
+async def _disable_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
+    status = welcome_banner_status(db)
+    set_welcome_banner_enabled(db, False)
+    record_action(db, actor=actor, action="disable_welcome_banner", detail=str(status.path))
+    await session.write_line(
+        f"Reverted to the default banner. Your file at {status.path} was left in place."
+    )
 
 
 # -- boards & areas (design doc -- board/area management round) -----------

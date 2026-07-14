@@ -5245,3 +5245,159 @@ are now down to two: ANSI-art login/welcome screens (needs real design
 decisions first — file format/storage, how a SysOp sets one) and the
 TUI screen-buffer/fullscreen-editor pair (the largest remaining piece
 by design, per round 26).
+
+## Sign-off notes, round 63 (welcome banner: ANSI art login screen, Round A of a three-part skinning initiative — implemented)
+
+1. **Phase 2's last two line items reframed as related, not
+   independent — Thiesi's own insight, not a decision made
+   unilaterally mid-implementation.** Round 62's note treated "ANSI-art
+   login/welcome screens" and "the TUI screen-buffer/fullscreen-editor
+   pair" as two separate remaining gaps. Thiesi pointed out they're
+   coupled: he wants a SysOp to manage as much as possible *through the
+   BBS itself*, including an eventual in-BBS WYSIWYG ANSI art
+   viewer/editor (not a full paint program, but proper display +
+   editing), and wants the whole BBS eventually skinnable beyond just
+   the login screen. This directly echoes round 26's own reasoning for
+   the TUI abstraction — pairing it with "the fullscreen editor... the
+   actual reason it's needed" specifically so the abstraction isn't
+   designed without a real consumer to validate against. A WYSIWYG ANSI
+   editor is if anything a *better* validating consumer than the
+   originally-envisioned prose editor, since art editing is inherently
+   2D/cursor-addressable in a way line-based text editing can mostly
+   avoid. Agreed sequencing, confirmed with Thiesi: **Round A** (this
+   round) ships *display* of a pre-made ANSI file at login, no TUI
+   dependency; **Round B** (future, separate round) builds the TUI
+   screen-buffer abstraction + a WYSIWYG in-BBS ANSI editor, designed
+   against two real consumers (the ANSI editor and the originally-
+   planned prose post/message editor); **Round C** (future, separate
+   round) generalizes Round A's display mechanism beyond the login
+   screen to other hook points. Round A is deliberately scoped to stand
+   alone and ship real value now, without foreclosing B or C — see
+   point 5 below for what's deliberately left small rather than
+   over-built toward a generalized "skin" mechanism that doesn't exist
+   yet.
+2. **CP437-fallback decoding, not a required-UTF-8 or raw-bytes
+   scheme.** `netbbs.rendering.ansi_art.decode_ansi_bytes` tries UTF-8
+   first, falls back to the stdlib `cp437` codec (no new dependency) on
+   failure. `cp437` is a total function over all 256 byte values — it
+   never raises — so once the fallback is reached, decoding cannot
+   fail; verified directly (`test_decode_never_raises_for_any_single_
+   byte_value`, a 256-value sweep, plus a handful of deliberately
+   invalid-looking multi-byte sequences) rather than assumed from the
+   codec's documentation. Real scene-authored `.ans` files are raw
+   CP437 and will almost always fail strict UTF-8 decoding (their
+   high-bit bytes rarely form valid UTF-8 by chance), making the
+   try/fallback a reliable, deterministic heuristic; a SysOp who
+   directly authors valid UTF-8/Unicode content gets that path instead,
+   automatically. This content is trusted, SysOp-authored, and
+   deliberately bypasses `sanitize_text` entirely (which strips every
+   Unicode "Control" category character, ESC included — exactly what
+   real ANSI art needs to keep for cursor positioning and color) —
+   same trust tier as `colored()` output, documented explicitly in
+   `ansi_art.py`'s own module docstring so a future reader doesn't
+   "fix" this into passing through sanitization and silently destroy
+   real art.
+3. **Filesystem-only storage, no in-BBS upload in this round** —
+   mirrors `netbbs.net.ssh.ensure_host_key`'s established pattern
+   exactly: a single well-known file colocated with the database
+   (`<db_path>_welcome_banner.ans`), not a `node_config` TEXT column
+   (reserved for small string settings) and not the content-addressed
+   file-area storage scheme (built for many uploaded files, overkill
+   for one node-wide singleton). A SysOp places the file externally (a
+   normal ANSI-art-scene tool, or a download) — the enable/disable flag
+   lives separately in `node_config` (`netbbs.net.welcome_banner.
+   is_welcome_banner_enabled`/`set_welcome_banner_enabled`, not
+   `netbbs.config` itself — mirrors `netbbs.chat.scrollback`'s and
+   `netbbs.timeutil`'s own precedent of a feature module owning its
+   typed config wrapper rather than centralizing every wrapper in
+   `netbbs.config`), so a SysOp can revert to the default banner
+   without deleting their prepared file. Every failure mode the login-
+   time loader (`load_welcome_banner`) can hit — missing file, over the
+   256 KiB size cap, unreadable (`OSError`) — falls back to the
+   original hardcoded banner silently to the connecting user (never a
+   raw error shown to an anonymous pre-auth session) but logged
+   server-side at WARNING, so a SysOp can still diagnose a vanished or
+   broken file after enabling it.
+4. **A real regression, caught only by running the full suite — not by
+   inspection.** Ten pre-existing tests across `tests/test_login_
+   outcomes.py`, `tests/test_login_presence.py`, and `tests/test_login_
+   throttling.py` passed a bare `object()` as `db` to `handle_session`
+   — safe before this round, since nothing on those code paths touched
+   `db` before the point they intentionally diverged (an early
+   monkeypatched auth failure, an idle timeout, a deliberately
+   exhausted throttle). `load_welcome_banner(db)` is called earlier in
+   `_run_authenticated_session` than any of that — a fresh `AttributeError:
+   'object' object has no attribute 'connection'` on every one of those
+   ten tests. Fixed by giving each affected test a real `Database(tmp_path
+   / "node.db")` fixture in place of `object()`; two more `handle_session`
+   call sites (`tests/test_shutdown.py`'s maintenance-mode rejection,
+   `tests/test_main_lifecycle.py`'s monkeypatched-around-`_run_
+   authenticated_session` spy) were checked directly and confirmed safe
+   as-is, not just assumed safe from the absence of a test failure.
+5. **Deferred to Round B/C, deliberately, not oversights**: no caching
+   (re-reads from disk every login; a future editor's save path would
+   need its own invalidation story if this ever becomes worth
+   revisiting); size enforcement stays a login-time fallback rather
+   than an in-editor error, since there's no "save" path to enforce it
+   at yet; the config key and file path are named specifically for the
+   login banner (`welcome_banner_*`), not a generic "skin" concept —
+   Round C's job is generalizing display to multiple named hook points,
+   which will need its own shape (several keys/files, or a small
+   table — genuinely unclear yet), and guessing that shape now, before
+   Round C's real requirements exist, would repeat exactly the mistake
+   round 26 already flagged for the TUI abstraction itself.
+6. **Testing**: `tests/test_ansi_art.py` (new) — pure decode-logic
+   tests including the never-raises sweep. `tests/test_welcome_
+   banner.py` (new) — loader/status/flag behavior across disabled,
+   missing-file, oversized-file, valid-UTF-8, valid-CP437, and a
+   direct end-to-end `handle_session` smoke test with a missing and an
+   oversized banner file, confirming login proceeds normally rather
+   than raising — the actual risk this whole design defends against.
+   `tests/test_admin_flow.py` extended with the `[W]elcome banner`
+   submenu's own flows: option visibility, enable with no/oversized
+   file (friendly error, flag stays off), enable with a valid file,
+   disable (flag clears, file untouched), and preview in both the
+   custom-file and default-fallback states. Full suite re-run after
+   fixing the regression in point 4: **1175 passed, 3 skipped**.
+7. **An unrelated pre-existing test bug, found opportunistically when
+   Thiesi ran the suite on a real POSIX machine** (this sandbox is
+   Windows-only, where `tests/test_local_terminal_raw_mode.py`'s
+   `pty`/`termios`-based tests are skipped entirely — exactly the kind
+   of gap `netbbs.net.local_terminal`'s own module docstring already
+   flags): both of that file's tests asserted full byte-for-byte
+   equality of the entire termios attribute struct before/after
+   `raw_terminal()`'s context manager. On a real pty, one `lflag` bit
+   outside the set `tty.setraw()` (CPython's own implementation) ever
+   touches came back set that wasn't set before — traced via the exact
+   failure diff (`536872395 − 1483 = 2^29`, a single extra high bit)
+   to kernel-internal pty line-discipline bookkeeping (the `PENDIN`-
+   style "raw input still pending canonical reprocessing" family),
+   not anything `raw_terminal()` itself set or is responsible for
+   restoring. Confirmed this wasn't a real production bug before
+   touching anything: every other field (`iflag`/`oflag`/`cflag`/baud/
+   control-characters) matched exactly per the failure's own traceback,
+   and `raw_terminal()`'s restore path (`tcsetattr(fd, TCSADRAIN,
+   previous)`, capturing and replaying the *full* previous struct) is
+   the textbook-correct idiom — switching its restore mode to
+   `TCSAFLUSH` would have silently discarded any input a user typed
+   right as raw mode exits, trading real behavioral correctness for a
+   cosmetically stricter test. Fixed in the test instead: a shared
+   `_assert_mode_restored` helper checks `iflag`/`oflag`/`cflag`/cc
+   exactly (the fields `tty.setraw()` actually mutates) but only the
+   specific `lflag` bits it touches (`ECHO`/`ICANON`/`IEXTEN`/`ISIG`),
+   not the whole opaque word. Not independently re-verified on real
+   POSIX hardware from this sandbox — flagged for Thiesi to confirm on
+   his own next run, alongside this project's standing list of things
+   only checkable from real hardware.
+
+**Flagged, not blocking further work:** same category of gap this
+project's history already carries for anything involving real terminal
+rendering — actual visual verification of ANSI art displaying correctly
+(colors, cursor positioning, CP437 glyphs) in a real terminal client
+across Telnet/SSH/web hasn't been done outside this sandbox's scripted
+`FakeSession` tests, which check content/control-flow but can't confirm
+how it actually *looks*. Worth a direct check from Thiesi's own machine
+with a real `.ans` file before Round B (the WYSIWYG editor) builds on
+top of this. Round B and Round C remain fully unplanned beyond the
+shape agreed in point 1 — no implementation decisions have been made
+for either.

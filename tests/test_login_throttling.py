@@ -21,6 +21,14 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.throttle import LoginThrottle
+from netbbs.storage.database import Database
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
 
 
 def _throttle_config(**overrides) -> ThrottleConfig:
@@ -95,7 +103,7 @@ class HangingSession(FakeSession):
 # -- THROTTLED outcome --------------------------------------------------------
 
 
-def test_throttled_attempt_ends_login_with_throttled_message(monkeypatch):
+def test_throttled_attempt_ends_login_with_throttled_message(db, monkeypatch):
     async def unexpected_auth(db, username, password):
         raise AssertionError("authenticate_password_async must not run once throttled")
 
@@ -105,7 +113,7 @@ def test_throttled_attempt_ends_login_with_throttled_message(monkeypatch):
         config = _throttle_config(per_source_capacity=0.0, per_source_refill_per_minute=0.0)
         throttle = _throttle(config)
         session = FakeSession(["alice", "whatever"])
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Too many login attempts" in session.output
 
     asyncio.run(scenario())
@@ -114,30 +122,30 @@ def test_throttled_attempt_ends_login_with_throttled_message(monkeypatch):
 # -- IDLE_TIMEOUT outcome ------------------------------------------------------
 
 
-def test_idle_timeout_while_waiting_for_username(monkeypatch):
+def test_idle_timeout_while_waiting_for_username(db, monkeypatch):
     async def scenario() -> None:
         config = _throttle_config(unauthenticated_idle_timeout_seconds=0.05)
         throttle = _throttle(config)
         session = HangingSession()
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Timed out waiting for input" in session.output
 
     asyncio.run(scenario())
 
 
-def test_idle_timeout_while_waiting_for_password(monkeypatch):
+def test_idle_timeout_while_waiting_for_password(db, monkeypatch):
     async def scenario() -> None:
         config = _throttle_config(unauthenticated_idle_timeout_seconds=0.05)
         throttle = _throttle(config)
         # Username arrives fine; password prompt then hangs.
         session = HangingSession(unblock_after=["alice"])
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Timed out waiting for input" in session.output
 
     asyncio.run(scenario())
 
 
-def test_activity_resets_the_idle_timeout(monkeypatch):
+def test_activity_resets_the_idle_timeout(db, monkeypatch):
     """A client that's slow but keeps responding within the idle
     window must not be treated as idle -- each read gets its own fresh
     timeout, not one shared budget across the whole exchange."""
@@ -153,7 +161,7 @@ def test_activity_resets_the_idle_timeout(monkeypatch):
         )
         throttle = _throttle(config)
         session = FakeSession(["alice", "wrong-password"])
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         # Reached the normal "too many failed attempts" path, not idle
         # timeout, even though nothing here is instant.
         assert "Too many failed attempts" in session.output
@@ -165,7 +173,7 @@ def test_activity_resets_the_idle_timeout(monkeypatch):
 # -- overall login deadline ---------------------------------------------------
 
 
-def test_login_deadline_exceeded_even_with_continuous_activity(monkeypatch):
+def test_login_deadline_exceeded_even_with_continuous_activity(db, monkeypatch):
     """Distinct from idle timeout: a client that keeps sending *something*
     (so no individual read ever times out) but takes too long overall
     must still be cut off by login_deadline_seconds."""
@@ -193,7 +201,7 @@ def test_login_deadline_exceeded_even_with_continuous_activity(monkeypatch):
         )
         throttle = _throttle(config)
         session = SlowButActiveSession()
-        await login_flow.handle_session(session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Login timed out" in session.output
 
     asyncio.run(scenario())
@@ -215,7 +223,7 @@ def test_session_rejected_when_unauthenticated_budget_is_exhausted():
     asyncio.run(scenario())
 
 
-def test_unauthenticated_slot_is_released_after_login_completes(monkeypatch):
+def test_unauthenticated_slot_is_released_after_login_completes(db, monkeypatch):
     """The budget must free up once a login attempt finishes (success,
     failure, or timeout) -- not stay held for the session's whole
     lifetime, which would make the cap trivially exhaustible by anyone
@@ -241,7 +249,7 @@ def test_unauthenticated_slot_is_released_after_login_completes(monkeypatch):
         throttle = _throttle(config)
 
         first_session = FakeSession(["alice", "correct-password"], keys=["l"])
-        await login_flow.handle_session(first_session, object(), ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
+        await login_flow.handle_session(first_session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), throttle, config, ActiveSessionRegistry(), MaintenanceMode())
         assert "Welcome, alice" in first_session.output
 
         # The slot the first session held should be free again now.
