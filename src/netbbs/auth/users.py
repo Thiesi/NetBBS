@@ -232,7 +232,7 @@ def _create_user_with_password_hash(
 
 def get_user_by_username(db: Database, username: str) -> User:
     row = db.connection.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
     if row is None:
         raise AuthError("login failed")  # see AuthError docstring re: enumeration
@@ -266,7 +266,7 @@ def generate_challenge() -> bytes:
 
 def _password_login_row(db: Database, username: str) -> tuple[sqlite3.Row | None, str]:
     row = db.connection.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
     stored_hash = (
         row["password_hash"]
@@ -323,7 +323,7 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     once the connection-handling layer exists.)
     """
     row = db.connection.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
     if row is None or row["public_key"] is None:
         raise AuthError("login failed")
@@ -358,7 +358,7 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     proof of possession.
     """
     row = db.connection.execute(
-        "SELECT * FROM users WHERE username = ?", (username,)
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
     if row is None or row["public_key"] is None:
         raise AuthError("login failed")

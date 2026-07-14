@@ -5586,3 +5586,49 @@ Thiesi's own machine before Round B2 (the prose editor) builds on this
 same foundation. Round B2 and Round C remain fully unplanned beyond the
 shape already agreed in round 63 — no implementation decisions have
 been made for either.
+
+## Sign-off notes, round 65 (login username case-sensitivity bug — fixed)
+
+1. **The bug**: every login lookup in `netbbs.auth.users`
+   (`get_user_by_username`, the password-login row fetch,
+   `authenticate_keypair`, `authorize_public_key`) compared
+   `username = ?` under SQLite's default BINARY collation, so a login
+   only succeeded if typed with the exact case a username was
+   registered with. The `users.username` column's `UNIQUE` constraint
+   was likewise case-sensitive, so `"Thiesi"` and `"thiesi"` could
+   coexist as two distinct, mutually-invisible accounts — a trap for
+   both login and registration.
+2. **Fix scoped to avoid this project's biggest available foot-gun**:
+   `users` is the referenced *parent* of nine tables' foreign keys
+   (several carrying `ON DELETE CASCADE`/`SET NULL` since the SysOp
+   hard-delete round), and SQLite's `DROP TABLE` performs an implicit
+   `DELETE FROM` first whenever `foreign_keys = ON` (as this project's
+   connection always runs) — rebuilding `users` itself via the
+   drop/rename table-rebuild pattern rounds 37/40/41/56-57 already used
+   for other tables would have cascade-wiped every user's moderator
+   grants, channel membership, preferences, and blocklist entries, and
+   nulled out post/file authorship, as a side effect of fixing a login
+   bug. Deliberately avoided in favor of a plain `CREATE UNIQUE INDEX
+   idx_users_username_nocase ON users(username COLLATE NOCASE)` — no
+   table rebuild, no drop of the parent, closes both the login lookup
+   and the registration-uniqueness half of the bug in one migration.
+   The four lookup queries above gained an explicit `COLLATE NOCASE`
+   on the comparison (SQLite would pick up the column's own declared
+   collation automatically if the column itself were redeclared
+   `COLLATE NOCASE`, but since the fix here is index-only, the column
+   keeps its original BINARY declaration and the comparison needs its
+   own explicit collation to actually use the new index).
+3. **Left as-is, deliberately**: any case-variant duplicate usernames
+   already present in a database from before this migration are not
+   auto-merged — the migration will fail loudly (a `CREATE UNIQUE
+   INDEX` violation) rather than silently pick a winner between two
+   existing accounts. Acceptable at this project's current
+   single-sysop-node stage (§14 dozens-low-hundreds scale, Thiesi as
+   sole real user); a real migration-time merge tool would be pure
+   speculative scope for a scenario that hasn't occurred.
+4. **Testing**: `tests/test_auth.py` gained five cases —
+   `test_create_case_variant_duplicate_username_fails`,
+   `test_get_user_by_username_is_case_insensitive`, and one
+   different-case-succeeds case each for password login, keypair
+   login, and `authorize_public_key`. Full suite re-run: **1258
+   passed, 3 skipped**.

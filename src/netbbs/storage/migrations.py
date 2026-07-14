@@ -931,4 +931,36 @@ MIGRATIONS = [
         CREATE INDEX idx_moderation_log_target_user ON moderation_log(target_user_id, created_at);
         """,
     ),
+    Migration(
+        description=(
+            "Case-insensitive usernames: login (get_user_by_username, "
+            "password login, both keypair login paths) compared "
+            "`username = ?` under SQLite's default BINARY collation, so "
+            "logging in required typing the exact case a username was "
+            "registered with, and `users.username`'s UNIQUE constraint "
+            "was likewise case-sensitive, so 'Thiesi' and 'thiesi' could "
+            "coexist as two distinct, mutually-invisible accounts. A "
+            "plain `CREATE UNIQUE INDEX ... (username COLLATE NOCASE)` "
+            "closes both, without the table-rebuild this project's "
+            "'never edit a shipped migration' rule and rounds 37/40/41/"
+            "the SysOp-deletion round would otherwise suggest: `users` "
+            "is the referenced *parent* of nine tables' foreign keys "
+            "(several with ON DELETE CASCADE/SET NULL from the "
+            "SysOp-deletion round), and SQLite's DROP TABLE performs an "
+            "implicit DELETE FROM first when foreign_keys=ON (as this "
+            "connection always runs) -- rebuilding `users` itself the "
+            "same way would cascade-wipe every other user's moderator "
+            "grants, channel membership, preferences, and blocklist "
+            "entries, and null out post/file authorship, as a side "
+            "effect of fixing a login bug. An index-only fix has no "
+            "such risk. Existing case-variant duplicate usernames, if "
+            "any, would make this migration fail loudly rather than "
+            "silently pick a winner -- acceptable at this project's "
+            "current single-sysop-node stage (see the auth-users "
+            "sign-off note for the full reasoning)."
+        ),
+        sql="""
+        CREATE UNIQUE INDEX idx_users_username_nocase ON users(username COLLATE NOCASE);
+        """,
+    ),
 ]
