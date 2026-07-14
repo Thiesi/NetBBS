@@ -160,12 +160,19 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
 def test_msg_is_never_written_to_scrollback_or_moderation_log(
     db, hub, presence, mailbox, alice, bob, channel
 ):
+    # The `channel` fixture itself now logs a `create_channel` audit
+    # entry (design doc -- channel management round), so the baseline
+    # here is that one entry, not an empty log -- this test's actual
+    # claim is that /msg adds nothing further, not that the log is
+    # globally empty.
+    before = list_actions_for_object(db, "channel", channel.id)
+
     presence.enter("bob")
     asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/msg bob hello", "/quit"]))
 
     scrollback = get_scrollback(db, channel)
     assert all(m.kind in ("join", "leave") for m in scrollback)
-    assert list_actions_for_object(db, "channel", channel.id) == []
+    assert list_actions_for_object(db, "channel", channel.id) == before
 
 
 # -- /private, /close --------------------------------------------------

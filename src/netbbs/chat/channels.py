@@ -106,7 +106,12 @@ def create_channel(
     except sqlite3.IntegrityError as exc:
         raise ChannelError(f"could not create channel {name!r} — name already in use?") from exc
 
-    return get_channel_by_name(db, name)
+    new_channel = get_channel_by_name(db, name)
+    record_action(
+        db, actor=creator, action="create_channel", object_type="channel", object_id=new_channel.id,
+        detail=f"created channel {name!r}",
+    )
+    return new_channel
 
 
 def get_channel_by_name(db: Database, name: str) -> Channel:
@@ -138,6 +143,82 @@ def list_channels(db: Database) -> list[Channel]:
         "SELECT * FROM channels ORDER BY pinned DESC, name COLLATE NOCASE ASC"
     ).fetchall()
     return [_row_to_channel(row) for row in rows]
+
+
+def update_channel(
+    db: Database,
+    channel: Channel,
+    *,
+    name: str,
+    description: str | None,
+    min_level: int,
+    category_id: int | None,
+    pinned: bool,
+    hidden: bool,
+    members_only: bool,
+    allow_member_invites: bool,
+    changed_by: User,
+) -> Channel:
+    """
+    Replace `channel`'s editable settings with the given full state
+    (design doc -- channel management round), mirroring
+    `netbbs.boards.boards.update_board`: every field is required, not
+    partial/PATCH-style; the admin UI pre-fills current values as
+    editable defaults. `channel_id`/`created_at` are immutable, not
+    accepted here. `topic` is deliberately not settable through this
+    function -- it stays gated by `set_topic`'s own
+    `ChannelPermission.EDIT` check and audit trail, not folded into
+    this SysOp-only full-state replace.
+    """
+    try:
+        db.connection.execute(
+            """
+            UPDATE channels
+            SET name = ?, description = ?, min_level = ?, category_id = ?, pinned = ?,
+                hidden = ?, members_only = ?, allow_member_invites = ?
+            WHERE id = ?
+            """,
+            (
+                name, description, min_level, category_id, int(pinned),
+                int(hidden), int(members_only), int(allow_member_invites), channel.id,
+            ),
+        )
+        db.connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise ChannelError(f"could not update channel {channel.name!r} — name already in use?") from exc
+
+    updated = get_channel_by_name(db, name)
+    record_action(
+        db, actor=changed_by, action="update_channel", object_type="channel", object_id=channel.id,
+        detail=f"updated channel {channel.name!r}",
+    )
+    return updated
+
+
+def delete_channel(db: Database, channel: Channel, *, deleted_by: User) -> None:
+    """
+    Permanently remove `channel`, along with its scrollback, mute/ban
+    restrictions, membership/invitations, and any moderator grants
+    scoped to it (design doc -- channel management round) --
+    application-level cleanup, same reasoning as
+    `netbbs.boards.boards.delete_board`: no `ON DELETE` behavior in the
+    schema (a rebuild to add it risks the same silent-cascade hazard
+    found and documented in round 60). Logged before deleting, matching
+    `delete_board`/`delete_user`'s own "log first" precedent.
+    """
+    record_action(
+        db, actor=deleted_by, action="delete_channel", object_type="channel", object_id=channel.id,
+        detail=f"deleted channel {channel.name!r} (id {channel.id})",
+    )
+    db.connection.execute("DELETE FROM channel_messages WHERE channel_id = ?", (channel.id,))
+    db.connection.execute("DELETE FROM channel_restrictions WHERE channel_id = ?", (channel.id,))
+    db.connection.execute("DELETE FROM channel_members WHERE channel_id = ?", (channel.id,))
+    db.connection.execute("DELETE FROM channel_invitations WHERE channel_id = ?", (channel.id,))
+    db.connection.execute(
+        "DELETE FROM moderator_grants WHERE object_type = 'channel' AND object_id = ?", (channel.id,)
+    )
+    db.connection.execute("DELETE FROM channels WHERE id = ?", (channel.id,))
+    db.connection.commit()
 
 
 def set_topic(db: Database, channel: Channel, topic: str | None, *, set_by: User) -> Channel:

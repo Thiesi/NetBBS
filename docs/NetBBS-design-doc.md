@@ -5002,3 +5002,132 @@ from an actual connected client hasn't been done outside this sandbox's
 scripted `FakeSession` tests. Worth a direct check from Thiesi's own
 machine before considering "SysOp admin tools" as a whole closed out —
 channel management remains the one deliberately deferred piece.
+
+## Sign-off notes, round 61 (channel management: [H]annels admin menu — implemented)
+
+Closes out the "SysOp admin tools" line from §15 — the piece round 60
+explicitly deferred ("Boards and Areas first, then channels," Thiesi's
+own scoping call).
+
+Investigation before implementation found channels needed a narrower
+slice of round 60's work than boards/areas did, for two structural
+reasons specific to chat:
+
+1. **Channels have no moderated-content/approval workflow.** Chat
+   messages aren't even persisted beyond bounded scrollback (see
+   `netbbs.chat.channels`' own module docstring) — there's no
+   equivalent of a `posts`/`files` "pending" queue to build a UI for,
+   so this round has no `_pending_*_screen` counterpart.
+2. **Membership admin was already fully exposed.** Unlike board/file
+   post-approval (round 60's biggest gap — a fully permission-gated
+   library function with zero UI anywhere), `/invite`, `/kick`,
+   `/mute`, `/ban`, and `/members` already exist as real in-chat
+   commands, gated by the same `ChannelPermission` grants this round's
+   admin UI now also assigns. Nothing here duplicates that surface.
+
+What *was* actually missing, confirmed by the same kind of direct
+investigation round 60 did for boards/areas: `create_channel`/
+`create_category` (channel categories) had zero permission gating and
+no admin command path to reach them (test-fixture-only, same as boards
+before round 60); no edit or delete existed for channels or channel
+categories at all; and `_pick_moderator_scope`/the grant/revoke
+screens — already generic across `object_type` in principle — had no
+channel branch wired in, despite `ChannelPermission` and the
+`has_permission` SysOp bypass already covering `object_type='channel'`
+generically since round 60.
+
+1. **`chat/channels.py`**: `update_channel` (full-state replace,
+   mirroring `boards.update_board` field-for-field except swapping
+   `min_read_level`/`min_write_level`/`moderated`/`max_post_age_days`
+   for `min_level`/`hidden`/`members_only`/`allow_member_invites`) and
+   `delete_channel` (application-level cascade — no schema `ON DELETE`
+   change, same reasoning as round 60's empirically-found SQLite
+   `DROP TABLE` cascade hazard: `channel_messages`, `channel_
+   restrictions`, `channel_members`, `channel_invitations`, and
+   `moderator_grants` scoped to the channel are all explicitly deleted,
+   in that order, before the channel row itself, logged first). `topic`
+   is deliberately *not* part of `update_channel`'s full-state replace
+   — it stays gated by `set_topic`'s own `ChannelPermission.EDIT` check
+   and audit trail (round 33), not folded into this SysOp-only action.
+   `create_channel` gained a `record_action` call, same as round 60 did
+   for `create_board`/`create_file_area`.
+2. **`chat/categories.py`**: mirrors `boards/categories.py` exactly —
+   `create_category` gained a required `created_by: User` param plus
+   audit logging, and `delete_category` falls referencing channels/
+   child categories back to uncategorized/top-level rather than
+   blocking or cascading.
+3. **Admin UI** (`netbbs.net.admin_flow`): `_content_menu` gained
+   `[H]annels` (letter chosen to avoid colliding with `[C]ategories`,
+   which channel management now also feeds into) opening `_channel_menu`
+   — `[C]reate`/`[L]ist` → detail screen with `[E]dit`/`[D]elete`, no
+   pending-queue option per point 1 above. `_category_menu` gained a
+   third branch (`[H]annel category`) reusing `_generic_category_screen`
+   unchanged — that function was already fully parametrized over
+   create/list/delete/error-type, so no new category-UI code was needed
+   beyond wiring it in.
+4. **Moderator grant/revoke scope**: `_pick_moderator_scope` gained
+   `[H]annel` (per-object) and blanket-across-all-channels `[Z]`
+   options (`[X]`/`[Y]` were already taken by blanket-boards/blanket-
+   areas). Channel presets are deliberately different from the board/
+   file-area ones — `ChannelPermission` has no `READ`/`WRITE`/`APPROVE`
+   bits to begin with (see round 34's original reasoning: chat access
+   has no read/write split, and `MODERATE` bundles kick/mute/ban as one
+   capability rather than several) — so `_grant_moderator_screen`/
+   `_revoke_moderator_screen` now branch on `object_type`: "Full
+   moderator" = `EDIT|MODERATE|MANAGE_MEMBERS` and "Moderator only" =
+   `MODERATE` for channels, versus the existing `EDIT|DELETE|APPROVE`/
+   `APPROVE`-only presets for boards/areas. Revoke converts the
+   existing grant's bitmask back through whichever enum matches the
+   scope (`ChannelPermission` vs `BoardPermission`) before calling
+   `revoke_permissions`, rather than assuming `BoardPermission`
+   unconditionally the way the pre-this-round code did (harmless before
+   now, since channel scope was unreachable through this screen at
+   all).
+5. **Testing**: `tests/test_channels.py` extended for `update_channel`/
+   `delete_channel` (including a cascade test seeding all five
+   referencing tables — scrollback, a mute restriction, a member grant,
+   and a moderator grant — via the real `record_message`/`mute_user`/
+   `add_member`/`grant_permissions` functions, not raw SQL, confirming
+   each is actually gone after delete) and audit logging on create;
+   `tests/test_channel_categories.py` extended for `delete_category`'s
+   uncategorized/top-level fallback, same shape as round 60's board/
+   file-area category tests. `tests/test_admin_flow.py` extended with
+   end-to-end flows through the real UI: create/edit/delete a channel,
+   channel category create/delete, and — proving the channel-scope
+   additions to the grant/revoke screens actually reach production code
+   — a SysOp granting/revoking both a per-channel and a blanket-across-
+   all-channels grant to a zero-privilege user purely through the admin
+   menu.
+6. **A real regression, caught only by actually running the full suite
+   — not by inspection**: `create_channel`'s new `record_action` call
+   (point 1) broke `tests/test_chat_flow_private.py::
+   test_msg_is_never_written_to_scrollback_or_moderation_log`, which
+   asserted the moderation log was completely empty (`== []`) after a
+   `/msg`. That assertion's real intent was "`/msg` adds nothing to the
+   log," but its fixture creates the test channel via `create_channel`
+   — which, as of this round, legitimately logs its own `create_channel`
+   entry first. Fixed by rebaselining the test to snapshot the log
+   before sending `/msg` and asserting it's unchanged afterward, rather
+   than asserting global emptiness — the same category of "only caught
+   by running tests, would have shipped broken otherwise" finding
+   rounds 58-60 each flagged in their own sign-off notes. Two other
+   tests asserting on the same channel's moderation log
+   (`test_channel_topic.py::test_set_topic_is_recorded_in_the_
+   moderation_log`, `test_chat_flow_membership.py::
+   test_grantaccess_and_revokeaccess_are_logged_in_the_moderation_log`)
+   were unaffected — both already filtered by specific action name
+   rather than asserting on the log's full contents. Full suite re-run
+   after the fix: **1125 passed, 3 skipped**.
+
+**Flagged, not blocking further work:** same as every prior round's
+equivalent note — real interactive verification of the `[H]annels` menu
+(creating/editing/deleting real channels, channel-category management,
+channel-scoped moderator grant/revoke) from an actual connected client
+hasn't been done outside this sandbox's scripted `FakeSession` tests.
+With this round, "SysOp admin tools" as originally scoped in §15 (user
+management, node management, board/area management, channel
+management) is now feature-complete pending exactly that kind of real-
+world verification — the same three-item list (interactive SSH, real
+Zmodem-client interop, and browser-rendered xterm.js) flagged since
+Phase 1, plus this admin-tools tree, are the standing "verify from
+Thiesi's own machine" backlog going into whatever's next.

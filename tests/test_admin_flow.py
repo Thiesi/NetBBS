@@ -531,3 +531,110 @@ def test_grant_blanket_across_all_boards(db, sysop):
     _run(session, db, sysop)
     assert "Granted" in _written_text(session)
     assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)
+
+
+# -- channels (design doc -- channel management round) --------------------
+
+
+def test_create_channel_flow(db, sysop):
+    inputs = [
+        "m", "h", "c",
+        "Lobby", "A general channel", "0",
+        "n",  # assign category? no
+        "n",  # pinned? no
+        "n",  # hidden? no
+        "n",  # members-only? no
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    from netbbs.chat.channels import list_channels
+
+    channels = list_channels(db)
+    assert [c.name for c in channels] == ["Lobby"]
+    assert "Created channel" in _written_text(session)
+
+
+def test_edit_and_delete_channel_flow(db, sysop):
+    from netbbs.chat.channels import create_channel, list_channels
+
+    create_channel(db, "Lobby", creator=sysop)
+
+    # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
+    # min level(keep), n(don't change category), y(pin), n(hidden),
+    # n(members-only), n(allow invites) -> back to detail -> d(elete) ->
+    # retype new name -> back x3
+    inputs = [
+        "m", "h", "l", "0", "1", "e",
+        "Lobby2", "", "",
+        "n", "y", "n", "n", "n",
+        "d", "Lobby2",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "Updated 'Lobby2'" in text
+    assert "'Lobby2' deleted." in text
+    assert list_channels(db) == []
+
+
+def test_create_and_delete_channel_category_flow(db, sysop):
+    from netbbs.chat.categories import list_top_level_categories
+
+    inputs = [
+        "m", "c", "h", "c",
+        "Vintage", "Old radios", "n",  # not a sub-category
+        "l", "0", "1", "Vintage",
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    text = _written_text(session)
+    assert "Created category 'Vintage'." in text
+    assert "'Vintage' deleted." in text
+    assert list_top_level_categories(db) == []
+
+
+def test_grant_and_revoke_moderator_flow_for_channel(db, sysop):
+    """Proves the has_permission SysOp bypass and the channel-scope
+    additions to _pick_moderator_scope/preset selection reach this real
+    admin UI path, not just the library functions in isolation."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.moderation.roles import ChannelPermission, has_permission
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(db, "Lobby", creator=sysop)
+
+    grant_inputs = ["m", "g", "0", "1", "h", "0", "1", "f", "y", "b", "b"]
+    session = FakeSession(grant_inputs)
+    _run(session, db, sysop)
+    assert "Granted" in _written_text(session)
+    assert has_permission(
+        db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
+    )
+
+    revoke_inputs = ["m", "r", "0", "1", "h", "0", "1", "y", "b", "b"]
+    session2 = FakeSession(revoke_inputs)
+    _run(session2, db, sysop)
+    assert "Revoked" in _written_text(session2)
+    assert not has_permission(
+        db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
+    )
+
+
+def test_grant_blanket_across_all_channels(db, sysop):
+    from netbbs.chat.channels import create_channel
+    from netbbs.moderation.roles import ChannelPermission, has_permission
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(db, "Lobby", creator=sysop)
+
+    # scope 'z' = blanket across all channels, no channel picker needed.
+    inputs = ["m", "g", "0", "1", "z", "f", "y", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    assert "Granted" in _written_text(session)
+    assert has_permission(
+        db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MANAGE_MEMBERS
+    )

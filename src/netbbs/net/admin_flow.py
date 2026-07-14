@@ -47,6 +47,12 @@ from netbbs.boards.posts import (
     set_post_exempt,
     set_post_pinned,
 )
+from netbbs.chat.categories import CategoryError as ChannelCategoryError
+from netbbs.chat.categories import create_category as create_channel_category
+from netbbs.chat.categories import delete_category as delete_channel_category
+from netbbs.chat.categories import list_subcategories as list_channel_subcategories
+from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
+from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
 from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
@@ -64,7 +70,13 @@ from netbbs.files.entries import (
 )
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import list_actions_for_target_user, record_action
-from netbbs.moderation.roles import BoardPermission, get_grant, grant_permissions, revoke_permissions
+from netbbs.moderation.roles import (
+    BoardPermission,
+    ChannelPermission,
+    get_grant,
+    grant_permissions,
+    revoke_permissions,
+)
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
@@ -138,7 +150,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
         menu_key("P", "romote/demote"),
         menu_key("E", "nable/disable"),
         menu_key("D", "elete user"),
-        menu_key("M", "anage boards/areas"),
+        menu_key("M", "anage boards/areas/channels"),
     ]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
@@ -507,6 +519,10 @@ async def _content_menu(session: Session, db: Database, actor: User) -> None:
             await session.write_line("")
             await _area_menu(session, db, actor)
             await _draw_content_menu(session)
+        elif choice == "h":
+            await session.write_line("")
+            await _channel_menu(session, db, actor)
+            await _draw_content_menu(session)
         elif choice == "c":
             await session.write_line("")
             await _category_menu(session, db, actor)
@@ -524,11 +540,12 @@ async def _content_menu(session: Session, db: Database, actor: User) -> None:
 
 
 async def _draw_content_menu(session: Session) -> None:
-    header = colored("Manage boards/areas:", fg_color=HEADER_COLOR, bold=True)
+    header = colored("Manage boards/areas/channels:", fg_color=HEADER_COLOR, bold=True)
     options = "  ".join(
         [
             menu_key("M", "essage boards"),
             menu_key("A", "reas"),
+            menu_key("H", "annels"),
             menu_key("C", "ategories"),
             menu_key("G", "rant moderator"),
             menu_key("R", "evoke moderator"),
@@ -1157,6 +1174,226 @@ async def _file_action_screen(session: Session, db: Database, actor: User, entry
             await session.write("\a")
 
 
+# -- channels (design doc -- channel management round) --------------------
+#
+# Mirrors the board/area sections above, structurally, but with no
+# pending-queue equivalent: channels have no moderated-content/approval
+# workflow the way boards/file areas do (see netbbs.chat.channels'
+# module docstring — chat messages aren't even persisted beyond bounded
+# scrollback). Membership admin (invite/kick/mute/ban) is also
+# deliberately not duplicated here — it's already fully reachable via
+# in-chat commands (/invite, /kick, /mute, /ban, /members) for anyone
+# holding the relevant ChannelPermission grant, so there's no existing-
+# but-UI-less gap to close for it the way there was for post/file
+# approval.
+
+
+async def _channel_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_channel_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _create_channel_screen(session, db, actor)
+            await _draw_channel_menu(session)
+        elif choice == "l":
+            await session.write_line("")
+            await _list_channels_screen(session, db, actor)
+            await _draw_channel_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_channel_menu(session: Session) -> None:
+    header = colored("Channels:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _create_channel_screen(session: Session, db: Database, actor: User) -> None:
+    await session.write_line(colored("\r\nCreate channel", fg_color=HEADER_COLOR, bold=True))
+    await session.write("Name: ")
+    name = (await session.read_line()).strip()
+    if not name:
+        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
+        return
+    await session.write("Description (optional): ")
+    description = (await session.read_line()).strip() or None
+    await session.write("Minimum level [0]: ")
+    min_level = await _read_int(session, default=0)
+    if min_level is None:
+        return
+    category_id = await _pick_optional_category(
+        session, db, list_top_level=list_top_level_channel_categories,
+        list_subcategories=list_channel_subcategories, title="Channel category",
+    )
+    await session.write("Pinned? [y/N]: ")
+    pinned = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Hidden (omitted from listings)? [y/N]: ")
+    hidden = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    await session.write("Members-only (invite-only access)? [y/N]: ")
+    members_only = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    allow_member_invites = False
+    if members_only:
+        await session.write("Allow members to invite others? [y/N]: ")
+        allow_member_invites = (await session.read_key()).lower() == "y"
+        await session.write_line("")
+
+    try:
+        channel = create_channel(
+            db, name, description=description, min_level=min_level, category_id=category_id,
+            pinned=pinned, hidden=hidden, members_only=members_only,
+            allow_member_invites=allow_member_invites, creator=actor,
+        )
+    except ChannelError as exc:
+        await session.write_line(colored(f"Could not create channel: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Created channel {channel.name!r}.")
+
+
+async def _list_channels_screen(session: Session, db: Database, actor: User) -> None:
+    channels = list_channels(db)
+    selected = await pick_item(
+        session, channels,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        description_of=_channel_description,
+        title="Channels",
+        empty_message="No channels yet.",
+    )
+    if selected is not None:
+        await _channel_detail_screen(session, db, actor, selected)
+
+
+def _channel_description(channel: Channel) -> str:
+    bits = [f"level {channel.min_level}"]
+    if channel.members_only:
+        bits.append("members-only")
+    if channel.hidden:
+        bits.append("hidden")
+    return ", ".join(bits)
+
+
+async def _channel_detail_screen(session: Session, db: Database, actor: User, channel: Channel) -> None:
+    await _draw_channel_detail(session, channel)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "e":
+            await session.write_line("")
+            updated = await _edit_channel_screen(session, db, actor, channel)
+            if updated is not None:
+                channel = updated
+            await _draw_channel_detail(session, channel)
+        elif choice == "d":
+            await session.write_line("")
+            deleted = await _delete_channel_screen(session, db, actor, channel)
+            if deleted:
+                return
+            await _draw_channel_detail(session, channel)
+        else:
+            await session.write("\a")
+
+
+async def _draw_channel_detail(session: Session, channel: Channel) -> None:
+    header = colored(sanitize_text(channel.name), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(
+        f"Description: {sanitize_text(channel.description) if channel.description else '(none)'}"
+    )
+    await session.write_line(f"Minimum level: {channel.min_level}")
+    await session.write_line(
+        f"Pinned: {'yes' if channel.pinned else 'no'}  Hidden: {'yes' if channel.hidden else 'no'}"
+    )
+    await session.write_line(
+        f"Members-only: {'yes' if channel.members_only else 'no'}  "
+        f"Allow member invites: {'yes' if channel.allow_member_invites else 'no'}"
+    )
+    options = "  ".join([menu_key("E", "dit"), menu_key("D", "elete"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _edit_channel_screen(session: Session, db: Database, actor: User, channel: Channel) -> Channel | None:
+    await session.write(f"Name [{channel.name}]: ")
+    name = (await session.read_line()).strip() or channel.name
+    await session.write(f"Description [{channel.description or '(none)'}]: ")
+    description = (await session.read_line()).strip() or channel.description
+    await session.write(f"Minimum level [{channel.min_level}]: ")
+    min_level = await _read_int(session, default=channel.min_level)
+    if min_level is None:
+        return None
+    await session.write("Change category? [y/N]: ")
+    change_category = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    category_id = channel.category_id
+    if change_category:
+        category_id = await _pick_optional_category(
+            session, db, list_top_level=list_top_level_channel_categories,
+            list_subcategories=list_channel_subcategories, title="Channel category",
+        )
+    await session.write(f"Pinned? [{'y' if channel.pinned else 'N'}]: ")
+    pinned_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else channel.pinned
+    await session.write(f"Hidden? [{'y' if channel.hidden else 'N'}]: ")
+    hidden_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    hidden = hidden_answer == "y" if hidden_answer in ("y", "n") else channel.hidden
+    await session.write(f"Members-only? [{'y' if channel.members_only else 'N'}]: ")
+    members_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    members_only = members_answer == "y" if members_answer in ("y", "n") else channel.members_only
+    await session.write(f"Allow member invites? [{'y' if channel.allow_member_invites else 'N'}]: ")
+    invites_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    allow_member_invites = (
+        invites_answer == "y" if invites_answer in ("y", "n") else channel.allow_member_invites
+    )
+
+    try:
+        updated = update_channel(
+            db, channel, name=name, description=description, min_level=min_level,
+            category_id=category_id, pinned=pinned, hidden=hidden, members_only=members_only,
+            allow_member_invites=allow_member_invites, changed_by=actor,
+        )
+    except ChannelError as exc:
+        await session.write_line(colored(f"Could not update channel: {exc}", fg_color=MUTED_COLOR))
+        return None
+    await session.write_line(f"Updated {updated.name!r}.")
+    return updated
+
+
+async def _delete_channel_screen(session: Session, db: Database, actor: User, channel: Channel) -> bool:
+    await session.write_line(
+        colored(
+            "\r\nThis permanently deletes the channel, its scrollback, mute/ban "
+            "restrictions, membership/invitations, and any moderator grants "
+            "scoped to it. This cannot be undone.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"Type the channel name {channel.name!r} to confirm, or anything else to cancel: ")
+    confirmation = (await session.read_line()).strip()
+    if confirmation != channel.name:
+        await session.write_line("Cancelled.")
+        return False
+    delete_channel(db, channel, deleted_by=actor)
+    await session.write_line(f"{channel.name!r} deleted.")
+    return True
+
+
 # -- categories ----------------------------------------------------------
 
 
@@ -1186,6 +1423,15 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
                 error_type=FileCategoryError, title="File-area categories",
             )
             await _draw_category_menu(session)
+        elif choice == "h":
+            await session.write_line("")
+            await _generic_category_screen(
+                session, db, actor,
+                create=create_channel_category, list_top_level=list_top_level_channel_categories,
+                list_subcategories=list_channel_subcategories, delete=delete_channel_category,
+                error_type=ChannelCategoryError, title="Channel categories",
+            )
+            await _draw_category_menu(session)
         else:
             await session.write("\a")
 
@@ -1193,7 +1439,12 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
 async def _draw_category_menu(session: Session) -> None:
     header = colored("Categories:", fg_color=HEADER_COLOR, bold=True)
     options = "  ".join(
-        [menu_key("M", "essage board category"), menu_key("F", "ile-area category"), menu_key("B", "ack")]
+        [
+            menu_key("M", "essage board category"),
+            menu_key("F", "ile-area category"),
+            menu_key("H", "annel category"),
+            menu_key("B", "ack"),
+        ]
     )
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
@@ -1284,8 +1535,8 @@ async def _list_categories_screen(
         return
     await session.write_line(
         colored(
-            "\r\nDeleting this category sets any boards/areas assigned to it "
-            "(and any of its own sub-categories) back to uncategorized.",
+            "\r\nDeleting this category sets any boards/areas/channels assigned "
+            "to it (and any of its own sub-categories) back to uncategorized.",
             fg_color=MUTED_COLOR,
         )
     )
@@ -1304,9 +1555,11 @@ async def _list_categories_screen(
 async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, int | None, str] | None:
     """Returns `(object_type, object_id, human label)`, or `None` if
     cancelled. `object_id=None` means a local-blanket grant (design doc
-    -- board/area management round)."""
+    -- board/area management round; channel scope added in the channel
+    management round)."""
     await session.write(
-        "Scope: [B]oard, [A]rea, blanket across all boards [X], blanket across all areas [Y]: "
+        "Scope: [B]oard, [A]rea, [H]annel, blanket across all boards [X], "
+        "blanket across all areas [Y], blanket across all channels [Z]: "
     )
     scope_key = (await session.read_key()).lower()
     await session.write_line("")
@@ -1328,10 +1581,21 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         if area is None:
             return None
         return "file_area", area.id, f"file area {area.name!r}"
+    elif scope_key == "h":
+        channel = await pick_item(
+            session, list_channels(db),
+            name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
+            title="Which channel?", empty_message="No channels yet.",
+        )
+        if channel is None:
+            return None
+        return "channel", channel.id, f"channel {channel.name!r}"
     elif scope_key == "x":
         return "board", None, "all boards (blanket)"
     elif scope_key == "y":
         return "file_area", None, "all file areas (blanket)"
+    elif scope_key == "z":
+        return "channel", None, "all channels (blanket)"
     else:
         await session.write_line(colored("Not a valid scope -- cancelled.", fg_color=MUTED_COLOR))
         return None
@@ -1350,18 +1614,32 @@ async def _grant_moderator_screen(session: Session, db: Database, actor: User) -
         return
     object_type, object_id, label = scope
 
-    await session.write("Preset: [F]ull moderator (edit+delete+approve), [A]pprover only: ")
-    preset_key = (await session.read_key()).lower()
-    await session.write_line("")
-    if preset_key == "f":
-        permissions = BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
-        preset_label = "Full moderator"
-    elif preset_key == "a":
-        permissions = BoardPermission.APPROVE
-        preset_label = "Approver only"
+    if object_type == "channel":
+        await session.write("Preset: [F]ull moderator (edit+moderate+manage members), [M]oderator only: ")
+        preset_key = (await session.read_key()).lower()
+        await session.write_line("")
+        if preset_key == "f":
+            permissions = ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
+            preset_label = "Full moderator"
+        elif preset_key == "m":
+            permissions = ChannelPermission.MODERATE
+            preset_label = "Moderator only"
+        else:
+            await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
+            return
     else:
-        await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
-        return
+        await session.write("Preset: [F]ull moderator (edit+delete+approve), [A]pprover only: ")
+        preset_key = (await session.read_key()).lower()
+        await session.write_line("")
+        if preset_key == "f":
+            permissions = BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
+            preset_label = "Full moderator"
+        elif preset_key == "a":
+            permissions = BoardPermission.APPROVE
+            preset_label = "Approver only"
+        else:
+            await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
+            return
 
     await session.write(f"Grant {preset_label!r} on {label} to {target.username!r}? [y/N]: ")
     confirm = (await session.read_key()).lower()
@@ -1401,8 +1679,9 @@ async def _revoke_moderator_screen(session: Session, db: Database, actor: User) 
         await session.write_line("Cancelled.")
         return
 
+    permission_enum = ChannelPermission if object_type == "channel" else BoardPermission
     revoke_permissions(
         db, target, object_type=object_type, object_id=object_id,
-        permissions=BoardPermission(grant.permissions), revoked_by=actor,
+        permissions=permission_enum(grant.permissions), revoked_by=actor,
     )
     await session.write_line(f"Revoked {target.username!r}'s grant on {label}.")
