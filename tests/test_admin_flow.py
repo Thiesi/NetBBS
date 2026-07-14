@@ -257,8 +257,8 @@ def test_delete_with_blank_confirmation_does_not_delete(db, sysop):
 def test_invalid_key_writes_only_a_bell(db, sysop):
     session = FakeSession(["z", "b"])
     _run(session, db, sysop)
-    bell_index = session.written.index("\a")
-    assert session.written[bell_index] == "\a"
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
     assert session.written[:bell_index].count("Choice: ") == 1
 
 
@@ -277,8 +277,8 @@ def _node_controls() -> NodeControls:
 def test_node_option_hidden_without_node_controls(db, sysop):
     session = FakeSession(["n", "b"])
     _run(session, db, sysop)  # _run's admin_menu call passes no node_controls
-    bell_index = session.written.index("\a")
-    assert session.written[bell_index] == "\a"
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
 
 
 def test_who_lists_and_disconnects_another_session(db, sysop):

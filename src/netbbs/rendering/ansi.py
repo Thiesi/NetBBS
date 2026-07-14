@@ -76,6 +76,30 @@ def move_cursor(row: int, col: int) -> str:
     return f"{CSI}{row};{col}H"
 
 
+def reject_keystroke(count: int = 1) -> str:
+    """
+    Erase the `count` most recently echoed characters and sound the
+    bell -- the standard "that key doesn't do anything here" response
+    for single-keystroke menu dispatch (`netbbs.net.char_input.
+    read_key`).
+
+    Necessary because that echo happens inside `read_key` itself, as
+    each byte is read, before the caller can know whether the
+    keystroke will turn out to be recognized (design doc round 52:
+    "character echo is a real transport's job") -- by the time an
+    unrecognized keystroke reaches a dispatch loop's `else` branch,
+    its character is already on screen, with no way to have withheld
+    it. Backspace, overwrite with a space, backspace again -- repeated
+    `count` times for multi-character reads like a picker's two-digit
+    selection -- leaves no visible trace before the bell rings,
+    instead of the character piling up on screen with every rejected
+    keystroke.
+    """
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
+    return ("\b \b" * count) + "\a"
+
+
 def _validate_color(color: int) -> None:
     if not 0 <= color <= 255:
         raise ValueError(f"color must be 0-255, got {color}")

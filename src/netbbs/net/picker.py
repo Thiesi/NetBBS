@@ -44,7 +44,7 @@ from typing import Callable, Sequence, TypeVar
 
 from netbbs.net.char_input import Completer
 from netbbs.net.session import Session
-from netbbs.rendering import HEADER_COLOR, colored, menu_key, sanitize_text, truncate
+from netbbs.rendering import HEADER_COLOR, colored, menu_key, reject_keystroke, sanitize_text, truncate
 
 T = TypeVar("T")
 
@@ -181,7 +181,7 @@ async def pick_item(
                 page_index += 1
                 page_items = await _render()
             else:
-                await session.write("\a")
+                await session.write(reject_keystroke())
             continue
 
         if key_lower == "p":
@@ -190,7 +190,7 @@ async def pick_item(
                 page_index -= 1
                 page_items = await _render()
             else:
-                await session.write("\a")
+                await session.write(reject_keystroke())
             continue
 
         if key_lower == "s":
@@ -248,15 +248,19 @@ async def pick_item(
         if key.isdigit():
             second = await session.read_key()
             if not second.isdigit():
-                await session.write("\a")
+                # Both digits' worth of echo are already on screen --
+                # the first from the read above, the second from this
+                # one -- so rejecting the pair erases two characters,
+                # not one.
+                await session.write(reject_keystroke(2))
                 continue
             number = int(key + second)
             if 1 <= number <= len(page_items):
                 return page_items[number - 1]
-            await session.write("\a")
+            await session.write(reject_keystroke(2))
             continue
 
-        await session.write("\a")
+        await session.write(reject_keystroke())
 
 
 def _search_completer(candidates: Sequence[str]) -> Completer:

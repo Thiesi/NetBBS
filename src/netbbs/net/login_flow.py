@@ -47,7 +47,16 @@ from netbbs.net.shutdown import NodeControls
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
+from netbbs.rendering import (
+    ACCENT_COLOR,
+    HEADER_COLOR,
+    MUTED_COLOR,
+    colored,
+    menu_key,
+    reflow,
+    reject_keystroke,
+    sanitize_text,
+)
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -331,7 +340,7 @@ async def _main_menu(
             await admin_menu(session, db, user, node_controls=node_controls)
             await _draw_main_menu(session, db, mailbox, user)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _login(
@@ -575,7 +584,7 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
                 await session.write_line("")
                 break
             else:
-                await session.write("\a")
+                await session.write(reject_keystroke())
 
     if not meets_level(user, board.min_write_level):
         return
@@ -717,7 +726,7 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
             await _toggle_bio_visibility(session, db, user, currently_visible=visible)
             visible = await _render_profile(session, db, user)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _edit_bio(session: Session, db: Database, user: User) -> None:

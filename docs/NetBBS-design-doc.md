@@ -5737,3 +5737,65 @@ been made for either.
    real `TelnetServer`, connecting a real client, and asserting the
    accepted socket's `TCP_NODELAY` option is `1`. Full suite re-run:
    **1261 passed, 3 skipped**.
+
+## Sign-off notes, round 68 (invalid single-keystroke menu input: no more piled-up echoed characters — revises round 52)
+
+1. **What changed**: with round 67's TCP_NODELAY fix confirmed working
+   (bell now fires reliably), Thiesi's remaining, separate complaint
+   turned out to be real too: an invalid single-keystroke menu choice
+   left the pressed character sitting on screen, and repeated invalid
+   presses piled up ("Choice: hhhhhhxxxxxxxh"). Round 52 explicitly
+   accepted the character showing up once (echo is `read_key`'s job,
+   not `login_flow`'s, and reprinting the prompt added nothing) but
+   never actually revisited whether the echoed character *staying on
+   screen* was itself the right call -- in practice, over a real
+   client, an invalid keystroke now visibly and permanently marks up
+   the prompt line instead of being cleanly rejected. Fixed by having
+   the bell also erase the character(s) it's rejecting:
+   `netbbs.rendering.ansi.reject_keystroke(count=1)` returns
+   `("\b \b" * count) + "\a"` -- backspace, overwrite with a space,
+   backspace again (repeated for multi-character reads), then the
+   bell -- and every bare `session.write("\a")` bell-only call site
+   across `netbbs.net.login_flow`, `netbbs.net.admin_flow`, and
+   `netbbs.net.picker` (23 sites, 3 files) now calls this instead.
+2. **Why erase-after-echo instead of suppressing the echo**: the
+   character is already on screen inside `read_key()` itself by the
+   time any of these dispatch loops see it and can judge validity
+   (round 52's own reasoning for why echo is transport-level, not
+   login_flow's) -- there is no hook to withhold it in the first
+   place without a much larger change to `read_key`'s architecture
+   (echo timing shared by ~50 call sites across the whole menu
+   system, most of which are for *valid* keys where immediate echo is
+   correct and wanted). Erasing after the fact gets the same visible
+   outcome (nothing suspicious lingers from a rejected keystroke)
+   without touching that architecture or how any valid keystroke
+   behaves.
+3. **Erase count varies by call site, verified individually, not
+   assumed uniform**: every ordinary single-key menu dispatch (all of
+   `admin_flow.py`, `login_flow.py`'s `_main_menu`/`_show_board`/
+   `_edit_profile`, and `picker.py`'s page-boundary/unrecognized-key
+   branches) rejects exactly one echoed character. `picker.py`'s
+   two-digit item-selection path is the one exception: by the time
+   either of its two invalid branches (non-digit second character;
+   both digits valid but the number is out of range) is reached, two
+   characters are already echoed, so those two call sites pass
+   `reject_keystroke(2)`. `file_flow.py`'s single remaining bare-bell
+   call site was deliberately left untouched -- it's reached via
+   `read_line()`, not `read_key()` (that screen accepts multi-character
+   `/download <filename>` commands, documented in `_show_area`'s own
+   docstring as the reason it can't use single-keystroke dispatch),
+   so by the time it's reached, Enter has already terminated the line
+   and the terminal's cursor has already moved to a new one -- there's
+   nothing left inline to erase.
+4. **Testing**: every test asserting an exact bell-only byte sequence
+   from round 52 was updated to the new erase-and-bell sequence rather
+   than left passing on a stale assumption --
+   `tests/test_menu_invalid_key.py` (both tests),
+   `tests/test_admin_flow.py::test_invalid_key_writes_only_a_bell` and
+   `::test_node_option_hidden_without_node_controls`, and
+   `tests/test_picker.py::test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell`
+   (updated to expect `b"z\b \b\a"`/`b"y\b \b\a"` over the real wire,
+   echo included, rather than the non-echoing `FakeSession` the
+   `login_flow`/`admin_flow` tests use). Tests that only checked bell
+   *presence* as a substring needed no change. Full suite re-run:
+   **1261 passed, 3 skipped**.

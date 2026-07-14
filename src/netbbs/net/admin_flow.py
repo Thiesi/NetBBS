@@ -89,7 +89,7 @@ from netbbs.net.welcome_banner import (
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
-from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
+from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, reject_keystroke, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
@@ -151,7 +151,7 @@ async def admin_menu(
             await _content_menu(session, db, user)
             await _draw_admin_menu(session, node_controls)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_admin_menu(session: Session, node_controls: NodeControls | None) -> None:
@@ -394,7 +394,7 @@ async def _node_menu(session: Session, db: Database, actor: User, node_controls:
             await _shutdown_screen(session, db, actor, node_controls)
             await _draw_node_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_node_menu(session: Session) -> None:
@@ -534,7 +534,7 @@ async def _welcome_banner_menu(session: Session, db: Database, actor: User) -> N
             await _edit_welcome_banner_screen(session, db, actor)
             await _draw_welcome_banner_menu(session, db)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_welcome_banner_menu(session: Session, db: Database) -> None:
@@ -675,7 +675,7 @@ async def _content_menu(session: Session, db: Database, actor: User) -> None:
             await _revoke_moderator_screen(session, db, actor)
             await _draw_content_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_content_menu(session: Session) -> None:
@@ -769,7 +769,7 @@ async def _board_menu(session: Session, db: Database, actor: User) -> None:
             await _list_boards_screen(session, db, actor)
             await _draw_board_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_board_menu(session: Session) -> None:
@@ -872,7 +872,7 @@ async def _board_detail_screen(session: Session, db: Database, actor: User, boar
             await _pending_posts_screen(session, db, actor, board)
             await _draw_board_detail(session, board)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_board_detail(session: Session, board: Board) -> None:
@@ -1027,7 +1027,7 @@ async def _post_action_screen(session: Session, db: Database, actor: User, post:
             post = set_post_exempt(db, post, not post.exempt_from_expiry, changed_by=actor)
             await _draw_post_action(session, post)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 # -- file areas ----------------------------------------------------------
@@ -1050,7 +1050,7 @@ async def _area_menu(session: Session, db: Database, actor: User) -> None:
             await _list_areas_screen(session, db, actor)
             await _draw_area_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_area_menu(session: Session) -> None:
@@ -1153,7 +1153,7 @@ async def _area_detail_screen(session: Session, db: Database, actor: User, area:
             await _pending_files_screen(session, db, actor, area)
             await _draw_area_detail(session, area)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_area_detail(session: Session, area: FileArea) -> None:
@@ -1310,7 +1310,7 @@ async def _file_action_screen(session: Session, db: Database, actor: User, entry
             entry = set_file_exempt(db, entry, not entry.exempt_from_expiry, changed_by=actor)
             await _draw_file_action(session, entry)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 # -- channels (design doc -- channel management round) --------------------
@@ -1344,7 +1344,7 @@ async def _channel_menu(session: Session, db: Database, actor: User) -> None:
             await _list_channels_screen(session, db, actor)
             await _draw_channel_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_channel_menu(session: Session) -> None:
@@ -1442,7 +1442,7 @@ async def _channel_detail_screen(session: Session, db: Database, actor: User, ch
                 return
             await _draw_channel_detail(session, channel)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_channel_detail(session: Session, channel: Channel) -> None:
@@ -1572,7 +1572,7 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
             )
             await _draw_category_menu(session)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_category_menu(session: Session) -> None:
@@ -1614,7 +1614,7 @@ async def _generic_category_screen(
             )
             await _draw_generic_category_menu(session, title)
         else:
-            await session.write("\a")
+            await session.write(reject_keystroke())
 
 
 async def _draw_generic_category_menu(session: Session, title: str) -> None:

@@ -66,10 +66,13 @@ def test_main_menu_invalid_key_writes_only_a_bell(tmp_path):
     )
 
     # Every write() call made across the whole run, in order -- the
-    # invalid "z" turn must be exactly one bell, nothing else (no
+    # invalid "z" turn must be exactly one erase-and-bell (round 67:
+    # echoing already happened inside the real read_key() before
+    # _main_menu ever saw the key, so rejecting it also erases the
+    # already-echoed character, not just bell), nothing else (no
     # write_line("") newline, no reprinted "Choice: ").
-    bell_index = session.written.index("\a")
-    assert session.written[bell_index] == "\a"
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
     # Nothing about the menu was written again between entry and the
     # bell -- confirms no redraw happened for the invalid key either.
     assert session.written[:bell_index].count("Choice: ") == 1
@@ -91,7 +94,7 @@ def test_show_board_invalid_key_writes_only_a_bell(tmp_path):
 
     asyncio.run(_show_board(session, db, board, user))
 
-    bell_index = session.written.index("\a")
-    assert session.written[bell_index] == "\a"
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
     assert session.written[:bell_index].count("Choice: ") == 1
     db.close()

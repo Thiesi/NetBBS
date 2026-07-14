@@ -20,6 +20,7 @@ from netbbs.rendering.ansi import (
     colored,
     fg,
     move_cursor,
+    reject_keystroke,
 )
 from netbbs.rendering.ansi_art import decode_ansi_bytes, encode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
@@ -48,6 +49,7 @@ __all__ = [
     "parse_ansi_into_buffer",
     "fg",
     "move_cursor",
+    "reject_keystroke",
     "menu_key",
     "DEFAULT_WIDTH",
     "reflow",

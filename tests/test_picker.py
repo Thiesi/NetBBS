@@ -234,10 +234,13 @@ def test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell():
             writer.write(b"y")
             await writer.drain()
             second = await _read_until_quiet(reader)
-            # Just the echoed character plus a bell -- nothing else,
-            # each time, regardless of how many invalid keys precede it.
-            assert first == b"z\a"
-            assert second == b"y\a"
+            # The echoed character, immediately erased, plus a bell --
+            # nothing else, each time, regardless of how many invalid
+            # keys precede it (round 67: echo happens inside read_key
+            # before pick_item ever sees the key, so rejecting it also
+            # erases the already-echoed character via reject_keystroke()).
+            assert first == b"z\b \b\a"
+            assert second == b"y\b \b\a"
             writer.write(b"b")
             await writer.drain()
             await _read_until_quiet(reader)
