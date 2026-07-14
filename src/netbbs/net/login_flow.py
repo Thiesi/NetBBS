@@ -22,7 +22,7 @@ from enum import Enum, auto
 from pathlib import Path
 
 from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
-from netbbs.boards import Board, Post, PostPage, create_post, edit_post, list_boards, list_posts_page
+from netbbs.boards import Board, Post, PostError, PostPage, create_post, edit_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry, format_with_preference
 from netbbs.directory import (
@@ -532,7 +532,21 @@ async def _browse_boards_in_category(
         await _show_board(session, db, selected, user)
 
 
-async def _render_board_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
+def _can_edit_post(db: Database, post: Post, user: User) -> bool:
+    """The post's own original author, no grant needed, or anyone
+    holding `BoardPermission.EDIT` -- the exact same authorization
+    `netbbs.boards.posts.edit_post` itself enforces, checked here too
+    so `[E]dit` only offers itself when it would actually succeed,
+    rather than letting a SysOp compose a whole edit only to be
+    rejected at the very end."""
+    return post.author_user_id == user.id or has_permission(
+        db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
+    )
+
+
+async def _render_board_page(
+    session: Session, db: Database, board_name: str, page: PostPage, user: User
+) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
     Older/Newer/Recent), not on every loop iteration regardless of
@@ -544,6 +558,8 @@ async def _render_board_page(session: Session, db: Database, board_name: str, pa
     if page.has_newer:
         options.append(menu_key("N", "ewer"))
         options.append(menu_key("R", "ecent"))
+    if any(_can_edit_post(db, post, user) for post in page.posts):
+        options.append(menu_key("E", "dit"))
     options.append(menu_key("B", "ack"))
     await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
@@ -561,28 +577,50 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     re-rendered everything, most of which was already read.
     """
     board_name = sanitize_text(board.name)
+
+    def _refetch_current_page() -> PostPage:
+        """Re-fetches whichever page is currently on screen, using the
+        exact cursor that produced it -- not always the newest page.
+        Needed after an in-place edit (which never moves a post's feed
+        position, see netbbs.boards.posts._resolve_current_version)
+        so [E]diting a post doesn't also silently jump the SysOp back
+        to page one as an unrelated side effect."""
+        if page_anchor is None:
+            return list_posts_page(db, board, user)
+        mode, cursor = page_anchor
+        return list_posts_page(db, board, user, **{mode: cursor})
+
+    page_anchor: tuple[str, tuple[str, str]] | None = None
     page = list_posts_page(db, board, user)
     if not page.posts:
         await session.write_line(f"\r\n[{board_name}] has no posts yet.")
     else:
-        await _render_board_page(session, db, board_name, page)
+        await _render_board_page(session, db, board_name, page, user)
         while True:
             choice = (await session.read_key()).lower()
 
             if choice == "o" and page.has_older:
                 await session.write_line("")
                 oldest = page.posts[0]
-                page = list_posts_page(db, board, user, before=(oldest.created_at, oldest.post_id))
-                await _render_board_page(session, db, board_name, page)
+                page_anchor = ("before", (oldest.created_at, oldest.post_id))
+                page = _refetch_current_page()
+                await _render_board_page(session, db, board_name, page, user)
             elif choice == "n" and page.has_newer:
                 await session.write_line("")
                 newest = page.posts[-1]
-                page = list_posts_page(db, board, user, after=(newest.created_at, newest.post_id))
-                await _render_board_page(session, db, board_name, page)
+                page_anchor = ("after", (newest.created_at, newest.post_id))
+                page = _refetch_current_page()
+                await _render_board_page(session, db, board_name, page, user)
             elif choice == "r" and page.has_newer:
                 await session.write_line("")
-                page = list_posts_page(db, board, user)
-                await _render_board_page(session, db, board_name, page)
+                page_anchor = None
+                page = _refetch_current_page()
+                await _render_board_page(session, db, board_name, page, user)
+            elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
+                await session.write_line("")
+                await _edit_existing_post(session, db, board, page, user)
+                page = _refetch_current_page()
+                await _render_board_page(session, db, board_name, page, user)
             elif choice == "b":
                 await session.write_line("")
                 break
@@ -605,6 +643,55 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
         return
     post = create_post(db, board, user, subject, body)
     await session.write_line(f"Posted (id {post.post_id[:12]}...).")
+
+
+async def _edit_existing_post(
+    session: Session, db: Database, board: Board, page: PostPage, user: User
+) -> None:
+    """
+    Edit one of the posts currently on screen -- selected by the
+    page-relative `[N]` position `_render_post_page` prints next to
+    each one, since a board page is at most 5 posts, too small to
+    justify pulling in the real picker (`netbbs.net.picker.pick_item`)
+    just to choose one (design doc -- prose editor round B2).
+
+    Authorization is checked *before* prompting for any new content
+    (`_can_edit_post`, the same rule `edit_post` itself enforces) so a
+    SysOp who picks a post they can't actually edit finds out
+    immediately, not after composing a whole revision.
+    """
+    await session.write(f"Edit which post number [1-{len(page.posts)}]? ")
+    choice = (await session.read_key()).strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
+        await session.write_line(colored("\r\nNot a valid post number.", fg_color=MUTED_COLOR))
+        return
+    post = page.posts[int(choice) - 1]
+    await session.write_line("")
+
+    if not _can_edit_post(db, post, user):
+        await session.write_line(colored("You can't edit that post.", fg_color=MUTED_COLOR))
+        return
+
+    await session.write(f"Subject [{post.subject}] (Enter to keep): ")
+    subject = (await session.read_line()).strip() or post.subject
+
+    body = await _compose_body(
+        session,
+        db,
+        user,
+        initial_text=post.body,
+        draft_path=_post_draft_path(db, kind="edit", board=board, user=user, root_post_id=post.root_post_id),
+    )
+    if body is None:
+        await session.write_line(colored("Edit cancelled.", fg_color=MUTED_COLOR))
+        return
+
+    try:
+        edit_post(db, post, board, subject=subject, body=body, edited_by=user)
+    except PostError as exc:
+        await session.write_line(colored(f"Could not save edit: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line("Post updated.")
 
 
 def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:
@@ -631,9 +718,20 @@ async def _compose_body(
     `None` only for the fullscreen path's genuine cancel (quit without
     saving) -- the plain-line fallback has no equivalent "cancel"
     concept and always returns a string, matching its unchanged
-    existing behavior for every account that hasn't opted in."""
+    existing behavior for every account that hasn't opted in. The
+    plain path has no way to *pre-fill* a line-based prompt with
+    `initial_text` (unlike the subject field's own "[current] (Enter
+    to keep)" pattern, a whole body is too long to inline into a
+    prompt that way) -- shown as read-only context above the prompt
+    instead, on an edit, so the current content isn't simply invisible
+    to anyone who hasn't opted into the fullscreen editor."""
     if fullscreen_editor_enabled(db, user):
         return await edit_prose(session, initial_text=initial_text, draft_path=draft_path)
+    if initial_text:
+        await session.write_line(colored("Current body:", fg_color=MUTED_COLOR))
+        await session.write_line(reflow(sanitize_text(initial_text, allow_newlines=True), width=session.terminal_width))
+        await session.write("New body (Enter to keep unchanged): ")
+        return (await session.read_line()).strip() or initial_text
     await session.write("Body: ")
     return (await session.read_line()).strip()
 
@@ -641,10 +739,19 @@ async def _compose_body(
 async def _render_post_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
     header = colored(f"[{board_name}]", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
-    for post in page.posts:
+    for position, post in enumerate(page.posts, start=1):
         when = format_for_display(post.created_at, db)
+        edited_marker = " (edited)" if post.is_edited else ""
+        # Position numbers are 1-indexed *within this page only* -- not
+        # a stable identity across page changes, purely a same-screen
+        # selector for [E]dit (design doc -- prose editor round B2:
+        # editing an existing post), the same "how do you pick one item
+        # currently on screen" role a picker's page-relative numbering
+        # already plays elsewhere, just inline here since a board page
+        # is at most 5 posts, too small to need a real picker for it.
         post_header = colored(
-            f"{sanitize_text(post.subject)} -- {sanitize_text(post.author_label)} ({when})",
+            f"[{position}] {sanitize_text(post.subject)} -- "
+            f"{sanitize_text(post.author_label)} ({when}){edited_marker}",
             fg_color=ACCENT_COLOR,
         )
         await session.write_line(f"\r\n{post_header}")

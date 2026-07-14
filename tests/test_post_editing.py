@@ -204,12 +204,10 @@ def test_an_edit_keeps_a_post_alive_even_after_the_original_root_expires(db, ali
     edited = edit_post(db, original, board, subject="Subject", body="Fresh body", edited_by=alice)
     # Old enough to sweep to 'expired' (past max_post_age_days=30) but
     # not old enough to be hard-deleted (default grace period is 7
-    # more days) -- deliberately not aged past the delete threshold,
-    # since that hits a separate, pre-existing bug unrelated to this
-    # feature (see the note in this session's summary): deleting a
-    # post that's still referenced by another row's parent_post_id
-    # already raises a FOREIGN KEY IntegrityError today, root_post_id/
-    # edit_of_post_id or not, and fixing that is its own task.
+    # more days) -- the "does an edit still surviving past hard-delete"
+    # case is covered separately, more precisely, by
+    # tests/test_post_lifecycle.py::
+    # test_expired_post_still_referenced_by_an_edit_is_not_deleted.
     _age(db, original, days_old=35)
 
     page = list_posts_page(db, board, alice)

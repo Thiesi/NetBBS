@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import list_posts_page
+from netbbs.boards.posts import create_post, list_posts_page
 from netbbs.directory import get_bio
 from netbbs.net import login_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind
@@ -155,6 +155,78 @@ def test_compose_post_cancelled_from_the_fullscreen_editor_does_not_post(db, ali
     text = _written_text(session)
     assert "Posted" not in text
     assert "cancelled" in text.lower()
+
+
+# -- editing an existing post -------------------------------------------------
+
+
+def test_edit_option_hidden_when_nothing_on_the_page_is_editable(db, alice):
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, bob))
+    assert "[E]dit" not in _written_text(session)
+
+
+def test_edit_existing_post_via_plain_line_flow(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Original subject", "Original body")
+    # e -> pick post 1 -> keep subject (Enter) -> new body -> back -> skip new post
+    session = FakeSession(["e", "1", "", "Edited body", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Post updated" in _written_text(session)
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.subject == "Original subject"
+    assert saved.body == "Edited body"
+    assert saved.is_edited is True
+
+
+def test_edit_existing_post_via_fullscreen_editor(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Original subject", "Original body")
+    session = FakeSession(
+        ["e", "1", "New subject"] + ["END"] + _type(" -- revised") + ["CTRL+O", "b", ""]
+    )
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Post updated" in _written_text(session)
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.subject == "New subject"
+    assert saved.body == "Original body -- revised"  # editor was pre-filled with the current body
+
+
+def test_edit_existing_post_cancelled_leaves_it_unchanged(db, alice):
+    set_fullscreen_editor_enabled(db, alice, True)
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["e", "1", "Subject", "CTRL+X", "d", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "cancelled" in _written_text(session).lower()
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.body == "Body"
+    assert saved.is_edited is False
+
+
+def test_edit_existing_post_rejects_an_invalid_post_number(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["e", "9", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Not a valid post number" in _written_text(session)
+
+
+def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
+    board = create_board(db, "general", creator=alice)
+    # 6 posts -> 2 pages at the default page size of 5; back up one
+    # page, edit the post shown there, and confirm the view stays on
+    # that same older page rather than jumping back to page one.
+    posts = [create_post(db, board, alice, f"Subject {i}", f"Body {i}") for i in range(6)]
+    session = FakeSession(["o", "e", "1", "", "Edited", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    text = _written_text(session)
+    assert "Post updated" in text
+    assert "Subject 0" in text  # the oldest post, only visible on the older page
 
 
 # -- editing the bio ---------------------------------------------------------

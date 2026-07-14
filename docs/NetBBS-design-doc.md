@@ -6027,3 +6027,84 @@ code, per this project's design-before-code convention:**
 delete/FK bug (point 2.5) and the edit-existing-post UI entry point
 (point 3.7) are both real, known gaps going into whatever's next —
 neither silently papered over nor guessed at unilaterally.
+
+## Sign-off notes, round 70 (the two round 69 gaps closed out — implemented)
+
+1. **The pre-existing FK delete bug (round 69 point 2.5), fixed at the
+   root round 60 already established for this exact class of
+   problem.** `_sweep_expired_posts`'s hard-delete step now excludes
+   any post still referenced by another live row — as a reply's
+   `parent_post_id`, an edit chain's `root_post_id`, or a later edit's
+   `edit_of_post_id` — via a `NOT EXISTS` clause, rather than changing
+   `parent_post_id`'s `ON DELETE` behavior (which would need the drop/
+   rebuild migration pattern, and round 60 already found that
+   rebuilding `posts` specifically — a live parent of several other
+   tables' own foreign keys — risks SQLite's `DROP TABLE` cascading
+   into *all* of those relationships at once, not just the one column
+   being fixed). A referenced post simply stays `'expired'`
+   indefinitely instead of being purged — already a valid, harmless
+   state (delisted from browsing, still individually reachable via
+   `get_post`), not a new one this introduces. Two regression tests in
+   `tests/test_post_lifecycle.py` (the reply case and the edit-chain
+   case), plus a standalone reproduction confirming the exact
+   pre-existing failure against unmodified `parent_post_id` alone,
+   with none of round 69's new columns involved, before touching
+   anything.
+2. **The edit-existing-post UI entry point (round 69 point 3.7).**
+   `_render_post_page` now numbers each post on its page (`[1]`..`[N]`,
+   page-relative only — not a stable identity across page changes) and
+   marks an edited one `(edited)`. A new `[E]dit` option on the board-
+   reading screen — shown only when at least one post on the current
+   page is actually editable by the viewer (`_can_edit_post`, the exact
+   same author-or-`BoardPermission.EDIT` rule `edit_post` itself
+   enforces, checked *before* prompting for any new content so a
+   rejection happens immediately, not after composing a whole
+   revision) — prompts for a page-relative post number, then reuses
+   the existing subject-with-current-default pattern
+   (`admin_flow.py`'s `_edit_board_screen`: `"Subject [{current}]:
+   "`) and `_compose_body` (round 69) for the body, pre-filled with
+   the post's current content either way. Deliberately not the real
+   picker (`netbbs.net.picker.pick_item`) — a board page is at most 5
+   posts, too small to justify it, matching how the ANSI editor's own
+   glyph/color pickers are the only place in this codebase that
+   *does* reach for the real picker over inline numbering.
+3. **A real UX regression caught and fixed before it shipped, not
+   discovered after**: the first version simply re-fetched the
+   *newest* page after every edit, which meant editing a post while
+   browsing older history silently bounced the SysOp back to page one
+   — an unrelated side effect nothing asked for. Fixed by having
+   `_show_board` track which cursor produced the page currently on
+   screen (`page_anchor`, updated at every navigation step, reused
+   by `_edit_existing_post`'s own post-edit refresh) — editing a post
+   never moves it in the feed to begin with (round 69 point 4), so the
+   fix only needed to stop `_show_board` from discarding its own
+   navigation state, not anything in the pagination model itself.
+   Confirmed by a dedicated test: back one page, edit the post shown
+   there, assert the older page's own content is still what's on
+   screen afterward.
+4. **The plain (non-fullscreen-editor) body-entry path gained real
+   edit support it never needed before**: composing a new post never
+   had anything to pre-fill, but editing does, and a whole body is too
+   long to inline into a `"[current]: "`-style prompt the way the
+   subject field can. `_compose_body`'s plain-line fallback now shows
+   the current body as read-only context immediately above the prompt
+   when editing, and — matching round 69's own `initial_text`
+   pre-fill contract for the fullscreen path — treats a bare Enter as
+   "keep it unchanged," not "replace it with an empty body."
+5. **Testing**: `tests/test_post_lifecycle.py` gained the two FK-fix
+   regression tests above (point 1). `tests/
+   test_login_flow_fullscreen_editor.py` gained 6 new cases: the
+   `[E]dit` option correctly hidden when nothing on the page is
+   editable, editing via both the plain and fullscreen paths (the
+   fullscreen case confirming the editor really was pre-filled with
+   the existing body, not started blank), a cancelled fullscreen edit
+   leaving the post untouched, an invalid post-number rejection, and
+   the page-position-preservation regression from point 3. Full suite
+   re-run: **1339 passed, 3 skipped**.
+
+**Nothing further flagged as outstanding from this pair of rounds** —
+both round 69 gaps are now closed. Round B2's own remaining unplanned
+scope (cut/copy/paste, search/replace, wiring the fullscreen editor
+into anything beyond posts/bio) remains exactly as round 69 already
+described: real, deliberate, and not guessed at ahead of an actual
+need.

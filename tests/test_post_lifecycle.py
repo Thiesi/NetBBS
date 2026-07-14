@@ -17,6 +17,8 @@ from netbbs.boards.posts import (
     approve_post,
     create_post,
     delete_post,
+    edit_post,
+    get_post,
     list_pending_posts,
     list_pinned_posts,
     list_posts_page,
@@ -301,6 +303,48 @@ def test_expired_post_past_grace_period_is_actually_deleted(db, alice, bob):
 
     with pytest.raises(PostError):
         get_post(db, post.post_id)
+
+
+def test_expired_post_still_referenced_by_a_reply_is_not_deleted(db, alice, bob):
+    """Regression test for a real, pre-existing bug (found while
+    testing design doc -- prose editor round B2's post-editing work,
+    fixed independently of it): deleting a post that still has a live
+    reply pointing at it via parent_post_id used to raise
+    `sqlite3.IntegrityError: FOREIGN KEY constraint failed` -- the
+    sweep now leaves a still-referenced post in `'expired'` status
+    indefinitely instead of attempting (and failing) to purge it."""
+    board = create_board(db, "general", max_post_age_days=30, creator=alice)
+    set_expiry_grace_period_days(db, 5)
+    parent = create_post(db, board, bob, "Parent", "Body")
+    create_post(db, board, alice, "Reply", "Body", parent_post_id=parent.post_id)
+    _age_post(db, parent, days_old=40)  # past both age and grace period
+
+    list_posts_page(db, board, bob)  # triggers the sweep -- must not raise
+
+    still_there = get_post(db, parent.post_id)
+    assert still_there.status == "expired"
+
+
+def test_expired_post_still_referenced_by_an_edit_is_not_deleted(db, sysop, alice):
+    """Same regression, for the root_post_id/edit_of_post_id chain a
+    still-live edit creates (design doc -- prose editor round B2) --
+    the root must survive as long as any edit of it still exists, even
+    once the root row itself has individually aged past deletion."""
+    board = create_board(db, "general", max_post_age_days=30, creator=alice)
+    set_expiry_grace_period_days(db, 5)
+    grant_permissions(
+        db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop
+    )
+    original = create_post(db, board, alice, "Subject", "Original")
+    edited = edit_post(db, original, board, subject="Subject", body="Edited", edited_by=alice)
+    _age_post(db, original, days_old=40)  # only the root ages past deletion, not the edit
+
+    list_posts_page(db, board, alice)  # triggers the sweep -- must not raise
+
+    still_there = get_post(db, original.post_id)
+    assert still_there.status == "expired"
+    still_referenced = get_post(db, edited.post_id)
+    assert still_referenced.root_post_id == original.post_id
 
 
 def test_expired_post_within_grace_period_is_not_yet_deleted(db, alice, bob):

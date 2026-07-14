@@ -663,6 +663,29 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
     the default). Not logged to `netbbs.moderation.log` — that log is
     for explicit human moderation decisions, not mechanical time-based
     housekeeping.
+
+    The delete step deliberately excludes any post still referenced by
+    another live row — as a reply's `parent_post_id`, an edit chain's
+    `root_post_id`, or a later edit's `edit_of_post_id` (design doc --
+    prose editor round B2 planning; a real, pre-existing bug found
+    while testing that round, fixed here rather than there since it
+    predates and is independent of post editing). `posts.parent_post_id
+    REFERENCES posts(post_id)` with no `ON DELETE` clause means SQLite
+    raises `FOREIGN KEY constraint failed` on any attempt to delete a
+    still-referenced row — confirmed to already reproduce this against
+    a plain reply, with none of round B2's own new columns involved.
+    Changing that FK's `ON DELETE` behavior would need the drop/rebuild
+    migration pattern rounds 37/40/41/56-57/60 use elsewhere, and round
+    60 already found the hard way that rebuilding `posts` specifically
+    — a live parent of several other tables' own foreign keys — risks
+    SQLite's `DROP TABLE` applying its own cascade/SET-NULL side
+    effects to *all* of those relationships at once, not just the one
+    column being fixed. Handling it here instead, application-level,
+    is the same choice round 60 made for board/area/category deletion
+    for exactly that reason: a referenced post simply stays in
+    `'expired'` status indefinitely rather than being purged — already
+    a valid, harmless state (delisted from browsing, still individually
+    reachable via `get_post`), not a new one this introduces.
     """
     if board.max_post_age_days is None:
         return
@@ -684,6 +707,13 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
         DELETE FROM posts
         WHERE board_id = ? AND status = 'expired' AND exempt_from_expiry = 0
               AND created_at < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM posts child
+                  WHERE child.post_id != posts.post_id
+                    AND (child.parent_post_id = posts.post_id
+                         OR child.root_post_id = posts.post_id
+                         OR child.edit_of_post_id = posts.post_id)
+              )
         """,
         (board.id, deletion_cutoff),
     )
