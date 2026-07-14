@@ -18,8 +18,12 @@ import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, count_sysops, create_user, list_users
 from netbbs.net.admin_flow import admin_menu
+from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session import Session
+from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.net.shutdown import NodeControls
 from netbbs.storage.database import Database
+from tests.test_shutdown import _hold_registered
 
 
 class FakeSession(Session):
@@ -223,3 +227,154 @@ def test_invalid_key_writes_only_a_bell(db, sysop):
     bell_index = session.written.index("\a")
     assert session.written[bell_index] == "\a"
     assert session.written[:bell_index].count("Choice: ") == 1
+
+
+# -- node management (design doc -- node management round) -----------------
+
+
+def _node_controls() -> NodeControls:
+    return NodeControls(
+        session_registry=ActiveSessionRegistry(),
+        maintenance=MaintenanceMode(),
+        shutdown_event=asyncio.Event(),
+        graceful_delay_seconds=60.0,
+    )
+
+
+def test_node_option_hidden_without_node_controls(db, sysop):
+    session = FakeSession(["n", "b"])
+    _run(session, db, sysop)  # _run's admin_menu call passes no node_controls
+    bell_index = session.written.index("\a")
+    assert session.written[bell_index] == "\a"
+
+
+def test_who_lists_and_disconnects_another_session(db, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)  # let the other session register
+
+        admin_session = FakeSession(["n", "w", "0", "1", "y", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert other_task.cancelled() or other_task.done()
+        assert "disconnected" in _written_text(admin_session)
+
+    asyncio.run(scenario())
+
+
+def test_who_refuses_to_disconnect_own_session(db, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        admin_session = FakeSession(["n", "w", "0", "1", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert "use Logoff instead" in _written_text(admin_session)
+
+    asyncio.run(scenario())
+
+
+async def _run_admin_session_as_its_own_task(session, db, actor, node_controls, registry):
+    """
+    Runs `admin_menu` as an independent task with its own `enter()`/
+    `leave()`, mirroring how a real connection's `handle_session` always
+    runs as its own task in production -- never inline within whatever
+    task later triggers a shutdown. Needed specifically for tests that
+    go on to `await node_controls.shutdown_event.wait()` from the test's
+    *own* task afterward: if `admin_session` were instead registered
+    under that same outer task, `disconnect_all()`'s eventual
+    cancellation would be cancelling the very task suspended waiting for
+    the event it's about to set -- the identical self-referential hazard
+    `run_shutdown_sequence`'s fire-and-forget design exists to avoid,
+    just recreated inside the test instead of the code under test.
+    """
+    registry.enter(session)
+    try:
+        await admin_menu(session, db, actor, node_controls=node_controls)
+    finally:
+        registry.leave(session)
+
+
+def test_shutdown_screen_triggers_the_sequence_as_a_background_task(db, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        # Scripted with trailing "b", "b" to return all the way out --
+        # FakeSession's reads never actually suspend, so admin_task runs
+        # to completion (including its own registry.leave()) in a single
+        # scheduling turn, before the background sequence gets a turn to
+        # run at all. That's fine for what this test checks: that the
+        # sequence was fired as non-blocking and genuinely takes effect
+        # afterward -- "does disconnect_all() reach a still-mid-read
+        # session" is already covered thoroughly in tests/test_shutdown.py
+        # (via a session that genuinely blocks), not re-proven here.
+        admin_session = FakeSession(["n", "s", "i", "", "y", "b", "b"])
+        admin_task = asyncio.create_task(
+            _run_admin_session_as_its_own_task(admin_session, db, sysop, node_controls, registry)
+        )
+
+        await asyncio.wait_for(node_controls.shutdown_event.wait(), timeout=2.0)
+        await asyncio.gather(admin_task, return_exceptions=True)
+
+        assert "Shutdown sequence started." in _written_text(admin_session)
+        assert node_controls.maintenance.is_active() is True
+        assert len(registry) == 0
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_screen_with_custom_message_replaces_the_default(db, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)
+
+        admin_session = FakeSession(
+            ["n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b"]
+        )
+        admin_task = asyncio.create_task(
+            _run_admin_session_as_its_own_task(admin_session, db, sysop, node_controls, registry)
+        )
+
+        await asyncio.wait_for(node_controls.shutdown_event.wait(), timeout=2.0)
+        await asyncio.gather(other_task, admin_task, return_exceptions=True)
+
+        assert any("Emergency patch" in line for line in other.written)
+        assert not any("going down now" in line for line in other.written)
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_screen_declined_confirmation_does_nothing(db, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        admin_session = FakeSession(["n", "s", "g", "", "n", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert "Cancelled." in _written_text(admin_session)
+        assert node_controls.shutdown_event.is_set() is False
+        assert node_controls.maintenance.is_active() is False
+
+    asyncio.run(scenario())

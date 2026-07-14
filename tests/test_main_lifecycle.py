@@ -23,7 +23,7 @@ import pytest
 from netbbs.__main__ import StartupError, _install_signal_handlers, run
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.net.maintenance import MaintenanceMode
-from netbbs.net.nodeconfig import NodeConfig, TransportConfig
+from netbbs.net.nodeconfig import NodeConfig, ShutdownConfig, TransportConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 
@@ -100,6 +100,59 @@ def test_configured_telnet_listener_on_known_port_accepts_connections(tmp_path):
             reader, writer = await _open_connection_when_ready("127.0.0.1", 12399)
             data = await reader.readexactly(1)  # first byte of Telnet negotiation
             assert data == b"\xff"  # IAC
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            shutdown_event.set()
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkeypatch):
+    """
+    Confirms `run()`'s `session_handler` closure actually threads its
+    real `shutdown_event`/`config.shutdown.graceful_delay_seconds` all
+    the way into `handle_session` (design doc -- node management round)
+    -- not just that `handle_session`'s own signature accepts them.
+
+    Monkeypatches `_run_authenticated_session` to a spy that captures
+    the `node_controls` it receives and returns immediately, rather
+    than driving a real login over the socket -- `handle_session`
+    itself (the part actually under test here) already constructs
+    `node_controls` before calling that function.
+    """
+    from netbbs.net import login_flow
+
+    captured: dict = {}
+
+    async def spy(session, db, hub, presence, mailbox, throttle, throttle_config, *, node_controls=None):
+        captured["node_controls"] = node_controls
+
+    monkeypatch.setattr(login_flow, "_run_authenticated_session", spy)
+
+    async def scenario():
+        config = _config(
+            tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12391),
+            shutdown=ShutdownConfig(graceful_delay_seconds=42.0),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            reader, writer = await _open_connection_when_ready("127.0.0.1", 12391)
+            await reader.readexactly(9)  # initial Telnet negotiation triplets
+
+            deadline = asyncio.get_event_loop().time() + 2.0
+            while "node_controls" not in captured:
+                if asyncio.get_event_loop().time() >= deadline:
+                    raise AssertionError("handle_session's spy was never reached")
+                await asyncio.sleep(0.01)
+
+            node_controls = captured["node_controls"]
+            assert node_controls is not None
+            assert node_controls.shutdown_event is shutdown_event
+            assert node_controls.graceful_delay_seconds == 42.0
+
             writer.close()
             await writer.wait_closed()
         finally:

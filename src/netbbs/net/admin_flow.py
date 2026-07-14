@@ -18,6 +18,8 @@ round 52), and `netbbs.net.picker.pick_item` for target selection.
 
 from __future__ import annotations
 
+import asyncio
+
 import nacl.signing
 
 from netbbs.auth.users import (
@@ -26,6 +28,7 @@ from netbbs.auth.users import (
     UserManagementError,
     create_user_async,
     delete_user,
+    get_user_by_username,
     list_users,
     set_user_disabled,
     set_user_level,
@@ -34,17 +37,31 @@ from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import list_actions_for_target_user, record_action
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
+from netbbs.net.session_registry import SessionSummary
+from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
 
-async def admin_menu(session: Session, db: Database, user: User) -> None:
-    """Top-level SysOp admin menu. Callers are responsible for their
-    own level gating before entering this -- it performs no permission
+async def admin_menu(
+    session: Session, db: Database, user: User, *, node_controls: NodeControls | None = None
+) -> None:
+    """
+    Top-level SysOp admin menu. Callers are responsible for their own
+    level gating before entering this -- it performs no permission
     check of its own, matching `pick_item`'s "presentation and
-    selection only" precedent."""
-    await _draw_admin_menu(session)
+    selection only" precedent.
+
+    `node_controls` (design doc -- node management round), if given,
+    unlocks the `[N]ode` submenu (list/disconnect sessions, trigger
+    shutdown) -- present when called from within a live session
+    (`netbbs.net.login_flow`), absent (`None`) when called from the
+    standalone `python -m netbbs.admin` CLI, which has no access to a
+    running node's live in-memory state at all (confirmed design
+    decision, not an oversight -- see that module's docstring).
+    """
+    await _draw_admin_menu(session, node_controls)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -54,39 +71,44 @@ async def admin_menu(session: Session, db: Database, user: User) -> None:
         elif choice == "c":
             await session.write_line("")
             await _create_user_screen(session, db, user)
-            await _draw_admin_menu(session)
+            await _draw_admin_menu(session, node_controls)
         elif choice == "l":
             await session.write_line("")
             await _list_users_screen(session, db)
-            await _draw_admin_menu(session)
+            await _draw_admin_menu(session, node_controls)
         elif choice == "p":
             await session.write_line("")
             await _change_level_screen(session, db, user)
-            await _draw_admin_menu(session)
+            await _draw_admin_menu(session, node_controls)
         elif choice == "e":
             await session.write_line("")
             await _disable_enable_screen(session, db, user)
-            await _draw_admin_menu(session)
+            await _draw_admin_menu(session, node_controls)
         elif choice == "d":
             await session.write_line("")
             await _delete_user_screen(session, db, user)
-            await _draw_admin_menu(session)
+            await _draw_admin_menu(session, node_controls)
+        elif choice == "n" and node_controls is not None:
+            await session.write_line("")
+            await _node_menu(session, db, user, node_controls)
+            await _draw_admin_menu(session, node_controls)
         else:
             await session.write("\a")
 
 
-async def _draw_admin_menu(session: Session) -> None:
+async def _draw_admin_menu(session: Session, node_controls: NodeControls | None) -> None:
     header = colored("SysOp admin menu:", fg_color=HEADER_COLOR, bold=True)
-    options = "  ".join(
-        [
-            menu_key("C", "reate user"),
-            menu_key("L", "ist users"),
-            menu_key("P", "romote/demote"),
-            menu_key("E", "nable/disable"),
-            menu_key("D", "elete user"),
-            menu_key("B", "ack"),
-        ]
-    )
+    option_list = [
+        menu_key("C", "reate user"),
+        menu_key("L", "ist users"),
+        menu_key("P", "romote/demote"),
+        menu_key("E", "nable/disable"),
+        menu_key("D", "elete user"),
+    ]
+    if node_controls is not None:
+        option_list.append(menu_key("N", "ode"))
+    option_list.append(menu_key("B", "ack"))
+    options = "  ".join(option_list)
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
 
@@ -290,3 +312,134 @@ async def _delete_user_screen(session: Session, db: Database, actor: User) -> No
         await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         return
     await session.write_line(f"{target.username!r} deleted.")
+
+
+# -- node management (design doc -- node management round) -----------------
+
+
+async def _node_menu(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+    await _draw_node_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "w":
+            await session.write_line("")
+            await _who_screen(session, db, actor, node_controls)
+            await _draw_node_menu(session)
+        elif choice == "s":
+            await session.write_line("")
+            await _shutdown_screen(session, db, actor, node_controls)
+            await _draw_node_menu(session)
+        else:
+            await session.write("\a")
+
+
+async def _draw_node_menu(session: Session) -> None:
+    header = colored("Node management:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("W", "ho"), menu_key("S", "hutdown"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+def _session_name(entry: SessionSummary) -> str:
+    if entry.username is not None:
+        return entry.username
+    return f"(unauthenticated) {entry.peer_address or 'unknown address'}"
+
+
+def _session_description(db: Database, entry: SessionSummary) -> str:
+    return f"connected since {format_for_display(entry.connected_at, db)}"
+
+
+async def _who_screen(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+    entries = node_controls.session_registry.list_entries()
+    selected = await pick_item(
+        session, entries,
+        name_of=_session_name,
+        stable_id_of=lambda e: id(e.session),
+        description_of=lambda e: _session_description(db, e),
+        title="Active sessions",
+        empty_message="No active sessions.",
+    )
+    if selected is None:
+        return
+
+    if selected.session is session:
+        await session.write_line(
+            colored("That's your own session -- use Logoff instead.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    await session.write(f"Disconnect {_session_name(selected)!r}? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return
+
+    target_user_id: int | None = None
+    detail = f"peer address {selected.peer_address or 'unknown'}"
+    if selected.username is not None:
+        try:
+            target_user_id = get_user_by_username(db, selected.username).id
+        except AuthError:
+            pass  # account no longer exists -- log by peer address only
+
+    disconnected = await node_controls.session_registry.disconnect_one(selected.session)
+    if not disconnected:
+        await session.write_line(colored("That session is already gone.", fg_color=MUTED_COLOR))
+        return
+
+    record_action(
+        db, actor=actor, action="disconnect_session", target_user_id=target_user_id, detail=detail
+    )
+    await session.write_line(f"{_session_name(selected)!r} disconnected.")
+
+
+async def _shutdown_screen(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+    await session.write_line(
+        colored(
+            "\r\nThis warns and disconnects every connected session (including this "
+            "one), then locks out new logins. This cannot be undone once confirmed.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write("Graceful (wait, then disconnect) or immediate? [G/i]: ")
+    mode_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    graceful = mode_answer != "i"
+
+    await session.write("Custom broadcast message (leave blank for the default): ")
+    message_raw = (await session.read_line()).strip()
+    message = message_raw or None
+
+    mode_label = "graceful" if graceful else "immediate"
+    await session.write(f"Confirm {mode_label} shutdown? [y/N]: ")
+    confirm = (await session.read_key()).lower()
+    await session.write_line("")
+    if confirm != "y":
+        await session.write_line("Cancelled.")
+        return
+
+    # Logged before triggering, not after: the sequence disconnects
+    # this very session too (see run_shutdown_sequence's own docstring
+    # on why it's fired as a background task rather than awaited
+    # inline), so there's no guarantee this session survives long
+    # enough afterward to still be able to write an audit row.
+    record_action(
+        db, actor=actor, action="trigger_shutdown",
+        detail=f"graceful={graceful}, message={message!r}",
+    )
+    asyncio.create_task(
+        run_shutdown_sequence(
+            graceful=graceful,
+            session_registry=node_controls.session_registry,
+            maintenance=node_controls.maintenance,
+            graceful_delay_seconds=node_controls.graceful_delay_seconds,
+            shutdown_event=node_controls.shutdown_event,
+            message=message,
+        )
+    )
+    await session.write_line("Shutdown sequence started.")

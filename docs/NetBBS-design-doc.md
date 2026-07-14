@@ -4694,3 +4694,183 @@ interactive verification of `python -m netbbs.admin` and the in-BBS
 NetBSD hardware, haven't been done from this sandboxed dev environment.
 Worth a direct check from Thiesi's own machine before considering this
 round fully closed out.
+
+## Sign-off notes, round 58 (chat_loop cancellation orphaned its two child tasks on deliberate shutdown — fixed)
+
+A real bug, caught on Thiesi's own NetBSD deployment (not in this
+sandbox) — round 51's `[A]dmin` tooling had barely shipped when a plain
+Ctrl-C with a chat session open produced an unhandled-exception
+warning at shutdown:
+
+```
+ERROR:asyncio:Task exception was never retrieved
+future: <Task ... send_loop() ... exception=SessionClosedError('client disconnected during read')>
+```
+
+**Root cause:** `_chat_loop` (`netbbs/net/chat_flow.py`) runs two
+concurrent child tasks, `receive_task` and `send_task`, and awaits
+`asyncio.wait({receive_task, send_task}, return_when=FIRST_COMPLETED)`.
+That call's own cancel/gather cleanup (the lines immediately after it)
+only runs when the `await` returns normally — i.e., when one of the two
+child tasks finishes on its own. When the *outer* task running
+`_chat_loop` is itself cancelled from outside instead (design doc round
+51's `ActiveSessionRegistry.disconnect_all()`, invoked by SIGINT's
+immediate-shutdown path), the `CancelledError` is raised at the
+`asyncio.wait(...)` call site — but `asyncio.wait()` being cancelled
+does **not** cancel the tasks it was waiting on. Execution jumped
+straight past the cancel/gather logic to the function's `finally:`
+block, leaving both child tasks orphaned: still scheduled on the event
+loop, with nothing left to await their eventual result. Once the
+connection's real socket actually closed, `send_task`'s blocked
+`read_byte()` failed with `SessionClosedError` — an exception nothing
+was left to retrieve, which is exactly what asyncio's default handler
+logs at that point.
+
+**Fix:** wrapped the `asyncio.wait(...)` call in its own
+`try`/`except asyncio.CancelledError`, cancelling and gathering both
+child tasks explicitly on that path before re-raising — the same
+cancel-then-gather shape the existing normal-completion path already
+used, just also applied to the cancellation path that previously
+skipped it entirely.
+
+**Testing:** `tests/test_chat_flow_cancellation.py` (new). First
+attempt used a fake session that blocks on a bare `asyncio.Event().
+wait()` and asserted no exception was ever logged via a custom
+`loop.set_exception_handler` — this passed even *without* the fix,
+because the fake never actually raises anything on its own the way a
+real closing socket does, so it never exercised the failure mode at
+all (caught by deliberately reverting the fix and confirming the test
+still passed — a test that can't fail is worth nothing, and this one
+initially couldn't). Rewritten to check the actual mechanism directly:
+capture `asyncio.all_tasks()` before starting `_chat_loop`, cancel the
+outer task, and assert no *still-pending* tasks are left over
+afterward — confirmed this version fails without the fix (both child
+tasks show up pending) and passes with it, verified by hand in both
+directions before trusting it. A second test confirms the existing
+`finally:` cleanup (`hub.leave`, the "has left the channel" broadcast)
+still runs on this path, i.e. the fix re-raises `CancelledError` rather
+than swallowing it. Full suite re-run: **1064 passed, 3 skipped** —
+actually run, not just syntax-checked.
+
+## Sign-off notes, round 59 (node management: [N]ode admin menu — implemented)
+
+Second slice of §15's "SysOp admin tools" line: exposing round 51's
+shutdown/session-registry machinery as an in-session command, so a
+SysOp can list active sessions, force-disconnect a specific one, and
+trigger a graceful/immediate shutdown — with an optional custom
+broadcast message — without needing OS-level signal access.
+
+1. **Standalone-CLI scope, confirmed with Thiesi: in-session only.**
+   List-sessions/force-disconnect/trigger-shutdown all need live in-
+   memory state (`ActiveSessionRegistry`, `MaintenanceMode`, the
+   shutdown event) that only exists inside the running server process.
+   `python -m netbbs.admin` is a separate OS process with no access to
+   that memory. Building real IPC (a Unix socket/named pipe) to bridge
+   that was discussed and explicitly rejected — the only solid use case
+   beyond this one feature would be richer CLI-side diagnostics, not
+   enough to justify a remote-control layer for a solo-SysOp target.
+   The CLI needs no changes at all: `kill -TERM`/`kill -INT` against the
+   running process already triggers the exact sequence this round
+   exposes as a menu command. Also confirmed out of scope: no
+   standalone reversible maintenance-mode toggle — `MaintenanceMode`
+   stays exactly as round 51 built it, a one-way flag only ever part of
+   the shutdown sequence.
+2. **`netbbs/net/shutdown.py`** (new) — `run_shutdown_sequence` (moved
+   out of `netbbs.__main__`, no longer private, since it now has two
+   genuinely different callers) and `NodeControls`, a small bundle
+   (`session_registry`, `maintenance`, `shutdown_event`,
+   `graceful_delay_seconds`) threaded as one optional parameter rather
+   than four separate ones. Same split-out-into-its-own-module
+   reasoning as `session_registry.py`/`maintenance.py` themselves in
+   round 51. Gained a `message: str | None` parameter — per Thiesi's
+   own wording, a supplied message *replaces* the default "going down
+   in N seconds"/"going down now" text rather than appending to it,
+   sanitized like any other free text a SysOp typed.
+3. **A self-cancellation hazard, designed around up front rather than
+   discovered the hard way** — directly informed by round 58, found
+   just before this round started: if the shutdown-trigger command
+   `await`ed `disconnect_all()` inline from within the very session
+   issuing the command, that session's own task would be cancelling
+   itself while being one of the tasks its own `gather()` call is
+   waiting on — the identical species of bug round 58 just fixed
+   elsewhere. Resolved architecturally, not defensively: the `[S]hutdown`
+   screen fires the sequence as an independent background task
+   (`asyncio.create_task`, never awaited inline), exactly matching how
+   the existing signal-handler path already does it. The calling
+   SysOp's own session is then just another `ActiveSessionRegistry`
+   entry that gets cleanly cancelled from *outside* once the background
+   task reaches it — the same already-proven-safe shape every other
+   connected session goes through, no exclusion or special-casing
+   needed. A parallel, narrower version of the same hazard exists for
+   single-target disconnect (`[W]ho`, force-disconnecting *yourself*)
+   — resolved there with a simple UI-level guard instead (refuse,
+   "use Logoff instead"), since a single target has no equivalent
+   fire-and-forget framing that would still give the SysOp a synchronous
+   success/failure confirmation.
+4. **`ActiveSessionRegistry` gained per-entry metadata.** Internal
+   storage changed from `dict[Session, asyncio.Task]` to
+   `dict[Session, _Entry]` (`task`, `username: str | None`,
+   `connected_at`). New `mark_authenticated(session, username)`, called
+   from `login_flow._run_authenticated_session` right where
+   `presence.enter(user.username)` already happens; new
+   `disconnect_one(session) -> bool` (cancel just one task, same shape
+   `disconnect_all` already uses per-task); new `list_entries() ->
+   list[SessionSummary]`, a display-only snapshot (deliberately not
+   exposing the raw `Task`) backing the `[W]ho` screen.
+5. **`login_flow.py` threading, backward-compatible by construction.**
+   `handle_session`'s existing required params (`session_registry`,
+   `maintenance`) are unchanged — zero churn for the many existing test
+   call sites. It gained two new *optional* params, `shutdown_event`
+   and `graceful_delay_seconds`, and now constructs a `NodeControls`
+   internally, threaded through `_run_authenticated_session`/
+   `_main_menu`/`admin_menu` as one new optional param at each level.
+   The standalone CLI calls `admin_flow.admin_menu(session, db, actor)`
+   directly, bypassing this whole chain, so `node_controls` simply
+   stays `None` there — exactly the signal `admin_menu` needs to hide
+   the `[N]ode` option, achieved for free by *which* caller invokes it
+   rather than a separate flag.
+6. **A real ordering hazard fixed along the way, not originally
+   planned:** `run()` used to construct its own `shutdown_event` lazily,
+   right before `await shutdown_event.wait()` — *after* listeners were
+   already started and could in principle be accepting connections.
+   Since `session_handler` now needs a real `shutdown_event` to pass
+   into `handle_session`, that lazy construction was moved earlier,
+   before `session_handler` is even defined — removing a latent race
+   (a connection reaching the closure before the event existed) that
+   predated this round but was only surfaced by needing to touch this
+   code path at all.
+7. **A real docstring/syntax bug caught by actually running the code,
+   not by inspection:** an early edit to `handle_session`'s docstring
+   accidentally closed the triple-quoted string early and reopened
+   backtick-quoted prose as bare code immediately after — a `SyntaxError`
+   on the first `import netbbs.net.login_flow`, not a subtle runtime
+   issue. Caught immediately by the standing "actually import/run it"
+   discipline rather than shipping silently broken.
+8. **Testing:** `tests/test_shutdown.py` extended for `disconnect_one`,
+   `mark_authenticated`, `list_entries`, and `run_shutdown_sequence`'s
+   `message` param (replaces the default text; sanitized). `tests/
+   test_admin_flow.py` extended for the `[N]ode` submenu: `[W]ho` lists
+   and disconnects another session, refuses to target the caller's own;
+   `[S]hutdown` fires as a genuine background task (verified via a
+   second, independently-registered `asyncio.Task` rather than the
+   scenario's own task awaiting the very event the sequence sets —
+   an early draft of these tests recreated the round-58-adjacent
+   self-referential hazard *inside the test* by registering the admin's
+   session under the same task that later awaited `shutdown_event`,
+   caught before trusting the tests, not after), custom message
+   replaces the default, declined confirmation does nothing.
+   `tests/test_main_lifecycle.py` gained a test confirming `run()`'s
+   real `shutdown_event`/`config.shutdown.graceful_delay_seconds`
+   actually reach `handle_session` (via a spy on
+   `_run_authenticated_session`, not a full simulated login). Full
+   suite re-run: **1078 passed, 3 skipped** — actually run, not just
+   syntax-checked.
+
+**Flagged, not blocking further work:** same category of gap this
+project's history already carries — real interactive verification of
+the `[N]ode` menu (listing real concurrent sessions, disconnecting one,
+triggering a real shutdown with a custom message) from actual connected
+clients, not just this sandbox's scripted `FakeSession` tests, hasn't
+been done. Worth a direct check from Thiesi's own machine, especially
+since round 58's original bug report came from exactly that kind of
+real-world use this sandbox can't reproduce.

@@ -43,6 +43,7 @@ from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.net.shutdown import NodeControls
 from netbbs.net.throttle import LoginThrottle
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, sanitize_text
@@ -80,9 +81,23 @@ async def handle_session(
     throttle_config: ThrottleConfig,
     session_registry: ActiveSessionRegistry,
     maintenance: MaintenanceMode,
+    *,
+    shutdown_event: asyncio.Event | None = None,
+    graceful_delay_seconds: float = 60.0,
 ) -> None:
     """
     Top-level per-connection entry point.
+
+    `shutdown_event`/`graceful_delay_seconds` (design doc -- node
+    management round) are bundled with `session_registry`/`maintenance`
+    into a `NodeControls`, threaded down through `_run_authenticated_
+    session`/`_main_menu` to `netbbs.net.admin_flow.admin_menu` — what
+    the in-session `[N]ode` admin command needs to trigger a shutdown
+    directly, the same sequence a real OS signal already triggers (see
+    `netbbs.net.shutdown`). Both optional/defaulted so every existing
+    caller of this function (many tests, none of which exercise node
+    management) needs no changes; `netbbs.__main__.run()` is the only
+    caller that passes its own real values.
 
     `throttle`/`throttle_config` implement issue #3's cross-connection
     login throttling: `throttle` is node-lifetime shared state (one
@@ -123,9 +138,18 @@ async def handle_session(
         await session.write_line(MAINTENANCE_MESSAGE)
         return
 
+    node_controls = NodeControls(
+        session_registry=session_registry,
+        maintenance=maintenance,
+        shutdown_event=shutdown_event if shutdown_event is not None else asyncio.Event(),
+        graceful_delay_seconds=graceful_delay_seconds,
+    )
+
     session_registry.enter(session)
     try:
-        await _run_authenticated_session(session, db, hub, presence, mailbox, throttle, throttle_config)
+        await _run_authenticated_session(
+            session, db, hub, presence, mailbox, throttle, throttle_config, node_controls=node_controls
+        )
     finally:
         session_registry.leave(session)
 
@@ -138,12 +162,20 @@ async def _run_authenticated_session(
     mailbox: MessageMailbox,
     throttle: LoginThrottle,
     throttle_config: ThrottleConfig,
+    *,
+    node_controls: NodeControls | None = None,
 ) -> None:
     """The login-through-logoff body of a connection, wrapped by
     `handle_session`'s maintenance-mode check and session-registry
     bookkeeping (design doc round 51) — split out so those two concerns
     stay a thin, easy-to-read wrapper rather than adding another level
-    of nesting to the whole function."""
+    of nesting to the whole function.
+
+    `node_controls`, if given, is threaded straight through to
+    `_main_menu`/`admin_menu` (design doc -- node management round);
+    `None` is what a direct test call site (bypassing `handle_session`)
+    gets by default, which correctly hides the `[N]ode` admin option
+    rather than needing every such test updated."""
     if not throttle.try_enter_unauthenticated():
         await session.write_line(
             "This server has too many pending logins right now. Please try again shortly."
@@ -197,8 +229,10 @@ async def _run_authenticated_session(
     history = InputHistory()
 
     presence.enter(user.username)
+    if node_controls is not None:
+        node_controls.session_registry.mark_authenticated(session, user.username)
     try:
-        await _main_menu(session, db, hub, presence, mailbox, history, user)
+        await _main_menu(session, db, hub, presence, mailbox, history, user, node_controls=node_controls)
     finally:
         presence.leave(user.username)
 
@@ -243,6 +277,8 @@ async def _main_menu(
     mailbox: MessageMailbox,
     history: InputHistory,
     user: User,
+    *,
+    node_controls: NodeControls | None = None,
 ) -> None:
     """
     The main menu, now dispatching immediately on a single keystroke
@@ -292,7 +328,7 @@ async def _main_menu(
             await _draw_main_menu(session, mailbox, user)
         elif choice == "a" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
-            await admin_menu(session, db, user)
+            await admin_menu(session, db, user, node_controls=node_controls)
             await _draw_main_menu(session, mailbox, user)
         else:
             await session.write("\a")

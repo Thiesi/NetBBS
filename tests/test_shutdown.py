@@ -2,9 +2,12 @@
 Tests for the deliberate node-shutdown sequence (design doc round 51):
 `netbbs.net.session_registry.ActiveSessionRegistry`,
 `netbbs.net.maintenance.MaintenanceMode`, and
-`netbbs.__main__._run_shutdown_sequence` (the coordinator SIGTERM/
-SIGINT actually trigger). The coordinator is driven directly here
-rather than via real OS signals — `tests/test_main_lifecycle.py`'s own
+`netbbs.net.shutdown.run_shutdown_sequence` (the coordinator SIGTERM/
+SIGINT -- and, as of the node-management round, the in-session `[N]ode`
+admin command too -- actually trigger; relocated out of
+`netbbs.__main__` in that same round since it's no longer signal-
+specific). The coordinator is driven directly here rather than via real
+OS signals — `tests/test_main_lifecycle.py`'s own
 `test_signal_handler_registration_triggers_shutdown_event` already
 covers that a real signal reaches `_install_signal_handlers`; this file
 covers what happens once it does.
@@ -14,15 +17,18 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.__main__ import _run_shutdown_sequence, run
+from netbbs.__main__ import run
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import TransportConfig
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.net.shutdown import run_shutdown_sequence
 from tests.test_main_lifecycle import _config, _open_connection_when_ready
 
 
 class _FakeSession:
+    peer_address: str | None = None
+
     def __init__(self):
         self.written: list[str] = []
 
@@ -148,6 +154,93 @@ def test_disconnect_all_on_an_empty_registry_returns_immediately():
     asyncio.run(scenario())
 
 
+# -- disconnect_one / mark_authenticated / list_entries (node management round) --
+
+
+def test_disconnect_one_cancels_just_that_session():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sessions = [_FakeSession(), _FakeSession()]
+        tasks = [asyncio.create_task(_hold_registered(registry, s)) for s in sessions]
+        await asyncio.sleep(0)
+
+        disconnected = await registry.disconnect_one(sessions[0])
+
+        assert disconnected is True
+        assert tasks[0].cancelled()
+        assert len(registry) == 1  # the other session is untouched
+
+        tasks[1].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_one_returns_false_for_an_unregistered_session():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        result = await registry.disconnect_one(_FakeSession())
+        assert result is False
+
+    asyncio.run(scenario())
+
+
+def test_mark_authenticated_updates_list_entries():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        session = _FakeSession()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        before = registry.list_entries()
+        assert before[0].username is None
+
+        registry.mark_authenticated(session, "alice")
+
+        after = registry.list_entries()
+        assert after[0].username == "alice"
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_mark_authenticated_on_an_unregistered_session_does_not_raise():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        registry.mark_authenticated(_FakeSession(), "alice")  # must not raise
+
+    asyncio.run(scenario())
+
+
+def test_list_entries_reflects_peer_address_and_connected_at():
+    registry = ActiveSessionRegistry()
+
+    class _AddressedSession(_FakeSession):
+        peer_address = "203.0.113.7"
+
+    async def scenario():
+        session = _AddressedSession()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        entries = registry.list_entries()
+        assert len(entries) == 1
+        assert entries[0].session is session
+        assert entries[0].peer_address == "203.0.113.7"
+        assert entries[0].connected_at  # a real timestamp was recorded
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 # -- MaintenanceMode ------------------------------------------------------
 
 
@@ -233,7 +326,7 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
                 await asyncio.sleep(0.01)
 
             await asyncio.wait_for(
-                _run_shutdown_sequence(
+                run_shutdown_sequence(
                     graceful=False,
                     session_registry=session_registry,
                     maintenance=maintenance,
@@ -282,7 +375,7 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
 
             start = asyncio.get_event_loop().time()
             await asyncio.wait_for(
-                _run_shutdown_sequence(
+                run_shutdown_sequence(
                     graceful=True,
                     session_registry=session_registry,
                     maintenance=maintenance,
@@ -312,7 +405,7 @@ def test_shutdown_activates_maintenance_mode():
         registry = ActiveSessionRegistry()
         shutdown_event = asyncio.Event()
 
-        await _run_shutdown_sequence(
+        await run_shutdown_sequence(
             graceful=False,
             session_registry=registry,
             maintenance=maintenance,
@@ -322,5 +415,55 @@ def test_shutdown_activates_maintenance_mode():
 
         assert maintenance.is_active() is True
         assert shutdown_event.is_set() is True
+
+    asyncio.run(scenario())
+
+
+def test_run_shutdown_sequence_custom_message_replaces_the_default(tmp_path):
+    """Per Thiesi's own wording (design doc -- node management round): a
+    supplied message *replaces* the default "going down" text, it
+    doesn't append to it."""
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        await run_shutdown_sequence(
+            graceful=False,
+            session_registry=registry,
+            maintenance=MaintenanceMode(),
+            graceful_delay_seconds=60.0,
+            shutdown_event=asyncio.Event(),
+            message="Emergency maintenance, back in five minutes.",
+        )
+
+        assert any("Emergency maintenance" in line for line in session.written)
+        assert not any("going down now" in line for line in session.written)
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_shutdown_sequence_without_a_message_uses_the_default():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        await run_shutdown_sequence(
+            graceful=False,
+            session_registry=registry,
+            maintenance=MaintenanceMode(),
+            graceful_delay_seconds=60.0,
+            shutdown_event=asyncio.Event(),
+        )
+
+        assert any("going down now" in line for line in session.written)
+
+        await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())

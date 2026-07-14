@@ -24,6 +24,7 @@ from netbbs.net.login_flow import handle_session
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
 from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.net.shutdown import run_shutdown_sequence
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
@@ -179,10 +180,22 @@ async def run(
         session_registry = ActiveSessionRegistry()
     if maintenance is None:
         maintenance = MaintenanceMode()
+    # Constructed here, before session_handler is defined below, rather
+    # than lazily right before `await shutdown_event.wait()` (as this
+    # used to) -- a real connection could in principle reach
+    # session_handler (and need a real shutdown_event to hand down to
+    # handle_session, design doc -- node management round) before
+    # reaching that later line, the same ordering hazard
+    # session_registry/maintenance's own None-check already avoids by
+    # being resolved up here.
+    if shutdown_event is None:
+        shutdown_event = asyncio.Event()
 
     async def session_handler(session):
         await handle_session(
-            session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance
+            session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
+            shutdown_event=shutdown_event,
+            graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
         )
 
     servers: list = []
@@ -196,48 +209,12 @@ async def run(
             )
         servers = await _start_servers(config, db, session_handler, throttle)
 
-        if shutdown_event is None:
-            shutdown_event = asyncio.Event()
         await shutdown_event.wait()
     finally:
         for server in reversed(servers):
             await server.stop()
         db.close()
         _logger.info("NetBBS node shut down cleanly")
-
-
-async def _run_shutdown_sequence(
-    *,
-    graceful: bool,
-    session_registry: ActiveSessionRegistry,
-    maintenance: MaintenanceMode,
-    graceful_delay_seconds: float,
-    shutdown_event: asyncio.Event,
-) -> None:
-    """
-    What a signal actually triggers now (design doc round 51) — locks
-    out new logins, warns everyone already connected (regardless of
-    what screen they're on, or even whether they've logged in yet — see
-    `netbbs.net.session_registry.ActiveSessionRegistry`), then (a
-    *graceful* SIGTERM request only) gives them `graceful_delay_seconds`
-    to notice before forcibly disconnecting; an *immediate* SIGINT
-    request skips straight to disconnecting. Either way, `shutdown_event`
-    is set last, so `run()`'s existing `finally: server.stop() ->
-    db.close()` sequence only ever runs once every session is already
-    gone — a deliberate, awaited sequence, not the previous reliance on
-    `asyncio.run()`'s own implicit end-of-process task cancellation to
-    eventually reach connected sessions.
-    """
-    maintenance.activate()
-    if graceful:
-        await session_registry.broadcast_to_all(
-            f"\r\n*** This node is going down in {int(graceful_delay_seconds)} seconds. ***"
-        )
-        await asyncio.sleep(graceful_delay_seconds)
-    else:
-        await session_registry.broadcast_to_all("\r\n*** This node is going down now. ***")
-    await session_registry.disconnect_all()
-    shutdown_event.set()
 
 
 def _install_signal_handlers(
@@ -251,7 +228,7 @@ def _install_signal_handlers(
     def _request_shutdown(graceful: bool) -> None:
         _logger.info("shutdown requested (%s)", "graceful" if graceful else "immediate")
         loop.create_task(
-            _run_shutdown_sequence(
+            run_shutdown_sequence(
                 graceful=graceful,
                 session_registry=session_registry,
                 maintenance=maintenance,

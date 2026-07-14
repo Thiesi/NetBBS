@@ -1732,9 +1732,27 @@ async def _chat_loop(
     send_task = asyncio.create_task(send_loop())
 
     try:
-        done, pending = await asyncio.wait(
-            {receive_task, send_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        try:
+            done, pending = await asyncio.wait(
+                {receive_task, send_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # This whole session task was itself cancelled from outside
+            # (e.g. deliberate node shutdown, design doc round 51's
+            # ActiveSessionRegistry.disconnect_all()) -- asyncio.wait()
+            # being cancelled does NOT cancel the tasks it was waiting
+            # on, so without this, receive_task/send_task would be left
+            # orphaned: still scheduled, with nothing left to await
+            # their result. One of them then hits SessionClosedError
+            # the moment the underlying socket actually closes, and
+            # asyncio logs "Task exception was never retrieved" since
+            # there's no one left to retrieve it (seen for real on
+            # Thiesi's NetBSD box on Ctrl-C with a chat session open,
+            # not just reasoned about).
+            for task in (receive_task, send_task):
+                task.cancel()
+            await asyncio.gather(receive_task, send_task, return_exceptions=True)
+            raise
         for task in pending:
             task.cancel()
         # Properly await cancelled tasks rather than fire-and-forget —

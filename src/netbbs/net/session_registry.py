@@ -17,8 +17,36 @@ called at the very top, before login even begins.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 
 from netbbs.net.session import Session, SessionClosedError
+from netbbs.timeutil import utc_now_iso
+
+
+@dataclass
+class _Entry:
+    """Internal, mutable — `username` starts `None` and is filled in
+    later by `mark_authenticated` once login succeeds; a session sits
+    at the login prompt (or never authenticates at all) for some of its
+    lifetime, and this registry has always covered that too (see the
+    module docstring)."""
+
+    task: asyncio.Task
+    username: str | None = None
+    connected_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """A read-only snapshot of one registered session, for admin
+    display (design doc -- node management round) — deliberately
+    doesn't expose the raw `Task`, only what a "who's connected" view
+    needs."""
+
+    session: Session
+    username: str | None
+    connected_at: str
+    peer_address: str | None
 
 
 class ActiveSessionRegistry:
@@ -27,18 +55,42 @@ class ActiveSessionRegistry:
     threaded down through `handle_session`)."""
 
     def __init__(self) -> None:
-        self._sessions: dict[Session, asyncio.Task] = {}
+        self._sessions: dict[Session, _Entry] = {}
 
     def enter(self, session: Session) -> None:
         """Register `session` as connected. Records the *current*
         asyncio task (the one running this connection's handler) so
-        `disconnect_all` can cancel it directly later."""
+        `disconnect_all`/`disconnect_one` can cancel it directly later."""
         task = asyncio.current_task()
         assert task is not None, "enter() must be called from within the connection's own task"
-        self._sessions[session] = task
+        self._sessions[session] = _Entry(task=task)
 
     def leave(self, session: Session) -> None:
         self._sessions.pop(session, None)
+
+    def mark_authenticated(self, session: Session, username: str) -> None:
+        """Records which account `session` authenticated as, once login
+        succeeds — called from `netbbs.net.login_flow._run_authenticated_
+        session` right where `presence.enter(user.username)` already
+        happens. A no-op if `session` isn't (or is no longer)
+        registered, matching `leave`'s own tolerance of that."""
+        entry = self._sessions.get(session)
+        if entry is not None:
+            entry.username = username
+
+    def list_entries(self) -> list[SessionSummary]:
+        """A snapshot of every currently connected session, for the
+        `[N]ode` admin menu's `[W]ho` screen (design doc -- node
+        management round)."""
+        return [
+            SessionSummary(
+                session=session,
+                username=entry.username,
+                connected_at=entry.connected_at,
+                peer_address=session.peer_address,
+            )
+            for session, entry in self._sessions.items()
+        ]
 
     def __len__(self) -> int:
         return len(self._sessions)
@@ -77,9 +129,42 @@ class ActiveSessionRegistry:
         actually finish unwinding through their own existing
         `finally: await session.close()` cleanup, rather than firing
         cancellation and moving on without confirming it took effect.
+
+        Must never be `await`ed directly from within one of the very
+        sessions being disconnected (design doc -- node management
+        round): that session's own task would then be cancelling
+        itself while being one of the tasks this method's own
+        `gather()` is waiting on — the same species of hazard round 58
+        hit and fixed in `netbbs.net.chat_flow._chat_loop`. Callers
+        triggering this from inside a live session (the `[N]ode` admin
+        menu's shutdown command) fire it as an independent background
+        task instead — see `netbbs.net.shutdown.run_shutdown_sequence`'s
+        own docstring.
         """
-        tasks = list(self._sessions.values())
+        tasks = [entry.task for entry in self._sessions.values()]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def disconnect_one(self, session: Session) -> bool:
+        """
+        Forcibly end just `session`'s connection, the same way
+        `disconnect_all` ends every one of them (design doc -- node
+        management round's `[N]ode` `[W]ho` screen). Returns `False`
+        without doing anything if `session` isn't (or is no longer)
+        registered, `True` otherwise.
+
+        Safe to `await` directly, *unlike* `disconnect_all` above,
+        provided `session` is never the caller's own currently-running
+        session (the `[W]ho` screen enforces this at the UI level,
+        refusing to target yourself) — cancelling and gathering a
+        *different* task than the one currently running has none of
+        that method's self-referential hazard.
+        """
+        entry = self._sessions.get(session)
+        if entry is None:
+            return False
+        entry.task.cancel()
+        await asyncio.gather(entry.task, return_exceptions=True)
+        return True
