@@ -239,7 +239,8 @@ def test_topic_change_is_broadcast_to_other_participants(db, hub, presence, syso
         asyncio.run(_run(db, hub, presence, channel, sysop, ["/topic Retro chat", "/quit"]))
         received = []
         while not queue.empty():
-            received.append(queue.get_nowait())
+            item = queue.get_nowait()
+            received.append(item.text if isinstance(item, chat_flow._TimestampedNotice) else item)
         assert any("Topic changed by sysop: Retro chat" in msg for msg in received)
     finally:
         hub.leave(channel.name, "bob:1")

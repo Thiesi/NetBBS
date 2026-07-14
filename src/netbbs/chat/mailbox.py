@@ -43,14 +43,19 @@ from collections import defaultdict
 
 class MessageMailbox:
     def __init__(self) -> None:
-        self._pending: dict[str, list[str]] = defaultdict(list)
+        self._pending: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
-    def deliver(self, username: str, text: str) -> None:
+    def deliver(self, username: str, text: str, created_at: str) -> None:
         """Queue an already-formatted line for `username`, to be shown
-        at their next flush."""
-        self._pending[username].append(text)
+        at their next flush. `created_at` (design doc -- per-user chat
+        timestamp preference round) is carried alongside the text so the
+        recipient's own timestamp preference, read at flush time, can
+        still be honored -- the same reason `netbbs.net.chat_flow`'s
+        live-broadcast path carries a raw timestamp through the queue
+        instead of baking a rendering decision in at send time."""
+        self._pending[username].append((text, created_at))
 
-    def flush(self, username: str) -> list[str]:
+    def flush(self, username: str) -> list[tuple[str, str]]:
         """Return and clear whatever's queued for `username` --
         an empty list if nothing's waiting."""
         return self._pending.pop(username, [])

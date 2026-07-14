@@ -31,6 +31,7 @@ from netbbs.chat import (
     chat_stream_label,
     create_invitation,
     display_label,
+    format_with_preference,
     get_channel_by_name,
     get_nick,
     get_scrollback,
@@ -47,7 +48,9 @@ from netbbs.chat import (
     remove_member,
     revoke_invitation,
     set_nick,
+    set_timestamps_enabled,
     set_topic,
+    timestamps_enabled,
     unban_user,
     unmute_user,
 )
@@ -60,7 +63,7 @@ from netbbs.net.session import Session
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
-from netbbs.timeutil import format_for_display
+from netbbs.timeutil import format_for_display, utc_now_iso
 
 
 async def browse_channels(
@@ -240,7 +243,7 @@ def _resolve_chat_stream_label(db: Database, author_label: str) -> str:
     return chat_stream_label(db, author)
 
 
-def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
+def _render_scrollback_message(db: Database, user: User, message: ChannelMessage) -> str:
     """
     Render a persisted `ChannelMessage` for replay on join, matching the
     live formatting `_chat_loop` itself uses for the same kind of event —
@@ -258,35 +261,45 @@ def _render_scrollback_message(db: Database, message: ChannelMessage) -> str:
     moderation/auditing always shows canonical identity only (design
     doc round 32, point 7), and a `nick` event's own body text already
     fully describes the change.
+
+    `user` is the *replaying* session's own account — every kind gets
+    prefixed with `message.created_at` per `user`'s own timestamp
+    preference (design doc -- per-user chat timestamp preference round),
+    uniformly across every kind rather than selectively by original
+    live-broadcast coverage: "replayed scrollback" is its own category
+    in that round's scope, not a kind-by-kind carryover of which live
+    events happen to be timestamped.
     """
     if message.kind == "join":
-        return colored(
+        line = colored(
             f"*** {_resolve_chat_stream_label(db, message.author_label)} has joined the channel.",
             fg_color=MUTED_COLOR,
         )
-    if message.kind == "leave":
-        return colored(
+    elif message.kind == "leave":
+        line = colored(
             f"*** {_resolve_chat_stream_label(db, message.author_label)} has left the channel.",
             fg_color=MUTED_COLOR,
         )
-    if message.kind == "action":
-        return colored(
+    elif message.kind == "action":
+        line = colored(
             f"* {_resolve_chat_stream_label(db, message.author_label)} {sanitize_text(message.body)}",
             fg_color=MUTED_COLOR,
         )
-    if message.kind == "nick":
-        return colored(
+    elif message.kind == "nick":
+        line = colored(
             f"*** {sanitize_text(message.author_label)} {sanitize_text(message.body)}",
             fg_color=MUTED_COLOR,
         )
-    if message.kind in _VERB_BY_KIND:
+    elif message.kind in _VERB_BY_KIND:
         author_label = sanitize_text(message.author_label)
         detail = f" ({sanitize_text(message.body)})" if message.body else ""
-        return colored(
+        line = colored(
             f"*** {author_label} was {_VERB_BY_KIND[message.kind]}{detail}.", fg_color=MUTED_COLOR
         )
-    label = colored(f"<{_resolve_chat_stream_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
-    return f"{label} {sanitize_text(message.body)}"
+    else:
+        label = colored(f"<{_resolve_chat_stream_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
+        line = f"{label} {sanitize_text(message.body)}"
+    return format_with_preference(db, user, line, message.created_at)
 
 
 # -- command dispatch (design doc §13, sign-off round 39; ChatAction result
@@ -511,13 +524,14 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
         fg_color=MUTED_COLOR,
         bold=True,
     )
+    created_at = utc_now_iso()
 
     live = _find_live_participant(ctx.hub, ctx.db, target.username)
     if live is not None:
         channel_name, participant_id = live
-        await ctx.hub.send_to(channel_name, participant_id, notice)
+        await ctx.hub.send_to(channel_name, participant_id, _TimestampedNotice(notice, created_at))
     else:
-        ctx.mailbox.deliver(target.username, notice)
+        ctx.mailbox.deliver(target.username, notice, created_at)
 
     await ctx.session.write_line(
         colored(f"(sent to {sanitize_text(target.username)})", fg_color=MUTED_COLOR)
@@ -675,6 +689,25 @@ class _KickNotice:
     """
 
     reason: str  # "kicked" or "banned" -- which notice the target sees
+
+
+@dataclass(frozen=True)
+class _TimestampedNotice:
+    """
+    Delivered through `ChatHub.broadcast`/`send_to` for any event whose
+    display should honor each *recipient's* own timestamp preference
+    (design doc -- per-user chat timestamp preference round): `text` is
+    the already-rendered line, `created_at` the raw moment it happened.
+    `receive_loop` is the one place that turns this into a final string,
+    via `format_with_preference`, using the receiving session's own
+    user -- the same reason a plain rendered string can't be broadcast
+    directly here the way it is for events outside this round's scope
+    (e.g. `/topic`/`/nick` notices): a shared string can't reflect a
+    per-recipient decision.
+    """
+
+    text: str
+    created_at: str
 
 
 def _humanize_duration(duration: datetime.timedelta) -> str:
@@ -940,8 +973,7 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
     label = chat_stream_label(ctx.db, ctx.user)
     notice = colored(f"* {label} {sanitize_text(args)}", fg_color=MUTED_COLOR)
 
-    await ctx.session.write_line(notice)
-    record_message(
+    recorded = record_message(
         ctx.db,
         ctx.channel,
         kind="action",
@@ -949,7 +981,10 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
         author_fingerprint=ctx.user.fingerprint,
         body=args,
     )
-    await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
+    await ctx.session.write_line(format_with_preference(ctx.db, ctx.user, notice, recorded.created_at))
+    await ctx.hub.broadcast(
+        ctx.channel.name, _TimestampedNotice(notice, recorded.created_at), exclude={ctx.participant_id}
+    )
 
 
 async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
@@ -1017,6 +1052,38 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(
         colored(f"You are now marked away: {sanitize_text(args)}", fg_color=MUTED_COLOR)
     )
+
+
+async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
+    """
+    `/timestamps on|off|toggle` (design doc round 32 point 3, round 42
+    point 6): sets the persistent per-user preference controlling
+    whether chat lines show a display timestamp, defaulting to off.
+    `/timestamps` with no argument reports the current state rather
+    than toggling it -- unlike `/away`, this preference has no natural
+    "clear" meaning for a bare invocation, so an explicit `on`/`off`/
+    `toggle` argument is required to change it (design doc's own
+    wording lists exactly these three subcommands).
+    """
+    if not args:
+        state = "on" if timestamps_enabled(ctx.db, ctx.user) else "off"
+        await ctx.session.write_line(colored(f"Chat timestamps are {state}.", fg_color=MUTED_COLOR))
+        return
+
+    choice = args.strip().lower()
+    if choice == "on":
+        new_state = True
+    elif choice == "off":
+        new_state = False
+    elif choice == "toggle":
+        new_state = not timestamps_enabled(ctx.db, ctx.user)
+    else:
+        await _show_usage(ctx.session, "timestamps")
+        return
+
+    set_timestamps_enabled(ctx.db, ctx.user, new_state)
+    state = "on" if new_state else "off"
+    await ctx.session.write_line(colored(f"Chat timestamps are now {state}.", fg_color=MUTED_COLOR))
 
 
 # -- discovery (design doc rounds 32/33, sign-off round 43) ------------------
@@ -1315,6 +1382,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
     "nick": ("/nick [name|off]", "Set, view, or clear your display alias."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
+    "timestamps": ("/timestamps on|off|toggle", "Show, enable, disable, or toggle chat timestamps."),
     "mute": ("/mute <user> [duration] [reason]", "Silence a user's messages in this channel."),
     "unmute": ("/unmute <user>", "Lift a mute."),
     "ban": ("/ban <user> [duration] [reason]", "Bar a user from this channel."),
@@ -1348,6 +1416,7 @@ _COMMANDS: dict[str, CommandHandler] = {
     "me": _handle_me,
     "nick": _handle_nick,
     "away": _handle_away,
+    "timestamps": _handle_timestamps,
     "mute": _handle_mute,
     "unmute": _handle_unmute,
     "ban": _handle_ban,
@@ -1559,7 +1628,7 @@ async def _chat_loop(
     if scrollback:
         await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
         for message in scrollback:
-            await session.write_line(_render_scrollback_message(db, message))
+            await session.write_line(_render_scrollback_message(db, user, message))
         # Round 19, point 5: even bounded persistence is a different
         # promise than pure ephemeral chat — worth surfacing explicitly
         # rather than leaving as an internal implementation detail.
@@ -1577,12 +1646,15 @@ async def _chat_loop(
     # actually rendered to a terminal. chat_stream_label (design doc
     # round 53) looked up fresh here (not cached) since it can change
     # mid-session via /nick.
-    record_message(
+    recorded_join = record_message(
         db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
     )
     await hub.broadcast(
         channel.name,
-        colored(f"*** {chat_stream_label(db, user)} has joined the channel.", fg_color=MUTED_COLOR),
+        _TimestampedNotice(
+            colored(f"*** {chat_stream_label(db, user)} has joined the channel.", fg_color=MUTED_COLOR),
+            recorded_join.created_at,
+        ),
         exclude={participant_id},
     )
 
@@ -1594,6 +1666,11 @@ async def _chat_loop(
                     colored(f"\r\n*** You have been {message.reason} from this channel.", fg_color=MUTED_COLOR)
                 )
                 return
+            if isinstance(message, _TimestampedNotice):
+                await session.write_line(
+                    format_with_preference(db, user, message.text, message.created_at)
+                )
+                continue
             await session.write_line(message)
 
     async def send_loop() -> ChatAction | None:
@@ -1708,8 +1785,7 @@ async def _chat_loop(
             # `line`, not this sanitized copy -- sanitize on output, not
             # on storage.
             displayed_line = sanitize_text(line)
-            await session.write_line(f"{self_label} {displayed_line}")
-            record_message(
+            recorded_message = record_message(
                 db,
                 channel,
                 kind="message",
@@ -1717,8 +1793,15 @@ async def _chat_loop(
                 author_fingerprint=user.fingerprint,
                 body=line,
             )
+            await session.write_line(
+                format_with_preference(
+                    db, user, f"{self_label} {displayed_line}", recorded_message.created_at
+                )
+            )
             await hub.broadcast(
-                channel.name, f"{others_label} {displayed_line}", exclude={participant_id}
+                channel.name,
+                _TimestampedNotice(f"{others_label} {displayed_line}", recorded_message.created_at),
+                exclude={participant_id},
             )
             # Design doc round 32, point 6: sending a message does not
             # clear away state -- a user may intentionally remain away
@@ -1770,11 +1853,14 @@ async def _chat_loop(
         return outcome or _Quit()
     finally:
         hub.leave(channel.name, participant_id)
-        record_message(
+        recorded_leave = record_message(
             db, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint
         )
         await hub.broadcast(
             channel.name,
-            colored(f"*** {chat_stream_label(db, user)} has left the channel.", fg_color=MUTED_COLOR),
+            _TimestampedNotice(
+                colored(f"*** {chat_stream_label(db, user)} has left the channel.", fg_color=MUTED_COLOR),
+                recorded_leave.created_at,
+            ),
             exclude={participant_id},
         )

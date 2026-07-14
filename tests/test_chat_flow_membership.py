@@ -118,7 +118,7 @@ def test_invite_notifies_the_invitee_via_mailbox(db, hub, presence, mailbox, ali
     asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
     pending = mailbox.flush("bob")
     assert len(pending) == 1
-    assert "invited to #lobby" in pending[0]
+    assert "invited to #lobby" in pending[0][0]
 
 
 def test_invite_via_member_opt_in_without_manage_members_succeeds(db, hub, presence, mailbox, alice, bob, channel):

@@ -14,10 +14,22 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from netbbs.auth.users import User
 from netbbs.chat import MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.storage.database import Database
+
+_T = "2026-01-01T00:00:00.000000Z"
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "node.db")
+    yield database
+    database.close()
 
 
 class FakeSession:
@@ -53,12 +65,12 @@ def _make_user() -> User:
     )
 
 
-def test_pending_private_message_shown_before_the_menu_on_entry():
+def test_pending_private_message_shown_before_the_menu_on_entry(db):
     async def scenario():
         mailbox = MessageMailbox()
-        mailbox.deliver("alice", "*** Private message from bob: hi there")
+        mailbox.deliver("alice", "*** Private message from bob: hi there", _T)
         session = FakeSession(keys=["l"])  # logoff immediately
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
@@ -68,30 +80,30 @@ def test_pending_private_message_shown_before_the_menu_on_entry():
     assert output.index("Private message from bob") < output.index("Main menu:")
 
 
-def test_message_is_only_shown_once_not_on_every_redraw():
+def test_message_is_only_shown_once_not_on_every_redraw(db):
     async def scenario():
         mailbox = MessageMailbox()
-        mailbox.deliver("alice", "*** Private message from bob: only once")
+        mailbox.deliver("alice", "*** Private message from bob: only once", _T)
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
     assert session.output.count("only once") == 1
 
 
-def test_no_extra_output_when_mailbox_is_empty():
+def test_no_extra_output_when_mailbox_is_empty(db):
     async def scenario():
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
         return session
 
     session = asyncio.run(scenario())
     assert "Private message" not in session.output
 
 
-def test_a_second_pending_message_delivered_after_returning_to_the_menu(monkeypatch):
+def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monkeypatch):
     # Confirms the flush isn't a one-shot thing tied only to the very
     # first draw -- _draw_main_menu is the same function called again
     # after every submenu return, so a message queued while "in" a
@@ -102,13 +114,13 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(monkeypa
     async def fake_browse_boards(session, db, u):
         # Simulate a message arriving while the user was off in another
         # screen entirely.
-        mailbox.deliver("alice", "*** Private message from bob: while you were away")
+        mailbox.deliver("alice", "*** Private message from bob: while you were away", _T)
 
     monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)
 
     async def scenario():
         session = FakeSession(keys=["m", "l"])  # boards, then logoff
-        await login_flow._main_menu(session, object(), object(), PresenceRegistry(), mailbox, InputHistory(), user)
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
         return session
 
     session = asyncio.run(scenario())

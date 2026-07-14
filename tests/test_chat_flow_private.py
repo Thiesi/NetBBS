@@ -154,7 +154,7 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
     assert "(sent to bob)" in _written(session)
     pending = mailbox.flush("bob")
     assert len(pending) == 1
-    assert "Private message from alice: hello there" in pending[0]
+    assert "Private message from alice: hello there" in pending[0][0]
 
 
 def test_msg_is_never_written_to_scrollback_or_moderation_log(
@@ -205,7 +205,7 @@ def test_private_enters_conversation_mode_and_routes_plain_lines(
     assert "Entering private conversation with bob" in _written(session)
     pending = mailbox.flush("bob")
     assert len(pending) == 1
-    assert "Private message from alice: hello there" in pending[0]
+    assert "Private message from alice: hello there" in pending[0][0]
     # The plain line went to bob privately, not posted to the channel.
     scrollback = get_scrollback(db, channel)
     assert all(m.kind in ("join", "leave") for m in scrollback)

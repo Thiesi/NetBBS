@@ -59,11 +59,18 @@ class ChatHub:
         self._channels[channel_name].pop(participant_id, None)
 
     async def broadcast(
-        self, channel_name: str, message: str, *, exclude: set[str] | None = None
+        self, channel_name: str, message: object, *, exclude: set[str] | None = None
     ) -> None:
         """
         Push `message` onto every current participant's queue in
         `channel_name`, except anyone in `exclude`.
+
+        `message` isn't required to be a `str`, matching `send_to`
+        below (design doc -- per-user chat timestamp preference round):
+        a caller can push a small envelope carrying a raw timestamp
+        alongside the text, letting each recipient's own `receive_loop`
+        decide whether to render it, rather than baking one shared
+        rendering decision into the broadcast string itself.
 
         Iterates over a *snapshot* of the participant list, not the live
         dict — verified directly that awaiting inside a loop over a live

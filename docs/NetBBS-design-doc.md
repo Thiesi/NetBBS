@@ -5131,3 +5131,117 @@ world verification — the same three-item list (interactive SSH, real
 Zmodem-client interop, and browser-rendered xterm.js) flagged since
 Phase 1, plus this admin-tools tree, are the standing "verify from
 Thiesi's own machine" backlog going into whatever's next.
+
+## Sign-off notes, round 62 (per-user chat timestamp preference: `/timestamps` — implemented)
+
+Closes the one piece of round 42's own investigation that it explicitly
+left open: round 42 point 6 found `netbbs.timeutil.format_for_display`
+already had `override_format`/`override_timezone` parameters reserved
+for a future per-user value, and `netbbs.user_preferences` (round 38)
+already existed as a generic store — concluding "wiring a real per-user
+value through... is a small follow-up left for whenever Track 5's UI
+actually needs a `/timestamps` command... not done speculatively here."
+This round is that follow-up, identified as the clear low-effort
+candidate among Phase 2's three remaining gaps (the other two —
+ANSI-art login screens and the TUI/fullscreen-editor pair — both need
+real design decisions or are a genuinely large architectural piece).
+
+1. **New module `netbbs/chat/timestamps.py`**: `timestamps_enabled`/
+   `set_timestamps_enabled` (a thin typed wrapper over
+   `netbbs.user_preferences`, mirroring how `netbbs.timeutil` wraps
+   `netbbs.config` for the node-wide equivalent settings) plus
+   `format_with_preference(db, user, text, created_at)` — the single
+   place that combines the preference check, `format_for_display`
+   (reusing the existing per-user/node display-timezone/format system
+   rather than inventing chat-specific formatting, per round 32 point
+   3's own wording), and muted-color styling. Deliberately kept in
+   `netbbs.chat`, not `netbbs.timeutil`, since it does ANSI coloring —
+   `netbbs.chat.nick`'s `chat_stream_label`/`display_label` already set
+   the precedent of a small chat-specific helper combining a lookup
+   with its own sanitizing/coloring, reused identically by both
+   `netbbs.net.chat_flow` (live chat, scrollback replay) and
+   `netbbs.net.login_flow` (mailbox-flushed private messages) so the
+   combination logic lives in exactly one place.
+2. **A real architectural wrinkle, worth documenting explicitly**: a
+   genuinely *per-user* toggle can't be satisfied by rendering a
+   broadcast string once at send time — `ChatHub.broadcast` pushes one
+   shared string onto every recipient's queue, but whether *that*
+   recipient wants a timestamp is a decision only knowable per
+   recipient, at receive time. Resolved by loosening `ChatHub.
+   broadcast`'s type hint from `str` to `object` (matching `send_to`,
+   which was already permissive for exactly this reason — round 37's
+   `_KickNotice` sentinel) and introducing a small `_TimestampedNotice`
+   envelope (`netbbs.net.chat_flow`, carrying the raw text plus a raw
+   ISO timestamp) for every broadcast/`send_to` call this round's scope
+   touches. `receive_loop` — the one piece of code that already knows
+   both "which session is this" and "which account owns it" — is the
+   single place that turns an envelope into a final string, via
+   `format_with_preference` against its own session's user. The
+   sender's own direct writes (their own message, their own `/me` line)
+   apply the same formatting call directly against the sender's own
+   preference, since those never go through the queue at all.
+3. **Scope, held to round 32 point 3's literal wording** ("live
+   messages, replayed scrollback, join/leave events, `/me` actions, and
+   private messages") rather than extended to every chat event kind:
+   `/topic` change notices, `/nick` change announcements, and mute/ban/
+   kick moderation notices are deliberately *not* timestamped live —
+   nothing in scope asked for them, and extending coverage there would
+   have been scope creep, not a requirement. Scrollback replay is the
+   one exception applied uniformly regardless of original event kind
+   (moderation-verb and `nick` lines included) — the design doc lists
+   "replayed scrollback" as its own category, and a replay of *any*
+   persisted event answers the same "when did this happen" question a
+   timestamp exists to answer, whether or not the live version of that
+   same event kind happens to be timestamped.
+4. **Private messages needed both delivery paths threaded through**:
+   `_deliver_private_message`'s online path (`ChatHub.send_to`) reuses
+   the same `_TimestampedNotice`/`receive_loop` mechanism above for
+   free. The offline path (`netbbs.chat.mailbox.MessageMailbox`) is a
+   separate lifecycle entirely — `deliver`/`flush` changed from
+   carrying bare `str` lines to `(text, created_at)` tuples, formatted
+   at the one place they're ever displayed
+   (`netbbs.net.login_flow._draw_main_menu`, which gained a `db`
+   parameter for exactly this). The recipient there is always the
+   flushing session's own user, so — unlike the live broadcast case —
+   no per-recipient envelope threading through a shared queue is
+   needed, just the same `format_with_preference` call applied once at
+   flush time.
+5. **`/timestamps on|off|toggle`** (no bare-invocation toggle, unlike
+   `/away`): shows current state with no argument, since — unlike
+   `/away`'s "typing nothing clears it" — this preference has no
+   natural meaning for a bare invocation; the design doc's own wording
+   already specifies exactly these three subcommands. Defaults to off,
+   confirmed unaffected by `_COMMAND_VISIBILITY` (no entry needed —
+   absence from that dict already means "always visible," the same as
+   `/away`).
+6. **Testing**: new `tests/test_chat_timestamps.py` (library-level:
+   preference get/set/default, `format_with_preference`'s enabled/
+   disabled behavior) and `tests/test_chat_flow_timestamps.py`
+   (integration: the command itself, own-message/scrollback-replay
+   prefixing, and — the test that actually proves point 2's
+   architecture works, not just that a single user's own preference is
+   honored — a scenario with the sender's preference off and the
+   recipient's on, confirming the *same* live broadcast renders
+   differently for each). Updating existing tests to the mailbox's new
+   tuple shape and the hub's now-heterogeneous queue payloads surfaced
+   the exact set of places a real client actually touches these paths:
+   `tests/test_chat_mailbox.py` (direct tuple-shape rewrite),
+   `tests/test_login_mailbox_flush.py` (gained a real `Database`
+   fixture — `_draw_main_menu` now genuinely queries it, so the
+   pre-existing `object()` placeholder would have raised), `tests/
+   test_terminal_sanitization.py` and `tests/test_chat_flow_join.py`
+   (both read directly off a `ChatHub` queue, bypassing `receive_loop`
+   entirely, and needed to unwrap `_TimestampedNotice` the same way
+   `receive_loop` itself does), and `tests/test_chat_flow_membership.py`/
+   `tests/test_chat_flow_private.py` (mailbox-tuple indexing fixes).
+   Full suite re-run: **1145 passed, 3 skipped**.
+
+**Flagged, not blocking further work:** none specific to this round —
+unlike node/board/channel management, nothing here needs a real
+connected client to verify; `FakeSession`-driven integration tests
+already exercise the actual command dispatch, chat loop, and hub/
+mailbox delivery paths this feature touches. Phase 2's remaining gaps
+are now down to two: ANSI-art login/welcome screens (needs real design
+decisions first — file format/storage, how a SysOp sets one) and the
+TUI screen-buffer/fullscreen-editor pair (the largest remaining piece
+by design, per round 26).

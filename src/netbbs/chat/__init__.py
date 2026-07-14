@@ -64,6 +64,11 @@ from netbbs.chat.scrollback import (
     record_message,
     set_scrollback_limit,
 )
+from netbbs.chat.timestamps import (
+    format_with_preference,
+    set_timestamps_enabled,
+    timestamps_enabled,
+)
 
 __all__ = [
     "Channel",
@@ -110,4 +115,7 @@ __all__ = [
     "get_scrollback_limit",
     "record_message",
     "set_scrollback_limit",
+    "format_with_preference",
+    "set_timestamps_enabled",
+    "timestamps_enabled",
 ]

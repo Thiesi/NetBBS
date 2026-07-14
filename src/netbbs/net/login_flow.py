@@ -23,7 +23,7 @@ from enum import Enum, auto
 from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
 from netbbs.boards import Board, PostPage, create_post, list_boards, list_posts_page
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
-from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry, format_with_preference
 from netbbs.directory import (
     MAX_BIO_LINES,
     BioError,
@@ -239,7 +239,7 @@ async def _run_authenticated_session(
     await session.write_line("\r\nGoodbye!")
 
 
-async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User) -> None:
+async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbox, user: User) -> None:
     """
     Shows any private messages that arrived while away from this menu,
     then the menu itself.
@@ -249,9 +249,17 @@ async def _draw_main_menu(session: Session, mailbox: MessageMailbox, user: User)
     every screen (boards, files, directory, profile, chat) returns here
     before its next redraw, so a single flush point here covers all of
     them without needing one sprinkled into each individual screen.
+
+    Each flushed `(text, created_at)` pair is formatted through
+    `format_with_preference` (design doc -- per-user chat timestamp
+    preference round), honoring `user`'s *current* timestamp preference
+    at display time -- the recipient here is always `user` themselves,
+    so unlike live chat's per-recipient broadcast problem, no envelope
+    threading through a shared queue is needed, just the same formatting
+    call `netbbs.net.chat_flow` uses for its own timestamped lines.
     """
-    for message in mailbox.flush(user.username):
-        await session.write_line(message)
+    for text, created_at in mailbox.flush(user.username):
+        await session.write_line(format_with_preference(db, user, text, created_at))
 
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
     option_list = [
@@ -299,7 +307,7 @@ async def _main_menu(
     leaves the screen exactly as it was, no reprinted prompt, since
     nothing was actually communicated worth a fresh line for.
     """
-    await _draw_main_menu(session, mailbox, user)
+    await _draw_main_menu(session, db, mailbox, user)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -309,27 +317,27 @@ async def _main_menu(
         elif choice == "m":
             await session.write_line("")
             await _browse_boards(session, db, user)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "c":
             await session.write_line("")
             await browse_channels(session, db, hub, presence, mailbox, history, user)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "f":
             await session.write_line("")
             await browse_file_areas(session, db, user)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
             await session.write_line("")
             await _browse_directory(session, db, user)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "p":
             await session.write_line("")
             await _edit_profile(session, db, user)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "a" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
             await admin_menu(session, db, user, node_controls=node_controls)
-            await _draw_main_menu(session, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user)
         else:
             await session.write("\a")
 
