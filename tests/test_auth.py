@@ -56,10 +56,22 @@ def test_create_duplicate_username_fails(db):
         create_user(db, "thiesi", password="different")
 
 
+def test_create_case_variant_duplicate_username_fails(db):
+    create_user(db, "thiesi", password="hunter2")
+    with pytest.raises(AuthError):
+        create_user(db, "Thiesi", password="different")
+
+
 def test_get_user_by_username(db):
     create_user(db, "thiesi", password="hunter2")
     user = get_user_by_username(db, "thiesi")
     assert user.username == "thiesi"
+
+
+def test_get_user_by_username_is_case_insensitive(db):
+    create_user(db, "Thiesi", password="hunter2")
+    user = get_user_by_username(db, "thiesi")
+    assert user.username == "Thiesi"
 
 
 def test_get_nonexistent_user_fails(db):
@@ -80,6 +92,12 @@ def test_password_login_fails_with_wrong_password(db):
     create_user(db, "thiesi", password="hunter2")
     with pytest.raises(AuthError):
         authenticate_password(db, "thiesi", "wrong-password")
+
+
+def test_password_login_succeeds_with_different_case(db):
+    create_user(db, "Thiesi", password="hunter2")
+    user = authenticate_password(db, "THIESI", "hunter2")
+    assert user.username == "Thiesi"
 
 
 def test_password_login_fails_for_nonexistent_user(db):
@@ -115,6 +133,17 @@ def test_keypair_login_succeeds_with_correct_signature(db):
 
     user = authenticate_keypair(db, "thiesi", challenge, signature)
     assert user.username == "thiesi"
+
+
+def test_keypair_login_succeeds_with_different_case(db):
+    signing_key = nacl.signing.SigningKey.generate()
+    create_user(db, "Thiesi", verify_key=signing_key.verify_key)
+
+    challenge = generate_challenge()
+    signature = signing_key.sign(challenge).signature
+
+    user = authenticate_keypair(db, "THIESI", challenge, signature)
+    assert user.username == "Thiesi"
 
 
 def test_keypair_login_fails_with_wrong_key(db):
@@ -169,6 +198,14 @@ def test_authorize_public_key_succeeds_with_registered_key(db):
 
     user = authorize_public_key(db, "thiesi", signing_key.verify_key)
     assert user.username == "thiesi"
+
+
+def test_authorize_public_key_succeeds_with_different_case(db):
+    signing_key = nacl.signing.SigningKey.generate()
+    create_user(db, "Thiesi", verify_key=signing_key.verify_key)
+
+    user = authorize_public_key(db, "THIESI", signing_key.verify_key)
+    assert user.username == "Thiesi"
 
 
 def test_authorize_public_key_fails_with_wrong_key(db):
