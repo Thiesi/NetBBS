@@ -1,7 +1,8 @@
 # NetBBS — Claude Code project notes
 
 A modern, TCP/IP-native BBS with an ad-hoc mesh network ("NetBBS Link").
-Currently in Phase 1 of a 7-phase roadmap — see below.
+Phases 1–2 of the 7-phase roadmap are complete; Phase 3 (Link
+connectivity & sync core) has not started yet — see below.
 
 ## Start here, every session
 
@@ -13,7 +14,15 @@ dated, numbered "sign-off note." If something seems ambiguous or you're
 about to make an architectural call, check whether it's already been
 decided before deciding it again. Section §15 has the full phase
 breakdown; the sign-off notes at the end are in roughly chronological
-order and are the most information-dense part of the document.
+order and are the design doc's most information-dense part.
+
+The full round-by-round implementation/bugfix history (what actually
+got built, bugs found and fixed, "N tests passing" confirmations) lives
+separately in `docs/NetBBS-worklog.md`, not in the design doc — that
+split happened specifically so the design doc stays a design doc rather
+than reading like a work log. Round numbers are shared/consistent
+across both files, so a sign-off note in one may reference a round that
+only exists in the other.
 
 ## Working conventions established so far
 
@@ -28,7 +37,12 @@ order and are the most information-dense part of the document.
 - **Every real design decision gets a sign-off note** appended to
   `docs/NetBBS-design-doc.md`, following the existing numbered-round
   format. Include: what was decided, why, what alternatives were
-  rejected and why, and anything left deliberately open/deferred.
+  rejected and why, and anything left deliberately open/deferred. Pure
+  implementation narrative and bugfix writeups — "implemented X,
+  N tests passing," a bug found and fixed with no lasting design
+  implication — go to `docs/NetBBS-worklog.md` instead, same
+  numbered-round format, so the design doc doesn't drift back into
+  being a work log.
 - **Modular package structure, not a monolithic script** — see design
   doc §3 for why (the first attempt at this project became an
   unmaintainable single file). Each subsystem (`boards`, `chat`,
@@ -63,26 +77,28 @@ order and are the most information-dense part of the document.
 
 Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
 breakdown and current status — it will be more current than anything
-written here. As of this update, **Phase 1 is feature-complete** —
-local single-node BBS with boards, chat (including bounded, disk-backed
-scrollback per channel — round 19/20), file areas including real
-Zmodem upload/download (round 21/24 — `/upload`/`/download` in
-`netbbs.net.file_flow`, works with real Zmodem-capable terminals like
-SyncTERM/lrzsz, CRC-16 only/no resume/no retry-recovery by deliberate
-scope), permissions, blocklist, ANSI rendering, and all three planned
-connectivity methods: character-mode Telnet, SSH (round 22/23 —
-`asyncssh`, optional `ssh` extra; password and Ed25519 pubkey auth,
-the latter finally exercising the previously-unreachable keypair login
-path via any standard SSH client), and web/xterm.js (round 22/25 —
-`aiohttp`, optional `web` extra, structured JSON wire protocol,
-vendored static assets at `netbbs/web/static/`) — plus a shared
-paginated picker with categories/pinning/sort order.
+written here. As of this update, **Phase 1 and Phase 2 are both
+complete** — a genuinely full-featured standalone single-node BBS with
+no NetBBS Link dependency yet: boards (including post editing), chat,
+file areas with real Zmodem upload/download, permissions and full
+moderation tooling, expiry/maintenance, a user directory, SysOp admin
+tooling, ANSI/TUI rendering including a fullscreen nano-keybound
+editor, and all three planned connectivity methods (Telnet, SSH,
+web/xterm.js). Phase 3 (Link connectivity & sync core) has not started.
+For how any of that got built — which round did what, bugs found along
+the way — see `docs/NetBBS-worklog.md` rather than duplicating that
+history here.
 
 Flagged, not blocking further work: real third-party-client/browser
-verification hasn't been done from this sandboxed dev environment for
-three things — interactive SSH sessions (design doc round 23 point 7),
-real Zmodem-client interop like SyncTERM/lrzsz (round 24 point 7), and
-actual browser rendering of the xterm.js terminal (round 25 point 5, no
-browser-automation tool available here). All three are worth a direct
-check from Thiesi's own machine, or a future session with the right
-tooling, before considering Phase 1 fully closed out.
+verification still hasn't been done from this sandboxed dev
+environment for three things — interactive SSH sessions, real
+Zmodem-client interop (SyncTERM/lrzsz), and actual browser rendering of
+the xterm.js terminal (no browser-automation tool available here). All
+three are worth a direct check from Thiesi's own machine, or a future
+session with the right tooling, before considering this fully verified
+end-to-end.
+
+A "Communities" (local) / "Link Communities" (federated) concept — a
+topic-oriented navigation layer sitting above boards/chat/file areas —
+is directionally agreed but not yet phase-assigned or fully specced;
+see design doc §16 for what's decided and what's still open.
