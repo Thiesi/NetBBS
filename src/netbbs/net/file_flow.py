@@ -19,6 +19,7 @@ the error and returns to browsing).
 from __future__ import annotations
 
 from netbbs.auth.users import User
+from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
     FileArea,
     FileEntryPage,
@@ -244,7 +245,7 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
         "\r\nStart your terminal's Zmodem send (sz) now. Waiting for the transfer to begin..."
     )
     try:
-        received = await zmodem.receive_file(session)
+        received = await zmodem.receive_file(session, max_bytes=get_max_upload_bytes(db))
         entry = upload_file(db, area, user, received.filename, received.data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from netbbs.config import get_config, set_config
+import pytest
+
+from netbbs.config import get_config, get_max_upload_bytes, set_config, set_max_upload_bytes
 from netbbs.storage.database import Database
 
 
@@ -42,3 +44,28 @@ def test_config_persists_across_reopen(tmp_path):
     db2 = Database(db_path)
     assert get_config(db2, "key") == "value"
     db2.close()
+
+
+# -- max_upload_bytes (GitHub issue #34) -------------------------------
+
+
+def test_max_upload_bytes_has_a_default(tmp_path):
+    db = Database(tmp_path / "node.db")
+    assert get_max_upload_bytes(db) > 0
+    db.close()
+
+
+def test_set_then_get_max_upload_bytes(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_max_upload_bytes(db, 12345)
+    assert get_max_upload_bytes(db) == 12345
+    db.close()
+
+
+def test_set_max_upload_bytes_rejects_non_positive(tmp_path):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError):
+        set_max_upload_bytes(db, 0)
+    with pytest.raises(ValueError):
+        set_max_upload_bytes(db, -1)
+    db.close()

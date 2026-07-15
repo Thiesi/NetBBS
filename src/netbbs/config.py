@@ -57,3 +57,26 @@ def set_expiry_grace_period_days(db: Database, days: int) -> None:
     if days < 0:
         raise ValueError(f"grace period must be non-negative, got {days!r}")
     set_config(db, EXPIRY_GRACE_PERIOD_CONFIG_KEY, str(days))
+
+
+# Config key for the node-wide maximum Zmodem upload size (GitHub issue
+# #34) -- a single node-wide default, same shape as the expiry grace
+# period above, rather than a per-area column: nothing currently asks
+# for per-area control over it, and a single node-wide ceiling is
+# already enough to close the actual security gap (unbounded upload
+# size/duration), unlike max post age, which genuinely needs to vary
+# per board.
+MAX_UPLOAD_BYTES_CONFIG_KEY = "max_upload_bytes"
+
+_DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB
+
+
+def get_max_upload_bytes(db: Database) -> int:
+    value = get_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY)
+    return int(value) if value is not None else _DEFAULT_MAX_UPLOAD_BYTES
+
+
+def set_max_upload_bytes(db: Database, max_bytes: int) -> None:
+    if max_bytes <= 0:
+        raise ValueError(f"max upload size must be positive, got {max_bytes!r}")
+    set_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY, str(max_bytes))

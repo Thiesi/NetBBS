@@ -20,12 +20,20 @@ import pytest
 
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.zmodem import (
+    ZCRCE,
+    ZCRCW,
+    ZDATA,
     ZDLE,
     ZEOF,
+    ZFILE,
     ZPAD,
+    ZRINIT,
+    ZRPOS,
     ZmodemError,
     _crc16,
+    _safe_filename,
     _send_header,
+    _send_subpacket,
     _wait_for_header,
     _zdle_encode,
     receive_file,
@@ -136,7 +144,7 @@ def _round_trip(filename: str, data: bytes) -> tuple[str, bytes]:
     async def scenario():
         sender_session, receiver_session = _session_pair()
         sender_task = asyncio.create_task(send_file(sender_session, filename, data))
-        receiver_task = asyncio.create_task(receive_file(receiver_session))
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
         await sender_task
         result = await receiver_task
         return result.filename, result.data
@@ -212,7 +220,7 @@ def test_corrupted_data_raises_zmodem_error():
 
         sender_task = asyncio.create_task(send_file(sender_session, "x.txt", b"hello world" * 10))
         with pytest.raises(ZmodemError):
-            await receive_file(receiver_session)
+            await receive_file(receiver_session, max_bytes=10_000_000)
         sender_task.cancel()
         try:
             await sender_task
@@ -241,13 +249,155 @@ def test_receiver_rejects_unexpected_frame_type():
     async def scenario():
         sender_session, receiver_session = _session_pair()
         # Send something that isn't a valid ZFILE after ZRINIT.
-        receiver_task = asyncio.create_task(receive_file(receiver_session))
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
         await _wait_for_header(sender_session)  # consume the receiver's ZRINIT
         await _send_header(sender_session, ZEOF)  # nonsense at this point
         with pytest.raises(ZmodemError, match="ZFILE"):
             await receiver_task
 
     asyncio.run(scenario())
+
+
+# -- GitHub issue #34: bounds on the bulk-data reception path ---------------
+
+
+def test_advertised_size_over_the_limit_is_rejected_before_bulk_data():
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10))
+        # send_file's own ZFILE metadata always advertises the true
+        # size (20 bytes here), so this exercises the early-rejection
+        # path against an honest sender declaring more than allowed.
+        sender_task = asyncio.create_task(send_file(sender_session, "big.bin", b"x" * 20))
+
+        with pytest.raises(ZmodemError, match="advertised"):
+            await receiver_task
+        sender_task.cancel()
+        try:
+            await sender_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(scenario())
+
+
+def test_sender_exceeding_its_own_declared_size_is_rejected():
+    """A malicious sender could advertise a small size (passing the
+    early check) and then simply keep sending -- the running received-
+    byte count, checked on every subpacket regardless of what was
+    declared, is the actual authoritative bound (GitHub issue #34)."""
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"lie.txt\x005 0 0 0 0 0\x00", ZCRCW)  # declares only 5 bytes
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        await _send_subpacket(sender_session, b"x" * 20, ZCRCE)  # actually sends far more
+
+        with pytest.raises(ZmodemError, match="exceeded"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_unterminated_subpacket_past_the_cap_is_rejected(monkeypatch):
+    import netbbs.net.zmodem as zmodem_module
+
+    monkeypatch.setattr(zmodem_module, "_MAX_SUBPACKET_BYTES", 8)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        # Raw data with no ZDLE terminator at all, past the (patched)
+        # 8-byte cap -- a genuinely malformed/hostile subpacket that
+        # never ends.
+        await sender_session.write_raw(b"y" * 100)
+
+        with pytest.raises(ZmodemError, match="no terminator"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_stalled_transfer_hits_the_idle_timeout(monkeypatch):
+    import netbbs.net.zmodem as zmodem_module
+
+    monkeypatch.setattr(zmodem_module, "_BULK_IDLE_TIMEOUT", 0.1)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        await sender_session.write_raw(b"y")  # one byte, then nothing -- ever
+
+        with pytest.raises(ZmodemError, match="stalled"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_round_trip_still_works_within_the_limit():
+    """Confirms the bounds above don't interfere with a normal transfer
+    comfortably inside them."""
+    name, data = _round_trip("readme.txt", b"hello world")
+    assert name == "readme.txt"
+    assert data == b"hello world"
+
+
+# -- _safe_filename (GitHub issue #34) --------------------------------------
+
+
+def test_safe_filename_strips_unix_path_components():
+    assert _safe_filename("../../etc/passwd") == "passwd"
+
+
+def test_safe_filename_strips_windows_path_components():
+    assert _safe_filename("C:\\Users\\alice\\file.txt") == "file.txt"
+
+
+def test_safe_filename_drops_control_characters():
+    assert _safe_filename("evil\x00\x01name.txt") == "evilname.txt"
+
+
+def test_safe_filename_caps_length():
+    assert len(_safe_filename("x" * 500)) == 255
+
+
+def test_safe_filename_falls_back_when_empty():
+    assert _safe_filename("") == "unnamed"
+    assert _safe_filename("/") == "unnamed"
+    assert _safe_filename("\x00\x00\x00") == "unnamed"
+
+
+def test_safe_filename_preserves_an_ordinary_name():
+    assert _safe_filename("report-final.pdf") == "report-final.pdf"
 
 
 def test_read_header_raises_on_cancel_signal():

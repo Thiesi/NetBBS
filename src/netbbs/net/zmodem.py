@@ -51,6 +51,7 @@ project's networking work has held to.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 
 from netbbs.net.session import Session
@@ -98,6 +99,29 @@ _SUBPACKET_SIZE = 8192
 # See module docstring's "one deliberate exception to no timeouts."
 _HANDSHAKE_TIMEOUT = 15.0
 
+# GitHub issue #34: none of the bulk-data reception path below had any
+# bound at all -- a peer could stream indefinitely, send one enormous
+# unterminated subpacket, or simply stall forever mid-transfer while
+# still holding the session task and growing process memory. Three
+# independent bounds, each catching a different failure shape:
+#
+# - _MAX_SUBPACKET_BYTES caps one *decoded* subpacket, regardless of
+#   the overall transfer size limit below -- a small multiple of this
+#   implementation's own chunk size (_SUBPACKET_SIZE), generous enough
+#   for any well-behaved sender using a different chunk size, still
+#   finite for one that never sends a terminator.
+# - _BULK_IDLE_TIMEOUT bounds *idle* time waiting for the next byte of
+#   a subpacket -- not total transfer duration (a large but genuinely
+#   in-progress transfer must not be killed for taking a while), just
+#   a stalled one.
+# - receive_file()'s own max_bytes parameter (netbbs.config.
+#   get_max_upload_bytes) bounds the complete transfer, checked against
+#   both the advertised ZFILE size (rejected before any data reception
+#   starts) and the actual running received-byte count (in case the
+#   advertised size was wrong or absent).
+_MAX_SUBPACKET_BYTES = _SUBPACKET_SIZE * 4
+_BULK_IDLE_TIMEOUT = 30.0
+
 
 class ZmodemError(Exception):
     """
@@ -113,6 +137,24 @@ class ZmodemError(Exception):
 class ReceivedFile:
     filename: str
     data: bytes
+
+
+def _safe_filename(raw: str) -> str:
+    """Extracts a safe basename from a remote-supplied filename (GitHub
+    issue #34): strips any path component (a peer could otherwise claim
+    a name like `../../etc/passwd` or an absolute path), drops NUL and
+    other control characters, and caps the result's length. Falls back
+    to `"unnamed"` for anything that sanitizes down to nothing, same as
+    the pre-existing empty-name fallback this replaces."""
+    # basename: strip anything before the last '/' or '\\' -- covers
+    # both Unix and Windows-style separators regardless of which OS the
+    # sending client or this node happens to be running on.
+    basename = re.split(r"[/\\]", raw)[-1]
+    cleaned = "".join(ch for ch in basename if ch.isprintable() and ch not in "\x00")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return "unnamed"
+    return cleaned[:255]
 
 
 # -- CRC-16 (CCITT) ----------------------------------------------------
@@ -269,12 +311,21 @@ async def _send_subpacket(session: Session, data: bytes, terminator: int) -> Non
 
 async def _read_subpacket(session: Session) -> tuple[bytes, int]:
     """Returns `(data, terminator)`. Raises `ZmodemError` on CRC
-    mismatch or a cancel signal from the peer."""
+    mismatch, a cancel signal from the peer, an unterminated subpacket
+    growing past `_MAX_SUBPACKET_BYTES`, or no byte arriving within
+    `_BULK_IDLE_TIMEOUT` of the previous one (GitHub issue #34)."""
     data = bytearray()
     terminator = None
     while terminator is None:
-        b = await _read_raw_byte(session)
+        try:
+            b = await asyncio.wait_for(_read_raw_byte(session), timeout=_BULK_IDLE_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise ZmodemError("transfer stalled — no data received in time") from exc
         if b != ZDLE:
+            if len(data) >= _MAX_SUBPACKET_BYTES:
+                raise ZmodemError(
+                    f"data subpacket exceeded {_MAX_SUBPACKET_BYTES} bytes with no terminator"
+                )
             data.append(b)
             continue
         b2 = await _read_raw_byte(session)
@@ -283,6 +334,10 @@ async def _read_subpacket(session: Session) -> tuple[bytes, int]:
         if b2 in (ZCRCE, ZCRCG, ZCRCQ, ZCRCW):
             terminator = b2
         else:
+            if len(data) >= _MAX_SUBPACKET_BYTES:
+                raise ZmodemError(
+                    f"data subpacket exceeded {_MAX_SUBPACKET_BYTES} bytes with no terminator"
+                )
             data.append(b2 ^ 0x40)
 
     crc_hi = await _read_zdle_byte(session)
@@ -351,7 +406,7 @@ async def send_file(session: Session, filename: str, data: bytes) -> None:
 # -- receiver (upload: NetBBS receives a file from the connecting client) -
 
 
-async def receive_file(session: Session) -> ReceivedFile:
+async def receive_file(session: Session, *, max_bytes: int) -> ReceivedFile:
     """
     Receive one file from the client via Zmodem, returning its filename
     and complete contents.
@@ -361,6 +416,14 @@ async def receive_file(session: Session) -> ReceivedFile:
     download, upload has no auto-detectable trigger analogous to
     `ZRQINIT` appearing unprompted in the stream, since *we* have to
     speak first (send `ZRINIT`) to invite the client to send.
+
+    `max_bytes` (GitHub issue #34, typically `netbbs.config.
+    get_max_upload_bytes`) bounds the transfer twice: the size the
+    sender itself advertises in `ZFILE` is checked and rejected before
+    any bulk data is ever read, and the actual running received-byte
+    count is checked after every subpacket regardless -- an advertised
+    size is peer-supplied metadata, not authoritative, so the second
+    check is the one that actually matters if the two ever disagree.
     """
     await _send_header(session, ZRINIT, 0)
 
@@ -378,8 +441,27 @@ async def receive_file(session: Session) -> ReceivedFile:
         raise ZmodemError(f"expected ZFILE, got frame type {frame_type}")
 
     info, _terminator = await _read_subpacket(session)
-    name_and_rest = info.split(b"\x00", 1)[0].decode("ascii", errors="replace")
-    filename = name_and_rest.split(" ")[0] if name_and_rest else "unnamed"
+    parts = info.split(b"\x00", 1)
+    # Defensive fallback for a sender that omits the NUL terminator
+    # entirely, in which case the whole "filename size mtime ..." field
+    # runs together space-separated -- take only the first token either
+    # way, same as this code did before issue #34's filename hardening.
+    raw_filename = parts[0].decode("ascii", errors="replace").split(" ")[0]
+    filename = _safe_filename(raw_filename) if raw_filename else "unnamed"
+
+    if len(parts) > 1:
+        # ZFILE's metadata field is "{size} {mtime} {mode} {serial}
+        # {files_remaining} {bytes_remaining}" (space-separated,
+        # ASCII), per spec -- only the leading size field matters here.
+        # Absent/malformed metadata isn't itself an error (some senders
+        # omit it); it just means the early-rejection check below can't
+        # run, and the running-total check during actual reception
+        # remains the authoritative bound regardless.
+        size_field = parts[1].split(b" ", 1)[0]
+        if size_field.isdigit() and int(size_field) > max_bytes:
+            raise ZmodemError(
+                f"advertised file size {int(size_field)} exceeds the {max_bytes}-byte upload limit"
+            )
 
     await _send_header(session, ZRPOS, 0)
 
@@ -395,6 +477,8 @@ async def receive_file(session: Session) -> ReceivedFile:
 
         while True:
             chunk, terminator = await _read_subpacket(session)
+            if len(received) + len(chunk) > max_bytes:
+                raise ZmodemError(f"upload exceeded the {max_bytes}-byte limit")
             received.extend(chunk)
             if terminator in (ZCRCW, ZCRCQ):
                 await _send_header(session, ZACK, len(received))
