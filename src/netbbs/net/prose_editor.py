@@ -133,6 +133,14 @@ async def edit_prose(
             _dispatch(state, key, width, height)
             previous = await _redraw(session, state, previous, width, height)
     finally:
+        # GitHub issue #38: same fix as netbbs.net.ansi_editor's -- every
+        # exit path above returns from mid-loop with the status line
+        # still painted on its own row and the real cursor left at the
+        # last edit position, neither of which the caller cleans up
+        # before drawing its own next screen. A `finally` block runs on
+        # every exit (including an unhandled exception), so clearing
+        # here once covers all of them.
+        await session.write(clear_screen())
         autosave_task.cancel()
         try:
             await autosave_task

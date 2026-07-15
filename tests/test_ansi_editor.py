@@ -17,6 +17,7 @@ import pytest
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.session import Session
+from netbbs.rendering import clear_screen
 from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
 from netbbs.rendering.screen_buffer import ScreenBuffer
@@ -367,6 +368,45 @@ def test_quit_after_editing_save_choice_saves_and_returns_bytes(tmp_path):
     result = asyncio.run(scenario())
     buf = _buffer_from(result)
     assert buf.get_cell(0, 0).char == "A"
+
+
+# -- GitHub issue #38: no leftover status line after exit -------------------
+
+
+def test_saving_clears_the_screen_before_returning(tmp_path):
+    async def scenario():
+        session = FakeSession(["A", "CTRL+O"])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
+
+
+def test_quit_without_editing_clears_the_screen_before_returning(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+X"])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
+
+
+def test_quit_after_confirmed_discard_clears_the_screen_before_returning(tmp_path):
+    draft = tmp_path / "d.draft"
+
+    async def scenario():
+        session = FakeSession(["A", "CTRL+X", "d"])
+        await edit_ansi_art(session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999)
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
 
 
 def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):

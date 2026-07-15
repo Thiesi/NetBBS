@@ -190,6 +190,57 @@ def test_delete_approved_post_logs_delete(db, sysop, alice, bob):
     assert entries[-1].action == "delete"
 
 
+def test_delete_post_with_a_reply_is_refused_not_crashed(db, sysop, alice, bob):
+    """Regression test for GitHub issue #37: the explicit moderator
+    delete_post() path used to attempt a raw DELETE with no reference
+    check, raising sqlite3.IntegrityError (potentially crashing the
+    session) instead of a catchable domain error -- unlike
+    _sweep_expired_posts, which round 70 already taught to leave a
+    still-referenced post alone."""
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    parent = create_post(db, board, bob, "Parent", "Body")
+    create_post(db, board, alice, "Reply", "Body", parent_post_id=parent.post_id)
+
+    with pytest.raises(PostError):
+        delete_post(db, parent, deleted_by=sysop)
+    still_there = get_post(db, parent.post_id)
+    assert still_there.status == "approved"
+
+
+def test_delete_post_that_was_edited_is_refused(db, sysop, alice):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop)
+    original = create_post(db, board, alice, "Subject", "Original")
+    edit_post(db, original, board, subject="Subject", body="Revised", edited_by=alice)
+
+    with pytest.raises(PostError):
+        delete_post(db, original, deleted_by=sysop)
+
+
+def test_delete_intermediate_edit_referenced_by_a_later_edit_is_refused(db, sysop, alice):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop)
+    original = create_post(db, board, alice, "Subject", "v1")
+    v2 = edit_post(db, original, board, subject="Subject", body="v2", edited_by=alice)
+    edit_post(db, get_post(db, v2.post_id), board, subject="Subject", body="v3", edited_by=alice)
+
+    with pytest.raises(PostError):
+        delete_post(db, v2, deleted_by=sysop)
+
+
+def test_delete_post_with_no_references_still_works(db, sysop, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    post = create_post(db, board, bob, "Hello", "Body")
+
+    delete_post(db, post, deleted_by=sysop)
+    with pytest.raises(PostError):
+        get_post(db, post.post_id)
+
+
 # -- pin/exempt: require edit permission -----------------------------------
 
 

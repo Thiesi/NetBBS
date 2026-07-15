@@ -545,7 +545,7 @@ def _can_edit_post(db: Database, post: Post, user: User) -> bool:
 
 
 async def _render_board_page(
-    session: Session, db: Database, board_name: str, page: PostPage, user: User
+    session: Session, db: Database, board_name: str, page: PostPage, user: User, *, can_post: bool
 ) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
@@ -560,6 +560,8 @@ async def _render_board_page(
         options.append(menu_key("R", "ecent"))
     if any(_can_edit_post(db, post, user) for post in page.posts):
         options.append(menu_key("E", "dit"))
+    if can_post:
+        options.append(menu_key("P", "ost"))
     options.append(menu_key("B", "ack"))
     await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
@@ -575,8 +577,14 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     what's actually useful to see on arrival, not its oldest history —
     directly answers the original complaint that returning to a board
     re-rendered everything, most of which was already read.
+
+    Composing a new post is a first-class `[P]ost` menu option inside
+    the browsing loop (GitHub issue #40), not something a `[B]ack`
+    choice used to silently fall through into on its way out (GitHub
+    issue #39) -- `[B]ack` now always means back, nothing else.
     """
     board_name = sanitize_text(board.name)
+    can_post = meets_level(user, board.min_write_level)
 
     def _refetch_current_page() -> PostPage:
         """Re-fetches whichever page is currently on screen, using the
@@ -590,59 +598,73 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
         mode, cursor = page_anchor
         return list_posts_page(db, board, user, **{mode: cursor})
 
+    async def _compose_new_post() -> None:
+        await session.write("\r\nSubject (or press Enter to cancel): ")
+        subject = (await session.read_line()).strip()
+        if not subject:
+            await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
+            return
+        body = await _compose_body(
+            session, db, user, draft_path=_post_draft_path(db, kind="new", board=board, user=user)
+        )
+        if body is None:
+            await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
+            return
+        post = create_post(db, board, user, subject, body)
+        await session.write_line(f"Posted (id {post.post_id[:12]}...).")
+
     page_anchor: tuple[str, tuple[str, str]] | None = None
     page = list_posts_page(db, board, user)
     if not page.posts:
+        # Deliberately still skips the navigation loop entirely --
+        # nothing to browse, so there's nothing for [O]lder/[N]ewer/
+        # [E]dit/[B]ack to do here anyway (see
+        # test_empty_board_never_enters_the_navigation_loop). Goes
+        # straight to composing the first post when the user's allowed
+        # to; unrelated to issues #39/#40, which were about the
+        # non-empty case's [B]ack silently triggering a post prompt.
         await session.write_line(f"\r\n[{board_name}] has no posts yet.")
-    else:
-        await _render_board_page(session, db, board_name, page, user)
-        while True:
-            choice = (await session.read_key()).lower()
-
-            if choice == "o" and page.has_older:
-                await session.write_line("")
-                oldest = page.posts[0]
-                page_anchor = ("before", (oldest.created_at, oldest.post_id))
-                page = _refetch_current_page()
-                await _render_board_page(session, db, board_name, page, user)
-            elif choice == "n" and page.has_newer:
-                await session.write_line("")
-                newest = page.posts[-1]
-                page_anchor = ("after", (newest.created_at, newest.post_id))
-                page = _refetch_current_page()
-                await _render_board_page(session, db, board_name, page, user)
-            elif choice == "r" and page.has_newer:
-                await session.write_line("")
-                page_anchor = None
-                page = _refetch_current_page()
-                await _render_board_page(session, db, board_name, page, user)
-            elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
-                await session.write_line("")
-                await _edit_existing_post(session, db, board, page, user)
-                page = _refetch_current_page()
-                await _render_board_page(session, db, board_name, page, user)
-            elif choice == "b":
-                await session.write_line("")
-                break
-            else:
-                await session.write(reject_keystroke())
-
-    if not meets_level(user, board.min_write_level):
+        if can_post:
+            await _compose_new_post()
         return
 
-    await session.write("\r\nPost a new message? Subject (or press Enter to skip): ")
-    subject = (await session.read_line()).strip()
-    if not subject:
-        return
+    await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+    while True:
+        choice = (await session.read_key()).lower()
 
-    body = await _compose_body(
-        session, db, user, draft_path=_post_draft_path(db, kind="new", board=board, user=user)
-    )
-    if body is None:
-        await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
-        return
-    post = create_post(db, board, user, subject, body)
-    await session.write_line(f"Posted (id {post.post_id[:12]}...).")
+        if choice == "o" and page.has_older:
+            await session.write_line("")
+            oldest = page.posts[0]
+            page_anchor = ("before", (oldest.created_at, oldest.post_id))
+            page = _refetch_current_page()
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+        elif choice == "n" and page.has_newer:
+            await session.write_line("")
+            newest = page.posts[-1]
+            page_anchor = ("after", (newest.created_at, newest.post_id))
+            page = _refetch_current_page()
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+        elif choice == "r" and page.has_newer:
+            await session.write_line("")
+            page_anchor = None
+            page = _refetch_current_page()
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+        elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
+            await session.write_line("")
+            await _edit_existing_post(session, db, board, page, user)
+            page = _refetch_current_page()
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+        elif choice == "p" and can_post:
+            await session.write_line("")
+            await _compose_new_post()
+            page_anchor = None  # a freshly-created post always lands on the newest page
+            page = _refetch_current_page()
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+        elif choice == "b":
+            await session.write_line("")
+            return
+        else:
+            await session.write(reject_keystroke())
 
 
 async def _edit_existing_post(

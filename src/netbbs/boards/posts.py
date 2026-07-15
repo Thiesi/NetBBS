@@ -194,6 +194,15 @@ def edit_post(
     if current is None:
         raise PostError("no currently-approved version of this post exists to edit")
 
+    if subject == current["subject"] and body == current["body"]:
+        # No-op edit (GitHub issue #41): every edit gets a fresh
+        # created_at, which alone would produce a new content-addressed
+        # post_id and make list_posts_page/_resolve_current_version
+        # treat this as a genuine newer revision -- misleadingly marking
+        # an unchanged post "(edited)". Skip the new row/is_edited flip
+        # entirely when nothing actually changed.
+        return _row_to_post(current)
+
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
     author_identifier = post.author_fingerprint or post.author_label
@@ -509,8 +518,40 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
     (design doc sign-off round 35) — and the moderation log records
     which of the two actually happened, distinguished by the post's
     status at the moment of deletion.
+
+    Refuses with a `PostError` (GitHub issue #37), rather than letting
+    SQLite's FK constraint raise `sqlite3.IntegrityError`, if this post
+    is still referenced by another row as a reply's `parent_post_id`,
+    an edit chain's `root_post_id`, or a later edit's `edit_of_post_id`
+    -- the same three relationships `_sweep_expired_posts` (round 70)
+    already excludes from its own hard-delete step, for the same
+    reason: changing those FKs' `ON DELETE` behavior needs the
+    drop/rebuild migration pattern round 60 found risks cascading
+    SQLite's implicit `DELETE FROM` to *all* of a live parent table's
+    relationships at once. A referenced post simply can't be deleted
+    until whatever references it is gone first -- an explicit, catchable
+    refusal rather than a session-crashing exception.
     """
     _require_board_permission(db, post, deleted_by, BoardPermission.DELETE)
+
+    blockers = db.connection.execute(
+        """
+        SELECT
+            EXISTS(SELECT 1 FROM posts WHERE parent_post_id = ?) AS has_reply,
+            EXISTS(SELECT 1 FROM posts WHERE root_post_id = ? AND post_id != ?) AS has_edit,
+            EXISTS(SELECT 1 FROM posts WHERE edit_of_post_id = ?) AS has_later_edit
+        """,
+        (post.post_id, post.post_id, post.post_id, post.post_id),
+    ).fetchone()
+    if blockers["has_reply"] or blockers["has_edit"] or blockers["has_later_edit"]:
+        reasons = []
+        if blockers["has_reply"]:
+            reasons.append("has one or more replies")
+        if blockers["has_edit"]:
+            reasons.append("is the root of an edit chain with other revisions")
+        if blockers["has_later_edit"]:
+            reasons.append("is referenced as the predecessor of a later edit")
+        raise PostError("cannot delete this post: it " + ", and ".join(reasons))
 
     action = "reject" if post.status == "pending" else "delete"
     db.connection.execute("DELETE FROM posts WHERE id = ?", (post.id,))

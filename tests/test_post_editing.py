@@ -113,6 +113,24 @@ def test_editing_does_not_bump_a_post_to_the_top_of_the_feed(db, alice):
     assert page.posts[0].body == "Revised body 1"
 
 
+def test_editing_with_no_actual_change_is_a_no_op(db, alice):
+    """Regression test for GitHub issue #41: every edit_post() call
+    computes a fresh created_at, which alone would produce a new
+    content-addressed post_id (and mark the post "(edited)" via
+    _resolve_current_version) even when the submitted subject/body are
+    byte-identical to the current version."""
+    board = create_board(db, "general", creator=alice)
+    original = create_post(db, board, alice, "Subject", "Body")
+
+    result = edit_post(db, original, board, subject="Subject", body="Body", edited_by=alice)
+
+    assert result.post_id == original.post_id
+    assert result.is_edited is False
+    shown = list_posts_page(db, board, alice).posts[0]
+    assert shown.is_edited is False
+    assert shown.body == "Body"
+
+
 def test_repeated_edits_all_chain_to_the_same_root(db, alice):
     board = create_board(db, "general", creator=alice)
     original = create_post(db, board, alice, "Subject", "v1")

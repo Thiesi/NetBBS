@@ -43,6 +43,7 @@ from netbbs.rendering import (
     ScreenBuffer,
     Snapshot,
     clear_line,
+    clear_screen,
     colored,
     decode_ansi_bytes,
     diff_ansi,
@@ -213,6 +214,16 @@ async def edit_ansi_art(
             _dispatch(state, key)
             previous = await _redraw(session, state, previous)
     finally:
+        # GitHub issue #38: every exit path above returns from mid-loop
+        # with the real terminal cursor left wherever _flush() last put
+        # it and the status line still painted on its own row -- neither
+        # gets cleaned up by the caller, which just writes its own next
+        # screen starting from that same cursor position, leaving the
+        # status line visibly stuck on screen. A `finally` block runs on
+        # every one of those exits (including an unhandled exception),
+        # so clearing here once covers all of them instead of repeating
+        # it before each individual `return`.
+        await session.write(clear_screen())
         autosave_task.cancel()
         try:
             await autosave_task

@@ -11,6 +11,7 @@ import pytest
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session
+from netbbs.rendering import clear_screen
 
 _EDITOR_KEY_SENTINELS: dict[str, EditorKeyKind] = {
     "ENTER": EditorKeyKind.ENTER,
@@ -194,6 +195,39 @@ def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):
 
     result = asyncio.run(scenario())
     assert result == "hi!"
+
+
+# -- GitHub issue #38: no leftover status line after exit -------------------
+
+
+def test_saving_clears_the_screen_before_returning(tmp_path):
+    async def scenario():
+        session = FakeSession(_type("hello") + ["CTRL+O"])
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
+
+
+def test_quit_without_editing_clears_the_screen_before_returning(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+X"])
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
+
+
+def test_quit_after_confirmed_discard_clears_the_screen_before_returning(tmp_path):
+    async def scenario():
+        session = FakeSession(_type("x") + ["CTRL+X", "d"])
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return session
+
+    session = asyncio.run(scenario())
+    assert session.written[-1] == clear_screen()
 
 
 def test_save_deletes_a_stale_draft(tmp_path):

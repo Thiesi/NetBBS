@@ -228,6 +228,39 @@ def test_muted_user_message_is_not_broadcast(db, hub, presence, mailbox, history
     assert not any(m.kind == "message" and m.body == "hello everyone" for m in scrollback)
 
 
+def test_muted_user_cannot_bypass_mute_with_me(db, hub, presence, mailbox, history, sysop, bob, channel):
+    """Regression test for GitHub issue #30: /me is dispatched as a
+    slash command, reaching _handle_me before send_loop's own
+    is_muted() check (which only guards the plain-message branch) --
+    letting a muted user broadcast arbitrary visible text as an action
+    event instead of an ordinary message."""
+
+    async def scenario():
+        mod_session = FakeSession(["/mute bob spamming", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(mod_session, db, hub, presence, mailbox, history, channel, sysop), timeout=2)
+
+        target_session = FakeSession(["/me waves", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(target_session, db, hub, presence, mailbox, history, channel, bob), timeout=2)
+        return target_session
+
+    target_session = asyncio.run(scenario())
+    assert "muted" in _written_text(target_session)
+
+    scrollback = get_scrollback(db, channel)
+    assert not any(m.kind == "action" for m in scrollback)
+
+
+def test_unmuted_user_me_still_works(db, hub, presence, mailbox, history, bob, channel):
+    async def scenario():
+        session = FakeSession(["/me waves", "/quit"])
+        await asyncio.wait_for(chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, bob), timeout=2)
+        return session
+
+    asyncio.run(scenario())
+    scrollback = get_scrollback(db, channel)
+    assert any(m.kind == "action" and "waves" in m.body for m in scrollback)
+
+
 def test_unmuted_user_can_send_again(db, hub, presence, mailbox, history, sysop, bob, channel):
     async def scenario():
         mod_session = FakeSession(["/mute bob", "/unmute bob", "/quit"])

@@ -970,6 +970,23 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "me")
         return
 
+    # GitHub issue #30: /me is a slash command, so it used to reach the
+    # dispatcher before send_loop's own is_muted() check (which only
+    # guards the plain, non-slash message branch) -- a muted user could
+    # still broadcast arbitrary visible text as an action event. Same
+    # response text/expiry formatting as the ordinary-message check.
+    restriction = is_muted(ctx.db, ctx.channel, ctx.user)
+    if restriction is not None:
+        until = (
+            "indefinitely"
+            if restriction.expires_at is None
+            else f"until {format_for_display(restriction.expires_at, ctx.db)}"
+        )
+        await ctx.session.write_line(
+            colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
+        )
+        return
+
     label = chat_stream_label(ctx.db, ctx.user)
     notice = colored(f"* {label} {sanitize_text(args)}", fg_color=MUTED_COLOR)
 

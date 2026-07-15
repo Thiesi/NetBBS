@@ -41,6 +41,7 @@ from netbbs.boards.categories import list_subcategories as list_board_subcategor
 from netbbs.boards.categories import list_top_level_categories as list_top_level_board_categories
 from netbbs.boards.posts import (
     Post,
+    PostError,
     approve_post,
     delete_post,
     list_pending_posts,
@@ -1015,7 +1016,12 @@ async def _post_action_screen(session: Session, db: Database, actor: User, post:
             return
         elif choice == "r":
             await session.write_line("")
-            delete_post(db, post, deleted_by=actor)
+            try:
+                delete_post(db, post, deleted_by=actor)
+            except PostError as exc:
+                await session.write_line(f"Error: {exc}")
+                await _draw_post_action(session, post)
+                continue
             await session.write_line("Rejected.")
             return
         elif choice == "p":
