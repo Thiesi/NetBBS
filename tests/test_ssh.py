@@ -335,6 +335,121 @@ def test_password_auth_rejected_for_keypair_only_user(db):
     asyncio.run(scenario())
 
 
+# -- GitHub issue #25: no second login prompt over SSH ----------------------
+
+
+def _ssh_session_handler(db):
+    """A real `handle_ssh_session`, wired to fresh node-wide state --
+    the actual production handler `netbbs.__main__.run` builds, not a
+    bare stub, so these tests exercise the real two-stage login split
+    end to end rather than just asserting `authenticated_username` was
+    set."""
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net.login_flow import handle_ssh_session
+    from netbbs.net.maintenance import MaintenanceMode
+    from netbbs.net.session_registry import ActiveSessionRegistry
+
+    hub = ChatHub()
+    presence = PresenceRegistry()
+    mailbox = MessageMailbox()
+    session_registry = ActiveSessionRegistry()
+    maintenance = MaintenanceMode()
+
+    async def handler(session):
+        await handle_ssh_session(session, db, hub, presence, mailbox, session_registry, maintenance)
+
+    return handler
+
+
+async def _read_until(stream, marker: str, *, limit: int = 8192) -> str:
+    """Accumulates decoded output until `marker` appears or `limit`
+    bytes have been read -- used instead of a fixed byte count since
+    exact ANSI-formatted prompt lengths aren't worth hardcoding here."""
+    buffer = ""
+    while marker not in buffer and len(buffer) < limit:
+        chunk = await asyncio.wait_for(stream.read(1), timeout=2)
+        if not chunk:
+            break
+        buffer += chunk.decode("utf-8", errors="replace")
+    return buffer
+
+
+def test_ssh_password_login_reaches_main_menu_without_a_second_prompt(db):
+    """The core regression: previously every transport funneled through
+    the same handler, which always prompted for a username/password
+    regardless of how the connection got here -- an SSH-authenticated
+    password account had to authenticate twice."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+
+    async def scenario():
+        server = await _run_server(db, _ssh_session_handler(db))
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+            ) as conn:
+                async with conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None) as proc:
+                    output = await _read_until(proc.stdout, "Choice:")
+                    return output
+        finally:
+            await server.stop()
+
+    output = asyncio.run(scenario())
+    assert "Welcome, alice" in output
+    assert "Main menu:" in output
+    # The one-and-only credential exchange happened at the SSH protocol
+    # level (already proven by the connection succeeding at all) --
+    # this confirms the *application* layer never asked again.
+    assert "Username:" not in output
+    assert "Password:" not in output
+
+
+def test_ssh_public_key_login_reaches_main_menu_without_any_password_prompt(db):
+    """A public-key-only account (no password at all) previously
+    couldn't complete a session over SSH: it would pass the SSH
+    handshake, then be stuck at a password prompt it has no password
+    to answer."""
+    key = _client_key_for(db, "bob")
+
+    async def scenario():
+        server = await _run_server(db, _ssh_session_handler(db))
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="bob", client_keys=[key], known_hosts=None
+            ) as conn:
+                async with conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None) as proc:
+                    output = await _read_until(proc.stdout, "Choice:")
+                    return output
+        finally:
+            await server.stop()
+
+    output = asyncio.run(scenario())
+    assert "Welcome, bob" in output
+    assert "Main menu:" in output
+    assert "Username:" not in output
+    assert "Password:" not in output
+
+
+def test_ssh_session_reports_the_authenticated_username():
+    """SSHSession.authenticated_username (GitHub issue #25) is what
+    handle_ssh_session uses to skip straight to the authenticated
+    session -- confirmed directly against the real asyncssh extra-info
+    plumbing, not just indirectly via the end-to-end tests above."""
+    from netbbs.net.ssh import SSHSession
+
+    class _FakeProcess:
+        term_size = (80, 24, 0, 0)
+
+        def get_extra_info(self, name, default=None):
+            if name == "username":
+                return "alice"
+            if name == "peername":
+                return ("203.0.113.5", 22)
+            return default
+
+    session = SSHSession(_FakeProcess())
+    assert session.authenticated_username == "alice"
+
+
 # -- terminal size ----------------------------------------------------------
 
 

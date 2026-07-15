@@ -20,7 +20,7 @@ import sys
 
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
-from netbbs.net.login_flow import handle_session
+from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
 from netbbs.net.session_registry import ActiveSessionRegistry
@@ -52,7 +52,7 @@ def _build_throttle(config: NodeConfig) -> LoginThrottle:
 
 
 async def _start_servers(
-    config: NodeConfig, db: Database, session_handler, throttle: LoginThrottle
+    config: NodeConfig, db: Database, session_handler, ssh_session_handler, throttle: LoginThrottle
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -68,6 +68,14 @@ async def _start_servers(
     per-source/per-username/global budgets would track each transport
     separately and an attacker could simply switch transports to reset
     them, defeating the entire point of a cross-connection budget.
+
+    `ssh_session_handler`, distinct from `session_handler` (GitHub
+    issue #25), wraps `netbbs.net.login_flow.handle_ssh_session` rather
+    than `handle_session` -- SSH has already authenticated the
+    connection through its own protocol-level handshake by the time
+    either handler is ever called, so it must not be handed the
+    Telnet/web handler, which unconditionally prompts for a
+    username/password a second time.
     """
     started: list = []
 
@@ -112,7 +120,7 @@ async def _start_servers(
                     host=config.ssh.host,
                     port=config.ssh.port,
                     db=db,
-                    session_handler=session_handler,
+                    session_handler=ssh_session_handler,
                     throttle=throttle,
                     login_timeout=config.throttle.login_deadline_seconds,
                 ),
@@ -198,6 +206,18 @@ async def run(
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
         )
 
+    async def ssh_session_handler(session):
+        # GitHub issue #25: SSH has already authenticated the
+        # connection through its own protocol-level handshake by this
+        # point (see netbbs.net.ssh._NetBBSSSHServer) -- this skips
+        # handle_session's interactive username/password prompt
+        # entirely rather than asking again.
+        await handle_ssh_session(
+            session, db, hub, presence, mailbox, session_registry, maintenance,
+            shutdown_event=shutdown_event,
+            graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+        )
+
     servers: list = []
     try:
         if count_sysops(db) == 0:
@@ -207,7 +227,7 @@ async def run(
                 "the network-facing server; a node with no SysOp could "
                 "never be administered once it's running"
             )
-        servers = await _start_servers(config, db, session_handler, throttle)
+        servers = await _start_servers(config, db, session_handler, ssh_session_handler, throttle)
 
         await shutdown_event.wait()
     finally:

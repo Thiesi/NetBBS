@@ -78,6 +78,18 @@ class SSHSession(Session):
 
     def __init__(self, process: asyncssh.SSHServerProcess):
         self._process = process
+        # GitHub issue #25: the username SSH's own protocol-level
+        # handshake already authenticated this connection as --
+        # asyncssh records it via `set_extra_info(username=...)`
+        # itself the moment `validate_password`/`validate_public_key`
+        # succeeds (see asyncssh.connection), well before a process/
+        # session like this one is ever created. `netbbs.net.
+        # login_flow.handle_ssh_session` reads this to skip straight
+        # to the authenticated session instead of prompting for
+        # credentials Telnet/web's `_login()` would ask for -- SSH
+        # already has proof, asking again would be a second,
+        # redundant credential exchange.
+        self.authenticated_username: str | None = process.get_extra_info("username") or None
         width, height, _pixwidth, _pixheight = process.term_size
         # A client that didn't request a PTY (width/height both 0) keeps
         # the Session base class's 80x24 default instead — same

@@ -193,11 +193,18 @@ async def _run_authenticated_session(
     *,
     node_controls: NodeControls | None = None,
 ) -> None:
-    """The login-through-logoff body of a connection, wrapped by
-    `handle_session`'s maintenance-mode check and session-registry
-    bookkeeping (design doc round 51) — split out so those two concerns
-    stay a thin, easy-to-read wrapper rather than adding another level
-    of nesting to the whole function.
+    """The login-through-logoff body of a *Telnet/web* connection,
+    wrapped by `handle_session`'s maintenance-mode check and session-
+    registry bookkeeping (design doc round 51) — split out so those two
+    concerns stay a thin, easy-to-read wrapper rather than adding
+    another level of nesting to the whole function.
+
+    Interactive-login-specific (the concurrent-unauthenticated-session
+    budget, the username/password prompt loop) -- SSH has already
+    proven identity before its own entry point, `handle_ssh_session`,
+    is ever called, so it skips straight to `run_authenticated_session`
+    below instead of going through this function at all (GitHub issue
+    #25).
 
     `node_controls`, if given, is threaded straight through to
     `_main_menu`/`admin_menu` (design doc -- node management round);
@@ -243,7 +250,35 @@ async def _run_authenticated_session(
     if login_result is LoginOutcome.BLOCKED:
         return
 
-    user = login_result
+    await run_authenticated_session(session, db, hub, presence, mailbox, login_result, node_controls=node_controls)
+
+
+async def run_authenticated_session(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    user: User,
+    *,
+    node_controls: NodeControls | None = None,
+) -> None:
+    """
+    The authenticated-through-logoff body of a connection (GitHub issue
+    #25's two-stage split): everything that happens once a `User` is
+    already known-good, regardless of *how* that was established --
+    Telnet/web's interactive `_login()` prompt (`_run_authenticated_
+    session`, above), or SSH's own protocol-level password/public-key
+    exchange (`handle_ssh_session`, below). Neither transport-specific
+    entry point duplicates any of this; there is exactly one "what a
+    session actually does" implementation.
+
+    `node_controls`, if given, is threaded straight through to
+    `_main_menu`/`admin_menu` (design doc -- node management round);
+    `None` is what a direct test call site (bypassing both entry
+    points above) gets by default, which correctly hides the `[N]ode`
+    admin option rather than needing every such test updated.
+    """
     await session.write_line(
         f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
     )
@@ -265,6 +300,119 @@ async def _run_authenticated_session(
         presence.leave(user.username)
 
     await session.write_line("\r\nGoodbye!")
+
+
+async def _authorize_ssh_authenticated_user(
+    session: Session, db: Database, username: str
+) -> User | LoginOutcome:
+    """
+    Re-resolves and authorizes `username` fresh, immediately before an
+    SSH session actually begins (GitHub issue #25).
+
+    SSH proves identity during its own protocol-level handshake
+    (`netbbs.net.ssh._NetBBSSSHServer.validate_password`/
+    `validate_public_key`) — genuinely earlier than the process/session
+    this runs in ever starts, unlike Telnet/web's interactive
+    `_login()`, where the credential check and everything after it
+    happen essentially atomically in one function call. Re-fetching
+    here closes that gap: a SysOp disabling or deleting the account in
+    the meantime (however narrow a window in practice) would otherwise
+    go unnoticed. `authenticate_password_async`/`authorize_public_key`
+    already checked `disabled_at` at their own, earlier point in time;
+    this repeats that check now, plus the blocklist check `_login`'s
+    own docstring explains is a distinct authentication-vs-
+    authorization concern Telnet/web's inline check (below) already
+    makes for its own path.
+    """
+    try:
+        user = get_user_by_username(db, username)
+    except AuthError:
+        await session.write_line("\r\nYour account is no longer available. Goodbye.")
+        return LoginOutcome.BLOCKED
+    if user.disabled_at is not None:
+        await session.write_line("\r\nYour account is no longer available. Goodbye.")
+        return LoginOutcome.BLOCKED
+    if is_blocked(db, user):
+        await session.write_line("\r\nYour access to this system has been revoked.")
+        return LoginOutcome.BLOCKED
+    return user
+
+
+async def handle_ssh_session(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    session_registry: ActiveSessionRegistry,
+    maintenance: MaintenanceMode,
+    *,
+    shutdown_event: asyncio.Event | None = None,
+    graceful_delay_seconds: float = 60.0,
+) -> None:
+    """
+    SSH-specific top-level entry point (GitHub issue #25) — the
+    `session_handler` `netbbs.__main__.run` gives to
+    `netbbs.net.ssh.SSHServer`, distinct from `handle_session` (which
+    stays exactly what Telnet/web use). SSH has already proven identity
+    via its own protocol-level handshake by the time this is ever
+    called (see `netbbs.net.ssh.SSHSession.authenticated_username`),
+    so this never calls `_login()` or prompts for a username/password a
+    second time — the actual bug this closes: previously every
+    transport funneled through the same `handle_session`, which had no
+    idea an SSH connection had already authenticated and always asked
+    again, defeating public-key-only accounts entirely (no password to
+    give the second prompt) and needlessly re-prompting password
+    accounts.
+
+    Deliberately does *not* acquire `throttle`'s concurrent-
+    unauthenticated-session budget the way `handle_session` does for
+    Telnet/web: that budget exists to bound how many connections can
+    sit *unauthenticated* at once, and by the time this function is
+    called, SSH has already fully authenticated the connection through
+    its own handshake (with its own `login_timeout` -- see
+    `netbbs.net.ssh.SSHServer`'s docstring on why that's a separate,
+    already-sufficient mechanism). Counting it against the same budget
+    as a genuinely unauthenticated Telnet/web connection would be
+    double-charging a connection that was never actually in the state
+    that budget protects against.
+
+    Otherwise mirrors `handle_session`'s maintenance-mode check and
+    session-registry bookkeeping exactly — see that function's
+    docstring for the reasoning, not repeated here.
+    """
+    if maintenance.is_active():
+        await session.write_line(MAINTENANCE_MESSAGE)
+        return
+
+    node_controls = NodeControls(
+        session_registry=session_registry,
+        maintenance=maintenance,
+        shutdown_event=shutdown_event if shutdown_event is not None else asyncio.Event(),
+        graceful_delay_seconds=graceful_delay_seconds,
+    )
+
+    session_registry.enter(session)
+    try:
+        username = getattr(session, "authenticated_username", None)
+        if not username:
+            # Unreachable in practice -- asyncssh never opens a
+            # process/session without a prior successful
+            # validate_password/validate_public_key -- but refusing
+            # cleanly here is cheaper than trusting that invariant
+            # blindly.
+            await session.write_line("\r\nSSH authentication did not complete. Goodbye.")
+            return
+
+        result = await _authorize_ssh_authenticated_user(session, db, username)
+        if isinstance(result, LoginOutcome):
+            return
+        await run_authenticated_session(
+            session, db, hub, presence, mailbox, result, node_controls=node_controls
+        )
+    finally:
+        session_registry.leave(session)
+        mailbox.discard(session)
 
 
 async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbox, user: User) -> None:
