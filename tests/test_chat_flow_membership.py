@@ -24,6 +24,7 @@ from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -76,11 +77,14 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, mailbox, channel, user, lines):
+async def _run(db, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
     session = FakeSession(lines)
     history = InputHistory()
     action = await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
+        chat_flow._chat_loop(
+            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+        ),
+        timeout=2,
     )
     return session, action
 
@@ -115,8 +119,18 @@ def test_invite_unknown_user_shows_friendly_message(db, hub, presence, mailbox, 
 
 def test_invite_notifies_the_invitee_via_mailbox(db, hub, presence, mailbox, alice, bob, channel):
     _grant_manage_members(db, alice, channel)
-    asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
-    pending = mailbox.flush("bob")
+    registry = ActiveSessionRegistry()
+    bob_session = FakeSession()
+
+    async def scenario():
+        registry.enter(bob_session)  # requires a running event loop
+        registry.mark_authenticated(bob_session, "bob")
+        return await _run(
+            db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"], session_registry=registry
+        )
+
+    asyncio.run(scenario())
+    pending = mailbox.flush(bob_session)
     assert len(pending) == 1
     assert "invited to #lobby" in pending[0][0]
 

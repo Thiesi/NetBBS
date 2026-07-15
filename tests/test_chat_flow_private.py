@@ -20,6 +20,7 @@ from netbbs.chat.scrollback import get_scrollback
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -75,11 +76,14 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, mailbox, channel, user, lines):
+async def _run(db, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
     session = FakeSession(lines)
     history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
+        chat_flow._chat_loop(
+            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+        ),
+        timeout=2,
     )
     return session
 
@@ -145,14 +149,100 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
 ):
     # Online (e.g. browsing boards) but not currently in a chat channel --
     # exactly the gap the mailbox exists for (design doc round 32/46).
+    # A registered (but not chat-live) session is what makes mailbox
+    # delivery possible at all under the session-addressed redesign
+    # (GitHub issue #27) -- without a registry entry there's no Session
+    # object to key the delivery by.
     presence.enter("bob")
+    registry = ActiveSessionRegistry()
+    bob_session = FakeSession()
 
-    session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"])
-    )
+    async def scenario():
+        registry.enter(bob_session)  # requires a running event loop
+        registry.mark_authenticated(bob_session, "bob")
+        return await _run(
+            db, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
+            session_registry=registry,
+        )
+
+    session = asyncio.run(scenario())
 
     assert "(sent to bob)" in _written(session)
-    pending = mailbox.flush("bob")
+    pending = mailbox.flush(bob_session)
+    assert len(pending) == 1
+    assert "Private message from alice: hello there" in pending[0][0]
+
+
+# -- GitHub issue #27: session-addressed delivery ---------------------
+
+
+def test_msg_reaches_every_one_of_the_recipients_sessions(
+    db, hub, presence, mailbox, alice, bob, channel, other_channel
+):
+    """Regression test for the core bug: a recipient with two
+    simultaneous non-chat-live sessions used to share one account-wide
+    mailbox slot -- both must now get their own independent copy."""
+    presence.enter("bob")
+    registry = ActiveSessionRegistry()
+    bob_session_one, bob_session_two = FakeSession(), FakeSession()
+
+    async def scenario():
+        registry.enter(bob_session_one)  # requires a running event loop
+        registry.mark_authenticated(bob_session_one, "bob")
+        registry.enter(bob_session_two)
+        registry.mark_authenticated(bob_session_two, "bob")
+        return await _run(
+            db, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
+            session_registry=registry,
+        )
+
+    asyncio.run(scenario())
+
+    pending_one = mailbox.flush(bob_session_one)
+    pending_two = mailbox.flush(bob_session_two)
+    assert len(pending_one) == 1
+    assert len(pending_two) == 1
+    assert "Private message from alice: hello there" in pending_one[0][0]
+    assert "Private message from alice: hello there" in pending_two[0][0]
+
+
+def test_msg_reaches_both_a_live_chat_session_and_a_non_chat_session(
+    db, hub, presence, mailbox, alice, bob, channel, other_channel
+):
+    """One chat session plus one main-menu (non-chat) session both
+    receive the same /msg -- the live one instantly via ChatHub, the
+    other queued in its own mailbox slot."""
+    presence.enter("bob")
+    registry = ActiveSessionRegistry()
+    non_chat_session = FakeSession()
+
+    async def scenario():
+        registry.enter(non_chat_session)  # requires a running event loop
+        registry.mark_authenticated(non_chat_session, "bob")
+        history = InputHistory()
+        live_session = FakeSession()  # sits in other_channel, never types
+        registry.enter(live_session)
+        registry.mark_authenticated(live_session, "bob")
+        live_task = asyncio.create_task(
+            chat_flow._chat_loop(live_session, db, hub, presence, mailbox, history, other_channel, bob)
+        )
+        await asyncio.sleep(0)  # let bob's live session actually join first
+
+        sender_session = FakeSession(["/msg bob hello there", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(
+                sender_session, db, hub, presence, mailbox, history, channel, alice,
+                session_registry=registry,
+            ),
+            timeout=2,
+        )
+        live_task.cancel()
+        await asyncio.gather(live_task, return_exceptions=True)
+        return live_session
+
+    live_session = asyncio.run(scenario())
+    assert "Private message from alice: hello there" in _written(live_session)
+    pending = mailbox.flush(non_chat_session)
     assert len(pending) == 1
     assert "Private message from alice: hello there" in pending[0][0]
 
@@ -189,9 +279,13 @@ def test_private_enters_conversation_mode_and_routes_plain_lines(
     db, hub, presence, mailbox, alice, bob, channel
 ):
     presence.enter("bob")
+    registry = ActiveSessionRegistry()
+    bob_session = FakeSession()
 
-    session = asyncio.run(
-        _run(
+    async def scenario():
+        registry.enter(bob_session)  # requires a running event loop
+        registry.mark_authenticated(bob_session, "bob")
+        return await _run(
             db,
             hub,
             presence,
@@ -199,11 +293,13 @@ def test_private_enters_conversation_mode_and_routes_plain_lines(
             channel,
             alice,
             ["/private bob", "hello there", "/quit"],
+            session_registry=registry,
         )
-    )
+
+    session = asyncio.run(scenario())
 
     assert "Entering private conversation with bob" in _written(session)
-    pending = mailbox.flush("bob")
+    pending = mailbox.flush(bob_session)
     assert len(pending) == 1
     assert "Private message from alice: hello there" in pending[0][0]
     # The plain line went to bob privately, not posted to the channel.

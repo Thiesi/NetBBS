@@ -274,7 +274,7 @@ def test_browse_channels_switch_to_skips_the_picker(monkeypatch, db, hub, presen
 
     chat_loop_calls = []
 
-    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user, **kwargs):
         chat_loop_calls.append(ch)
         if len(chat_loop_calls) == 1:
             return chat_flow._SwitchTo(other_channel)
@@ -298,7 +298,7 @@ def test_browse_channels_to_picker_reconsults_the_picker(monkeypatch, db, hub, p
 
     chat_loop_calls = 0
 
-    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user, **kwargs):
         nonlocal chat_loop_calls
         chat_loop_calls += 1
         if chat_loop_calls < 2:
@@ -321,7 +321,7 @@ def test_browse_channels_quit_exits_without_repicking(monkeypatch, db, hub, pres
         pick_calls.append(category_id)
         return channel
 
-    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user, **kwargs):
         return chat_flow._Quit()
 
     monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
@@ -338,7 +338,7 @@ def test_browse_channels_returns_immediately_if_nothing_picked(monkeypatch, db, 
 
     chat_loop_called = False
 
-    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user):
+    async def fake_chat_loop(session, db, hub, presence, mailbox, history, ch, user, **kwargs):
         nonlocal chat_loop_called
         chat_loop_called = True
         return chat_flow._Quit()

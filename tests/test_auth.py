@@ -62,6 +62,49 @@ def test_create_case_variant_duplicate_username_fails(db):
         create_user(db, "Thiesi", password="different")
 
 
+# -- username grammar (GitHub issue #26) ------------------------------------
+
+
+def test_create_user_rejects_a_colon_in_the_username(db):
+    """The delimiter netbbs.chat.hub.ParticipantId's string-encoded
+    predecessor used to be parsed against -- a username containing ':'
+    could be mistaken for a different account's session ID."""
+    with pytest.raises(AuthError):
+        create_user(db, "alice:alt", password="hunter2")
+
+
+@pytest.mark.parametrize(
+    "bad_username",
+    [
+        "alice bob",  # whitespace
+        "alice/bob",  # path-separator-like punctuation
+        "alice\tbob",  # control character
+        "",  # empty
+        "   ",  # whitespace-only
+        "alice\x1b[2Jbob",  # ANSI escape sequence
+    ],
+)
+def test_create_user_rejects_usernames_outside_the_allowlist(db, bad_username):
+    with pytest.raises(AuthError):
+        create_user(db, bad_username, password="hunter2")
+
+
+@pytest.mark.parametrize("good_username", ["alice", "alice_bob", "alice-bob", "alice.bob", "Alice123"])
+def test_create_user_allows_usernames_within_the_allowlist(db, good_username):
+    user = create_user(db, good_username, password="hunter2")
+    assert user.username == good_username
+
+
+def test_create_user_rejects_a_username_over_the_length_limit(db):
+    with pytest.raises(AuthError):
+        create_user(db, "a" * 33, password="hunter2")
+
+
+def test_create_user_allows_a_username_at_exactly_the_length_limit(db):
+    user = create_user(db, "a" * 32, password="hunter2")
+    assert len(user.username) == 32
+
+
 def test_get_user_by_username(db):
     create_user(db, "thiesi", password="hunter2")
     user = get_user_by_username(db, "thiesi")

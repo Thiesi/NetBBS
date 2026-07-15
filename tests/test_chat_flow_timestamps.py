@@ -23,6 +23,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.timestamps import set_timestamps_enabled, timestamps_enabled
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
@@ -289,12 +290,21 @@ def test_mailbox_queued_private_message_carries_a_timestamp(db, hub, presence, a
     mailbox = MessageMailbox()
     history = InputHistory()
     session = FakeSession(["/msg bob hi there", "/quit"])
-    asyncio.run(
-        asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice), timeout=2
+    registry = ActiveSessionRegistry()
+    bob_session = FakeSession()
+
+    async def scenario():
+        registry.enter(bob_session)  # requires a running event loop
+        registry.mark_authenticated(bob_session, "bob")
+        await asyncio.wait_for(
+            chat_flow._chat_loop(
+                session, db, hub, presence, mailbox, history, channel, alice, session_registry=registry
+            ),
+            timeout=2,
         )
-    )
-    pending = mailbox.flush("bob")
+
+    asyncio.run(scenario())
+    pending = mailbox.flush(bob_session)
     assert len(pending) == 1
     text, created_at = pending[0]
     assert "Private message from alice: hi there" in text

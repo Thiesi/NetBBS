@@ -174,6 +174,12 @@ async def handle_session(
         )
     finally:
         session_registry.leave(session)
+        # GitHub issue #27: an online-only /msg queued for this specific
+        # session must not survive to be shown after a later, distinct
+        # reconnect -- discard whatever's still pending for it now that
+        # it's gone, regardless of whether the same account remains
+        # online via another session.
+        mailbox.discard(session)
 
 
 async def _run_authenticated_session(
@@ -279,8 +285,14 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     so unlike live chat's per-recipient broadcast problem, no envelope
     threading through a shared queue is needed, just the same formatting
     call `netbbs.net.chat_flow` uses for its own timestamped lines.
+
+    Flushed by `session` (GitHub issue #27's session-addressed
+    redesign), not by `user.username` -- an account with several active
+    sessions each has its own independent pending queue now, so this
+    only ever drains what was actually queued for *this* connection,
+    never stealing a sibling session's still-pending messages.
     """
-    for text, created_at in mailbox.flush(user.username):
+    for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
 
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
@@ -372,7 +384,10 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "c":
             await session.write_line("")
-            await browse_channels(session, db, hub, presence, mailbox, history, user)
+            session_registry = node_controls.session_registry if node_controls is not None else None
+            await browse_channels(
+                session, db, hub, presence, mailbox, history, user, session_registry=session_registry
+            )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "f":
             await session.write_line("")

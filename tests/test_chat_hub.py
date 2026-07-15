@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.chat.hub import ChatHub, QueueOverflowNotice
+from netbbs.chat.hub import ChatHub, ParticipantId, QueueOverflowNotice
 
 
 def test_join_returns_a_queue():
@@ -191,6 +191,44 @@ def test_broadcast_never_blocks_on_one_full_slow_consumer():
 
     slow = asyncio.run(scenario())
     assert slow.qsize() <= 1
+
+
+# -- GitHub issue #26: participants_for_username -----------------------
+
+
+def test_participants_for_username_finds_only_exact_matches():
+    """Regression test for the core bug: the old string encoding
+    (f"{username}:{id(session)}") let a session belonging to
+    "alice:alt" be matched by a startswith(f"{'alice'}:") check meant
+    for canonical user "alice". A real ParticipantId.username equality
+    check can't confuse the two."""
+    hub = ChatHub()
+    hub.join("lobby", ParticipantId(username="alice", session_key=1))
+    hub.join("lobby", ParticipantId(username="alice:alt", session_key=2))
+    hub.join("lobby", ParticipantId(username="bob", session_key=3))
+
+    found = hub.participants_for_username("lobby", "alice")
+
+    assert len(found) == 1
+    assert found[0].username == "alice"
+    assert found[0].session_key == 1
+
+
+def test_participants_for_username_finds_every_session_for_an_account():
+    hub = ChatHub()
+    hub.join("lobby", ParticipantId(username="alice", session_key=1))
+    hub.join("lobby", ParticipantId(username="alice", session_key=2))
+    hub.join("lobby", ParticipantId(username="bob", session_key=3))
+
+    found = hub.participants_for_username("lobby", "alice")
+
+    assert {pid.session_key for pid in found} == {1, 2}
+
+
+def test_participants_for_username_with_no_matches_returns_empty_list():
+    hub = ChatHub()
+    hub.join("lobby", ParticipantId(username="bob", session_key=1))
+    assert hub.participants_for_username("lobby", "alice") == []
 
 
 def test_send_to_a_full_queue_overflows_instead_of_blocking():

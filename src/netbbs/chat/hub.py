@@ -13,8 +13,10 @@ Mute/ban/kick (design doc §13, round 37) live in
 `netbbs.chat.moderation`/`netbbs.net.chat_flow`, not here — this class
 only provides the two primitives (`participant_ids`, `send_to`) needed
 to reach a specific live session, while staying deliberately ignorant
-of the `participant_id` naming convention or what a delivered message
-means.
+of what a delivered message means. It does know the *shape* of a
+`ParticipantId` (unlike the plain opaque string this used to be, per
+GitHub issue #26 below) since that's just its dict key type, not a
+statement about what participant identity means to a caller.
 """
 
 from __future__ import annotations
@@ -24,6 +26,33 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from netbbs.timeutil import utc_now_iso
+
+
+@dataclass(frozen=True)
+class ParticipantId:
+    """
+    A structured, hashable identifier for one live chat participant —
+    a canonical username plus a per-session disambiguator (GitHub
+    issue #26), replacing the previous `f"{username}:{id(session)}"`
+    string encoding.
+
+    That string encoding broke down for any username actually
+    containing `:` — every caller that needed "every live session
+    belonging to this username" parsed it back out via `.split(":",
+    1)[0]` or `.startswith(f"{username}:")`, and a username like
+    `alice:alt` produced an ID beginning with `alice:`, indistinguishable
+    from a real session belonging to canonical user `alice` under that
+    scheme. `netbbs.auth.users._validate_username` now rejects `:` (and
+    everything else outside a conservative allowlist) in any *new*
+    account, but this type removes the parsing hazard structurally
+    rather than relying only on that -- comparing `.username` fields
+    directly can never misattribute a session regardless of what
+    characters a still-existing older account's name happens to
+    contain.
+    """
+
+    username: str
+    session_key: int
 
 # Every participant queue's fixed capacity (GitHub issue #31): an
 # authenticated user whose transport is slow/stalled (or who simply
@@ -71,7 +100,7 @@ class ChatHub:
 
     def __init__(self, *, queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE) -> None:
         self._queue_maxsize = queue_maxsize
-        self._channels: dict[str, dict[str, asyncio.Queue]] = defaultdict(dict)
+        self._channels: dict[str, dict[ParticipantId, asyncio.Queue]] = defaultdict(dict)
         # In-memory only, not persisted — consistent with chat messages
         # themselves not being persisted (see module docstring). A
         # dedicated "last activity" DB column on the channels table would
@@ -81,7 +110,7 @@ class ChatHub:
         # every other piece of in-memory ChatHub state.
         self._last_activity: dict[str, str] = {}
 
-    def join(self, channel_name: str, participant_id: str) -> asyncio.Queue:
+    def join(self, channel_name: str, participant_id: ParticipantId) -> asyncio.Queue:
         """Register `participant_id` as present in `channel_name`,
         returning the queue they should read incoming messages from.
         Bounded to `queue_maxsize` (GitHub issue #31) -- see
@@ -90,11 +119,11 @@ class ChatHub:
         self._channels[channel_name][participant_id] = queue
         return queue
 
-    def leave(self, channel_name: str, participant_id: str) -> None:
+    def leave(self, channel_name: str, participant_id: ParticipantId) -> None:
         self._channels[channel_name].pop(participant_id, None)
 
     async def broadcast(
-        self, channel_name: str, message: object, *, exclude: set[str] | None = None
+        self, channel_name: str, message: object, *, exclude: set[ParticipantId] | None = None
     ) -> None:
         """
         Push `message` onto every current participant's queue in
@@ -171,22 +200,27 @@ class ChatHub:
     def participant_count(self, channel_name: str) -> int:
         return len(self._channels[channel_name])
 
-    def participant_ids(self, channel_name: str) -> list[str]:
+    def participant_ids(self, channel_name: str) -> list[ParticipantId]:
         """
-        Every `participant_id` currently present in `channel_name`, a
+        Every `ParticipantId` currently present in `channel_name`, a
         snapshot (same non-live-dict-iteration safety as `broadcast`).
-
-        `ChatHub` treats `participant_id` as an opaque string — it has
-        no idea `netbbs.net.chat_flow` builds it as
-        `f"{username}:{id(session)}"`. This method exists specifically
-        so a caller that *does* know that convention (kick/ban, design
-        doc §13/round 37) can find every live session belonging to a
-        given username without `ChatHub` itself needing to learn that
-        convention.
         """
         return list(self._channels[channel_name].keys())
 
-    async def send_to(self, channel_name: str, participant_id: str, message: object) -> bool:
+    def participants_for_username(self, channel_name: str, username: str) -> list[ParticipantId]:
+        """
+        Every currently-present `ParticipantId` in `channel_name`
+        belonging to `username` — the "find every live session for
+        this account" query kick/ban, mute-lookup, `/whois`, and `/msg`
+        delivery all need (GitHub issue #26). A real equality check
+        against `ParticipantId.username`, not the fragile `pid.
+        startswith(f"{username}:")` string-prefix matching this
+        replaced, which could misattribute a session belonging to
+        `alice:alt` to canonical user `alice`.
+        """
+        return [pid for pid in self._channels[channel_name] if pid.username == username]
+
+    async def send_to(self, channel_name: str, participant_id: ParticipantId, message: object) -> bool:
         """
         Deliver `message` to exactly one participant's queue, if
         they're still present in `channel_name`.

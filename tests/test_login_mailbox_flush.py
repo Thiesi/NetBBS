@@ -65,8 +65,10 @@ def _make_user(db: Database) -> User:
 def test_pending_private_message_shown_before_the_menu_on_entry(db):
     async def scenario():
         mailbox = MessageMailbox()
-        mailbox.deliver("alice", "*** Private message from bob: hi there", _T)
         session = FakeSession(keys=["l"])  # logoff immediately
+        # Delivered by session (GitHub issue #27), not by username --
+        # the same session object _main_menu will later flush() by.
+        mailbox.deliver(session, "*** Private message from bob: hi there", _T)
         await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
@@ -80,8 +82,8 @@ def test_pending_private_message_shown_before_the_menu_on_entry(db):
 def test_message_is_only_shown_once_not_on_every_redraw(db):
     async def scenario():
         mailbox = MessageMailbox()
-        mailbox.deliver("alice", "*** Private message from bob: only once", _T)
         session = FakeSession(keys=["l"])
+        mailbox.deliver(session, "*** Private message from bob: only once", _T)
         await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
@@ -110,8 +112,10 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
 
     async def fake_browse_boards(session, db, u):
         # Simulate a message arriving while the user was off in another
-        # screen entirely.
-        mailbox.deliver("alice", "*** Private message from bob: while you were away", _T)
+        # screen entirely. Delivered by `session` (GitHub issue #27) --
+        # the exact object passed in here is the same one _main_menu is
+        # about to flush() by.
+        mailbox.deliver(session, "*** Private message from bob: while you were away", _T)
 
     monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)
 

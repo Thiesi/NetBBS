@@ -23,6 +23,7 @@ from netbbs.chat import (
     MembershipError,
     MessageMailbox,
     NickError,
+    ParticipantId,
     PresenceRegistry,
     QueueOverflowNotice,
     TopicError,
@@ -61,6 +62,7 @@ from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
+from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
@@ -75,10 +77,21 @@ async def browse_channels(
     mailbox: MessageMailbox,
     history: InputHistory,
     user: User,
+    *,
+    session_registry: ActiveSessionRegistry | None = None,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
     whatever's picked.
+
+    `session_registry` (GitHub issue #27), if given, is what
+    `_deliver_private_message` uses to enumerate *every* live session
+    belonging to a `/msg` recipient rather than just one -- passed
+    straight through to `_chat_loop`. `None` (the default) degrades to
+    the old single-target-ish behavior for any caller that bypasses
+    `netbbs.net.login_flow.handle_session`'s real node-wide registry
+    entirely (mainly tests not exercising this specific feature); every
+    real connection always has one.
 
     A small outer loop, not a single call (design doc §8/round 33,
     sign-off round 44 — Track 5d): `/leave` returns here to pick again,
@@ -98,7 +111,9 @@ async def browse_channels(
     """
     channel = await _pick_channel(session, db, hub, user, category_id=None)
     while channel is not None:
-        action = await _chat_loop(session, db, hub, presence, mailbox, history, channel, user)
+        action = await _chat_loop(
+            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+        )
         if isinstance(action, _SwitchTo):
             channel = action.channel
             continue
@@ -322,7 +337,8 @@ class ChatCommandContext:
     mailbox: MessageMailbox
     channel: Channel
     user: User
-    participant_id: str
+    participant_id: ParticipantId
+    session_registry: ActiveSessionRegistry | None = None
 
 
 @dataclass(frozen=True)
@@ -484,36 +500,44 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
 
 
-def _find_live_participant(hub: ChatHub, db: Database, username: str) -> tuple[str, str] | None:
+def _find_live_participants(hub: ChatHub, db: Database, username: str) -> list[tuple[str, ParticipantId]]:
     """
-    Every channel's roster is checked in turn for a live session
-    belonging to `username` — `ChatHub` has no reverse "which channel is
-    this user in" index, the same O(channels) shape as
-    `_channel_names_for_user`/`_kick_live_sessions`, which already parse
-    the same `"username:id(session)"` convention for the same reason.
-    Returns `(channel_name, participant_id)` for the first live session
-    found, or `None` if `username` has no live session in any channel
-    right now (e.g. online but browsing boards, or between channels) —
-    exactly the case `netbbs.chat.mailbox.MessageMailbox` exists for.
+    Every live session belonging to `username`, across every channel —
+    `(channel_name, participant_id)` for each one found, not just the
+    first (GitHub issue #27: a recipient with several simultaneous
+    chat sessions used to have only the first one located actually
+    receive a `/msg`). `ChatHub` has no reverse "which channel is this
+    user in" index, the same O(channels) shape `_kick_live_sessions`
+    already has for the same reason.
     """
+    found = []
     for channel in list_channels(db):
-        for participant_id in hub.participant_ids(channel.name):
-            if participant_id.startswith(f"{username}:"):
-                return channel.name, participant_id
-    return None
+        for pid in hub.participants_for_username(channel.name, username):
+            found.append((channel.name, pid))
+    return found
 
 
 async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: str) -> None:
     """
-    Delivers a private message to `target`: instantly, via the existing
-    `ChatHub`, if they currently have a live session in some channel
-    (the same delivery mechanism moderation notices already use, just a
-    differently-formatted string — no new `receive_loop` branch needed);
-    otherwise queued in the mailbox for their next natural prompt
-    (design doc round 32, sign-off round 46/Track 5e — mailbox +
-    next-prompt delivery, confirmed with Thiesi over full session-wide
-    live interrupt delivery, which nothing outside `_chat_loop` has any
-    mechanism for today — see `netbbs.chat.mailbox`'s module docstring).
+    Delivers a private message to *every* one of `target`'s currently
+    active sessions independently (GitHub issue #27's session-
+    addressed redesign, replacing the previous account-wide-mailbox
+    behavior): instantly via `ChatHub` for whichever are currently live
+    in some channel (the same delivery mechanism moderation notices
+    already use, just a differently-formatted string — no new
+    `receive_loop` branch needed), and queued in the mailbox — keyed by
+    that specific `Session` object, not the account — for the rest,
+    each to be shown at its own next natural prompt (design doc round
+    32, sign-off round 46/Track 5e).
+
+    `ctx.session_registry` (`netbbs.net.session_registry.
+    ActiveSessionRegistry`) is what makes "every session," not just
+    one, possible at all — without it (only reachable by a caller that
+    bypasses the real node-wide registry entirely, see
+    `browse_channels`'s docstring), this can only still reach sessions
+    currently live in chat; there is no way to address a non-chat
+    session's mailbox slot without actually knowing which `Session`
+    objects exist for the account.
 
     Never written to scrollback or the moderation log — round 32 point
     1's "online-only" private messages are intentionally as ephemeral as
@@ -527,12 +551,16 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     )
     created_at = utc_now_iso()
 
-    live = _find_live_participant(ctx.hub, ctx.db, target.username)
-    if live is not None:
-        channel_name, participant_id = live
-        await ctx.hub.send_to(channel_name, participant_id, _TimestampedNotice(notice, created_at))
-    else:
-        ctx.mailbox.deliver(target.username, notice, created_at)
+    live = _find_live_participants(ctx.hub, ctx.db, target.username)
+    live_session_keys = {pid.session_key for _channel_name, pid in live}
+    for channel_name, pid in live:
+        await ctx.hub.send_to(channel_name, pid, _TimestampedNotice(notice, created_at))
+
+    if ctx.session_registry is not None:
+        for target_session in ctx.session_registry.sessions_for_username(target.username):
+            if id(target_session) in live_session_keys:
+                continue  # already delivered live, above -- not also queued
+            ctx.mailbox.deliver(target_session, notice, created_at)
 
     await ctx.session.write_line(
         colored(f"(sent to {sanitize_text(target.username)})", fg_color=MUTED_COLOR)
@@ -798,9 +826,8 @@ async def _kick_live_sessions(hub: ChatHub, channel: Channel, target: User, *, r
     that doesn't remove an already-present target would be
     meaningless). A target with no live session in this channel is not
     an error; there's simply nothing to do."""
-    for participant_id in hub.participant_ids(channel.name):
-        if participant_id.startswith(f"{target.username}:"):
-            await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason))
+    for participant_id in hub.participants_for_username(channel.name, target.username):
+        await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason))
 
 
 async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
@@ -1122,11 +1149,8 @@ def _lookup_user_quietly(db: Database, username: str) -> User | None:
 def _roster_usernames(hub: ChatHub, channel: Channel) -> list[str]:
     """Every canonical username currently present in `channel`,
     deduplicated (a user connected via two sessions appears once) and
-    sorted case-insensitively. `ChatHub` only exposes opaque
-    `participant_id` strings; this is the one place `chat_flow.py`'s
-    own `"username:id(session)"` convention gets parsed back out for
-    discovery purposes."""
-    usernames = {pid.split(":", 1)[0] for pid in hub.participant_ids(channel.name)}
+    sorted case-insensitively."""
+    usernames = {pid.username for pid in hub.participant_ids(channel.name)}
     return sorted(usernames, key=str.lower)
 
 
@@ -1207,7 +1231,7 @@ def _channel_names_for_user(
     visible = _visible_channels_for(db, requesting_user)
     names = []
     for channel in visible:
-        if any(pid.startswith(f"{target_username}:") for pid in hub.participant_ids(channel.name)):
+        if hub.participants_for_username(channel.name, target_username):
             names.append(channel.name)
     return names
 
@@ -1579,6 +1603,8 @@ async def _chat_loop(
     history: InputHistory,
     channel: Channel,
     user: User,
+    *,
+    session_registry: ActiveSessionRegistry | None = None,
 ) -> ChatAction:
     """
     Real-time chat within `channel`, until the user types /quit, /leave,
@@ -1645,7 +1671,7 @@ async def _chat_loop(
         )
         return _Quit()
 
-    participant_id = f"{user.username}:{id(session)}"
+    participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
 
     channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
@@ -1741,6 +1767,7 @@ async def _chat_loop(
                     channel=channel,
                     user=user,
                     participant_id=participant_id,
+                    session_registry=session_registry,
                 )
                 action = await _dispatch_command(ctx, line)
                 if isinstance(action, _EnterPrivate):
@@ -1773,6 +1800,7 @@ async def _chat_loop(
                     channel=channel,
                     user=user,
                     participant_id=participant_id,
+                    session_registry=session_registry,
                 )
                 if not presence.is_online(private_target.username):
                     await session.write_line(

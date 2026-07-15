@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import create_user
+from netbbs.auth.passwords import hash_password
+from netbbs.auth.users import create_user, get_user_by_username
 from netbbs.boards import create_board, create_post
 from netbbs.chat import (
     ChatHub,
@@ -29,6 +30,7 @@ from netbbs.net.file_flow import _show_area
 from netbbs.net.login_flow import _show_board
 from netbbs.net.picker import pick_item
 from netbbs.storage.database import Database
+from netbbs.timeutil import utc_now_iso
 
 # A representative hostile payload combining several attack classes
 # named in the issue: ESC-introduced OSC (fake window title + BEL),
@@ -36,6 +38,27 @@ from netbbs.storage.database import Database
 # inside otherwise-ordinary text, the realistic shape of an attack
 # (not just a bare escape sequence with nothing else).
 HOSTILE = "Free stuff\x1b]0;PWNED\x07\x1b[2Jmore text\x9b1m"
+
+
+def _create_user_with_unvalidated_username(db, username: str, *, password: str, user_level: int):
+    """Inserts a user row directly, bypassing `netbbs.auth.users.
+    _validate_username` (GitHub issue #26) -- that validator now
+    correctly refuses a hostile-content username like `HOSTILE` at
+    *creation* time, but this suite's whole point is confirming
+    display-time sanitization independently still neutralizes hostile
+    content wherever it's rendered, as defense in depth for exactly
+    the case a hostile value reaches storage some other way (data
+    predating that validator, a future bypass, direct DB access).
+    Mirrors `_create_user_with_password_hash`'s own INSERT."""
+    db.connection.execute(
+        """
+        INSERT INTO users (username, password_hash, public_key, fingerprint, user_level, created_at)
+        VALUES (?, ?, NULL, NULL, ?, ?)
+        """,
+        (username, hash_password(password), user_level, utc_now_iso()),
+    )
+    db.connection.commit()
+    return get_user_by_username(db, username)
 
 
 class FakeSession:
@@ -94,7 +117,7 @@ def _assert_hostile_payload_neutralized(text: str) -> None:
 
 def test_board_post_subject_body_and_author_are_sanitized(tmp_path):
     db = Database(tmp_path / "node.db")
-    hostile_user = create_user(db, HOSTILE, password="hunter2", user_level=10)
+    hostile_user = _create_user_with_unvalidated_username(db, HOSTILE, password="hunter2", user_level=10)
     board = create_board(db, HOSTILE, description=HOSTILE, creator=hostile_user)
     create_post(db, board, hostile_user, HOSTILE, HOSTILE)
 
@@ -226,7 +249,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
 
 def test_file_area_listing_sanitizes_filename_description_and_uploader(tmp_path):
     db = Database(tmp_path / "node.db")
-    user = create_user(db, HOSTILE, password="hunter2", user_level=10)
+    user = _create_user_with_unvalidated_username(db, HOSTILE, password="hunter2", user_level=10)
     area = create_file_area(db, "downloads", creator=user)
     upload_file(db, area, user, HOSTILE, b"file contents", description=HOSTILE)
 

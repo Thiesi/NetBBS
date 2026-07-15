@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import sqlite3
 import weakref
 from dataclasses import dataclass
@@ -194,6 +195,36 @@ async def create_user_async(
     )
 
 
+#: Conservative, easy-to-reason-about grammar (GitHub issue #26):
+#: ASCII letters/digits plus '_', '-', '.'. Deliberately excludes ':'
+#: (the delimiter netbbs.chat.hub.ParticipantId's string encoding
+#: predecessor used to be parsed against) along with every other
+#: punctuation/control/whitespace character, rather than trying to
+#: enumerate a denylist of exactly what's unsafe. No schema-level CHECK
+#: constraint was added alongside this -- an existing database could
+#: already contain a username that predates this rule, and retroactively
+#: enforcing it at the schema level would need its own migration/audit
+#: pass, not a side effect of this fix.
+_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MAX_USERNAME_LENGTH = 32
+
+
+def _validate_username(username: str) -> None:
+    """The one central username grammar check (GitHub issue #26),
+    enforced at `_create_user_with_password_hash` -- the single choke
+    point every account-creation path (`create_user`,
+    `create_user_async`, and therefore the in-BBS admin screen and the
+    standalone CLI alike) already funnels through, so there's no
+    separate validator to keep in sync across callers."""
+    if not username or not _USERNAME_PATTERN.match(username):
+        raise AuthError(
+            "usernames may only contain letters, digits, '_', '-', and '.' "
+            f"(got {username!r})"
+        )
+    if len(username) > _MAX_USERNAME_LENGTH:
+        raise AuthError(f"username too long: max {_MAX_USERNAME_LENGTH} characters, got {len(username)}")
+
+
 def _create_user_with_password_hash(
     db: Database,
     username: str,
@@ -203,6 +234,7 @@ def _create_user_with_password_hash(
     user_level: int,
 ) -> User:
     """Persist an account after any expensive password hashing is complete."""
+    _validate_username(username)
     if verify_key is not None:
         public_key_b64 = base64.b64encode(bytes(verify_key)).decode("ascii")
         fingerprint = fingerprint_from_verify_key(verify_key)
