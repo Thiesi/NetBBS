@@ -241,6 +241,90 @@ def test_list_entries_reflects_peer_address_and_connected_at():
     asyncio.run(scenario())
 
 
+# -- sessions_for_username / disconnect_username (GitHub issue #29) --------
+
+
+def test_sessions_for_username_finds_every_matching_session():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sessions = [_FakeSession(), _FakeSession(), _FakeSession()]
+        tasks = [asyncio.create_task(_hold_registered(registry, s)) for s in sessions]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sessions[0], "alice")
+        registry.mark_authenticated(sessions[1], "bob")
+        registry.mark_authenticated(sessions[2], "alice")
+
+        found = registry.sessions_for_username("alice")
+
+        assert set(found) == {sessions[0], sessions[2]}
+
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_username_ends_every_matching_session():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sessions = [_FakeSession(), _FakeSession(), _FakeSession()]
+        tasks = [asyncio.create_task(_hold_registered(registry, s)) for s in sessions]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sessions[0], "alice")
+        registry.mark_authenticated(sessions[1], "bob")
+        registry.mark_authenticated(sessions[2], "alice")
+
+        disconnected = await registry.disconnect_username("alice")
+
+        assert disconnected == 2
+        assert tasks[0].cancelled()
+        assert tasks[2].cancelled()
+        assert len(registry) == 1  # bob's session is untouched
+
+        tasks[1].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_username_excludes_the_given_session():
+    """The acting SysOp's own current session must be skipped, not
+    cancelled-and-awaited from within itself (GitHub issue #29)."""
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sessions = [_FakeSession(), _FakeSession()]
+        tasks = [asyncio.create_task(_hold_registered(registry, s)) for s in sessions]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sessions[0], "alice")
+        registry.mark_authenticated(sessions[1], "alice")
+
+        disconnected = await registry.disconnect_username("alice", exclude_session=sessions[0])
+
+        assert disconnected == 1
+        assert not tasks[0].cancelled()
+        assert tasks[1].cancelled()
+        assert len(registry) == 1
+
+        tasks[0].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_username_with_no_matching_sessions_returns_zero():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        result = await registry.disconnect_username("nobody-here")
+        assert result == 0
+
+    asyncio.run(scenario())
+
+
 # -- MaintenanceMode ------------------------------------------------------
 
 

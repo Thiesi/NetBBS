@@ -251,6 +251,124 @@ def test_delete_with_blank_confirmation_does_not_delete(db, sysop):
     assert any(u.username == "alice" for u in list_users(db))
 
 
+# -- GitHub issue #29: disable/delete revoke live sessions -----------------
+
+
+def test_disable_disconnects_the_targets_live_session(db, sysop):
+    async def scenario():
+        create_user(db, "alice", password="hunter2", user_level=10)
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        alice_session = FakeSession()
+        alice_task = asyncio.create_task(_hold_registered(registry, alice_session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(alice_session, "alice")
+
+        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert alice_task.cancelled() or alice_task.done()
+        assert "Disconnected 1" in _written_text(admin_session)
+
+    asyncio.run(scenario())
+
+
+def test_re_enabling_does_not_disconnect_anyone(db, sysop):
+    async def scenario():
+        alice = create_user(db, "alice", password="hunter2", user_level=10)
+        from netbbs.auth.users import set_user_disabled
+
+        set_user_disabled(db, alice, True, changed_by=sysop)
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        alice_session = FakeSession()
+        alice_task = asyncio.create_task(_hold_registered(registry, alice_session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(alice_session, "alice")
+
+        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert not alice_task.cancelled()
+        assert "Disconnected" not in _written_text(admin_session)
+
+        alice_task.cancel()
+        await asyncio.gather(alice_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_delete_disconnects_the_targets_live_session(db, sysop):
+    async def scenario():
+        create_user(db, "alice", password="hunter2", user_level=10)
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        alice_session = FakeSession()
+        alice_task = asyncio.create_task(_hold_registered(registry, alice_session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(alice_session, "alice")
+
+        admin_session = FakeSession(["d", "0", "1", "alice", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, db, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert alice_task.cancelled() or alice_task.done()
+        assert "Disconnected 1" in _written_text(admin_session)
+
+    asyncio.run(scenario())
+
+
+def test_disable_without_node_controls_does_not_raise(db, sysop):
+    """The standalone `python -m netbbs.admin` CLI has no live node
+    state (node_controls=None) -- disabling a user there must still
+    work, just without anything to disconnect."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["e", "0", "1", "y", "b"])
+    _run(session, db, sysop)  # must not raise
+    updated = next(u for u in list_users(db) if u.username == "alice")
+    assert updated.disabled_at is not None
+
+
+def test_disabling_your_own_account_excludes_your_own_session(db, sysop):
+    """Disabling the acting SysOp's own account must not try to
+    cancel-and-await its own currently-running task (GitHub issue #29).
+    A second SysOp-level account exists specifically so the "can't
+    disable the only active SysOp" guard doesn't block this and mask
+    the thing actually under test."""
+    create_user(db, "zysop", password="hunter2", user_level=SYSOP_LEVEL)  # sorts after "sysop"
+
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        registry.enter(admin_session)
+        registry.mark_authenticated(admin_session, sysop.username)
+        try:
+            await asyncio.wait_for(
+                admin_menu(admin_session, db, sysop, node_controls=node_controls), timeout=2
+            )
+        finally:
+            registry.leave(admin_session)
+        # Reaching here at all (not hanging/erroring) is the assertion --
+        # excluding the acting session from disconnect_username avoided
+        # the self-cancellation hazard.
+        updated = next(u for u in list_users(db) if u.username == sysop.username)
+        assert updated.disabled_at is not None
+
+    asyncio.run(scenario())
+
+
 # -- invalid key: bell only (design doc round 52 convention) ---------------
 
 

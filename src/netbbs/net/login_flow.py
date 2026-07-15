@@ -21,7 +21,14 @@ import asyncio
 from enum import Enum, auto
 from pathlib import Path
 
-from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
+from netbbs.auth.users import (
+    SYSOP_LEVEL,
+    AuthError,
+    User,
+    authenticate_password_async,
+    get_user_by_username,
+    list_users,
+)
 from netbbs.boards import (
     MAX_BODY_BYTES,
     Board,
@@ -292,6 +299,20 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     await session.write("Choice: ")
 
 
+def _account_still_active(db: Database, user: User) -> bool:
+    """`False` if `user`'s account was disabled or deleted since this
+    session authenticated (GitHub issue #29) -- re-fetched fresh from
+    SQLite rather than trusting the in-memory `User` object handed to
+    this session at login, which a concurrent disable/delete (from this
+    same process or a completely separate `python -m netbbs.admin`
+    invocation) wouldn't otherwise ever update."""
+    try:
+        current = get_user_by_username(db, user.username)
+    except AuthError:
+        return False  # deleted
+    return current.disabled_at is None
+
+
 async def _main_menu(
     session: Session,
     db: Database,
@@ -325,6 +346,22 @@ async def _main_menu(
     await _draw_main_menu(session, db, mailbox, user)
     while True:
         choice = (await session.read_key()).lower()
+
+        if not _account_still_active(db, user):
+            # GitHub issue #29: the cross-process revalidation
+            # boundary. In-process disable/delete already disconnects
+            # a live session directly (see
+            # netbbs.net.admin_flow._revoke_live_sessions), but the
+            # standalone `python -m netbbs.admin` CLI can also change
+            # `disabled_at`/delete the row from a completely separate
+            # process with no in-memory notification path at all --
+            # this re-check, at the one natural choke point every
+            # main-menu action passes through, is the authoritative
+            # fallback regardless of which process made the change.
+            await session.write_line(
+                colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+            )
+            return
 
         if choice == "l":
             await session.write_line("")

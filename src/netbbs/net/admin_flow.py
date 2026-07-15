@@ -133,11 +133,11 @@ async def admin_menu(
             await _draw_admin_menu(session, node_controls)
         elif choice == "e":
             await session.write_line("")
-            await _disable_enable_screen(session, db, user)
+            await _disable_enable_screen(session, db, user, node_controls)
             await _draw_admin_menu(session, node_controls)
         elif choice == "d":
             await session.write_line("")
-            await _delete_user_screen(session, db, user)
+            await _delete_user_screen(session, db, user, node_controls)
             await _draw_admin_menu(session, node_controls)
         elif choice == "n" and node_controls is not None:
             await session.write_line("")
@@ -325,7 +325,9 @@ async def _change_level_screen(session: Session, db: Database, actor: User) -> N
     await session.write_line(f"{updated.username!r} is now level {updated.user_level}.")
 
 
-async def _disable_enable_screen(session: Session, db: Database, actor: User) -> None:
+async def _disable_enable_screen(
+    session: Session, db: Database, actor: User, node_controls: NodeControls | None = None
+) -> None:
     target = await _pick_target_user(session, db, title="Enable/disable which user?")
     if target is None:
         return
@@ -344,12 +346,16 @@ async def _disable_enable_screen(session: Session, db: Database, actor: User) ->
     await session.write_line(
         f"{updated.username!r} is now {'disabled' if updated.disabled_at is not None else 'active'}."
     )
+    if updated.disabled_at is not None:
+        await _revoke_live_sessions(session, node_controls, updated, actor)
 
 
 # -- delete ----------------------------------------------------------------
 
 
-async def _delete_user_screen(session: Session, db: Database, actor: User) -> None:
+async def _delete_user_screen(
+    session: Session, db: Database, actor: User, node_controls: NodeControls | None = None
+) -> None:
     target = await _pick_target_user(session, db, title="Delete which user?")
     if target is None:
         return
@@ -373,6 +379,41 @@ async def _delete_user_screen(session: Session, db: Database, actor: User) -> No
         await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         return
     await session.write_line(f"{target.username!r} deleted.")
+    await _revoke_live_sessions(session, node_controls, target, actor)
+
+
+async def _revoke_live_sessions(
+    session: Session, node_controls: NodeControls | None, target: User, actor: User
+) -> None:
+    """
+    The immediate, in-process half of revoking access (GitHub issue
+    #29): forcibly disconnect every currently registered session
+    authenticated as `target.username`, right after a successful
+    disable or delete. A no-op when `node_controls` is `None` (the
+    standalone `python -m netbbs.admin` CLI has no live node state to
+    act on at all -- see `admin_menu`'s own docstring on that).
+
+    The acting SysOp's own *current* session is deliberately excluded
+    (self-targeting: disabling/deleting your own account while it's
+    the one running this code) -- `ActiveSessionRegistry.
+    disconnect_username`'s docstring explains why that specific session
+    can't safely be cancelled-and-awaited from within itself. Any of
+    the acting SysOp's *other* live sessions still get disconnected
+    normally; the current one is caught instead by the cross-process
+    revalidation boundary in `netbbs.net.login_flow._main_menu` at its
+    next safe checkpoint.
+    """
+    if node_controls is None:
+        return
+    exclude = session if target.id == actor.id else None
+    disconnected = await node_controls.session_registry.disconnect_username(
+        target.username, exclude_session=exclude
+    )
+    if disconnected:
+        plural = "session" if disconnected == 1 else "sessions"
+        await session.write_line(
+            colored(f"Disconnected {disconnected} live {plural}.", fg_color=MUTED_COLOR)
+        )
 
 
 # -- node management (design doc -- node management round) -----------------

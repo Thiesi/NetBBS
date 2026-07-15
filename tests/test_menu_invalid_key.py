@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.auth.users import create_user
+from netbbs.auth.users import create_user, delete_user, set_user_disabled
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post
 from netbbs.chat.hub import ChatHub
@@ -76,6 +76,57 @@ def test_main_menu_invalid_key_writes_only_a_bell(tmp_path):
     # Nothing about the menu was written again between entry and the
     # bell -- confirms no redraw happened for the invalid key either.
     assert session.written[:bell_index].count("Choice: ") == 1
+    db.close()
+
+
+# -- GitHub issue #29: cross-process revalidation boundary ------------------
+
+
+def test_disabled_account_is_disconnected_on_next_main_menu_action(tmp_path):
+    """Simulates the cross-process case the revalidation check exists
+    for: the account is disabled via a completely separate
+    Database/User-management call (as `python -m netbbs.admin` would
+    from another process), with no in-memory notification to this
+    already-running session at all -- the next main-menu keystroke must
+    still catch it."""
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    set_user_disabled(db, user, True, changed_by=user)
+    session = FakeSession(keys=["m"])  # any ordinary action
+
+    asyncio.run(
+        _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
+    )
+
+    assert "no longer active" in "".join(session.written)
+    db.close()
+
+
+def test_deleted_account_is_disconnected_on_next_main_menu_action(tmp_path):
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=100)
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    delete_user(db, user, deleted_by=sysop)
+    session = FakeSession(keys=["m"])
+
+    asyncio.run(
+        _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
+    )
+
+    assert "no longer active" in "".join(session.written)
+    db.close()
+
+
+def test_still_active_account_is_not_disconnected(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(keys=["z", "l"])  # invalid key, then logoff -- never disconnected
+
+    asyncio.run(
+        _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
+    )
+
+    assert "no longer active" not in "".join(session.written)
     db.close()
 
 

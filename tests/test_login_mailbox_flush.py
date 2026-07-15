@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from netbbs.auth.users import User
+from netbbs.auth.users import User, create_user
 from netbbs.chat import MessageMailbox, PresenceRegistry
 from netbbs.net import login_flow
 from netbbs.net.char_input import InputHistory
@@ -54,15 +54,12 @@ class FakeSession:
         return "".join(self.written)
 
 
-def _make_user() -> User:
-    return User(
-        id=1,
-        username="alice",
-        user_level=0,
-        fingerprint=None,
-        created_at="2026-01-01T00:00:00+00:00",
-        last_login_at=None,
-    )
+def _make_user(db: Database) -> User:
+    # A real DB-backed account, not a synthetic dataclass (GitHub issue
+    # #29's cross-process revalidation boundary re-fetches by username
+    # on every main-menu action, so a user with no actual row would
+    # always look deleted).
+    return create_user(db, "alice", password="hunter2", user_level=0)
 
 
 def test_pending_private_message_shown_before_the_menu_on_entry(db):
@@ -70,7 +67,7 @@ def test_pending_private_message_shown_before_the_menu_on_entry(db):
         mailbox = MessageMailbox()
         mailbox.deliver("alice", "*** Private message from bob: hi there", _T)
         session = FakeSession(keys=["l"])  # logoff immediately
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -85,7 +82,7 @@ def test_message_is_only_shown_once_not_on_every_redraw(db):
         mailbox = MessageMailbox()
         mailbox.deliver("alice", "*** Private message from bob: only once", _T)
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -96,7 +93,7 @@ def test_no_extra_output_when_mailbox_is_empty(db):
     async def scenario():
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user())
+        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -109,7 +106,7 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
     # after every submenu return, so a message queued while "in" a
     # submenu shows up the next time the menu itself is redrawn.
     mailbox = MessageMailbox()
-    user = _make_user()
+    user = _make_user(db)
 
     async def fake_browse_boards(session, db, u):
         # Simulate a message arriving while the user was off in another

@@ -147,6 +147,49 @@ class ActiveSessionRegistry:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    def sessions_for_username(self, username: str) -> list[Session]:
+        """
+        Every currently registered session authenticated as `username`
+        (GitHub issue #29) -- an account can hold more than one live
+        session at once, and a SysOp disabling/deleting it needs to
+        reach all of them, not just whichever one happens to be found
+        first. Case-sensitive exact match against whatever
+        `mark_authenticated` recorded, matching how canonical usernames
+        are compared everywhere else in this codebase.
+        """
+        return [
+            session
+            for session, entry in self._sessions.items()
+            if entry.username == username
+        ]
+
+    async def disconnect_username(self, username: str, *, exclude_session: Session | None = None) -> int:
+        """
+        Forcibly end every currently registered session authenticated
+        as `username` (GitHub issue #29) -- the immediate, in-process
+        half of revoking a disabled/deleted account's access, the same
+        way `disconnect_one` ends a single targeted session.
+
+        `exclude_session`, if given, is skipped entirely rather than
+        disconnected -- for the same self-referential-cancellation
+        hazard `disconnect_all`'s docstring describes: a session
+        disconnecting itself via this path would be awaiting its own
+        task's cancellation. Pass the *acting* SysOp's own session here
+        when they might be targeting their own account, so their
+        current session keeps running (the cross-process revalidation
+        boundary in `netbbs.net.login_flow._main_menu` is what actually
+        ends it, at the next safe checkpoint, rather than this method
+        pretending it safely can).
+
+        Returns how many sessions were actually disconnected.
+        """
+        targets = [
+            session for session in self.sessions_for_username(username) if session != exclude_session
+        ]
+        for session in targets:
+            await self.disconnect_one(session)
+        return len(targets)
+
     async def disconnect_one(self, session: Session) -> bool:
         """
         Forcibly end just `session`'s connection, the same way
