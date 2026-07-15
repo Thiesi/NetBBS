@@ -142,10 +142,13 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
     the chosen `order_by` — identical semantics to
     `netbbs.boards.boards.list_boards`:
 
-      - "activity" (default): most recent upload first (an area with no
-        files yet falls back to its own creation time).
+      - "activity" (default): most recent *approved, non-expired*
+        upload first (an area with no such files falls back to its own
+        creation time) -- pending/expired entries don't count, same
+        reasoning as list_boards (GitHub issue #36).
       - "alphabetical": by name, case-insensitive.
-      - "volume": total file count, highest first.
+      - "volume": count of approved, non-expired files, highest first
+        -- not a raw row count (GitHub issue #36).
 
     Deliberately does *not* filter by any requesting user's level here —
     same reasoning as `list_boards`: "list every area for an admin view"
@@ -166,7 +169,7 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
             """
             SELECT a.*, COUNT(f.id) AS file_count
             FROM file_areas a
-            LEFT JOIN files f ON f.area_id = a.id
+            LEFT JOIN files f ON f.area_id = a.id AND f.status = 'approved'
             GROUP BY a.id
             ORDER BY a.pinned DESC, file_count DESC, a.name COLLATE NOCASE ASC
             """
@@ -176,7 +179,7 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
             """
             SELECT a.*, COALESCE(MAX(f.created_at), a.created_at) AS last_activity
             FROM file_areas a
-            LEFT JOIN files f ON f.area_id = a.id
+            LEFT JOIN files f ON f.area_id = a.id AND f.status = 'approved'
             GROUP BY a.id
             ORDER BY a.pinned DESC, last_activity DESC
             """

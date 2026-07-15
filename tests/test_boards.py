@@ -8,7 +8,7 @@ from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import BoardError, create_board, delete_board, get_board_by_name, list_boards, update_board
 from netbbs.boards.categories import create_category
-from netbbs.boards.posts import PostError, create_post, get_post, list_posts_page
+from netbbs.boards.posts import PostError, approve_post, create_post, edit_post, get_post, list_posts_page
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.permissions import InsufficientLevelError
@@ -136,6 +136,93 @@ def test_list_boards_volume_order_is_by_post_count_descending(db, alice):
 
     boards = list_boards(db, order_by="volume")
     assert [b.name for b in boards] == ["medium", "quiet", "empty"]
+
+
+# -- GitHub issue #36: hidden lifecycle rows/edit revisions must not
+# -- leak into activity/volume sorting --------------------------------
+
+
+def test_list_boards_volume_does_not_count_pending_posts(db, alice):
+    board = create_board(db, "reviewed", moderated=True, creator=alice)
+    create_post(db, board, alice, "Pending", "body")  # never approved
+    create_post(db, board, alice, "Also pending", "body")
+
+    boards = list_boards(db, order_by="volume")
+    reviewed = next(b for b in boards if b.name == "reviewed")
+    row = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM posts WHERE board_id = ? AND status = 'pending'", (reviewed.id,)
+    ).fetchone()
+    assert row["n"] == 2  # the posts really exist, just shouldn't be counted
+    volume_row = db.connection.execute(
+        """
+        SELECT COUNT(p.id) AS n FROM boards b
+        LEFT JOIN posts p ON p.board_id = b.id AND p.post_id = p.root_post_id
+            AND EXISTS (SELECT 1 FROM posts v WHERE v.root_post_id = p.root_post_id AND v.board_id = p.board_id AND v.status = 'approved')
+        WHERE b.id = ?
+        """,
+        (reviewed.id,),
+    ).fetchone()
+    assert volume_row["n"] == 0
+
+
+def test_list_boards_activity_does_not_surface_pending_posts(db, alice):
+    board = create_board(db, "reviewed", moderated=True, creator=alice)
+    other = create_board(db, "other", creator=alice)
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2026-01-01T00:00:00.000000Z", "reviewed"))
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2026-01-02T00:00:00.000000Z", "other"))
+    db.connection.commit()
+    post = create_post(db, board, alice, "Pending", "body")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2026-01-05T00:00:00.000000Z", post.id))
+    db.connection.commit()
+
+    boards = list_boards(db)
+    # The pending post's fresh timestamp must not bump "reviewed" ahead
+    # of "other", which has real (if older) approved activity via its
+    # own creation time -- a pending submission is invisible to
+    # ordinary readers and must not leak that it exists via ranking.
+    assert [b.name for b in boards] == ["other", "reviewed"]
+
+
+def test_list_boards_volume_counts_edit_revisions_once(db, alice):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice)
+    post = create_post(db, board, alice, "Subject", "v1")
+    v2 = edit_post(db, post, board, subject="Subject", body="v2", edited_by=alice)
+    edit_post(db, get_post(db, v2.post_id), board, subject="Subject", body="v3", edited_by=alice)
+
+    boards = list_boards(db, order_by="volume")
+    assert boards[0].name == "general"
+    # Confirmed via the actual count, not just first place, since a
+    # single board can't be mis-ranked against nothing else.
+    row = db.connection.execute(
+        """
+        SELECT COUNT(p.id) AS n FROM boards b
+        LEFT JOIN posts p ON p.board_id = b.id AND p.post_id = p.root_post_id
+            AND EXISTS (SELECT 1 FROM posts v WHERE v.root_post_id = p.root_post_id AND v.board_id = p.board_id AND v.status = 'approved')
+        WHERE b.name = 'general'
+        """
+    ).fetchone()
+    assert row["n"] == 1
+
+
+def test_list_boards_activity_reflects_a_fresh_edit_of_an_old_post(db, alice):
+    board = create_board(db, "general", creator=alice)
+    other = create_board(db, "other", creator=alice)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice)
+    old_post = create_post(db, board, alice, "Subject", "v1")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2020-01-01T00:00:00.000000Z", old_post.id))
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2020-01-01T00:00:00.000000Z", "general"))
+    other_post = create_post(db, other, alice, "Other", "body")  # newer than the (backdated) edit target
+    db.connection.commit()
+
+    edit_post(db, get_post(db, old_post.post_id), board, subject="Subject", body="revised now", edited_by=alice)
+
+    boards = list_boards(db)
+    # The fresh edit's own created_at must win -- editing counts as
+    # board-list activity even though it never moves the post's own
+    # position within its own board's feed (a different, narrower
+    # guarantee -- see netbbs.boards.posts._resolve_current_version).
+    assert boards[0].name == "general"
 
 
 def test_list_boards_pinned_boards_sort_first_regardless_of_order_by(db, alice):

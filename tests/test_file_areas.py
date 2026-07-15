@@ -141,6 +141,42 @@ def test_list_file_areas_volume_order_is_by_file_count_descending(db, alice):
     assert [a.name for a in areas] == ["busy", "quiet", "empty"]
 
 
+# -- GitHub issue #36: hidden lifecycle rows must not leak into
+# -- activity/volume sorting -----------------------------------------
+
+
+def test_list_file_areas_volume_does_not_count_pending_files(db, alice):
+    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
+    upload_file(db, area, alice, "one.txt", b"a")  # never approved
+    upload_file(db, area, alice, "two.txt", b"b")
+
+    areas = list_file_areas(db, order_by="volume")
+    reviewed = next(a for a in areas if a.name == "reviewed")
+    pending_count = db.connection.execute(
+        "SELECT COUNT(*) AS n FROM files WHERE area_id = ? AND status = 'pending'", (reviewed.id,)
+    ).fetchone()
+    assert pending_count["n"] == 2  # the files really exist, just shouldn't be counted
+    volume_row = db.connection.execute(
+        "SELECT COUNT(f.id) AS n FROM file_areas a LEFT JOIN files f ON f.area_id = a.id AND f.status = 'approved' WHERE a.id = ?",
+        (reviewed.id,),
+    ).fetchone()
+    assert volume_row["n"] == 0
+
+
+def test_list_file_areas_activity_does_not_surface_pending_files(db, alice):
+    area = create_file_area(db, "reviewed", moderated=True, creator=alice)
+    other = create_file_area(db, "other", creator=alice)
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2026-01-01T00:00:00.000000Z", "reviewed"))
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2026-01-02T00:00:00.000000Z", "other"))
+    db.connection.commit()
+    entry = upload_file(db, area, alice, "one.txt", b"a")
+    db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", ("2026-01-05T00:00:00.000000Z", entry.id))
+    db.connection.commit()
+
+    areas = list_file_areas(db)
+    assert [a.name for a in areas] == ["other", "reviewed"]
+
+
 def test_list_file_areas_pinned_areas_sort_first_regardless_of_order_by(db, alice):
     create_file_area(db, "apple", creator=alice)
     create_file_area(db, "banana", creator=alice)

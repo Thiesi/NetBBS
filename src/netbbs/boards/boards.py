@@ -148,10 +148,21 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
     List all boards. Pinned boards always sort first, then the rest in
     the chosen `order_by`:
 
-      - "activity" (default): most recent post first (a board with no
-        posts yet falls back to its own creation time).
+      - "activity" (default): most recent *approved* post first (a
+        board with no approved posts yet falls back to its own creation
+        time). Pending and expired posts don't count -- ranking a board
+        as active from content ordinary readers can't even see would
+        leak that hidden activity exists. An edit does count as fresh
+        activity even though it deliberately doesn't move its post's
+        own position within the board's own feed (design doc -- prose
+        editor round B2) -- those are different concerns at different
+        granularities: intra-board feed position vs. board-list
+        activity ranking (GitHub issue #36).
       - "alphabetical": by name, case-insensitive.
-      - "volume": total post count, highest first.
+      - "volume": count of logical posts with a currently-approved
+        version, highest first -- not a raw row count, which would
+        double-count every edit revision of the same logical post as
+        if it were separate content (GitHub issue #36).
 
     Deliberately does *not* filter by any requesting user's level here —
     unlike `netbbs.boards.posts.list_posts_page`, which enforces
@@ -173,7 +184,12 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
             """
             SELECT b.*, COUNT(p.id) AS post_count
             FROM boards b
-            LEFT JOIN posts p ON p.board_id = b.id
+            LEFT JOIN posts p ON p.board_id = b.id AND p.post_id = p.root_post_id
+                AND EXISTS (
+                    SELECT 1 FROM posts v
+                    WHERE v.root_post_id = p.root_post_id AND v.board_id = p.board_id
+                          AND v.status = 'approved'
+                )
             GROUP BY b.id
             ORDER BY b.pinned DESC, post_count DESC, b.name COLLATE NOCASE ASC
             """
@@ -183,7 +199,7 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
             """
             SELECT b.*, COALESCE(MAX(p.created_at), b.created_at) AS last_activity
             FROM boards b
-            LEFT JOIN posts p ON p.board_id = b.id
+            LEFT JOIN posts p ON p.board_id = b.id AND p.status = 'approved'
             GROUP BY b.id
             ORDER BY b.pinned DESC, last_activity DESC
             """
