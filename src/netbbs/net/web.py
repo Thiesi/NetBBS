@@ -50,7 +50,7 @@ from netbbs.net.char_input import (
     move_cursor,
     redraw_tail,
 )
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 
 _logger = logging.getLogger(__name__)
 
@@ -232,11 +232,20 @@ class WebSession(Session):
                     except asyncio.QueueFull:
                         await self._reject_input("web terminal input queue is full")
         elif event_type == "resize":
+            # GitHub issue #33: unlike Telnet NAWS (16-bit) or SSH's PTY
+            # window-size channel, this transport accepts any JSON
+            # number here -- an untrusted peer could report an integer
+            # far larger than either of those protocols could even
+            # encode, so this is the one boundary where clamping matters
+            # most. `bool` is an `int` subclass in Python, so `isinstance
+            # (cols, int)` alone would accept `true`/`false` as if they
+            # were real dimensions -- excluded explicitly rather than
+            # silently treating them as 1/0.
             cols, rows = event.get("cols"), event.get("rows")
-            if isinstance(cols, int) and cols > 0:
-                self.terminal_width = cols
-            if isinstance(rows, int) and rows > 0:
-                self.terminal_height = rows
+            if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0:
+                self.terminal_width, _ = clamp_terminal_size(cols, self.terminal_height)
+            if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
+                _, self.terminal_height = clamp_terminal_size(self.terminal_width, rows)
         # Unknown event types are ignored rather than treated as an
         # error — a forward-compatible client sending a message type
         # this version doesn't understand yet shouldn't break the

@@ -41,7 +41,7 @@ import nacl.signing
 
 from netbbs.auth.users import AuthError, authenticate_password_async, authorize_public_key
 from netbbs.net import char_input
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
@@ -82,11 +82,12 @@ class SSHSession(Session):
         # A client that didn't request a PTY (width/height both 0) keeps
         # the Session base class's 80x24 default instead — same
         # "conservative default, update in place if we learn better"
-        # approach TelnetSession uses for NAWS.
+        # approach TelnetSession uses for NAWS. Clamped through the same
+        # shared ceiling every transport uses (GitHub issue #33).
         if width > 0:
-            self.terminal_width = width
+            self.terminal_width, _ = clamp_terminal_size(width, self.terminal_height)
         if height > 0:
-            self.terminal_height = height
+            _, self.terminal_height = clamp_terminal_size(self.terminal_width, height)
         peer = process.get_extra_info("peername")
         self.peer_address = peer[0] if peer else None
 
@@ -145,9 +146,9 @@ class SSHSession(Session):
             data = await self._process.stdin.read(1)
         except asyncssh.TerminalSizeChanged as exc:
             if exc.width > 0:
-                self.terminal_width = exc.width
+                self.terminal_width, _ = clamp_terminal_size(exc.width, self.terminal_height)
             if exc.height > 0:
-                self.terminal_height = exc.height
+                _, self.terminal_height = clamp_terminal_size(self.terminal_width, exc.height)
             return None
         except asyncssh.BreakReceived:
             return None

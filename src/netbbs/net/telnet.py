@@ -47,7 +47,7 @@ import socket
 from typing import Awaitable, Callable
 
 from netbbs.net import char_input
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073).
 IAC = 0xFF  # "Interpret As Command" — introduces every negotiation sequence
@@ -294,11 +294,14 @@ class TelnetSession(Session):
             # A width/height of 0 is a real value some clients send
             # (meaning "unknown"/"not applicable"), not useful to act on
             # — keep whatever default or previously-known value instead
-            # of overwriting a real size with 0.
+            # of overwriting a real size with 0. NAWS is already bounded
+            # to 16 bits (max 65535), but clamped through the same
+            # shared ceiling as every transport regardless (GitHub issue
+            # #33) rather than trusting even that as allocation-safe.
             if width > 0:
-                self.terminal_width = width
+                self.terminal_width, _ = clamp_terminal_size(width, self.terminal_height)
             if height > 0:
-                self.terminal_height = height
+                _, self.terminal_height = clamp_terminal_size(self.terminal_width, height)
 
     async def _read_subnegotiation(self) -> tuple[int, bytes]:
         option = (await self._reader.readexactly(1))[0]

@@ -538,6 +538,39 @@ def test_naws_handles_width_containing_0xff_byte():
     assert captured["width"] == 255
 
 
+def test_naws_maximum_16_bit_size_is_clamped():
+    """Regression test for GitHub issue #33: NAWS width/height are each
+    16-bit values (max 65535), which alone would already force a
+    ScreenBuffer allocation of well over 4 billion cells -- clamped to
+    the shared sane ceiling before ever reaching terminal_width/height."""
+    captured = {}
+
+    async def handler(session: Session):
+        await session.read_line()
+        captured["width"] = session.terminal_width
+        captured["height"] = session.terminal_height
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await reader.readexactly(9)
+            # 0xFFFF for both width and height -- each byte doubled per
+            # NAWS's IAC-escaping rule (0xFF is the IAC byte itself).
+            writer.write(bytes([IAC, SB, NAWS, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, IAC, SE]))
+            writer.write(b"x\r\n")
+            await writer.drain()
+            await reader.readexactly(3)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert captured["width"] <= 500
+    assert captured["height"] <= 200
+
+
 def test_naws_zero_dimension_does_not_override_default():
     captured = {}
 

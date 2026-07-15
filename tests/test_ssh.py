@@ -395,6 +395,63 @@ def test_terminal_resize_mid_session_updates_session_size(db):
     assert sizes == [(80, 24), (120, 50)]
 
 
+def test_absurd_initial_terminal_size_is_clamped(db):
+    """Regression test for GitHub issue #33."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    sizes = []
+
+    async def handler(session: Session):
+        sizes.append((session.terminal_width, session.terminal_height))
+
+    async def scenario():
+        server = await _run_server(db, handler)
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+            ) as conn:
+                async with conn.create_process(
+                    term_type="ansi", term_size=(65535, 65535), encoding=None
+                ):
+                    pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert sizes[0][0] <= 500
+    assert sizes[0][1] <= 200
+
+
+def test_absurd_mid_session_resize_is_clamped(db):
+    """Regression test for GitHub issue #33."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    sizes = []
+
+    async def handler(session: Session):
+        await session.read_key()
+        sizes.append((session.terminal_width, session.terminal_height))
+
+    async def scenario():
+        server = await _run_server(db, handler)
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+            ) as conn:
+                async with conn.create_process(
+                    term_type="ansi", term_size=(80, 24), encoding=None
+                ) as proc:
+                    proc.change_terminal_size(65535, 65535)
+                    await asyncio.sleep(0.2)
+                    proc.stdin.write(b"a")
+                    await proc.stdin.drain()
+                    await asyncio.sleep(0.2)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert sizes[0][0] <= 500
+    assert sizes[0][1] <= 200
+
+
 # -- character-mode read/write ----------------------------------------------
 
 

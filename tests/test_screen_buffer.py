@@ -39,6 +39,22 @@ def test_clear_resets_every_cell():
     assert buf.get_cell(0, 0) == Cell()
 
 
+def test_absurd_dimensions_are_clamped_not_allocated():
+    """Regression test for GitHub issue #33: a caller's width/height
+    ultimately traces back to a client-reported terminal size --
+    ScreenBuffer must not eagerly allocate one Cell per coordinate for
+    an untrusted, effectively unbounded value."""
+    buf = ScreenBuffer(10_000_000, 10_000_000)
+    assert buf.width <= 500
+    assert buf.height <= 200
+
+
+def test_zero_or_negative_dimensions_are_clamped_to_at_least_one():
+    buf = ScreenBuffer(0, -5)
+    assert buf.width >= 1
+    assert buf.height >= 1
+
+
 def test_snapshot_is_independent_of_later_mutation():
     buf = ScreenBuffer(2, 1)
     buf.write_cell(0, 0, "A")

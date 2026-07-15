@@ -23,6 +23,37 @@ if TYPE_CHECKING:
     from netbbs.net.char_input import Completer, EditorKey, InputHistory
 
 
+# Same numbers as netbbs.rendering.screen_buffer.ScreenBuffer's own
+# defensive ceiling, deliberately (GitHub issue #33) -- comfortably
+# exceeds any real terminal while keeping width*height a small, fixed
+# number of cells regardless of what a client reports.
+_MAX_TERMINAL_WIDTH = 500
+_MAX_TERMINAL_HEIGHT = 200
+
+
+def clamp_terminal_size(width: int, height: int) -> tuple[int, int]:
+    """
+    Clamp a client-reported terminal size to a sane operational range
+    (GitHub issue #33).
+
+    A reported width/height is untrusted display metadata from the
+    remote peer -- Telnet NAWS and SSH's PTY window-size channel are
+    each bounded to 16 bits, but the web transport accepts any positive
+    Python integer in its `resize` event, and none of the three should
+    be treated as a resource-allocation authorization. Every transport
+    should call this before assigning to `Session.terminal_width`/
+    `terminal_height`, so a downstream consumer like the fullscreen
+    editors' `ScreenBuffer` allocation never sees an absurd size in the
+    first place -- `ScreenBuffer` itself also clamps defensively, but
+    that's a backstop, not a substitute for clamping at the boundary
+    where the untrusted value actually enters the system.
+    """
+    return (
+        max(1, min(width, _MAX_TERMINAL_WIDTH)),
+        max(1, min(height, _MAX_TERMINAL_HEIGHT)),
+    )
+
+
 class SessionClosedError(Exception):
     """
     Raised when the client disconnects while a read or write is in

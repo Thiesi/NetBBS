@@ -33,6 +33,19 @@ from netbbs.rendering.ansi import clear_screen, colored, move_cursor
 
 Snapshot = tuple[tuple["Cell", ...], ...]
 
+# Defensive ceiling on any single ScreenBuffer allocation (GitHub issue
+# #33): this constructor eagerly allocates one Cell per coordinate, and
+# a caller's width/height ultimately traces back to a client-reported
+# terminal size -- untrusted display metadata, not a resource-
+# allocation authorization. The primary fix is clamping at each
+# transport boundary before it ever reaches session.terminal_width/
+# height (see netbbs.net.session.clamp_terminal_size, which uses the
+# same numbers deliberately, not independently chosen); this is the
+# defense-in-depth backstop for any caller that doesn't. Comfortably
+# exceeds any real terminal.
+_MAX_WIDTH = 500
+_MAX_HEIGHT = 200
+
 
 @dataclass(frozen=True)
 class Cell:
@@ -49,9 +62,9 @@ class ScreenBuffer:
     `full_render_ansi` are the only places that conversion happens)."""
 
     def __init__(self, width: int, height: int) -> None:
-        self.width = width
-        self.height = height
-        self._rows: list[list[Cell]] = [[Cell() for _ in range(width)] for _ in range(height)]
+        self.width = max(1, min(width, _MAX_WIDTH))
+        self.height = max(1, min(height, _MAX_HEIGHT))
+        self._rows: list[list[Cell]] = [[Cell() for _ in range(self.width)] for _ in range(self.height)]
 
     def write_cell(
         self, row: int, col: int, char: str, *, fg: int | None = None, bg: int | None = None, bold: bool = False

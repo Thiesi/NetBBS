@@ -190,6 +190,61 @@ def test_resize_updates_terminal_dimensions():
     assert sizes == [(120, 40)]
 
 
+def test_resize_with_an_absurd_size_is_clamped():
+    """Regression test for GitHub issue #33: unlike Telnet NAWS (16-bit)
+    or SSH's PTY window-size channel, this transport accepts any JSON
+    integer here -- a malicious client can report a value neither of
+    the other two protocols could even encode."""
+    sizes = []
+
+    async def handler(session: Session):
+        await session.read_key()
+        sizes.append((session.terminal_width, session.terminal_height))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    await ws.send_json({"type": "resize", "cols": 10_000_000, "rows": 10_000_000})
+                    await asyncio.sleep(0.1)
+                    await ws.send_json({"type": "key", "data": "x"})
+                    await ws.receive_json(timeout=2)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert sizes[0][0] <= 500
+    assert sizes[0][1] <= 200
+
+
+def test_resize_with_boolean_values_is_ignored():
+    """bool is an int subclass in Python -- `true`/`false` in the JSON
+    payload decode to Python's True/False, which must not be treated as
+    real dimensions (GitHub issue #33)."""
+    sizes = []
+
+    async def handler(session: Session):
+        await session.read_key()
+        sizes.append((session.terminal_width, session.terminal_height))
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws:
+                    await ws.send_json({"type": "resize", "cols": True, "rows": False})
+                    await asyncio.sleep(0.1)
+                    await ws.send_json({"type": "key", "data": "x"})
+                    await ws.receive_json(timeout=2)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    # Neither boolean was accepted -- dimensions stay at the untouched default.
+    assert sizes == [(80, 24)]
+
+
 def test_escape_sequence_is_stripped_from_typed_line():
     received = []
 
