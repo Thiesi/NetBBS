@@ -164,6 +164,30 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
         double-count every edit revision of the same logical post as
         if it were separate content (GitHub issue #36).
 
+    Both "activity" and "volume" also exclude *effectively* expired
+    content, not just rows already physically stamped `'expired'`
+    (GitHub issue #36, reopened): expiry sweeping is lazy (see
+    `netbbs.boards.posts._sweep_expired_posts`'s own docstring for why
+    -- no background job exists anywhere in this codebase), so a post
+    already past its board's `max_post_age_days` can sit stored as
+    `'approved'` indefinitely until *something* actually browses that
+    specific board and triggers its sweep. Without this, such a post
+    kept counting toward both rankings the whole time it sat in that
+    state -- this function has no sweep of its own to run (a listing
+    function silently mutating rows as a side effect would be a
+    surprising, easy-to-miss write path), so effective expiry is instead
+    computed inline: `julianday(post.created_at) >= julianday(now) -
+    max_post_age_days` is the same "not yet past its age limit" test the
+    sweep itself applies, just expressed as a read-only predicate rather
+    than a write. Deliberately excludes the grace period
+    (`netbbs.config.get_expiry_grace_period_days`) -- that only governs
+    when an already-`'expired'` row is hard-deleted, not when it stops
+    being live content a reader would actually see, which is the
+    question ranking needs answered. `exempt_from_expiry` posts are
+    excluded from this check entirely, same as the sweep. One `now`
+    value is reused across every placeholder in a single call, so every
+    row is judged against the same instant.
+
     Deliberately does *not* filter by any requesting user's level here —
     unlike `netbbs.boards.posts.list_posts_page`, which enforces
     `min_read_level` before returning anything. "List every board for an
@@ -180,6 +204,7 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
             "SELECT * FROM boards ORDER BY pinned DESC, name COLLATE NOCASE ASC"
         ).fetchall()
     elif order_by == "volume":
+        now = utc_now_iso()
         rows = db.connection.execute(
             """
             SELECT b.*, COUNT(p.id) AS post_count
@@ -189,20 +214,34 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
                     SELECT 1 FROM posts v
                     WHERE v.root_post_id = p.root_post_id AND v.board_id = p.board_id
                           AND v.status = 'approved'
+                          AND (
+                                v.exempt_from_expiry = 1
+                                OR b.max_post_age_days IS NULL
+                                OR julianday(v.created_at) >= julianday(?) - b.max_post_age_days
+                          )
                 )
             GROUP BY b.id
             ORDER BY b.pinned DESC, post_count DESC, b.name COLLATE NOCASE ASC
-            """
+            """,
+            (now,),
         ).fetchall()
     else:  # "activity"
+        now = utc_now_iso()
         rows = db.connection.execute(
             """
             SELECT b.*, COALESCE(MAX(p.created_at), b.created_at) AS last_activity
             FROM boards b
-            LEFT JOIN posts p ON p.board_id = b.id AND p.status = 'approved'
+            LEFT JOIN posts p ON p.board_id = b.id
+                AND p.status = 'approved'
+                AND (
+                      p.exempt_from_expiry = 1
+                      OR b.max_post_age_days IS NULL
+                      OR julianday(p.created_at) >= julianday(?) - b.max_post_age_days
+                )
             GROUP BY b.id
             ORDER BY b.pinned DESC, last_activity DESC
-            """
+            """,
+            (now,),
         ).fetchall()
 
     return [_row_to_board(row) for row in rows]

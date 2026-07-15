@@ -225,6 +225,119 @@ def test_list_boards_activity_reflects_a_fresh_edit_of_an_old_post(db, alice):
     assert boards[0].name == "general"
 
 
+# -- GitHub issue #36 (reopened): effectively-expired-but-not-yet-swept
+# -- rows must not leak into activity/volume either -----------------------
+
+
+def test_list_boards_activity_excludes_effectively_expired_posts_before_any_sweep(db, alice):
+    """A post already past its own board's max_post_age_days, but still
+    physically stored as 'approved' -- expiry sweeping is lazy (see
+    _sweep_expired_posts's own docstring), and this test deliberately
+    never browses the board via list_posts_page, so no sweep has run --
+    must not count as board activity, the same as an already-swept
+    'expired' row wouldn't."""
+    stale = create_board(db, "stale", max_post_age_days=30, creator=alice)
+    fresh = create_board(db, "fresh", creator=alice)
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2020-01-01T00:00:00.000000Z", "stale"))
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2020-01-02T00:00:00.000000Z", "fresh"))
+    db.connection.commit()
+
+    old_post = create_post(db, stale, alice, "Old", "body")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2020-06-01T00:00:00.000000Z", old_post.id))
+    db.connection.commit()
+    assert (
+        db.connection.execute("SELECT status FROM posts WHERE id = ?", (old_post.id,)).fetchone()["status"]
+        == "approved"
+    )  # confirms the sweep really never ran
+
+    boards = list_boards(db)
+    # "stale"'s post's raw created_at (2020-06) is later than "fresh"'s
+    # own creation time (2020-01-02) -- it would win on activity if
+    # still (wrongly) being counted despite being 30+ days past its own
+    # board's retention window.
+    assert [b.name for b in boards] == ["fresh", "stale"]
+
+
+def test_list_boards_activity_still_counts_an_exempt_post_past_its_age_limit(db, alice):
+    stale = create_board(db, "stale", max_post_age_days=30, creator=alice)
+    fresh = create_board(db, "fresh", creator=alice)
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2020-01-01T00:00:00.000000Z", "stale"))
+    db.connection.execute("UPDATE boards SET created_at = ? WHERE name = ?", ("2020-01-02T00:00:00.000000Z", "fresh"))
+    db.connection.commit()
+
+    old_post = create_post(db, stale, alice, "Old", "body")
+    db.connection.execute(
+        "UPDATE posts SET created_at = ?, exempt_from_expiry = 1 WHERE id = ?",
+        ("2020-06-01T00:00:00.000000Z", old_post.id),
+    )
+    db.connection.commit()
+
+    boards = list_boards(db)
+    assert [b.name for b in boards] == ["stale", "fresh"]  # exempt -- its late created_at wins now
+
+
+def test_list_boards_volume_excludes_effectively_expired_posts_before_any_sweep(db, alice):
+    stale = create_board(db, "stale", max_post_age_days=30, creator=alice)
+    fresh = create_board(db, "fresh", creator=alice)
+    create_post(db, fresh, alice, "Fresh", "body")  # one genuinely-counted post
+    old_post = create_post(db, stale, alice, "Old", "body")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2020-01-01T00:00:00.000000Z", old_post.id))
+    db.connection.commit()
+    assert (
+        db.connection.execute("SELECT status FROM posts WHERE id = ?", (old_post.id,)).fetchone()["status"]
+        == "approved"
+    )
+
+    boards = list_boards(db, order_by="volume")
+    # "fresh" has one genuinely-counted post; "stale"'s only post is
+    # effectively expired and must count as zero, not one.
+    assert [b.name for b in boards] == ["fresh", "stale"]
+
+
+def test_list_boards_volume_still_counts_an_exempt_post_past_its_age_limit(db, alice):
+    stale = create_board(db, "stale", max_post_age_days=30, creator=alice)
+    empty = create_board(db, "empty", creator=alice)
+    old_post = create_post(db, stale, alice, "Old", "body")
+    db.connection.execute(
+        "UPDATE posts SET created_at = ?, exempt_from_expiry = 1 WHERE id = ?",
+        ("2020-01-01T00:00:00.000000Z", old_post.id),
+    )
+    db.connection.commit()
+
+    boards = list_boards(db, order_by="volume")
+    assert [b.name for b in boards] == ["stale", "empty"]
+
+
+def test_list_boards_volume_excludes_a_post_whose_every_revision_is_effectively_expired(db, alice):
+    """The 'root row' case the reopened issue specifically called out:
+    counting must key off whether *any* revision in a post's edit
+    chain is still effectively live, not just whether some row in the
+    chain has status='approved' -- an old post every one of whose
+    revisions (root and every edit) is past the board's retention
+    window must count as zero, not one. Board names are chosen so a
+    still-buggy "any approved row counts, regardless of how stale"
+    implementation and this fixed one produce different orderings --
+    zzz-general would out-count aaa-empty (1 > 0) and sort first
+    despite the name; only the effective-expiry fix makes both tie at
+    zero and fall back to the alphabetical tiebreak."""
+    board = create_board(db, "zzz-general", max_post_age_days=30, creator=alice)
+    empty = create_board(db, "aaa-empty", creator=alice)
+    grant_permissions(
+        db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice
+    )
+    post = create_post(db, board, alice, "Subject", "v1")
+    db.connection.execute("UPDATE posts SET created_at = ? WHERE id = ?", ("2020-01-01T00:00:00.000000Z", post.id))
+    db.connection.commit()
+    edited = edit_post(db, get_post(db, post.post_id), board, subject="Subject", body="v2", edited_by=alice)
+    db.connection.execute(
+        "UPDATE posts SET created_at = ? WHERE id = ?", ("2020-02-01T00:00:00.000000Z", edited.id)
+    )
+    db.connection.commit()
+
+    boards = list_boards(db, order_by="volume")
+    assert [b.name for b in boards] == ["aaa-empty", "zzz-general"]
+
+
 def test_list_boards_pinned_boards_sort_first_regardless_of_order_by(db, alice):
     create_board(db, "apple", creator=alice)
     create_board(db, "banana", creator=alice)

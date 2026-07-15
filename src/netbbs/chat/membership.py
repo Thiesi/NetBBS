@@ -231,15 +231,80 @@ def has_pending_invitation(db: Database, channel: Channel, user: User) -> bool:
     return row is not None
 
 
-def accept_invitation(db: Database, channel: Channel, user: User) -> None:
+@dataclass(frozen=True)
+class PendingInvitationView:
+    """A pending invitation plus the display fields a caller needs
+    without a second round-trip — the channel's name and the inviter's
+    username, both resolved via a join here rather than requiring
+    `netbbs.net.login_flow`/`netbbs.net.chat_flow` to look each one up
+    per invitation themselves (GitHub issue #42)."""
+
+    invitation_id: int
+    channel_id: int
+    channel_name: str
+    invited_by_username: str
+    created_at: str
+    expires_at: str | None
+
+
+def list_pending_invitations_for_user(db: Database, user: User) -> list[PendingInvitationView]:
+    """
+    Every currently pending, non-expired invitation addressed to
+    `user`, across every channel, oldest first (GitHub issue #42).
+
+    The durable view a user can check regardless of whether they were
+    online at `/invite` time: `channel_invitations` already persists
+    everything needed, independent of any session/mailbox state, which
+    is exactly what makes this usable as an offline-invitee
+    notification mechanism where the old `_deliver_private_message`-only
+    approach wasn't (that mailbox is deliberately session-addressed and
+    ephemeral — see its own module docstring — so it silently reached
+    nobody for an invitee with no active session at invite time).
+    Same `status = 'pending'` + not-expired filter `has_pending_
+    invitation` uses for one specific channel; this is the account-wide
+    equivalent, e.g. for `netbbs.net.login_flow`'s post-login notice and
+    an on-demand "list my pending invitations" screen.
+    """
+    rows = db.connection.execute(
+        """
+        SELECT ci.id AS invitation_id, ci.channel_id, c.name AS channel_name,
+               u.username AS invited_by_username, ci.created_at, ci.expires_at
+        FROM channel_invitations ci
+        JOIN channels c ON c.id = ci.channel_id
+        JOIN users u ON u.id = ci.invited_by_user_id
+        WHERE ci.invited_user_id = ? AND ci.status = 'pending'
+              AND (ci.expires_at IS NULL OR ci.expires_at > ?)
+        ORDER BY ci.created_at
+        """,
+        (user.id, utc_now_iso()),
+    ).fetchall()
+    return [
+        PendingInvitationView(
+            invitation_id=row["invitation_id"],
+            channel_id=row["channel_id"],
+            channel_name=row["channel_name"],
+            invited_by_username=row["invited_by_username"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )
+        for row in rows
+    ]
+
+
+def accept_invitation(db: Database, channel: Channel, user: User) -> bool:
     """
     Accepts `user`'s pending invitation (if any) — called by a
     successful `/join` (`netbbs.net.chat_flow._handle_join`), not a
-    separate `/accept` command (round 33's "reuse /join" decision). A
-    no-op if there was no pending, non-expired invitation (e.g. the
-    user was already a direct member, or the channel isn't
-    `members_only` at all) — joining doesn't require one to have
-    existed.
+    separate `/accept` command (round 33's "reuse /join" decision).
+    Returns `False`, without error, if there was no pending, non-
+    expired invitation left to accept (e.g. the user was already a
+    direct member, the channel isn't `members_only` at all, or a
+    concurrent revoke/expiry beat this call to it) — joining doesn't
+    require one to have existed, but the caller must not treat a no-op
+    as a successful acceptance (GitHub issue #28's reopened check-then-
+    act gap: `_handle_join` used to call this unconditionally after its
+    own separate `has_pending_invitation` check, so a revoke landing
+    between the two silently let the join through anyway).
 
     One atomic state transition (GitHub issue #28), not just marking
     the invitation accepted the way this used to: also inserts (or
@@ -248,32 +313,63 @@ def accept_invitation(db: Database, channel: Channel, user: User) -> None:
     invitation used to leave the invited user with no actual persistent
     membership row at all, so access silently reverted to "not a
     member" the moment they next left the channel.
-    """
-    row = db.connection.execute(
-        """
-        SELECT * FROM channel_invitations
-        WHERE channel_id = ? AND invited_user_id = ? AND status = 'pending'
-              AND (expires_at IS NULL OR expires_at > ?)
-        """,
-        (channel.id, user.id, utc_now_iso()),
-    ).fetchone()
-    if row is None:
-        return
 
-    db.connection.execute(
-        "UPDATE channel_invitations SET status = 'accepted' WHERE id = ?", (row["id"],)
-    )
-    db.connection.execute(
-        """
-        INSERT INTO channel_members (channel_id, user_id, granted_by_user_id, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(channel_id, user_id) DO UPDATE SET
-            granted_by_user_id = excluded.granted_by_user_id,
-            created_at = excluded.created_at
-        """,
-        (channel.id, user.id, row["invited_by_user_id"], utc_now_iso()),
-    )
-    db.connection.commit()
+    Wrapped in an explicit SAVEPOINT (GitHub issue #28, reopened a
+    second time), not just two DML statements followed by `commit()`:
+    on `db`'s shared long-lived connection, SQLite's default ABORT
+    behavior means a failure partway through (e.g. the membership
+    INSERT) would otherwise leave the preceding invitation-status
+    UPDATE pending on the connection, vulnerable to being persisted by
+    a later, completely unrelated `commit()` elsewhere. The membership
+    row is inserted *before* the status flips to `'accepted'`, and the
+    UPDATE's own `WHERE status = 'pending'` is checked via `rowcount`
+    rather than trusted — closing the same race from the other
+    direction, a concurrent `revoke_invitation` between this
+    function's own SELECT and UPDATE. A savepoint, not an unconditional
+    `BEGIN`, so this stays safe if ever called inside a wider
+    transaction.
+    """
+    conn = db.connection
+    conn.execute("SAVEPOINT accept_channel_invitation")
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM channel_invitations
+            WHERE channel_id = ? AND invited_user_id = ? AND status = 'pending'
+                  AND (expires_at IS NULL OR expires_at > ?)
+            """,
+            (channel.id, user.id, utc_now_iso()),
+        ).fetchone()
+
+        if row is None:
+            conn.execute("RELEASE SAVEPOINT accept_channel_invitation")
+            return False
+
+        conn.execute(
+            """
+            INSERT INTO channel_members (channel_id, user_id, granted_by_user_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(channel_id, user_id) DO UPDATE SET
+                granted_by_user_id = excluded.granted_by_user_id,
+                created_at = excluded.created_at
+            """,
+            (channel.id, user.id, row["invited_by_user_id"], utc_now_iso()),
+        )
+
+        cursor = conn.execute(
+            "UPDATE channel_invitations SET status = 'accepted' WHERE id = ? AND status = 'pending'",
+            (row["id"],),
+        )
+        if cursor.rowcount != 1:
+            raise MembershipError("invitation was no longer pending")
+
+        conn.execute("RELEASE SAVEPOINT accept_channel_invitation")
+        conn.commit()
+        return True
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT accept_channel_invitation")
+        conn.execute("RELEASE SAVEPOINT accept_channel_invitation")
+        raise
 
 
 def _require_manage_members(db: Database, channel: Channel, user: User) -> None:

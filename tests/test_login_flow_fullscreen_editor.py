@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import create_post, list_posts_page
+from netbbs.boards.posts import MAX_SUBJECT_BYTES, create_post, list_posts_page
 from netbbs.directory import get_bio
 from netbbs.net import login_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind
@@ -155,6 +155,50 @@ def test_compose_post_cancelled_from_the_fullscreen_editor_does_not_post(db, ali
     text = _written_text(session)
     assert "Posted" not in text
     assert "cancelled" in text.lower()
+
+
+def test_compose_post_with_oversized_subject_shows_a_friendly_error(db, alice):
+    """Regression test for GitHub issue #32 (reopened): the plain
+    single-line prompt has no length cap of its own (only the 4,096-
+    char line editor ceiling), so a subject can clear that and still
+    exceed create_post()'s own MAX_SUBJECT_BYTES domain limit. Before
+    this fix, the resulting PostError propagated straight out of
+    _compose_new_post() and terminated the session instead of being
+    shown as a normal rejection."""
+    board = create_board(db, "general", creator=alice)
+    oversized_subject = "x" * (MAX_SUBJECT_BYTES + 1)
+    session = FakeSession([oversized_subject, "A normal body"])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    text = _written_text(session)
+    assert "Posted" not in text
+    assert "Could not create post" in text
+    assert list_posts_page(db, board, alice).posts == []
+
+
+def test_compose_post_with_oversized_multibyte_subject_shows_a_friendly_error(db, alice):
+    """A subject that's well under any plausible character-based cap
+    can still exceed MAX_SUBJECT_BYTES once UTF-8 encoded -- the limit
+    is counted in bytes, not characters (see MAX_SUBJECT_BYTES's own
+    docstring), so multibyte content must be rejected the same way."""
+    board = create_board(db, "general", creator=alice)
+    oversized_subject = "€" * 150  # each euro sign is 3 UTF-8 bytes
+    assert len(oversized_subject) < MAX_SUBJECT_BYTES
+    assert len(oversized_subject.encode("utf-8")) > MAX_SUBJECT_BYTES
+    session = FakeSession([oversized_subject, "A normal body"])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    text = _written_text(session)
+    assert "Posted" not in text
+    assert "Could not create post" in text
+    assert list_posts_page(db, board, alice).posts == []
+
+
+def test_compose_post_with_subject_exactly_at_the_byte_boundary_succeeds(db, alice):
+    board = create_board(db, "general", creator=alice)
+    subject = "x" * MAX_SUBJECT_BYTES
+    session = FakeSession([subject, "A normal body"])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Posted" in _written_text(session)
+    assert list_posts_page(db, board, alice).posts[0].subject == subject
 
 
 # -- editing an existing post -------------------------------------------------

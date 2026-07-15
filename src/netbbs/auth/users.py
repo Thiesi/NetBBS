@@ -271,6 +271,34 @@ def get_user_by_username(db: Database, username: str) -> User:
     return _row_to_user(row)
 
 
+def account_still_active(db: Database, user: User) -> bool:
+    """
+    `False` if `user`'s account was disabled or deleted since it was
+    last read (GitHub issue #29) — re-fetched fresh from SQLite rather
+    than trusting a possibly-stale in-memory `User`, which a concurrent
+    disable/delete (from this same process or a completely separate
+    `python -m netbbs.admin` invocation) wouldn't otherwise ever update.
+
+    The one shared authoritative revalidation check every long-running
+    authenticated loop must call at its own natural per-iteration
+    boundary — originally local to `netbbs.net.login_flow._main_menu`
+    (the only such boundary that existed at the time), reopened and
+    moved here once a second one (`netbbs.net.chat_flow`'s send loop)
+    needed the identical policy: a single shared place for "is this
+    account still allowed to keep doing authenticated things," not one
+    copy per caller silently free to drift out of sync with the
+    others. Lives in `netbbs.auth.users` rather than either `net`
+    module specifically because `login_flow` already imports from
+    `chat_flow` (for `browse_channels`) — putting it in either would
+    create an import cycle the other way.
+    """
+    try:
+        current = get_user_by_username(db, user.username)
+    except AuthError:
+        return False  # deleted
+    return current.disabled_at is None
+
+
 def list_users(db: Database) -> list[User]:
     """
     Every registered account, ordered by username — the user

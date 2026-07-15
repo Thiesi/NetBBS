@@ -201,7 +201,29 @@ async def _read_raw_byte(session: Session) -> int:
             return b
 
 
-async def _read_zdle_byte(session: Session) -> int:
+async def _read_bulk_raw_byte(session: Session) -> int:
+    """
+    `_read_raw_byte`, bounded by `_BULK_IDLE_TIMEOUT` (GitHub issue #34,
+    reopened) — the one primitive every byte read during the
+    bulk-transfer phase (`_read_subpacket`) must go through, not just
+    the first byte of each loop iteration.
+
+    Before this, only that first byte was timeout-bound: the byte
+    immediately following a lone `ZDLE`, and both CRC bytes read after
+    a subpacket's terminator, still went through the untimed
+    `_read_raw_byte` directly. A peer could stall indefinitely at any
+    of those three positions — a lone `ZDLE` with nothing after it, or
+    a valid terminator followed by withheld CRC bytes — and hold the
+    upload session open forever despite the size/subpacket-length
+    bounds elsewhere in this module.
+    """
+    try:
+        return await asyncio.wait_for(_read_raw_byte(session), timeout=_BULK_IDLE_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        raise ZmodemError("transfer stalled — no data received in time") from exc
+
+
+async def _read_zdle_byte(session: Session, *, read_raw=_read_raw_byte) -> int:
     """
     Read one logical byte, resolving ZDLE-escaping if present.
 
@@ -210,11 +232,19 @@ async def _read_zdle_byte(session: Session) -> int:
     `ZDLE` byte value itself produces `ZDLE 0x58`, never `ZDLE ZDLE` —
     see `_zdle_encode`), so seeing that pair unambiguously means the
     peer sent a cancel signal, not corrupted framing.
+
+    `read_raw` (GitHub issue #34, reopened) is the raw-byte primitive
+    to use for both bytes read here — defaults to the untimed
+    `_read_raw_byte`, correct for this function's header-phase callers
+    (`_read_header`, already bounded as a whole by `_wait_for_header`'s
+    own `_HANDSHAKE_TIMEOUT`). `_read_subpacket` instead passes
+    `_read_bulk_raw_byte`, so its own CRC-byte reads get the same
+    per-byte idle bound as every other byte in the bulk-transfer phase.
     """
-    b = await _read_raw_byte(session)
+    b = await read_raw(session)
     if b != ZDLE:
         return b
-    b2 = await _read_raw_byte(session)
+    b2 = await read_raw(session)
     if b2 == ZDLE:
         raise ZmodemError("transfer cancelled by peer")
     return b2 ^ 0x40
@@ -313,14 +343,16 @@ async def _read_subpacket(session: Session) -> tuple[bytes, int]:
     """Returns `(data, terminator)`. Raises `ZmodemError` on CRC
     mismatch, a cancel signal from the peer, an unterminated subpacket
     growing past `_MAX_SUBPACKET_BYTES`, or no byte arriving within
-    `_BULK_IDLE_TIMEOUT` of the previous one (GitHub issue #34)."""
+    `_BULK_IDLE_TIMEOUT` of the previous one anywhere in this function
+    (GitHub issue #34, reopened: every byte read here — the escaped
+    byte following a lone `ZDLE`, and both CRC bytes after the
+    terminator, not just each loop iteration's first byte — now goes
+    through `_read_bulk_raw_byte`, so a peer can no longer stall
+    indefinitely at any of those positions either)."""
     data = bytearray()
     terminator = None
     while terminator is None:
-        try:
-            b = await asyncio.wait_for(_read_raw_byte(session), timeout=_BULK_IDLE_TIMEOUT)
-        except asyncio.TimeoutError as exc:
-            raise ZmodemError("transfer stalled — no data received in time") from exc
+        b = await _read_bulk_raw_byte(session)
         if b != ZDLE:
             if len(data) >= _MAX_SUBPACKET_BYTES:
                 raise ZmodemError(
@@ -328,7 +360,7 @@ async def _read_subpacket(session: Session) -> tuple[bytes, int]:
                 )
             data.append(b)
             continue
-        b2 = await _read_raw_byte(session)
+        b2 = await _read_bulk_raw_byte(session)
         if b2 == ZDLE:
             raise ZmodemError("transfer cancelled by peer")
         if b2 in (ZCRCE, ZCRCG, ZCRCQ, ZCRCW):
@@ -340,8 +372,8 @@ async def _read_subpacket(session: Session) -> tuple[bytes, int]:
                 )
             data.append(b2 ^ 0x40)
 
-    crc_hi = await _read_zdle_byte(session)
-    crc_lo = await _read_zdle_byte(session)
+    crc_hi = await _read_zdle_byte(session, read_raw=_read_bulk_raw_byte)
+    crc_lo = await _read_zdle_byte(session, read_raw=_read_bulk_raw_byte)
     if _crc16(bytes(data) + bytes([terminator])) != (crc_hi << 8) | crc_lo:
         raise ZmodemError("data subpacket CRC mismatch")
     return bytes(data), terminator

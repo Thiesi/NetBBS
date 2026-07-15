@@ -37,7 +37,7 @@ from pathlib import Path
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.picker import pick_item
-from netbbs.net.session import Session
+from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering import (
     MUTED_COLOR,
     ScreenBuffer,
@@ -223,7 +223,18 @@ async def edit_ansi_art(
         # every one of those exits (including an unhandled exception),
         # so clearing here once covers all of them instead of repeating
         # it before each individual `return`.
-        await session.write(clear_screen())
+        #
+        # GitHub issue #43: cancellation must not depend on that write
+        # succeeding -- a genuine disconnect makes session.write() raise
+        # SessionClosedError, which used to skip the two lines below
+        # entirely and leak the autosave task running forever against a
+        # dead session. Task cleanup now always runs; the screen clear
+        # is best-effort and simply skipped for a transport that's
+        # already gone (there's no terminal left to clean up).
+        try:
+            await session.write(clear_screen())
+        except SessionClosedError:
+            pass
         autosave_task.cancel()
         try:
             await autosave_task

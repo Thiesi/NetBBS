@@ -16,7 +16,7 @@ import pytest
 
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.char_input import EditorKey, EditorKeyKind
-from netbbs.net.session import Session
+from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering import clear_screen
 from netbbs.rendering.ansi_art import decode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
@@ -527,5 +527,68 @@ def test_autosave_does_not_write_when_nothing_changed(tmp_path):
             await task
         except asyncio.CancelledError:
             pass
+
+    asyncio.run(scenario())
+
+
+# -- disconnect cleanup (GitHub issue #43) ------------------------------
+
+
+class _DisconnectingSession(FakeSession):
+    """Simulates a genuinely dead transport: the very next key read
+    raises SessionClosedError, and every write from that point on
+    (including the editor's own best-effort clear_screen() in its
+    finally block) raises too -- a real closed connection, not just one
+    bad write."""
+
+    def __init__(self):
+        super().__init__([])
+        self._closed = False
+
+    async def read_editor_key(self) -> EditorKey:
+        self._closed = True
+        raise SessionClosedError("connection lost")
+
+    async def write(self, text: str) -> None:
+        if self._closed:
+            raise SessionClosedError("connection lost")
+        await super().write(text)
+
+
+def test_disconnect_still_cancels_the_autosave_task_even_when_the_screen_clear_also_fails(tmp_path):
+    """Before this fix, the finally block's `await
+    session.write(clear_screen())` ran before autosave_task.cancel() --
+    a SessionClosedError there (a genuinely dead transport, exactly
+    what this session simulates) skipped cancellation entirely and
+    leaked the autosave task running forever against a session nothing
+    will ever read from again."""
+    draft = tmp_path / "d.draft"
+
+    async def scenario():
+        session = _DisconnectingSession()
+        with pytest.raises(SessionClosedError):
+            await edit_ansi_art(
+                session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999
+            )
+        current = asyncio.current_task()
+        leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        assert leaked == []
+
+    asyncio.run(scenario())
+
+
+def test_repeated_disconnects_never_leave_autosave_tasks_pending(tmp_path):
+    draft = tmp_path / "d.draft"
+
+    async def scenario():
+        for _ in range(5):
+            session = _DisconnectingSession()
+            with pytest.raises(SessionClosedError):
+                await edit_ansi_art(
+                    session, initial_bytes=None, draft_path=draft, autosave_interval_seconds=9999
+                )
+        current = asyncio.current_task()
+        leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        assert leaked == []
 
     asyncio.run(scenario())

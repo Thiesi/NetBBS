@@ -150,6 +150,21 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
       - "volume": count of approved, non-expired files, highest first
         -- not a raw row count (GitHub issue #36).
 
+    "Non-expired" means *effectively* non-expired, not just not yet
+    swept into `status = 'expired'` (GitHub issue #36, reopened) —
+    mirrors `list_boards`'s own fix exactly, for the identical reason:
+    expiry sweeping (`netbbs.files.entries._sweep_expired_files`) is
+    lazy, triggered only by something actually browsing that specific
+    area, so a file already past `area.max_file_age_days` can otherwise
+    sit stored as `'approved'` — and keep counting toward both
+    rankings — indefinitely until that happens. Computed inline as a
+    read-only predicate rather than by sweeping from here (see
+    `list_boards` for the fuller reasoning); excludes the grace period
+    for the same reason (governs hard-deletion of already-expired rows,
+    not whether a row is still live content); `exempt_from_expiry`
+    files are excluded from the check entirely, same as the sweep. One
+    `now` value is reused across every placeholder in a single call.
+
     Deliberately does *not* filter by any requesting user's level here —
     same reasoning as `list_boards`: "list every area for an admin view"
     and "list areas a given user can actually read" are both legitimate,
@@ -165,24 +180,40 @@ def list_file_areas(db: Database, *, order_by: str = "activity") -> list[FileAre
             "SELECT * FROM file_areas ORDER BY pinned DESC, name COLLATE NOCASE ASC"
         ).fetchall()
     elif order_by == "volume":
+        now = utc_now_iso()
         rows = db.connection.execute(
             """
             SELECT a.*, COUNT(f.id) AS file_count
             FROM file_areas a
-            LEFT JOIN files f ON f.area_id = a.id AND f.status = 'approved'
+            LEFT JOIN files f ON f.area_id = a.id
+                AND f.status = 'approved'
+                AND (
+                      f.exempt_from_expiry = 1
+                      OR a.max_file_age_days IS NULL
+                      OR julianday(f.created_at) >= julianday(?) - a.max_file_age_days
+                )
             GROUP BY a.id
             ORDER BY a.pinned DESC, file_count DESC, a.name COLLATE NOCASE ASC
-            """
+            """,
+            (now,),
         ).fetchall()
     else:  # "activity"
+        now = utc_now_iso()
         rows = db.connection.execute(
             """
             SELECT a.*, COALESCE(MAX(f.created_at), a.created_at) AS last_activity
             FROM file_areas a
-            LEFT JOIN files f ON f.area_id = a.id AND f.status = 'approved'
+            LEFT JOIN files f ON f.area_id = a.id
+                AND f.status = 'approved'
+                AND (
+                      f.exempt_from_expiry = 1
+                      OR a.max_file_age_days IS NULL
+                      OR julianday(f.created_at) >= julianday(?) - a.max_file_age_days
+                )
             GROUP BY a.id
             ORDER BY a.pinned DESC, last_activity DESC
-            """
+            """,
+            (now,),
         ).fetchall()
 
     return [_row_to_file_area(row) for row in rows]

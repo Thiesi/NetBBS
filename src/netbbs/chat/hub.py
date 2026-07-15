@@ -162,7 +162,7 @@ class ChatHub:
         # intuitively expect.
         self._last_activity[channel_name] = utc_now_iso()
 
-    def _deliver(self, queue: asyncio.Queue, message: object) -> None:
+    def _deliver(self, queue: asyncio.Queue, message: object, *, priority: bool = False) -> None:
         """
         Enqueue `message`, never blocking (GitHub issue #31).
 
@@ -172,11 +172,20 @@ class ChatHub:
         per-consumer backpressure problem into a whole-channel one.
 
         On overflow, the oldest still-queued message is dropped to make
-        room for a `QueueOverflowNotice` in its place -- bounded memory
-        with an honest signal to the affected participant that they
-        missed something, rather than either unbounded growth or
+        room. What takes its place depends on `priority` (GitHub issue
+        #31, reopened): ordinary traffic is genuinely lossy, so a
+        `QueueOverflowNotice` goes in the freed slot instead of
+        `message` itself -- bounded memory with an honest signal that
+        something was missed, rather than either unbounded growth or
         silently discarding new messages with no indication anything
-        was lost.
+        was lost. A `priority` event (kick/ban/access-revocation --
+        see `send_to`'s own `priority` parameter) is different in kind:
+        losing the *incoming* event itself would mean the moderation
+        action it represents may never take effect in the target's
+        loop, which matters far more than one lost line of chat.
+        `priority=True` therefore occupies the freed slot with `message`
+        itself, evicting ordinary queued traffic to make room rather
+        than being subject to the same lossy policy that traffic gets.
         """
         try:
             queue.put_nowait(message)
@@ -187,14 +196,16 @@ class ChatHub:
             queue.get_nowait()
         except asyncio.QueueEmpty:
             pass
+        replacement = message if priority else QueueOverflowNotice(dropped_count=1)
         try:
-            queue.put_nowait(QueueOverflowNotice(dropped_count=1))
+            queue.put_nowait(replacement)
         except asyncio.QueueFull:
             # Another producer refilled the slot we just freed before we
             # could use it -- vanishingly unlikely on a single-threaded
             # event loop, but nothing more to do here regardless: the
             # queue is still bounded and the recipient is still falling
-            # behind, which the next overflow will report.
+            # behind, which the next overflow (or, for a priority event,
+            # the next call to this same delivery) will report/retry.
             pass
 
     def participant_count(self, channel_name: str) -> int:
@@ -220,7 +231,9 @@ class ChatHub:
         """
         return [pid for pid in self._channels[channel_name] if pid.username == username]
 
-    async def send_to(self, channel_name: str, participant_id: ParticipantId, message: object) -> bool:
+    async def send_to(
+        self, channel_name: str, participant_id: ParticipantId, message: object, *, priority: bool = False
+    ) -> bool:
         """
         Deliver `message` to exactly one participant's queue, if
         they're still present in `channel_name`.
@@ -231,11 +244,20 @@ class ChatHub:
         Unlike `broadcast`, `message` isn't required to be a `str` —
         round 37 uses this to deliver a small kick/ban sentinel object
         `receive_loop` recognizes, distinct from any real chat text.
+
+        `priority` (GitHub issue #31, reopened) must be set for any
+        mandatory state-transition event — kick, ban, members-only
+        access revocation, and similar — whose loss would mean the
+        transition it represents never actually reaches the target's
+        loop. See `_deliver` for what that changes about overflow
+        handling; a full target queue can still delay a priority event
+        by one slot's worth of eviction, but can never simply drop it
+        on the floor the way it would drop ordinary traffic.
         """
         queue = self._channels[channel_name].get(participant_id)
         if queue is None:
             return False
-        self._deliver(queue, message)
+        self._deliver(queue, message, priority=priority)
         return True
 
     def last_activity(self, channel_name: str) -> str | None:

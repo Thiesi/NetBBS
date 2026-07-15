@@ -25,6 +25,7 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     User,
+    account_still_active,
     authenticate_password_async,
     get_user_by_username,
     list_users,
@@ -41,7 +42,13 @@ from netbbs.boards import (
     list_posts_page,
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
-from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry, format_with_preference
+from netbbs.chat import (
+    ChatHub,
+    MessageMailbox,
+    PresenceRegistry,
+    format_with_preference,
+    list_pending_invitations_for_user,
+)
 from netbbs.directory import (
     MAX_BIO_BYTES,
     MAX_BIO_LINES,
@@ -282,6 +289,7 @@ async def run_authenticated_session(
     await session.write_line(
         f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
     )
+    await _announce_pending_invitations(session, db, user)
 
     # One InputHistory per connection (design doc round 47/Track 5f),
     # not node-wide like hub/presence/mailbox -- constructed here rather
@@ -415,6 +423,67 @@ async def handle_ssh_session(
         mailbox.discard(session)
 
 
+async def _announce_pending_invitations(session: Session, db: Database, user: User) -> None:
+    """
+    A one-time-per-login notice (GitHub issue #42) if `user` has any
+    pending channel invitations — the actual discoverability fix: an
+    offline invitee previously had no notification mechanism at all
+    (`_deliver_private_message`'s mailbox is session-addressed and
+    ephemeral, see its own docstring, so it silently reached nobody
+    with no active session at `/invite` time), even though the durable
+    `channel_invitations` row was always created regardless.
+
+    Deliberately brief (a count, not the full list with channel names/
+    inviters) -- `[I]nvitations` on the main menu (see
+    `_draw_main_menu`/`_show_pending_invitations`) shows full detail
+    and reappears on every redraw for as long as anything's still
+    pending, so this only needs to point there, not duplicate it.
+    Called once, right after login (`run_authenticated_session`), not
+    from `_draw_main_menu` itself -- that function redraws on every
+    return from a submenu, which would repeat this same notice far more
+    often than the one genuinely new moment it's meant to mark.
+    """
+    pending = list_pending_invitations_for_user(db, user)
+    if not pending:
+        return
+    plural = "s" if len(pending) != 1 else ""
+    await session.write_line(
+        colored(
+            f"\r\n*** You have {len(pending)} pending channel invitation{plural}. "
+            "See [I]nvitations on the main menu. ***",
+            fg_color=MUTED_COLOR,
+        )
+    )
+
+
+async def _show_pending_invitations(session: Session, db: Database, user: User) -> None:
+    """The on-demand full-detail view `_announce_pending_invitations`'s
+    brief notice points to -- channel name, inviter, and when, for
+    every currently pending invitation. No accept/reject action lives
+    here: `/join <channel>` from the channel picker remains the one
+    way to accept (design doc round 33's "reuse /join" decision,
+    unchanged by this issue), so this is purely informational, telling
+    the invitee what to type and where."""
+    pending = list_pending_invitations_for_user(db, user)
+    header = colored("Pending invitations:", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    if not pending:
+        await session.write_line("You have no pending channel invitations.")
+        return
+    for invitation in pending:
+        when = format_for_display(invitation.created_at, db)
+        await session.write_line(
+            f"  #{sanitize_text(invitation.channel_name)} "
+            f"-- invited by {sanitize_text(invitation.invited_by_username)} ({when})"
+        )
+    await session.write_line(
+        colored(
+            "Use [C]hat, then /join <channel> from the channel picker to accept one.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+
+
 async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbox, user: User) -> None:
     """
     Shows any private messages that arrived while away from this menu,
@@ -439,6 +508,14 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     sessions each has its own independent pending queue now, so this
     only ever drains what was actually queued for *this* connection,
     never stealing a sibling session's still-pending messages.
+
+    `[I]nvitations` (GitHub issue #42) is shown only while `user` has
+    at least one currently pending invitation -- same "only offer what
+    currently applies" convention `_render_board_page`'s `[O]lder`/
+    `[N]ewer` already follow, and it naturally disappears again once
+    every pending invitation is accepted/revoked/expired, with no
+    separate "mark as seen" bookkeeping needed: this just re-queries
+    current truth on every redraw.
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
@@ -451,26 +528,14 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
         menu_key("D", "irectory"),
         menu_key("P", "rofile"),
     ]
+    if list_pending_invitations_for_user(db, user):
+        option_list.append(menu_key("I", "nvitations"))
     if meets_level(user, SYSOP_LEVEL):
         option_list.append(menu_key("A", "dmin"))
     option_list.append(menu_key("L", "ogoff"))
     options = "  ".join(option_list)
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
-
-
-def _account_still_active(db: Database, user: User) -> bool:
-    """`False` if `user`'s account was disabled or deleted since this
-    session authenticated (GitHub issue #29) -- re-fetched fresh from
-    SQLite rather than trusting the in-memory `User` object handed to
-    this session at login, which a concurrent disable/delete (from this
-    same process or a completely separate `python -m netbbs.admin`
-    invocation) wouldn't otherwise ever update."""
-    try:
-        current = get_user_by_username(db, user.username)
-    except AuthError:
-        return False  # deleted
-    return current.disabled_at is None
 
 
 async def _main_menu(
@@ -507,7 +572,7 @@ async def _main_menu(
     while True:
         choice = (await session.read_key()).lower()
 
-        if not _account_still_active(db, user):
+        if not account_still_active(db, user):
             # GitHub issue #29: the cross-process revalidation
             # boundary. In-process disable/delete already disconnects
             # a live session directly (see
@@ -515,9 +580,13 @@ async def _main_menu(
             # standalone `python -m netbbs.admin` CLI can also change
             # `disabled_at`/delete the row from a completely separate
             # process with no in-memory notification path at all --
-            # this re-check, at the one natural choke point every
-            # main-menu action passes through, is the authoritative
+            # this re-check, at one natural choke point every
+            # main-menu action passes through, is an authoritative
             # fallback regardless of which process made the change.
+            # `netbbs.net.chat_flow`'s send loop has the identical
+            # check at its own equivalent boundary (GitHub issue #29,
+            # reopened) -- a session that never returns to this menu
+            # (e.g. staying in chat) still gets revalidated there.
             await session.write_line(
                 colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
             )
@@ -548,6 +617,10 @@ async def _main_menu(
         elif choice == "p":
             await session.write_line("")
             await _edit_profile(session, db, user)
+            await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "i" and list_pending_invitations_for_user(db, user):
+            await session.write_line("")
+            await _show_pending_invitations(session, db, user)
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "a" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
@@ -821,7 +894,11 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
         if body is None:
             await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
             return
-        post = create_post(db, board, user, subject, body)
+        try:
+            post = create_post(db, board, user, subject, body)
+        except PostError as exc:
+            await session.write_line(colored(f"Could not create post: {exc}", fg_color=MUTED_COLOR))
+            return
         await session.write_line(f"Posted (id {post.post_id[:12]}...).")
 
     page_anchor: tuple[str, tuple[str, str]] | None = None

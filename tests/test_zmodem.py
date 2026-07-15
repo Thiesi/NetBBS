@@ -363,6 +363,99 @@ def test_stalled_transfer_hits_the_idle_timeout(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_stall_immediately_after_a_lone_zdle_hits_the_idle_timeout(monkeypatch):
+    """Regression test for GitHub issue #34 (reopened): before routing
+    every bulk-phase byte through _read_bulk_raw_byte, the byte
+    immediately following ZDLE was read via the untimed
+    _read_raw_byte -- a peer sending a bare ZDLE and then withholding
+    everything else could stall the receiver forever despite the
+    subpacket-level idle timeout supposedly covering this phase."""
+    import netbbs.net.zmodem as zmodem_module
+
+    monkeypatch.setattr(zmodem_module, "_BULK_IDLE_TIMEOUT", 0.1)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        await sender_session.write_raw(b"partial" + bytes([ZDLE]))  # lone ZDLE, then nothing -- ever
+
+        with pytest.raises(ZmodemError, match="stalled"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_stall_after_the_terminator_before_crc_hi_hits_the_idle_timeout(monkeypatch):
+    """A valid terminator arrived, but the sender then withholds both
+    CRC bytes entirely -- must still time out, not wait forever for a
+    CRC that will never come."""
+    import netbbs.net.zmodem as zmodem_module
+
+    monkeypatch.setattr(zmodem_module, "_BULK_IDLE_TIMEOUT", 0.1)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        await sender_session.write_raw(b"partial" + bytes([ZDLE, ZCRCE]))  # terminator sent, CRC withheld
+
+        with pytest.raises(ZmodemError, match="stalled"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
+def test_stall_between_crc_hi_and_crc_lo_hits_the_idle_timeout(monkeypatch):
+    """The terminator and the CRC high byte both arrived, but the
+    sender withholds the final CRC low byte -- the narrowest possible
+    stall position, and the one most likely to be missed by a fix that
+    only re-times the *first* byte after the terminator."""
+    import netbbs.net.zmodem as zmodem_module
+
+    monkeypatch.setattr(zmodem_module, "_BULK_IDLE_TIMEOUT", 0.1)
+
+    async def scenario():
+        sender_session, receiver_session = _session_pair()
+        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRINIT
+        await _send_header(sender_session, ZFILE)
+        await _send_subpacket(sender_session, b"x.bin\x00", ZCRCW)
+
+        frame_type, _ = await _wait_for_header(sender_session)
+        assert frame_type == ZRPOS
+
+        await _send_header(sender_session, ZDATA, 0)
+        # 0x42 ('B') isn't in the escape set, so this is an unambiguous,
+        # unescaped crc_hi byte -- crc_lo is what's withheld.
+        await sender_session.write_raw(b"partial" + bytes([ZDLE, ZCRCE, 0x42]))
+
+        with pytest.raises(ZmodemError, match="stalled"):
+            await receiver_task
+
+    asyncio.run(scenario())
+
+
 def test_round_trip_still_works_within_the_limit():
     """Confirms the bounds above don't interfere with a normal transfer
     comfortably inside them."""

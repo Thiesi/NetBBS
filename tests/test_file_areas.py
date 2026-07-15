@@ -177,6 +177,89 @@ def test_list_file_areas_activity_does_not_surface_pending_files(db, alice):
     assert [a.name for a in areas] == ["other", "reviewed"]
 
 
+# -- GitHub issue #36 (reopened): effectively-expired-but-not-yet-swept
+# -- rows must not leak into activity/volume either -----------------------
+
+
+def test_list_file_areas_activity_excludes_effectively_expired_files_before_any_sweep(db, alice):
+    """A file already past its own area's max_file_age_days, but still
+    physically stored as 'approved' -- expiry sweeping is lazy (see
+    netbbs.files.entries._sweep_expired_files), and this test
+    deliberately never browses the area via list_files_page, so no
+    sweep has run -- must not count as area activity, the same as an
+    already-swept 'expired' row wouldn't."""
+    stale = create_file_area(db, "stale", max_file_age_days=30, creator=alice)
+    fresh = create_file_area(db, "fresh", creator=alice)
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2020-01-01T00:00:00.000000Z", "stale"))
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2020-01-02T00:00:00.000000Z", "fresh"))
+    db.connection.commit()
+
+    old_entry = upload_file(db, stale, alice, "old.txt", b"a")
+    db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", ("2020-06-01T00:00:00.000000Z", old_entry.id))
+    db.connection.commit()
+    assert (
+        db.connection.execute("SELECT status FROM files WHERE id = ?", (old_entry.id,)).fetchone()["status"]
+        == "approved"
+    )  # confirms the sweep really never ran
+
+    areas = list_file_areas(db)
+    # "stale"'s file's raw created_at (2020-06) is later than "fresh"'s
+    # own creation time (2020-01-02) -- it would win on activity if
+    # still (wrongly) being counted despite being 30+ days past its own
+    # area's retention window.
+    assert [a.name for a in areas] == ["fresh", "stale"]
+
+
+def test_list_file_areas_activity_still_counts_an_exempt_file_past_its_age_limit(db, alice):
+    stale = create_file_area(db, "stale", max_file_age_days=30, creator=alice)
+    fresh = create_file_area(db, "fresh", creator=alice)
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2020-01-01T00:00:00.000000Z", "stale"))
+    db.connection.execute("UPDATE file_areas SET created_at = ? WHERE name = ?", ("2020-01-02T00:00:00.000000Z", "fresh"))
+    db.connection.commit()
+
+    old_entry = upload_file(db, stale, alice, "old.txt", b"a")
+    db.connection.execute(
+        "UPDATE files SET created_at = ?, exempt_from_expiry = 1 WHERE id = ?",
+        ("2020-06-01T00:00:00.000000Z", old_entry.id),
+    )
+    db.connection.commit()
+
+    areas = list_file_areas(db)
+    assert [a.name for a in areas] == ["stale", "fresh"]  # exempt -- its late created_at wins now
+
+
+def test_list_file_areas_volume_excludes_effectively_expired_files_before_any_sweep(db, alice):
+    stale = create_file_area(db, "stale", max_file_age_days=30, creator=alice)
+    fresh = create_file_area(db, "fresh", creator=alice)
+    upload_file(db, fresh, alice, "new.txt", b"a")  # one genuinely-counted file
+    old_entry = upload_file(db, stale, alice, "old.txt", b"b")
+    db.connection.execute("UPDATE files SET created_at = ? WHERE id = ?", ("2020-01-01T00:00:00.000000Z", old_entry.id))
+    db.connection.commit()
+    assert (
+        db.connection.execute("SELECT status FROM files WHERE id = ?", (old_entry.id,)).fetchone()["status"]
+        == "approved"
+    )
+
+    areas = list_file_areas(db, order_by="volume")
+    # "fresh" has one genuinely-counted file; "stale"'s only file is
+    # effectively expired and must count as zero, not one.
+    assert [a.name for a in areas] == ["fresh", "stale"]
+
+
+def test_list_file_areas_volume_still_counts_an_exempt_file_past_its_age_limit(db, alice):
+    stale = create_file_area(db, "stale", max_file_age_days=30, creator=alice)
+    empty = create_file_area(db, "empty", creator=alice)
+    old_entry = upload_file(db, stale, alice, "old.txt", b"a")
+    db.connection.execute(
+        "UPDATE files SET created_at = ?, exempt_from_expiry = 1 WHERE id = ?",
+        ("2020-01-01T00:00:00.000000Z", old_entry.id),
+    )
+    db.connection.commit()
+
+    areas = list_file_areas(db, order_by="volume")
+    assert [a.name for a in areas] == ["stale", "empty"]
+
+
 def test_list_file_areas_pinned_areas_sort_first_regardless_of_order_by(db, alice):
     create_file_area(db, "apple", creator=alice)
     create_file_area(db, "banana", creator=alice)

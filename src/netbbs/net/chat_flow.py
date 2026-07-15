@@ -12,7 +12,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
+from netbbs.auth.users import AuthError, User, account_still_active, get_user_by_username, list_users
 from netbbs.chat import (
     Channel,
     ChannelError,
@@ -451,7 +451,26 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         return None
 
     if channel.members_only and not already_member:
-        accept_invitation(ctx.db, channel, ctx.user)
+        # GitHub issue #28 (reopened): accept_invitation() is now the
+        # authoritative check, not just a side effect run after the
+        # has_pending_invitation() lookup above -- a concurrent revoke
+        # or expiry landing between the two would otherwise still let
+        # this join through. It reports "nothing to accept" two ways:
+        # returning False for the common case (already handled/never
+        # existed), or raising MembershipError for the narrower race
+        # where its own SELECT saw a pending row that a concurrent
+        # revoke_invitation() then flipped before its UPDATE committed
+        # -- both are the same "not authorized after all" outcome here,
+        # not a bug to let escape as an unhandled exception.
+        try:
+            accepted = accept_invitation(ctx.db, channel, ctx.user)
+        except MembershipError:
+            accepted = False
+        if not accepted:
+            await ctx.session.write_line(
+                colored("That invitation is no longer valid.", fg_color=MUTED_COLOR)
+            )
+            return None
 
     return _SwitchTo(channel)
 
@@ -822,12 +841,21 @@ async def _resolve_target(session: Session, db: Database, username: str) -> User
 
 async def _kick_live_sessions(hub: ChatHub, channel: Channel, target: User, *, reason: str) -> None:
     """Force out every currently-connected session belonging to
-    `target` in `channel` — used by both `/kick` and `/ban` (a ban
-    that doesn't remove an already-present target would be
-    meaningless). A target with no live session in this channel is not
-    an error; there's simply nothing to do."""
+    `target` in `channel` — used by `/kick`, `/ban` (a ban that doesn't
+    remove an already-present target would be meaningless), and
+    `/revokeaccess` on a `members_only` channel (GitHub issue #28). A
+    target with no live session in this channel is not an error;
+    there's simply nothing to do.
+
+    `priority=True` (GitHub issue #31, reopened): `_KickNotice` is a
+    mandatory state transition, not ordinary chat traffic — a target
+    with a full, stalled queue must still receive it, evicting whatever
+    ordinary message would otherwise have occupied that freed slot,
+    rather than the removal itself silently being the thing that gets
+    dropped on overflow.
+    """
     for participant_id in hub.participants_for_username(channel.name, target.username):
-        await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason))
+        await hub.send_to(channel.name, participant_id, _KickNotice(reason=reason), priority=True)
 
 
 async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
@@ -1282,11 +1310,21 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     `create_invitation` itself is the one place that authorization
     decision is made (`netbbs.chat.membership`), not duplicated here.
 
-    Notifies the invitee through Track 5e's mailbox/live-push mechanism
-    directly (`_deliver_private_message`) — no second delivery mechanism
-    invented for this, and it already works for a currently-offline
-    invitee (mailbox delivery doesn't require the recipient to be online
-    right now, only `/msg`'s own send-time check does).
+    The durable `channel_invitations` row `create_invitation` writes is
+    the actual notification mechanism now (GitHub issue #42) —
+    discoverable by the invitee at their own next login/main-menu visit
+    (`netbbs.net.login_flow._announce_pending_invitations`/
+    `_show_pending_invitations`) regardless of whether they're online
+    right now. Live delivery through Track 5e's mailbox/push mechanism
+    (`_deliver_private_message`) remains a *convenience* on top of that
+    for a currently-online invitee, gated on `ctx.presence.is_online`
+    first -- the same check `_handle_msg` already makes before ever
+    attempting delivery. Calling `_deliver_private_message`
+    unconditionally, the way this used to, was the actual bug: that
+    mailbox is session-addressed and ephemeral (see its own docstring)
+    and silently reaches nobody for an offline invitee, yet it always
+    printed "(sent to X)" regardless -- misleading the inviter into
+    believing a notification went out when none did.
     """
     target_name = args.strip()
     if not target_name:
@@ -1305,9 +1343,10 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
         )
         return
 
-    await _deliver_private_message(
-        ctx, target, f"You've been invited to #{sanitize_text(ctx.channel.name)}. Use /join to accept."
-    )
+    if ctx.presence.is_online(target.username):
+        await _deliver_private_message(
+            ctx, target, f"You've been invited to #{sanitize_text(ctx.channel.name)}. Use /join to accept."
+        )
     await ctx.session.write_line(
         colored(f"Invited {sanitize_text(target.username)}.", fg_color=MUTED_COLOR)
     )
@@ -1755,6 +1794,22 @@ async def _chat_loop(
         while True:
             completer = _build_completer(db, presence, channel, user)
             line = (await session.read_line(history=history, completer=completer)).strip()
+
+            if not account_still_active(db, user):
+                # GitHub issue #29 (reopened): the same cross-process
+                # revalidation netbbs.net.login_flow._main_menu already
+                # does at its own boundary -- a session that stays in
+                # chat (or any other long-running submenu) never
+                # returns to that menu to pick up a disable/delete made
+                # through a separate `python -m netbbs.admin`
+                # invocation, so this loop needs the identical check at
+                # its own equivalent boundary: every attempted message
+                # or command, before any of it is actually processed.
+                await session.write_line(
+                    colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+                )
+                return _Quit()
+
             if not line:
                 continue
             if line.startswith("/"):

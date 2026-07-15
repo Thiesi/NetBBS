@@ -242,3 +242,115 @@ def test_send_to_a_full_queue_overflows_instead_of_blocking():
     queue, delivered = asyncio.run(scenario())
     assert delivered is True
     assert queue.qsize() <= 1
+
+
+# -- GitHub issue #31 (reopened): priority delivery for control events -----
+
+
+def test_send_to_a_full_queue_without_priority_loses_the_new_event():
+    """Documents the existing, still-correct policy for *ordinary*
+    traffic: on overflow, the incoming event itself is what's dropped
+    -- the freed slot gets a QueueOverflowNotice instead, not the new
+    message. Losing ordinary chat text is an accepted, explicit
+    tradeoff; the point of this test is to pin that this is still true
+    only for non-priority delivery, now that priority delivery exists
+    and behaves differently (see the next tests)."""
+
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        queue = hub.join("lobby", "alice")
+        await hub.broadcast("lobby", "first")  # fills the queue
+        await hub.send_to("lobby", "alice", "second")
+        return queue
+
+    queue = asyncio.run(scenario())
+    remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert "second" not in remaining
+    assert any(isinstance(item, QueueOverflowNotice) for item in remaining)
+
+
+def test_send_to_a_full_queue_with_priority_still_delivers_the_event():
+    """The core fix: a mandatory control event (kick/ban/access
+    revocation) must occupy the freed slot itself on overflow, not a
+    QueueOverflowNotice -- losing the event would mean the state
+    transition it represents may never reach the target's loop."""
+
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        pid = ParticipantId(username="alice", session_key=1)
+        queue = hub.join("lobby", pid)
+        await hub.broadcast("lobby", "first")  # fills the queue
+        delivered = await hub.send_to("lobby", pid, "URGENT", priority=True)
+        return queue, delivered
+
+    queue, delivered = asyncio.run(scenario())
+    assert delivered is True
+    remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert "URGENT" in remaining
+    assert not any(isinstance(item, QueueOverflowNotice) for item in remaining)
+
+
+def test_priority_delivery_to_one_participant_does_not_affect_another():
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        target = ParticipantId(username="alice", session_key=1)
+        bystander = ParticipantId(username="bob", session_key=2)
+        target_queue = hub.join("lobby", target)
+        bystander_queue = hub.join("lobby", bystander)
+        await hub.broadcast("lobby", "first")  # fills both queues
+
+        await hub.send_to("lobby", target, "URGENT", priority=True)
+
+        return target_queue, bystander_queue
+
+    target_queue, bystander_queue = asyncio.run(scenario())
+    remaining_target = [target_queue.get_nowait() for _ in range(target_queue.qsize())]
+    remaining_bystander = [bystander_queue.get_nowait() for _ in range(bystander_queue.qsize())]
+    assert "URGENT" in remaining_target
+    assert remaining_bystander == ["first"]  # untouched by the targeted priority delivery
+
+
+def test_repeated_priority_events_never_exceed_the_configured_capacity():
+    async def scenario():
+        hub = ChatHub(queue_maxsize=2)
+        pid = ParticipantId(username="alice", session_key=1)
+        queue = hub.join("lobby", pid)
+        for i in range(10):
+            await hub.send_to("lobby", pid, f"urgent {i}", priority=True)
+        return queue
+
+    queue = asyncio.run(scenario())
+    assert queue.qsize() <= 2
+    # The most recent priority event always makes it in -- overflow
+    # only ever evicts *older* queued content, never the incoming one.
+    remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert "urgent 9" in remaining
+
+
+def test_kick_notice_delivery_uses_priority_and_survives_a_full_queue():
+    """Integration-shaped check that _kick_live_sessions (used by
+    /kick, /ban, and /revokeaccess on a members_only channel) actually
+    passes priority=True through to ChatHub, not just that ChatHub
+    supports the parameter in isolation."""
+    from netbbs.net.chat_flow import _KickNotice, _kick_live_sessions
+    from netbbs.auth.users import User
+
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        pid = ParticipantId(username="alice", session_key=1)
+        queue = hub.join("lobby", pid)
+        await hub.broadcast("lobby", "first")  # fills the queue
+
+        class _Channel:
+            name = "lobby"
+
+        target = User(
+            id=1, username="alice", user_level=10, fingerprint=None,
+            created_at="2026-01-01T00:00:00+00:00", last_login_at=None,
+        )
+        await _kick_live_sessions(hub, _Channel(), target, reason="kicked")
+        return queue
+
+    queue = asyncio.run(scenario())
+    remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert any(isinstance(item, _KickNotice) for item in remaining)

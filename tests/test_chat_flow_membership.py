@@ -18,7 +18,7 @@ from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
-from netbbs.chat.membership import add_member, has_pending_invitation, is_member
+from netbbs.chat.membership import MembershipError, add_member, has_pending_invitation, is_member
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.moderation.log import list_actions_for_object
@@ -117,7 +117,45 @@ def test_invite_unknown_user_shows_friendly_message(db, hub, presence, mailbox, 
     assert "No such user" in _written(session)
 
 
+# -- GitHub issue #42: offline invitees are no longer silently unnotified --
+
+
+def test_invite_to_an_offline_user_does_not_claim_a_live_notification_was_sent(
+    db, hub, presence, mailbox, alice, bob, channel
+):
+    """bob has no active session at all -- /invite must still create
+    the durable invitation (the actual, now-authoritative notification
+    mechanism), but must not tell alice "(sent to bob)" when nothing
+    was actually delivered live. Before this fix, _deliver_private_
+    message was called unconditionally and always printed that,
+    regardless of whether bob had any reachable session."""
+    _grant_manage_members(db, alice, channel)
+    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
+    assert "Invited bob." in _written(session)
+    assert "sent to" not in _written(session)
+    assert has_pending_invitation(db, channel, bob) is True
+
+
+def test_invite_to_an_online_user_still_reports_a_live_notification(
+    db, hub, presence, mailbox, alice, bob, channel
+):
+    _grant_manage_members(db, alice, channel)
+    presence.enter("bob")
+    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
+    assert "Invited bob." in _written(session)
+    assert "sent to bob" in _written(session)
+
+
 def test_invite_notifies_the_invitee_via_mailbox(db, hub, presence, mailbox, alice, bob, channel):
+    """bob has an active session elsewhere (not this channel) -- the
+    exact scenario the mailbox-plus-next-prompt mechanism exists for.
+    `presence.enter` mirrors what a real login
+    (`netbbs.net.login_flow.run_authenticated_session`) always does
+    alongside registering the session -- GitHub issue #42's fix gates
+    live delivery on `presence.is_online`, the same check `/msg`
+    already used, so this needs to reflect a genuinely-online bob, not
+    just a session-registry entry with no matching presence state (a
+    combination that can't happen via any real login path)."""
     _grant_manage_members(db, alice, channel)
     registry = ActiveSessionRegistry()
     bob_session = FakeSession()
@@ -125,6 +163,7 @@ def test_invite_notifies_the_invitee_via_mailbox(db, hub, presence, mailbox, ali
     async def scenario():
         registry.enter(bob_session)  # requires a running event loop
         registry.mark_authenticated(bob_session, "bob")
+        presence.enter("bob")
         return await _run(
             db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"], session_registry=registry
         )
@@ -282,6 +321,54 @@ def test_joining_via_invitation_marks_it_accepted(db, hub, presence, mailbox, al
     asyncio.run(_run(db, hub, presence, mailbox, other, bob, [f"/join {channel.name}"]))
     # No longer pending -- it was consumed, not left dangling.
     assert has_pending_invitation(db, channel, bob) is False
+
+
+def test_join_shows_a_friendly_message_when_the_invitation_stopped_being_valid(
+    db, hub, presence, mailbox, alice, bob, channel, monkeypatch
+):
+    """GitHub issue #28 (reopened): /join used to call accept_invitation()
+    purely as a side effect after its own separate has_pending_invitation()
+    check, ignoring the result -- so an invitation that stopped being
+    valid between the two checks (revoked, expired, or already consumed)
+    still let the join through anyway. accept_invitation() is now the
+    authoritative check; simulated here via its plain "nothing to
+    accept" outcome, a False return."""
+    _grant_manage_members(db, alice, channel)
+    asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
+
+    monkeypatch.setattr(chat_flow, "accept_invitation", lambda *a, **kw: False)
+
+    other = create_channel(db, "offtopic", creator=alice)
+    session, action = asyncio.run(
+        _run(db, hub, presence, mailbox, other, bob, [f"/join {channel.name}", "/quit"])
+    )
+    assert "no longer valid" in _written(session)
+    assert not isinstance(action, chat_flow._SwitchTo)
+
+
+def test_join_shows_a_friendly_message_when_accept_invitation_raises(
+    db, hub, presence, mailbox, alice, bob, channel, monkeypatch
+):
+    """The narrower race variant: accept_invitation() can also report
+    "nothing to accept" by raising MembershipError instead of returning
+    False (its own defensive rowcount check finding the invitation row
+    already changed underneath it) -- /join must treat that identically
+    to a False return, not let it escape as an unhandled exception and
+    crash the session."""
+    _grant_manage_members(db, alice, channel)
+    asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
+
+    def _raise(*args, **kwargs):
+        raise MembershipError("invitation was no longer pending")
+
+    monkeypatch.setattr(chat_flow, "accept_invitation", _raise)
+
+    other = create_channel(db, "offtopic", creator=alice)
+    session, action = asyncio.run(
+        _run(db, hub, presence, mailbox, other, bob, [f"/join {channel.name}", "/quit"])
+    )
+    assert "no longer valid" in _written(session)
+    assert not isinstance(action, chat_flow._SwitchTo)
 
 
 def test_open_channel_join_is_unaffected_by_members_only_logic(db, hub, presence, mailbox, alice, bob, channel):

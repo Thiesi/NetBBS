@@ -8,6 +8,8 @@ real command wiring covered in tests/test_chat_flow_membership.py.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from netbbs.auth.users import create_user
@@ -20,6 +22,7 @@ from netbbs.chat.membership import (
     has_pending_invitation,
     is_member,
     list_members,
+    list_pending_invitations_for_user,
     remove_member,
     revoke_invitation,
 )
@@ -227,6 +230,128 @@ def test_accepting_with_no_pending_invitation_does_not_raise(db, bob, channel):
     accept_invitation(db, channel, bob)  # must not raise
 
 
+# -- GitHub issue #28 (reopened): return value + atomicity -----------------
+
+
+def test_accept_invitation_returns_true_on_success(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    assert accept_invitation(db, channel, bob) is True
+
+
+def test_accept_invitation_returns_false_when_nothing_to_accept(db, bob, channel):
+    assert accept_invitation(db, channel, bob) is False
+
+
+class _ProxyConnection:
+    """Wraps a real sqlite3.Connection, forwarding everything except
+    `execute()`, which runs `on_execute(sql)` first -- lets a test
+    intercept one specific statement inside accept_invitation()'s own
+    SAVEPOINT scope without needing to modify accept_invitation itself.
+    Needed because sqlite3.Connection instances refuse arbitrary
+    attribute assignment (`execute` is read-only on the real object),
+    so the swap happens at the netbbs.storage.database.Database level
+    (`db.connection`), a plain, freely reassignable attribute."""
+
+    def __init__(self, real, on_execute):
+        self._real = real
+        self._on_execute = on_execute
+
+    def execute(self, sql, *args, **kwargs):
+        self._on_execute(sql)
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_accept_invitation_rolls_back_cleanly_if_the_membership_insert_fails(
+    db, alice, bob, channel, monkeypatch
+):
+    """Failure-injection regression test for the reopened issue: the
+    invitation-status UPDATE and the channel_members INSERT must be one
+    atomic unit on the shared connection. Before the SAVEPOINT fix, a
+    failure partway through (simulated here) would leave whichever
+    statement already ran sitting uncommitted on the connection --
+    silently vulnerable to being persisted by a later, unrelated
+    commit() elsewhere, rather than being cleanly discarded."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    real_connection = db.connection
+
+    def _on_execute(sql: str) -> None:
+        if sql.strip().upper().startswith("INSERT INTO CHANNEL_MEMBERS"):
+            raise sqlite3.OperationalError("simulated failure")
+
+    monkeypatch.setattr(db, "connection", _ProxyConnection(real_connection, _on_execute))
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            accept_invitation(db, channel, bob)
+    finally:
+        monkeypatch.undo()
+
+    # Nothing must have been persisted -- still pending, not silently
+    # left "accepted" with no membership row, and no membership row.
+    assert has_pending_invitation(db, channel, bob) is True
+    assert is_member(db, channel, bob) is False
+
+    # A later, completely unrelated write+commit on this same connection
+    # must not resurrect any part of the aborted attempt either -- the
+    # rollback-to-savepoint has to have fully discarded it already, not
+    # merely left it uncommitted and hoping nothing else commits first.
+    carol = create_user(db, "carol", password="hunter2", user_level=10)
+    create_invitation(db, channel, carol, invited_by=alice)
+    assert has_pending_invitation(db, channel, bob) is True
+    assert is_member(db, channel, bob) is False
+
+
+def test_accept_invitation_raises_if_the_row_stopped_being_pending_before_its_own_update(
+    db, alice, bob, channel, monkeypatch
+):
+    """Direct unit test of the defensive `WHERE status = 'pending'` +
+    `rowcount != 1` check on accept_invitation()'s own UPDATE: whatever
+    the cause, if the invitation row is no longer 'pending' by the time
+    this call reaches its own UPDATE (its earlier SELECT notwithstanding),
+    it must raise rather than report success. Simulated deterministically
+    here by flipping the row's status directly, on the same connection,
+    in the narrow window between accept_invitation()'s SELECT and its own
+    UPDATE -- accept_invitation() itself has no `await` points, so on
+    this project's single shared, single-threaded event-loop connection
+    there is no way for another *in-process* coroutine to genuinely
+    interleave here; this test exists to pin the guard's own behavior
+    (defense in depth against a changed assumption elsewhere), not to
+    model a specific real-world trigger for it."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    real_connection = db.connection
+    injected = {"done": False}
+
+    def _on_execute(sql: str) -> None:
+        if not injected["done"] and sql.strip().upper().startswith("INSERT INTO CHANNEL_MEMBERS"):
+            injected["done"] = True
+            real_connection.execute(
+                "UPDATE channel_invitations SET status = 'revoked' "
+                "WHERE channel_id = ? AND invited_user_id = ?",
+                (channel.id, bob.id),
+            )
+
+    monkeypatch.setattr(db, "connection", _ProxyConnection(real_connection, _on_execute))
+    try:
+        with pytest.raises(MembershipError):
+            accept_invitation(db, channel, bob)
+    finally:
+        monkeypatch.undo()
+
+    # Rolled back cleanly: no membership row, and the injected 'revoked'
+    # status itself was inside accept_invitation()'s own SAVEPOINT, so
+    # its rollback undid that too -- back to 'pending', as if this call
+    # had never run at all.
+    assert is_member(db, channel, bob) is False
+    assert has_pending_invitation(db, channel, bob) is True
+
+
 # -- GitHub issue #28: accepting an invitation grants real membership ------
 
 
@@ -328,3 +453,83 @@ def test_expired_invitation_cannot_be_accepted(db, alice, bob, channel):
     accept_invitation(db, channel, bob)
 
     assert is_member(db, channel, bob) is False
+
+
+# -- GitHub issue #42: durable, account-wide pending-invitation view ------
+
+
+def test_list_pending_invitations_for_user_is_empty_by_default(db, bob):
+    assert list_pending_invitations_for_user(db, bob) == []
+
+
+def test_list_pending_invitations_for_user_includes_channel_and_inviter(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    pending = list_pending_invitations_for_user(db, bob)
+
+    assert len(pending) == 1
+    assert pending[0].channel_id == channel.id
+    assert pending[0].channel_name == channel.name
+    assert pending[0].invited_by_username == "alice"
+
+
+def test_list_pending_invitations_for_user_spans_every_channel(db, alice, bob, sysop, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    other = create_channel(db, "offtopic", creator=sysop, members_only=True)
+    _grant_manage_members(db, sysop, other)
+    create_invitation(db, other, bob, invited_by=sysop)
+
+    pending = list_pending_invitations_for_user(db, bob)
+
+    assert {p.channel_name for p in pending} == {"general", "offtopic"}
+
+
+def test_list_pending_invitations_for_user_only_returns_this_users_own(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    carol = create_user(db, "carol", password="hunter2", user_level=10)
+    create_invitation(db, channel, carol, invited_by=alice)
+
+    assert list_pending_invitations_for_user(db, bob) == []
+
+
+def test_list_pending_invitations_for_user_excludes_accepted(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    accept_invitation(db, channel, bob)
+
+    assert list_pending_invitations_for_user(db, bob) == []
+
+
+def test_list_pending_invitations_for_user_excludes_revoked(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    revoke_invitation(db, channel, bob, revoked_by=alice)
+
+    assert list_pending_invitations_for_user(db, bob) == []
+
+
+def test_list_pending_invitations_for_user_excludes_expired(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    db.connection.execute(
+        "UPDATE channel_invitations SET expires_at = '2000-01-01T00:00:00.000000Z' "
+        "WHERE channel_id = ? AND invited_user_id = ?",
+        (channel.id, bob.id),
+    )
+    db.connection.commit()
+
+    assert list_pending_invitations_for_user(db, bob) == []
+
+
+def test_list_pending_invitations_for_user_survives_every_session_disconnecting(db, alice, bob, channel):
+    """The actual point of GitHub issue #42: unlike the ephemeral,
+    session-addressed /msg mailbox, this reflects the durable
+    channel_invitations row directly -- there is no session state here
+    at all to lose, so "the invitee was never online, or disconnected"
+    changes nothing about what this returns."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    assert len(list_pending_invitations_for_user(db, bob)) == 1
