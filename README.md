@@ -11,15 +11,31 @@ other POSIX systems too.
 
 ## Status
 
-**Phase 1 (Foundation) is complete** — v1.0.0. A secure, single-node BBS:
-keypair + password auth, local message boards (paginated, content-addressed
-IDs), real-time chat with scrollback, file areas with real Zmodem transfer,
-and three connectivity methods (Telnet, SSH, web/xterm.js), all hardened
-through a post-launch security audit (secure-by-default transports,
-cross-connection login throttling, terminal-rendering sanitization). See
-[`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md) for the full
-architecture, rationale, and phased roadmap — Phase 2 (local moderation,
-fullscreen editor, user directory) is next.
+**Phases 1 and 2 are complete.** A genuinely full-featured standalone
+single-node BBS — no NetBBS Link connectivity yet (that's Phase 3):
+
+- Keypair + password auth, three connectivity methods (Telnet, SSH,
+  web/xterm.js), all hardened through a post-launch security audit
+  (secure-by-default transports, cross-connection login throttling,
+  terminal-rendering sanitization, bounded queues/uploads/allocations).
+- Local message boards (paginated, content-addressed IDs, post editing)
+  and file areas with real Zmodem upload/download.
+- Real-time chat: channels with scrollback, private messages, `/nick`
+  display aliases, `/away`, invite-only/hidden channels, and a full
+  local moderation set (mute/ban/kick, moderated-board/area approval
+  queues, permission grants).
+- A user directory (vCard/finger-style lookup) and per-user
+  preferences.
+- A fullscreen WYSIWYG ANSI art editor (for welcome banners) and a
+  nano-keybound prose editor (for post bodies/bios), both reachable as
+  an opt-in per-user preference over any of the three transports.
+- SysOp admin tooling: user/board/area/channel management, node
+  management (who's online, disconnect a session, graceful shutdown),
+  and reference-aware garbage collection for uploaded file storage.
+
+See [`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md) for the
+full architecture, rationale, and phased roadmap — Phase 3 (Link
+connectivity & sync core) is next.
 
 This is a second attempt at this project. The first attempt got a long way
 (multi-user chat, file areas, message boards) but needed a significant
@@ -36,83 +52,104 @@ history and the lessons carried forward.
   libsodium (C) rather than pulling in a Rust toolchain, unlike
   `cryptography`'s recent pkgsrc versions.
 - SQLite (bundled with Python's standard library)
+- Optional, per transport — a node only needs to install what it
+  actually enables:
+  - `pip install -e ".[ssh]"` (`asyncssh`) for the SSH transport.
+    **SSH is enabled by default** (see "Running a node" below), so
+    most nodes will want this.
+  - `pip install -e ".[web]"` (`aiohttp`) for the web/xterm.js
+    transport.
+  - A node that only wants Telnet needs neither extra.
 
 ## Project layout
 
 ```
 netbbs/
-├── docs/                 Design documentation
+├── docs/                 Design documentation (see below)
+├── examples/             Sample assets a node can reuse directly, e.g.
+│                         two placeholder ANSI welcome banners in
+│                         different styles — see `examples/README.md`
 ├── src/netbbs/           Main package (modular, not monolithic — see
 │                         design doc §3 for why)
 │   ├── identity/         Keypair generation, storage, addressing (§5)
 │   ├── storage/          SQLite connection + schema migrations (§3)
-│   ├── auth/             Account creation, password + keypair login (§5)
+│   ├── auth/             Account creation, password + keypair login,
+│   │                     central username validation (§5)
 │   ├── permissions/      User-level gating plumbing (§13)
-│   ├── net/              Telnet transport (character-mode input: server-
-│   │                     driven echo, Backspace/Delete, NAWS window-size
-│   │                     negotiation) + Session abstraction, login flow
-│   │                     (SSH/web to follow on the same Session
-│   │                     abstraction). `picker.py`: shared paginated
-│   │                     list selector (2-digit select, search, goto by
-│   │                     stable index) used by both board and channel
-│   │                     selection, and (once built) file areas
-│   ├── boards/           Local message boards + posts, content-addressed
-│   │                     IDs from day one (§7) so Linked-board support
-│   │                     later needs no ID-scheme migration. Two-level
-│   │                     categories, pinning, and configurable sort
-│   │                     order (activity/alphabetical/volume) in
-│   │                     `categories.py`/`boards.py`
+│   ├── moderation/       Local moderator/permission grants, the
+│   │                     moderation action log, and the blocklist (§13)
+│   ├── boards/           Local message boards + posts: content-
+│   │                     addressed IDs (§7), post editing (edit = a new
+│   │                     linked revision, never an in-place mutation),
+│   │                     moderated-board approval, expiry/maintenance,
+│   │                     categories, pinning, configurable sort order
+│   ├── files/            Local file areas: content-addressed blob
+│   │                     storage, real Zmodem-compatible upload/
+│   │                     download, moderated-area approval, expiry,
+│   │                     and reference-aware garbage collection for
+│   │                     orphaned blobs
 │   ├── chat/             Local real-time chat: channels (content-
-│   │                     addressed IDs, same reasoning as boards) + an
-│   │                     in-memory per-node broadcast hub. Same
-│   │                     categories/pinning as boards; "activity" sort
-│   │                     is in-memory only (chat isn't persisted)
-│   ├── moderation/       Local blocklist (moderation stub, pre-dates the
-│   │                     full reputation system)
-│   ├── rendering/        ANSI rendering framework (§4/§15):
-│   │                     256-color/cursor helpers + text reflow to each
-│   │                     session's detected width. Transport-independent
-│   │                     character-mode input lives in netbbs.net.
-│   │                     char_input. A future screen-buffer/diff
-│   │                     abstraction ("TUI") is Phase 2 scope, alongside
-│   │                     the fullscreen editor that needs it (round 26)
-│   ├── config.py         Node-wide key-value settings (currently just
-│   │                     display timestamp format)
+│   │                     addressed IDs), an in-memory per-node
+│   │                     broadcast hub, membership/invitations for
+│   │                     invite-only channels, mute/ban/kick, presence,
+│   │                     scrollback, per-session private-message
+│   │                     delivery, `/nick` aliases
+│   ├── rendering/        ANSI rendering framework (§4): 256-color/
+│   │                     cursor helpers, text reflow, untrusted-input
+│   │                     sanitization, and the screen-buffer/diff
+│   │                     ("TUI") abstraction the fullscreen ANSI art
+│   │                     editor and prose editor are both built on
+│   │                     (`screen_buffer.py`, `prose_buffer.py`)
+│   ├── net/              Telnet, SSH, and web/xterm.js transports,
+│   │                     all implementing one transport-agnostic
+│   │                     `Session` abstraction (`session.py`) so
+│   │                     everything above this layer is transport-
+│   │                     independent. Login/main-menu flow
+│   │                     (`login_flow.py`), board/chat/file-area
+│   │                     screens (`*_flow.py`), the SysOp admin menu
+│   │                     (`admin_flow.py`), the fullscreen editors
+│   │                     (`ansi_editor.py`/`prose_editor.py`),
+│   │                     `picker.py` (shared paginated list selector),
+│   │                     cross-connection login throttling
+│   │                     (`throttle.py`), node/session management and
+│   │                     graceful shutdown (`session_registry.py`/
+│   │                     `shutdown.py`/`maintenance.py`), and the real
+│   │                     Zmodem protocol implementation (`zmodem.py`)
+│   ├── admin/            Standalone `python -m netbbs.admin` CLI for
+│   │                     account/node maintenance without a running,
+│   │                     network-facing node
+│   ├── web/              Vendored xterm.js static assets served by
+│   │                     `netbbs.net.web`
+│   ├── directory.py      User directory / vCard-style finger lookups
+│   ├── user_preferences.py  Generic per-user key-value preference store
+│   │                     (fullscreen editor opt-in, chat timestamps,
+│   │                     etc. are all built on this)
+│   ├── config.py         Node-wide key-value settings (display
+│   │                     timestamp format, upload size limits, etc.)
 │   ├── __main__.py       Configuration-driven node entry point: builds a
 │   │                     NodeConfig (net/nodeconfig.py), starts every
 │   │                     enabled listener, and shuts down cleanly on
-│   │                     SIGTERM/SIGINT (round 28)
+│   │                     SIGTERM/SIGINT
 │   └── timeutil.py       Storage-format timestamps (utc_now_iso) and
 │                         user-facing display formatting, kept separate
-├── scripts/
-│   ├── create_test_user.py    Dev utility: create an account to test the
-│   │                          login flow with (no self-registration UI
-│   │                          exists yet)
-│   ├── create_test_board.py   Dev utility: create a board (+ seed post)
-│   │                          to test board browsing with. Optional
-│   │                          category name and pinned flag
-│   ├── create_test_channel.py Dev utility: create a chat channel to
-│   │                          test real-time chat with. Optional
-│   │                          category name and pinned flag
-│   ├── create_test_category.py Dev utility: create a board or channel
-│   │                          category, optionally as a sub-category
-│   ├── block_user.py          Dev/admin utility: block a user from
-│   │                          logging in
-│   ├── unblock_user.py        Dev/admin utility: remove a user from the
-│   │                          blocklist
-│   └── set_node_config.py     Dev/admin utility: set a node-wide config
-│                               value, e.g. the display timestamp format
+├── scripts/               Dev utilities for exercising features without
+│                         a self-registration UI or full admin session —
+│                         create/block/unblock test users, boards,
+│                         channels, categories, file areas/files, and
+│                         set node config values directly
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
 ├── pyproject.toml
 └── README.md
 ```
 
-As phases progress, expect new top-level modules under `src/netbbs/`
-roughly mirroring the design doc's sections: `transport/`, `link/`
-(DAG/gossip/sync), `boards/`, `areas/` (files), `chat/`, etc. Each stays a
-separate, testable module — see design doc §3 for the reasoning against a
-single monolithic script.
+`python -m netbbs.admin --db path/to/netbbs.db` runs the same SysOp
+admin menu (`netbbs.net.admin_flow.admin_menu`) directly against a
+node's database from the local controlling terminal, with no network
+listener involved — useful for account/node maintenance when the node
+isn't running, or you'd rather not open a real Telnet/SSH/web
+connection just to fix a stuck account. `src/netbbs/net/local_cli.py`/
+`local_terminal.py` are the `Session` implementation this is built on.
 
 ## Running a node
 
@@ -187,43 +224,53 @@ transport enabled at all, an unreadable/malformed file) is reported as a
 clear one-line error and a non-zero exit, not a raw traceback or a node
 silently listening for nobody.
 
-## Manually testing the Telnet connection
+## Manually testing a node
 
-Telnet is off by default (see above) — enable it explicitly for local
-testing:
+Telnet is off by default (see "Secure by default" above) — enable it
+explicitly for the simplest local testing loop:
 
 ```sh
 python scripts/create_test_user.py netbbs.db thiesi hunter2 100
 python scripts/create_test_board.py netbbs.db general "General discussion"
 python scripts/create_test_channel.py netbbs.db lobby "General chat"
+python scripts/create_test_file_area.py netbbs.db downloads "Downloads"
 python scripts/set_node_config.py netbbs.db display_timezone Europe/Berlin
 python -m netbbs --db netbbs.db --enable-telnet
 ```
 
-For real-time chat specifically, open two separate `telnet localhost
-2323` sessions (two terminals, or one real connection plus you at the
-console testing solo won't show the broadcast effect) and join the same
+Then, from another terminal: `telnet localhost 2323`. Port 2323, not
+23 — binding 23 needs root. See `src/netbbs/net/nodeconfig.py` for why,
+and for what a real deployment would need instead.
+
+**SSH** is enabled by default (install the `ssh` extra first — see
+Requirements above): `python -m netbbs --db netbbs.db` alone is enough
+to bring up an SSH listener on `127.0.0.1:2222`. Connect with any
+standard client, e.g. `ssh -p 2222 thiesi@127.0.0.1` (password) or
+register a keypair account for public-key auth — either way, a
+successfully SSH-authenticated connection goes straight to the main
+menu, no second NetBBS-level password prompt.
+
+For real-time chat specifically, open two separate sessions (two
+terminals/clients, or one real connection plus you at the console
+testing solo won't show the broadcast effect) and join the same
 channel from both — messages sent from one should appear in the other
 immediately.
 
 To see terminal-width-aware reflow in action, resize your terminal
-narrower (e.g. ~40 columns) *before* connecting — most Telnet clients
-report their window size via NAWS on connect, and post bodies should
-wrap to match. A client that doesn't support NAWS falls back to an
-80-column assumption.
+narrower (e.g. ~40 columns) *before* connecting — most clients report
+their window size on connect (NAWS over Telnet, the PTY channel over
+SSH), and post bodies should wrap to match. A client that doesn't
+report a size falls back to an 80-column assumption.
 
-**Line editing:** the server now handles all echo and Backspace/Delete
-itself (character mode), not the client — this fixed the `^M`-instead-
-of-newline and non-working-Backspace issues seen with client-side line
-editing. Known limitation: Backspace only removes from the *end* of what
-you've typed — there's no cursor movement (arrow keys, Home/End), so
-fixing a mid-word typo means backspacing past everything after it and
-retyping, not editing in place. Full cursor-addressable editing is out of
-scope for this pass; see design doc phasing notes.
+**Line editing:** the server handles echo and editing itself
+(character mode), not the client. Full cursor-addressable editing is
+implemented — Left/Right/Home/End move within the line, Backspace/
+Delete work at the cursor position (not just at the end), and Up/Down
+recall previous lines per connection.
 
-The main menu now dispatches immediately on a single keystroke — no
-Enter needed for `B`/`C`/`Q`. Real behavior change: the old "b" or
-"boards" (full word) alternative no longer works, only the single letter.
+The main menu dispatches immediately on a single keystroke — no Enter
+needed for `M`/`C`/`F`/`D`/`P`/`A`/`L`. Only the single letter works,
+not a full word.
 
 Your own chat messages now show in a distinct color (magenta) from
 everyone else's (gold), so they stand out in the conversation.
@@ -263,15 +310,24 @@ Then try logging in as `thiesi` — you should see "Your access to this
 system has been revoked." instead of reaching the main menu. Reverse with
 `python scripts/unblock_user.py netbbs.db thiesi`.
 
-Then, from another terminal:
+**The SysOp admin menu** (`[A]dmin` from the main menu, for any account
+at or above the SysOp level) covers user/board/area/channel/category
+management, moderator permission grants, node management (who's
+online, disconnect a session, trigger a graceful shutdown), and
+file-storage garbage collection. `python -m netbbs.admin --db
+netbbs.db` reaches the same menu without a network connection at all.
 
-```sh
-telnet localhost 2323
-```
+**The fullscreen editors** are opt-in per account: from `[P]rofile`,
+toggle "Fullscreen editor" on, then composing a board post or editing
+your bio opens the nano-keybound prose editor (Ctrl+O save, Ctrl+X
+quit) instead of the plain line prompt. A welcome-banner WYSIWYG ANSI
+art editor is reachable from `[A]dmin` → `[W]elcome banner` → `[X]
+edit`; see `examples/README.md` for two ready-made placeholder banners
+to drop in and try it against instead of starting from a blank canvas.
 
-Port 2323, not 23 — binding 23 needs root. See `src/netbbs/net/
-nodeconfig.py` for why, and for what a real deployment would need
-instead.
+**File transfer** uses real Zmodem — `/upload`/`/download` inside a
+file area work with any Zmodem-capable terminal (SyncTERM, `lrzsz`'s
+`rz`/`sz`, etc.), not just NetBBS-aware clients.
 
 ## Development
 
