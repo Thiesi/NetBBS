@@ -211,3 +211,36 @@ class ActiveSessionRegistry:
         entry.task.cancel()
         await asyncio.gather(entry.task, return_exceptions=True)
         return True
+
+    def cancel_one(self, session: Session) -> bool:
+        """
+        Like `disconnect_one`, but only *schedules* the cancellation —
+        does not await the target task's unwind (GitHub issue #29's
+        background per-session revocation watcher,
+        `netbbs.net.login_flow._watch_for_account_revocation`).
+
+        That watcher runs as its own task for the lifetime of the
+        session it's watching, and that session's own cleanup cancels
+        the watcher task in turn once it finishes (the same "cancel and
+        await the background task" pattern editor autosave tasks
+        already use, GitHub issue #43). If the watcher called
+        `disconnect_one` — which awaits the *target* task's full
+        unwind before returning — from inside that same watcher task,
+        the target session's own cleanup would then try to cancel and
+        await *this* watcher task while the watcher task is still
+        blocked awaiting that very same target task: a mutual-wait
+        deadlock, not the already-safe "different task" case
+        `disconnect_one`'s own docstring describes. `cancel_one` sidesteps
+        that entirely by never waiting on anything — it hands off the
+        actual unwind to the cancellation machinery already proven
+        correct elsewhere (`disconnect_all`/`disconnect_one`) without
+        this caller needing to block on its completion at all.
+
+        Returns `False` without doing anything if `session` isn't (or
+        is no longer) registered, `True` otherwise.
+        """
+        entry = self._sessions.get(session)
+        if entry is None:
+            return False
+        entry.task.cancel()
+        return True

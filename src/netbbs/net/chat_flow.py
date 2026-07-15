@@ -108,9 +108,26 @@ async def browse_channels(
     handle_session` — passed straight through to every `_chat_loop`
     call here so command recall persists across a `/join` channel
     switch rather than resetting.
+
+    Every `channel` this loop is about to enter `_chat_loop` with is
+    re-checked through `_authorize_channel_entry` first (GitHub issue
+    #28, reopened a third time) -- covers all three ways `channel` can
+    change here (the initial pick, a picker repick via `_ToPicker`, and
+    a `/join`-driven `_SwitchTo`) with one check at the top of the loop,
+    rather than needing it duplicated at each. Redundant, not wrong,
+    for the `_SwitchTo` case specifically: `_handle_join` already ran
+    the identical check (and already consumed any invitation) before
+    ever returning that action, so this just re-confirms "yes, still a
+    member" for free.
     """
     channel = await _pick_channel(session, db, hub, user, category_id=None)
     while channel is not None:
+        allowed, denial_message = _authorize_channel_entry(db, channel, user)
+        if not allowed:
+            await session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
+            channel = await _pick_channel(session, db, hub, user, category_id=None)
+            continue
+
         action = await _chat_loop(
             session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
         )
@@ -140,8 +157,10 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     A `members_only`-but-not-`hidden` channel still appears here —
     "hidden + open is obscurity, not access control" (round 33 point
     9): only `hidden` controls listing visibility itself; `members_only`
-    alone just means you can see it exists but can't `/join` it without
-    access (enforced separately, in `_handle_join`).
+    alone just means you can see it exists but can't actually enter it
+    without access, enforced separately by `_authorize_channel_entry`
+    (GitHub issue #28, reopened a third time -- both `/join` and
+    picking it directly from this list go through that one check now).
     """
     visible = []
     for channel in list_channels(db):
@@ -229,6 +248,59 @@ async def _pick_channel(
     if isinstance(selected, Category):
         return await _pick_channel(session, db, hub, user, category_id=selected.id)
     return selected
+
+
+def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tuple[bool, str | None]:
+    """
+    The one authoritative check for whether `user` may actually enter
+    `channel` right now, and the single place that performs it (GitHub
+    issue #28, reopened a third time).
+
+    Before this, membership/invitation enforcement existed *only*
+    inside `_handle_join` (`/join`'s command handler) -- but `/join`
+    was never the only way into `_chat_loop`. `browse_channels`' own
+    picker returns any *visible* channel (`_visible_channels_for`
+    deliberately still lists a non-hidden `members_only` channel, and a
+    `hidden` one the user merely holds a pending invitation for) and
+    handed it straight to `_chat_loop`, which only checks bans. Picking
+    such a channel from the browse list -- not typing `/join` -- used
+    to grant entry with no membership/invitation check at all, and a
+    hidden channel's invitation was never actually consumed that way
+    either, leaving it perpetually pending while the invitee kept
+    re-entering through the picker.
+
+    Returns `(True, None)` if entry is allowed (open channel, existing
+    member, or a valid pending invitation -- atomically accepted here,
+    creating real persistent membership via `accept_invitation`, exactly
+    as `/join` already did), or `(False, message)` otherwise. `message`
+    distinguishes "never had any claim on this channel" from "had a
+    pending invitation, but it stopped being valid" (expired, revoked,
+    or lost a race to a concurrent revoke -- see `accept_invitation`'s
+    own docstring) purely for clearer feedback; both are the same
+    "not authorized" outcome as far as entry itself is concerned.
+
+    Deliberately synchronous -- every check here (`meets_level`,
+    `is_member`, `has_pending_invitation`, `accept_invitation`) already
+    is, and there's no `await` point for a race to open up between them
+    within a single call.
+    """
+    if not meets_level(user, channel.min_level):
+        return False, "You are not authorized to enter that channel."
+    if not channel.members_only:
+        return True, None
+    if is_member(db, channel, user):
+        return True, None
+
+    had_invitation = has_pending_invitation(db, channel, user)
+    try:
+        accepted = accept_invitation(db, channel, user)
+    except MembershipError:
+        accepted = False
+    if accepted:
+        return True, None
+    if had_invitation:
+        return False, "That invitation is no longer valid."
+    return False, "You are not authorized to enter that channel."
 
 
 def _channel_description(hub: ChatHub, channel: Channel) -> str:
@@ -417,6 +489,13 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     accepted, reusing this existing "look up, check authorization,
     switch" flow instead of inventing parallel command surface for the
     same action.
+
+    Authorization itself is `_authorize_channel_entry` (GitHub issue
+    #28, reopened a third time) -- the same check `browse_channels` now
+    runs before *any* path into `_chat_loop`, not duplicated here. The
+    "already in this channel" check runs first, ahead of it, purely so
+    that case gets its own clearer message rather than being folded
+    into a generic authorization failure.
     """
     channel_name = args.strip()
     if not channel_name:
@@ -431,46 +510,16 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         )
         return None
 
-    if not meets_level(ctx.user, channel.min_level):
-        await ctx.session.write_line(
-            colored("You are not authorized to join that channel.", fg_color=MUTED_COLOR)
-        )
-        return None
-
-    already_member = is_member(ctx.db, channel, ctx.user)
-    if channel.members_only and not already_member and not has_pending_invitation(ctx.db, channel, ctx.user):
-        await ctx.session.write_line(
-            colored("You are not authorized to join that channel.", fg_color=MUTED_COLOR)
-        )
-        return None
-
     if channel.id == ctx.channel.id:
         await ctx.session.write_line(
             colored(f"You are already in #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
         )
         return None
 
-    if channel.members_only and not already_member:
-        # GitHub issue #28 (reopened): accept_invitation() is now the
-        # authoritative check, not just a side effect run after the
-        # has_pending_invitation() lookup above -- a concurrent revoke
-        # or expiry landing between the two would otherwise still let
-        # this join through. It reports "nothing to accept" two ways:
-        # returning False for the common case (already handled/never
-        # existed), or raising MembershipError for the narrower race
-        # where its own SELECT saw a pending row that a concurrent
-        # revoke_invitation() then flipped before its UPDATE committed
-        # -- both are the same "not authorized after all" outcome here,
-        # not a bug to let escape as an unhandled exception.
-        try:
-            accepted = accept_invitation(ctx.db, channel, ctx.user)
-        except MembershipError:
-            accepted = False
-        if not accepted:
-            await ctx.session.write_line(
-                colored("That invitation is no longer valid.", fg_color=MUTED_COLOR)
-            )
-            return None
+    allowed, denial_message = _authorize_channel_entry(ctx.db, channel, ctx.user)
+    if not allowed:
+        await ctx.session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
+        return None
 
     return _SwitchTo(channel)
 

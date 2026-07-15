@@ -69,7 +69,7 @@ from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
-from netbbs.net.session import Session
+from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.throttle import LoginThrottle
@@ -89,6 +89,16 @@ from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
 _MAX_LOGIN_ATTEMPTS = 3
+
+# How often the background account-revocation watcher re-checks a live
+# session's account (GitHub issue #29, reopened a second time). A fixed
+# module constant, not node-configurable -- an internal responsiveness/
+# DB-query-overhead tradeoff, not a policy an operator needs control
+# over the way e.g. invitation expiry is. Short enough to feel prompt
+# for a real disable/delete, cheap enough that one extra SELECT per
+# live session per interval is a non-issue at this project's declared
+# scale (§14, dozens to low hundreds of concurrent sessions).
+_REVOCATION_CHECK_INTERVAL_SECONDS = 5.0
 
 
 class LoginOutcome(Enum):
@@ -260,6 +270,51 @@ async def _run_authenticated_session(
     await run_authenticated_session(session, db, hub, presence, mailbox, login_result, node_controls=node_controls)
 
 
+async def _watch_for_account_revocation(
+    session: Session, db: Database, user: User, session_registry: ActiveSessionRegistry
+) -> None:
+    """
+    Runs for the lifetime of one authenticated session (started in
+    `run_authenticated_session`, cancelled in its own `finally`
+    alongside `presence.leave`): periodically re-checks
+    `account_still_active()` and forcibly disconnects this session the
+    moment it comes back `False`, regardless of which screen the
+    session is currently blocked inside — including one genuinely idle,
+    waiting on input that never comes (GitHub issue #29, reopened a
+    second time).
+
+    The in-loop `account_still_active()` checks already in `_main_menu`
+    and `netbbs.net.chat_flow`'s send loop only ever fire on that
+    loop's *next* keystroke/message — a session sitting inside board
+    browsing, a file area, the profile screen, or (most significantly)
+    the admin menu tree could otherwise keep operating indefinitely
+    after a cross-process disable/delete, exactly as reported. This
+    watcher is the comprehensive backstop for every one of those loops
+    at once, present or future, without needing a copy of the same
+    check bolted onto each — not a replacement for the in-loop checks,
+    which still give an *actively* typing session zero-latency
+    revalidation on its very next input rather than waiting for the
+    next poll tick.
+
+    Calls `session_registry.cancel_one`, not `disconnect_one` — see
+    `cancel_one`'s own docstring for exactly why awaiting the fuller
+    `disconnect_one` from inside this watcher task would deadlock
+    against this same session's own cleanup trying to cancel *this*
+    watcher task in turn.
+    """
+    while True:
+        await asyncio.sleep(_REVOCATION_CHECK_INTERVAL_SECONDS)
+        if not account_still_active(db, user):
+            try:
+                await session.write_line(
+                    colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+                )
+            except SessionClosedError:
+                pass
+            session_registry.cancel_one(session)
+            return
+
+
 async def run_authenticated_session(
     session: Session,
     db: Database,
@@ -284,7 +339,13 @@ async def run_authenticated_session(
     `_main_menu`/`admin_menu` (design doc -- node management round);
     `None` is what a direct test call site (bypassing both entry
     points above) gets by default, which correctly hides the `[N]ode`
-    admin option rather than needing every such test updated.
+    admin option rather than needing every such test updated. The
+    background account-revocation watcher (GitHub issue #29, reopened a
+    second time) is gated on it the same way -- it needs
+    `node_controls.session_registry` to actually reach this session
+    from outside, and a caller bypassing `NodeControls` entirely gets
+    no watcher, matching every other node-wide-registry-dependent
+    feature's existing degrade-gracefully-in-tests behavior.
     """
     await session.write_line(
         f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
@@ -300,12 +361,29 @@ async def run_authenticated_session(
     history = InputHistory()
 
     presence.enter(user.username)
+    watcher_task: asyncio.Task | None = None
     if node_controls is not None:
         node_controls.session_registry.mark_authenticated(session, user.username)
+        watcher_task = asyncio.create_task(
+            _watch_for_account_revocation(session, db, user, node_controls.session_registry)
+        )
     try:
         await _main_menu(session, db, hub, presence, mailbox, history, user, node_controls=node_controls)
     finally:
         presence.leave(user.username)
+        if watcher_task is not None:
+            # Same cancel-then-await-swallowing-CancelledError shape
+            # editor autosave tasks already use (GitHub issue #43) --
+            # a no-op if the watcher itself is what triggered this
+            # unwind (it's already finished by the time control reaches
+            # here), and a clean, awaited cancellation otherwise (the
+            # session ended some other way while the watcher was still
+            # mid-sleep).
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
 
     await session.write_line("\r\nGoodbye!")
 

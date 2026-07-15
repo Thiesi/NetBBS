@@ -3049,3 +3049,128 @@ migration path, and phase placement. This entry exists so the
 direction is recorded and the reasoning doesn't need rediscovering —
 not as a green light to start building any of it.
 
+## Sign-off notes, round 73 (two architecture forks from a code-review follow-up: session revocation watcher, streaming Zmodem uploads)
+
+A code-review follow-up (see the round 73 worklog entry for the full
+fix narrative) surfaced two questions that were genuine forks, not
+contained bugfixes, and were put to Thiesi before implementation
+rather than picked unilaterally.
+
+**Decision 1 — account revocation: one background watcher per
+session, not a check at every loop boundary.**
+
+**What was decided:** cross-process account disable/delete
+revalidation (issue #29) is now enforced by a single background task
+per authenticated session (`netbbs.net.login_flow.
+_watch_for_account_revocation`), polling every 5 seconds and
+forcibly disconnecting the session the moment the account comes back
+inactive — regardless of which screen/loop the session is currently
+in, including one sitting fully idle. The two existing in-loop checks
+(main menu, chat's send loop) were kept alongside it, not replaced, as
+zero-latency defense-in-depth for an actively typing session.
+
+**Why:** the alternative — bolting an `account_still_active()` check
+onto every long-running loop (board browsing/posting, file areas, the
+profile screen, the whole admin menu tree) — was the smaller patch,
+but its coverage is only ever as complete as the list of loops someone
+remembered to touch, a list this exact bug had already grown past
+twice (the original fix covered the main menu; the first reopening
+added chat's send loop; the second reopening found four more). A
+background watcher's coverage is structural, not enumerable — it
+doesn't care what loop the session is in, or whether a future feature
+adds a new one. It also closes a case no in-loop check ever could: a
+session that's genuinely idle, producing no input for the check to
+fire on. Thiesi chose this over the smaller patch specifically for
+that "stop enumerating loops" property.
+
+**Alternatives considered:**
+- *Add the guard at every current loop boundary* — rejected as
+  described above: correct today, but a maintenance trap that already
+  bit this exact feature twice.
+- *Awaiting the existing `ActiveSessionRegistry.disconnect_one()`
+  directly from the watcher task* — this was the first implementation
+  attempt, and it deadlocks: `disconnect_one` cancels the target
+  session's task *and awaits its full unwind*; the target session's
+  own cleanup (in `run_authenticated_session`'s `finally`) then tries
+  to cancel and await the *watcher* task in turn, and the watcher task
+  is still blocked inside `disconnect_one`'s own await at that exact
+  moment — a mutual wait between the two tasks. `disconnect_one`'s own
+  docstring already flags the analogous *self*-cancellation hazard,
+  but this is a distinct, new *mutual* variant between two different
+  tasks that didn't previously exist. Fixed with a new lighter-weight
+  `ActiveSessionRegistry.cancel_one()` — schedules the cancellation
+  without awaiting the target's unwind — rather than either accepting
+  the deadlock or making the target session's own cleanup not wait for
+  the watcher (which would risk exactly the "Task was destroyed but it
+  is pending" warning round 51's `disconnect_all` design already went
+  out of its way to avoid).
+
+**Left as-is / deferred:** the 5-second poll interval is a fixed
+module constant (`_REVOCATION_CHECK_INTERVAL_SECONDS`), not
+node-configurable — judged an internal responsiveness/DB-query-
+overhead tradeoff an operator doesn't need control over, unlike e.g.
+invitation expiry. Revisit if a real deployment ever wants it tuned.
+
+**Decision 2 — Zmodem uploads: stream to a temp file with incremental
+SHA-256, not a bounded concurrency semaphore.**
+
+**What was decided:** `netbbs.net.zmodem.receive_file` now streams
+each received subpacket directly to a caller-supplied destination
+path, hashing incrementally, instead of accumulating the complete
+transfer in a `bytearray` and returning a second `bytes` copy on top
+of that. `netbbs.files.storage` gained `new_incoming_temp_path`/
+`move_temp_file_into_storage` as the streaming counterpart to the
+existing bytes-based `store_bytes`; `netbbs.files.entries` gained
+`upload_file_from_temp` alongside the existing `upload_file`.
+
+**Why:** the per-transfer `max_bytes` ceiling (already in place from
+the original round-72 fix) bounds any *one* upload, but says nothing
+about several concurrent ones — a node accepting `N` simultaneous
+uploads near that ceiling could transiently hold something like
+`2×N×max_bytes` in memory (the accumulating buffer plus the returned
+copy, per transfer), an availability gap at node scope even though
+every individual transfer was already correctly bounded. Streaming
+removes the whole-file in-memory requirement at its root, rather than
+capping how many transfers can be in flight around a design that still
+buffers each one fully.
+
+**Alternatives considered:**
+- *A bounded upload-concurrency semaphore (or a weighted aggregate
+  byte budget), keeping the buffered design underneath* — the smaller
+  patch, explicitly offered as the "acceptable hardening step" if the
+  bigger rewrite wasn't wanted. Would need a new node-wide shared
+  resource threaded through the session stack the same way
+  `NodeControls`/`ChatHub` already are, plus a policy decision (how
+  many concurrent uploads, per-account vs. node-wide) with no strong
+  existing precedent to anchor it to. Not chosen — the streaming
+  rewrite closes the actual problem (unbounded memory *per transfer*
+  compounding across concurrency) rather than capping the compounding
+  factor around a design that still has it.
+- *Streaming without incremental hashing (hash after the fact, reading
+  the temp file back)* — rejected as pointless: the whole motivation is
+  avoiding a second full read of the content, and `hashlib.sha256()`
+  already supports incremental `.update()` calls naturally, so there
+  was no reason to hash any way other than as bytes already pass
+  through on their way to disk.
+- *Staging temp files in the platform temp directory
+  (`tempfile.gettempdir()`)* — rejected specifically for this
+  project's NetBSD deployment target: the final placement step
+  (`move_temp_file_into_storage`) uses `os.replace()`, an atomic
+  rename POSIX only guarantees within a single filesystem, and `/tmp`
+  is commonly its own separate `tmpfs`/`mfs` mount there, distinct from
+  wherever a node's data volume actually lives. Staging under a
+  `.incoming` subdirectory *inside* `storage_root` itself instead
+  guarantees the rename is always same-filesystem, regardless of
+  platform temp-directory placement.
+
+**Left as-is / deferred:** `upload_file` (the bytes-based path) was
+kept, not removed — dev scripts (`scripts/create_test_file.py`) and
+most existing tests already have the complete content in hand, and
+forcing them through a temp-file dance would add ceremony with no
+corresponding benefit for a caller that was never the availability
+risk in the first place. `download_file` (the send side) was
+deliberately left untouched — a download reads a size already bounded
+by whatever's stored, not attacker-controlled growth the way an
+upload's declared/actual size is, so it was never the same class of
+problem.
+

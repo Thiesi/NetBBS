@@ -328,6 +328,18 @@ def accept_invitation(db: Database, channel: Channel, user: User) -> bool:
     function's own SELECT and UPDATE. A savepoint, not an unconditional
     `BEGIN`, so this stays safe if ever called inside a wider
     transaction.
+
+    Deliberately never calls `conn.commit()` itself (GitHub issue #28,
+    reopened a third time): `RELEASE` on an *outermost* savepoint
+    already commits it on its own, so an unconditional `commit()`
+    afterward was either redundant in that case or, if this function
+    is ever called while a caller already has its own transaction open,
+    actively wrong — it would commit that whole enclosing transaction
+    early, contradicting this very docstring's "stays safe if ever
+    called inside a wider transaction" claim. Releasing an outermost
+    savepoint persists this function's own work; releasing a nested one
+    correctly leaves the enclosing transaction's boundary for its own
+    owner to decide.
     """
     conn = db.connection
     conn.execute("SAVEPOINT accept_channel_invitation")
@@ -364,7 +376,6 @@ def accept_invitation(db: Database, channel: Channel, user: User) -> bool:
             raise MembershipError("invitation was no longer pending")
 
         conn.execute("RELEASE SAVEPOINT accept_channel_invitation")
-        conn.commit()
         return True
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT accept_channel_invitation")

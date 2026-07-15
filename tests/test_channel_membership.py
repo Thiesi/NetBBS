@@ -243,6 +243,40 @@ def test_accept_invitation_returns_false_when_nothing_to_accept(db, bob, channel
     assert accept_invitation(db, channel, bob) is False
 
 
+def test_accept_invitation_does_not_commit_an_enclosing_caller_transaction(db, alice, bob, channel):
+    """Regression test for GitHub issue #28 (reopened a third time):
+    accept_invitation() used to call conn.commit() unconditionally
+    right after releasing its own savepoint. Harmless when that
+    savepoint is the outermost transaction (RELEASE already commits it
+    on its own then) -- but wrong the moment a caller already has its
+    own transaction open: the stray commit() would persist that whole
+    enclosing transaction early, contradicting the function's own
+    "safe to call inside a wider transaction" claim."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    carol = create_user(db, "carol", password="hunter2", user_level=10)
+    # An unrelated write, left deliberately uncommitted -- simulates a
+    # caller wrapping accept_invitation() in its own wider transaction
+    # that hasn't decided to commit yet. UPDATE triggers Python
+    # sqlite3's implicit BEGIN, so this really does open one.
+    db.connection.execute("UPDATE users SET user_level = 50 WHERE id = ?", (carol.id,))
+
+    assert accept_invitation(db, channel, bob) is True
+
+    db.connection.rollback()
+
+    # The enclosing transaction's own unrelated write must be gone --
+    # if accept_invitation() had still called commit() itself, this
+    # would still read 50.
+    row = db.connection.execute("SELECT user_level FROM users WHERE id = ?", (carol.id,)).fetchone()
+    assert row["user_level"] == 10
+    # accept_invitation()'s own work must be gone too -- a full
+    # rollback of the shared enclosing transaction, not a partial one.
+    assert is_member(db, channel, bob) is False
+    assert has_pending_invitation(db, channel, bob) is True
+
+
 class _ProxyConnection:
     """Wraps a real sqlite3.Connection, forwarding everything except
     `execute()`, which runs `on_execute(sql)` first -- lets a test

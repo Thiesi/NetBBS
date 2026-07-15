@@ -51,8 +51,10 @@ project's networking work has held to.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from netbbs.net.session import Session
 
@@ -135,8 +137,20 @@ class ZmodemError(Exception):
 
 @dataclass(frozen=True)
 class ReceivedFile:
+    """
+    `data: bytes` was replaced with `sha256`/`size_bytes` (GitHub issue
+    #34, reopened a second time) once `receive_file` started streaming
+    directly to a caller-supplied path instead of accumulating the
+    whole transfer in memory — there is no complete in-memory buffer
+    left to hand back here at all. The content itself lives at whatever
+    `dest_path` `receive_file` was called with; `netbbs.net.file_flow.
+    _handle_upload` is what still has that path and moves it into
+    permanent storage via `netbbs.files.entries.upload_file_from_temp`.
+    """
+
     filename: str
-    data: bytes
+    sha256: str
+    size_bytes: int
 
 
 def _safe_filename(raw: str) -> str:
@@ -438,10 +452,29 @@ async def send_file(session: Session, filename: str, data: bytes) -> None:
 # -- receiver (upload: NetBBS receives a file from the connecting client) -
 
 
-async def receive_file(session: Session, *, max_bytes: int) -> ReceivedFile:
+async def receive_file(session: Session, *, max_bytes: int, dest_path: Path) -> ReceivedFile:
     """
-    Receive one file from the client via Zmodem, returning its filename
-    and complete contents.
+    Receive one file from the client via Zmodem, streaming it directly
+    to `dest_path` as it arrives and returning its filename, content
+    hash, and size — never holding the complete transfer in memory at
+    once (GitHub issue #34, reopened a second time: accumulating the
+    whole thing in a `bytearray`, then returning a second `bytes` copy
+    on top of that, meant a node's peak memory use scaled with however
+    many uploads happened to be concurrently in flight, on top of the
+    existing per-transfer `max_bytes` ceiling — a real availability gap
+    at node scope even though any *one* transfer was already bounded).
+
+    `dest_path` is caller-supplied (`netbbs.net.file_flow._handle_upload`
+    passes one from `netbbs.files.storage.new_incoming_temp_path`) --
+    this module stays exactly as ignorant of "file area"/content-
+    addressed storage as it already was of "welcome banner"/"board
+    post" elsewhere (see the other caller-supplied-`Path` precedents in
+    `netbbs.net.ansi_editor`/`prose_editor`); it only knows it's
+    writing to a path, and assumes `dest_path.parent` already exists.
+    Deleted on any failure below -- a stalled/cancelled/oversized/
+    malformed transfer must not leave a partial file behind in the
+    caller's staging area. Left in place, complete and ready for the
+    caller to move into permanent storage, only on a clean return.
 
     Assumes the client's terminal is either already running a `sz`-
     equivalent, or the SysOp/user has just told it to start one — unlike
@@ -452,10 +485,11 @@ async def receive_file(session: Session, *, max_bytes: int) -> ReceivedFile:
     `max_bytes` (GitHub issue #34, typically `netbbs.config.
     get_max_upload_bytes`) bounds the transfer twice: the size the
     sender itself advertises in `ZFILE` is checked and rejected before
-    any bulk data is ever read, and the actual running received-byte
-    count is checked after every subpacket regardless -- an advertised
-    size is peer-supplied metadata, not authoritative, so the second
-    check is the one that actually matters if the two ever disagree.
+    any bulk data is ever read or `dest_path` even opened, and the
+    actual running received-byte count is checked after every subpacket
+    regardless -- an advertised size is peer-supplied metadata, not
+    authoritative, so the second check is the one that actually matters
+    if the two ever disagree.
     """
     await _send_header(session, ZRINIT, 0)
 
@@ -497,32 +531,46 @@ async def receive_file(session: Session, *, max_bytes: int) -> ReceivedFile:
 
     await _send_header(session, ZRPOS, 0)
 
-    received = bytearray()
-    while True:
-        frame_type, position = await _wait_for_header(session)
-        if frame_type == ZEOF:
-            break
-        if frame_type != ZDATA:
-            raise ZmodemError(f"expected ZDATA, got frame type {frame_type}")
-        if position != len(received):
-            raise ZmodemError("out-of-order data (resume is not supported)")
+    hasher = hashlib.sha256()
+    received_bytes = 0
+    # BaseException, not Exception -- a session cancellation (e.g. the
+    # GitHub issue #29 background revocation watcher firing mid-upload,
+    # or a genuine disconnect) raises asyncio.CancelledError, which is
+    # not an Exception subclass. dest_path must still be cleaned up on
+    # that path too, not just an ordinary ZmodemError -- and it's
+    # re-raised unchanged either way, never swallowed.
+    try:
+        with open(dest_path, "wb") as dest_file:
+            while True:
+                frame_type, position = await _wait_for_header(session)
+                if frame_type == ZEOF:
+                    break
+                if frame_type != ZDATA:
+                    raise ZmodemError(f"expected ZDATA, got frame type {frame_type}")
+                if position != received_bytes:
+                    raise ZmodemError("out-of-order data (resume is not supported)")
 
-        while True:
-            chunk, terminator = await _read_subpacket(session)
-            if len(received) + len(chunk) > max_bytes:
-                raise ZmodemError(f"upload exceeded the {max_bytes}-byte limit")
-            received.extend(chunk)
-            if terminator in (ZCRCW, ZCRCQ):
-                await _send_header(session, ZACK, len(received))
-            if terminator == ZCRCE:
-                break
-            # ZCRCG/ZCRCQ/ZCRCW (already ACKed if needed above): more
-            # subpackets follow under this same ZDATA run.
+                while True:
+                    chunk, terminator = await _read_subpacket(session)
+                    if received_bytes + len(chunk) > max_bytes:
+                        raise ZmodemError(f"upload exceeded the {max_bytes}-byte limit")
+                    dest_file.write(chunk)
+                    hasher.update(chunk)
+                    received_bytes += len(chunk)
+                    if terminator in (ZCRCW, ZCRCQ):
+                        await _send_header(session, ZACK, received_bytes)
+                    if terminator == ZCRCE:
+                        break
+                    # ZCRCG/ZCRCQ/ZCRCW (already ACKed if needed above):
+                    # more subpackets follow under this same ZDATA run.
 
-    await _send_header(session, ZRINIT, 0)
-    frame_type, _ = await _wait_for_header(session)
-    if frame_type != ZFIN:
-        raise ZmodemError(f"expected ZFIN, got frame type {frame_type}")
-    await _send_header(session, ZFIN)
+        await _send_header(session, ZRINIT, 0)
+        frame_type, _ = await _wait_for_header(session)
+        if frame_type != ZFIN:
+            raise ZmodemError(f"expected ZFIN, got frame type {frame_type}")
+        await _send_header(session, ZFIN)
+    except BaseException:
+        dest_path.unlink(missing_ok=True)
+        raise
 
-    return ReceivedFile(filename=filename, data=bytes(received))
+    return ReceivedFile(filename=filename, sha256=hasher.hexdigest(), size_bytes=received_bytes)

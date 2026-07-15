@@ -4970,3 +4970,209 @@ into anything beyond posts/bio) remains exactly as round 69 already
 described: real, deliberate, and not guessed at ahead of an actual
 need.
 
+## Sign-off notes, round 72 (a second round-2 code-review pass — 8 issues: #28, #29, #31, #32, #34, #36, #42, #43 — fixed)
+
+A second automated review pass over the post-Phase-2 security-hardening
+work (the same reviewer that filed the original round of issues closed
+out earlier). It reopened four already-"fixed" issues with remaining
+gaps, and filed two new ones, all closed in commit `b6ee18c`:
+
+1. **#28 (reopened): invitation acceptance still had two real gaps.**
+   `accept_invitation()` now wraps its SELECT/INSERT/UPDATE in an
+   explicit `SAVEPOINT`, rolling back on any failure instead of leaving
+   a partially-applied state vulnerable to a later unrelated commit;
+   returns `bool` instead of silently no-op'ing, and `_handle_join`
+   treats a failed acceptance (`False`, or the narrower race case,
+   `MembershipError`) as authorization failure instead of switching
+   channels off an earlier, now-stale `has_pending_invitation()` check.
+2. **#29 (reopened): cross-process disable/delete revalidation only
+   ran at the main-menu boundary.** `account_still_active()` (moved out
+   of `login_flow.py`, a private `_main_menu`-only helper, into
+   `netbbs.auth.users` — `chat_flow.py` can't import from
+   `login_flow.py`, the dependency already runs the other way) is now
+   also checked in `chat_flow`'s send loop, before every message/
+   command, not just at the main menu.
+3. **#31 (reopened): `ChatHub`'s queue-overflow policy could swallow a
+   kick/ban/revocation notice itself.** `_deliver`/`send_to` gained a
+   `priority` flag: on overflow, a priority event now occupies the
+   freed queue slot itself (evicting ordinary traffic), instead of a
+   `QueueOverflowNotice` taking that slot the way ordinary chat traffic
+   still does. `_kick_live_sessions` (shared by `/kick`, `/ban`, and
+   `/revokeaccess`) now passes `priority=True`.
+4. **#32 (reopened): the new-post UI didn't catch its own domain
+   rejection.** `_compose_new_post()` now catches `PostError` around
+   `create_post()` (an oversized subject can clear the line editor's
+   4096-char cap but still exceed the 300-byte domain limit), mirroring
+   `_edit_existing_post()`'s existing handling instead of crashing the
+   session.
+5. **#34 (reopened): the bulk-transfer idle timeout had three
+   remaining gaps.** `_read_subpacket()` only ever timed the *first*
+   byte of each loop iteration — the byte following a lone `ZDLE`, and
+   both CRC bytes after the terminator, could still stall forever. A
+   new `_read_bulk_raw_byte()` helper, and an injectable `read_raw`
+   parameter on `_read_zdle_byte()` (used only for the bulk phase — the
+   header-phase default stays untimed, correctly, since it's already
+   bounded as a whole by `_wait_for_header`'s own `_HANDSHAKE_TIMEOUT`),
+   close all three.
+6. **#36 (reopened): activity/volume ranking only checked *stored*
+   status, not *effective* expiry.** Expiry sweeping is lazy — a post/
+   file already past its board/area's `max_*_age_days` but not yet
+   swept by something actually browsing that resource still counted
+   toward both rankings. `list_boards()`/`list_file_areas()`'s
+   aggregate queries now evaluate effective expiry inline
+   (`exempt_from_expiry = 1 OR max_age_days IS NULL OR
+   julianday(created_at) >= julianday(now) - max_age_days`), with no
+   mutating sweep added to either listing function.
+7. **#42 (new): offline channel invitees had no notification
+   mechanism at all.** The mailbox `_deliver_private_message` uses is
+   session-addressed and ephemeral (round 46/Track 5e) — an invitee
+   with no active session at `/invite` time was silently never
+   notified, though the durable `channel_invitations` row was always
+   created regardless. `netbbs.chat.membership.
+   list_pending_invitations_for_user()` is the durable, account-wide
+   fix; `login_flow` announces a brief count once per login and offers
+   an `[I]nvitations` main-menu screen (shown only while something's
+   actually pending) with full detail. `/invite`'s live push is now
+   gated on `presence.is_online` first (matching `/msg`'s existing
+   check), so "(sent to X)" is no longer shown when nothing was
+   actually delivered live.
+8. **#43 (new): editor disconnect cleanup could leak the autosave
+   task.** `edit_ansi_art()`/`edit_prose()`'s `finally` block wrote the
+   screen-clear before cancelling the autosave task — a
+   `SessionClosedError` from a genuinely dead transport (the write
+   itself failing) skipped cancellation entirely. Cancellation is now
+   unconditional; the screen clear is best-effort, wrapped in its own
+   `try/except SessionClosedError`.
+9. **Testing**: regression tests for all eight, several exercising
+   real SQLite locking/rollback behavior (`accept_invitation`'s
+   savepoint, via a proxied connection object rather than mocking
+   around it) or genuine `asyncio.all_tasks()` leak detection (#43).
+   Full suite re-run: **1527 passed, 3 skipped**.
+
+## Sign-off notes, round 73 (the reviewer's round 72 follow-up — 3 remaining gaps in #28/#29/#34 — fixed)
+
+The same reviewer verified round 72 and found three further gaps —
+two narrow, one a real architectural fork each for #29 and #34 that
+Thiesi picked a direction for before implementation (see the round 73
+design-doc sign-off note for that decision and its reasoning).
+
+1. **#28, part 1: `accept_invitation()`'s own fix had a bug.**
+   `RELEASE SAVEPOINT` on an outermost savepoint already commits it —
+   the trailing, unconditional `conn.commit()` right after it was
+   either redundant in that case, or, if `accept_invitation()` is ever
+   called inside a caller's own already-open transaction, actively
+   wrong: it would commit that *entire enclosing transaction* early,
+   directly contradicting the function's own "safe to nest" claim.
+   Fixed by simply removing the stray `commit()` — releasing an
+   outermost savepoint already persists this function's own work;
+   releasing a nested one correctly leaves the enclosing transaction's
+   boundary alone. Regression test: an unrelated write left
+   deliberately uncommitted before calling `accept_invitation()`
+   (simulating a caller's own wider transaction), confirmed to roll
+   back together with it afterward — would have stayed committed
+   against the pre-fix code.
+2. **#28, part 2: the real access-control gap — channel entry never
+   went through `/join` at all if picked from the browse list.**
+   `browse_channels()` → `_pick_channel()` hands any *visible* channel
+   (a non-hidden `members_only` one, or a hidden one the user merely
+   holds a pending invitation for — both deliberately still listed, per
+   `_visible_channels_for`'s own round 33 point 9 reasoning) straight
+   to `_chat_loop()`, which only ever checked bans —
+   membership/invitation enforcement lived *exclusively* inside
+   `_handle_join`, `/join`'s own command handler. Picking such a
+   channel directly from the browse list, never typing `/join`, used
+   to grant entry with no check at all, and never consumed the
+   invitation either — leaving it perpetually pending while the
+   invitee kept re-entering through the picker. Fixed with one shared
+   `_authorize_channel_entry()` (open channel/existing member → allow;
+   valid pending invitation → atomically accept via the now-fixed
+   `accept_invitation`; otherwise refuse), called both by `_handle_join`
+   and by `browse_channels` before *every* `_chat_loop` entry — one
+   check at the top of `browse_channels`' own loop covers the initial
+   pick, a `/leave`-driven repick, and a `/join`-driven switch alike.
+   Confirmed via a genuine end-to-end picker-driven test harness (a
+   `FakeSession` combining `read_key` and `read_line` from one queue,
+   since `pick_item` needs the former and `_chat_loop` the latter) —
+   3 of the 5 new tests fail against the pre-fix code when checked by
+   temporarily reverting just this change, confirming they're real,
+   not vacuous.
+3. **#29: cross-process revalidation still missed board/file-area/
+   profile/admin loops, and never caught a genuinely idle session.**
+   The two in-loop checks (main menu, chat's send loop) only ever fire
+   on that loop's *next* keystroke — a SysOp stuck inside `admin_menu`
+   after being disabled/deleted through a separate `python -m
+   netbbs.admin` invocation could keep issuing privileged commands
+   indefinitely, and nothing ever caught a session sitting fully idle.
+   `_watch_for_account_revocation()` is a new background task, one per
+   authenticated session (started in `run_authenticated_session`
+   alongside `presence.enter`, cancelled in its own `finally`), that
+   re-checks the account every `_REVOCATION_CHECK_INTERVAL_SECONDS`
+   (5s) and disconnects the session the moment it comes back inactive
+   — covering every loop at once, present or future, without a copy of
+   the check bolted onto each. Kept the two existing in-loop checks
+   too, as genuine defense-in-depth (zero-latency for an actively
+   typing session) rather than replacing them.
+
+   The tricky part was avoiding a mutual-wait deadlock: the watcher
+   calling the existing `disconnect_one()` (which cancels the target
+   task *and awaits its full unwind*) from inside its own task would
+   deadlock the moment the target session's own cleanup tries to cancel
+   and await the watcher task in turn — a hazard `disconnect_one`'s own
+   docstring already flags for the *self*-cancellation case, but this
+   is a *new*, mutual variant between two different tasks. Fixed with a
+   new `ActiveSessionRegistry.cancel_one()` — schedules the
+   cancellation without awaiting the unwind, so the watcher task
+   finishes (and can safely itself be cancelled+awaited by the target's
+   own cleanup) almost immediately after firing it. Regression tests
+   drive the real `run_authenticated_session` with
+   `_REVOCATION_CHECK_INTERVAL_SECONDS` patched down for speed: a
+   genuinely idle main-menu session, and sessions stuck inside board
+   composing, a file area, the profile screen, and the admin menu —
+   all 5 confirmed to fail (timeout) against a neutered watcher stub,
+   proving they exercise the real mechanism.
+4. **#34: the idle-timeout fix was confirmed correct; the remaining
+   gap was node-wide memory amplification.** `receive_file()` still
+   accumulated the whole upload in a `bytearray` and returned a second
+   `bytes` copy — the per-transfer `max_bytes` ceiling bounded one
+   upload, but said nothing about several concurrent ones. Thiesi chose
+   the root-cause fix (streaming to a temp file with incremental
+   SHA-256) over a smaller concurrency-semaphore bolt-on. `receive_file`
+   now writes each subpacket straight to a caller-supplied `dest_path`
+   and hashes incrementally, returning `sha256`/`size_bytes` instead of
+   `data: bytes` — never holding the complete transfer in memory at
+   once. New `netbbs.files.storage` primitives:
+   `new_incoming_temp_path()` (a fresh path under a `.incoming`
+   staging directory *inside* `storage_root`, not the platform temp
+   directory — guarantees the final placement's `os.replace()` is
+   always same-filesystem, a real concern on this project's NetBSD
+   deployment target, where `/tmp` is commonly its own separate mount)
+   and `move_temp_file_into_storage()` (an atomic rename into the
+   content-addressed layout, never re-reading the content back into
+   memory). `netbbs.files.entries` gained `upload_file_from_temp()`
+   alongside the existing bytes-based `upload_file()` (kept for callers
+   that already have the whole thing in hand — dev scripts, most
+   tests), sharing a new `_finalize_upload()` helper for the identical
+   database-row half of both paths. `dest_path`/`temp_path` are
+   cleaned up on every failure path in both `receive_file` and
+   `upload_file_from_temp` (including `asyncio.CancelledError` — a
+   session cancelled mid-upload, e.g. by the new round 73 revocation
+   watcher, must not leak a partial temp file either), never silently
+   orphaned.
+5. **Testing**: `test_zmodem.py`'s whole suite updated for the new
+   `receive_file(..., dest_path=...)` signature and
+   `ReceivedFile.sha256`/`.size_bytes` fields (`_round_trip` now reads
+   the destination file back for its own assertions). New coverage in
+   `test_file_storage.py` (the two new storage primitives, including
+   that identical content converges on the same final path regardless
+   of which upload path wrote it) and `test_file_areas.py`
+   (`upload_file_from_temp`, including temp-file cleanup on a
+   permission-check failure). A new
+   `test_file_flow_upload_integration.py` drives a *real* end-to-end
+   upload — real `_show_area`/`_handle_upload` menu flow, a real
+   `zmodem.send_file` client task on the other end of an in-memory
+   duplex byte pipe, confirming the whole chain (menu → live Zmodem
+   handshake → temp file → content-addressed storage → a queryable
+   `FileEntry`) works together, plus that a rejected oversized upload
+   leaves no temp file and no entry behind. Full suite re-run: **1551
+   passed, 3 skipped**.
+

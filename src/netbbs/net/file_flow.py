@@ -27,13 +27,14 @@ from netbbs.files import (
     get_file_by_name,
     list_file_areas,
     list_files_page,
-    upload_file,
+    upload_file_from_temp,
 )
 from netbbs.files.categories import (
     FileAreaCategory,
     list_subcategories,
     list_top_level_categories,
 )
+from netbbs.files.storage import new_incoming_temp_path
 from netbbs.net import zmodem
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
@@ -241,17 +242,33 @@ async def _render_file_page(session: Session, db: Database, area_name: str, page
 
 
 async def _handle_upload(session: Session, db: Database, area: FileArea, user: User) -> None:
+    """
+    `receive_file` (GitHub issue #34, reopened a second time) now
+    streams straight to a temp file under `netbbs.files.storage`'s own
+    staging directory rather than returning the complete upload as one
+    in-memory `bytes` object -- `temp_path` here is that staging file;
+    `upload_file_from_temp` moves it into permanent content-addressed
+    storage (or discards it, if this exact content is already stored)
+    without ever holding the full content in memory in this module
+    either.
+    """
     await session.write_line(
         "\r\nStart your terminal's Zmodem send (sz) now. Waiting for the transfer to begin..."
     )
+    temp_path = new_incoming_temp_path(db)
     try:
-        received = await zmodem.receive_file(session, max_bytes=get_max_upload_bytes(db))
-        entry = upload_file(db, area, user, received.filename, received.data)
+        received = await zmodem.receive_file(session, max_bytes=get_max_upload_bytes(db), dest_path=temp_path)
+        entry = upload_file_from_temp(
+            db, area, user, received.filename,
+            temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
+        )
     except (zmodem.ZmodemError, NotImplementedError) as exc:
         # NotImplementedError: some transports (netbbs.net.web) can't
         # carry raw bytes at all -- see WebSession's docstring. Handled
         # the same as any other failed transfer rather than crashing
-        # the session.
+        # the session. temp_path is already cleaned up by receive_file
+        # itself on any failure of its own; a NotImplementedError means
+        # receive_file never even opened it.
         await session.write_line(f"\r\nUpload failed: {exc}")
         return
     await session.write_line(

@@ -7,6 +7,8 @@ NetBSD's finer clock resolution)."""
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from netbbs.auth.users import create_user
@@ -22,8 +24,10 @@ from netbbs.files import (
     list_files_page,
     update_file_area,
     upload_file,
+    upload_file_from_temp,
 )
 from netbbs.files.categories import create_category
+from netbbs.files.storage import new_incoming_temp_path, storage_root
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.permissions import InsufficientLevelError
@@ -380,6 +384,71 @@ def test_upload_allowed_at_exact_min_write_level(db, bob):
     area = create_file_area(db, "docs", min_write_level=0, creator=bob)
     entry = upload_file(db, area, bob, "readme.txt", b"hello")
     assert entry.filename == "readme.txt"
+
+
+# -- GitHub issue #34: streaming upload path (upload_file_from_temp) -------
+
+
+def _temp_file_with(db, content: bytes) -> tuple:
+    temp_path = new_incoming_temp_path(db)
+    temp_path.write_bytes(content)
+    return temp_path, hashlib.sha256(content).hexdigest()
+
+
+def test_upload_file_from_temp_creates_an_entry_matching_upload_file(db, alice):
+    """The streaming and non-streaming paths must produce equivalent
+    results for identical content -- proves upload_file_from_temp isn't
+    a second, subtly-different upload implementation."""
+    area = create_file_area(db, "docs", creator=alice)
+    temp_path, sha256 = _temp_file_with(db, b"hello world")
+
+    entry = upload_file_from_temp(
+        db, area, alice, "readme.txt",
+        temp_path=temp_path, sha256=sha256, size_bytes=11, description="A readme",
+    )
+
+    assert entry.filename == "readme.txt"
+    assert entry.size_bytes == 11
+    assert entry.sha256 == sha256
+    assert entry.description == "A readme"
+    assert entry.uploader_label == "alice"
+    assert download_file(entry) == b"hello world"
+
+
+def test_upload_file_from_temp_moves_the_temp_file_not_copies(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    temp_path, sha256 = _temp_file_with(db, b"hello world")
+
+    upload_file_from_temp(db, area, alice, "readme.txt", temp_path=temp_path, sha256=sha256, size_bytes=11)
+
+    assert not temp_path.exists()
+
+
+def test_upload_file_from_temp_shares_storage_with_upload_file_for_identical_content(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    bytes_entry = upload_file(db, area, alice, "a.txt", b"same content")
+    temp_path, sha256 = _temp_file_with(db, b"same content")
+
+    temp_entry = upload_file_from_temp(
+        db, area, alice, "b.txt", temp_path=temp_path, sha256=sha256, size_bytes=12
+    )
+
+    assert temp_entry.storage_path == bytes_entry.storage_path
+    assert not temp_path.exists()  # discarded -- content already stored
+
+
+def test_upload_file_from_temp_cleans_up_the_temp_file_on_permission_failure(db, alice, bob):
+    area = create_file_area(db, "staff-only", min_write_level=50, creator=alice)
+    temp_path, sha256 = _temp_file_with(db, b"hello world")
+
+    with pytest.raises(InsufficientLevelError):
+        upload_file_from_temp(
+            db, area, bob, "readme.txt", temp_path=temp_path, sha256=sha256, size_bytes=11
+        )
+
+    assert not temp_path.exists()  # never leaked as an orphaned staging file
+    # And nothing was ever moved into permanent storage either.
+    assert not (storage_root(db) / sha256[:2] / sha256).exists()
 
 
 def test_list_files_blocked_below_min_read_level(db, alice, bob):

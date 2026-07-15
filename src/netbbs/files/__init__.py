@@ -37,6 +37,7 @@ from netbbs.files.entries import (
     set_file_exempt,
     set_file_pinned,
     upload_file,
+    upload_file_from_temp,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "set_file_exempt",
     "set_file_pinned",
     "upload_file",
+    "upload_file_from_temp",
 ]

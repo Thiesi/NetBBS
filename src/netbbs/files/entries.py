@@ -34,7 +34,7 @@ from netbbs.auth.users import User
 from netbbs.boards.content_id import compute_content_id
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.files.areas import FileArea
-from netbbs.files.storage import read_bytes, store_bytes
+from netbbs.files.storage import move_temp_file_into_storage, read_bytes, store_bytes
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
 from netbbs.storage.database import Database
@@ -77,22 +77,83 @@ def upload_file(
     Store `data` in `area`, enforcing `area.min_write_level` via the same
     level-gating plumbing as `netbbs.boards.posts.create_post`.
 
-    Takes the complete file as one in-memory `bytes` object — appropriate
-    for this project's scale (design doc §14: dozens–low hundreds of
-    concurrent users, not large-file streaming at volume) and for how
-    files reach this function today (a dev script reading a local file;
-    see `scripts/create_test_file.py`). Revisit if/when the actual
-    upload transfer protocol (still unbuilt — see design doc) streams
-    bytes incrementally rather than handing over a complete buffer.
+    Takes the complete file as one in-memory `bytes` object — the right
+    shape for a caller that already has the whole thing in hand (dev
+    scripts, most tests; see `scripts/create_test_file.py`). The real
+    Zmodem upload path (`netbbs.net.file_flow._handle_upload`) uses
+    `upload_file_from_temp` instead (GitHub issue #34): once
+    `receive_file` streamed the content incrementally rather than
+    handing over a complete buffer, this function's own `store_bytes`
+    call would be the one remaining place still requiring the whole
+    file in memory at once, defeating the point.
 
     Starts `'pending'` if `area.moderated`, else `'approved'` — see
     `approve_file`/`delete_file` for how a pending upload gets
     resolved, and `list_pending_files` for the moderation queue view.
     """
     require_level(uploader, area.min_write_level)
-
-    status = "pending" if area.moderated else "approved"
     sha256, path = store_bytes(db, data)
+    return _finalize_upload(
+        db, area, uploader, filename,
+        sha256=sha256, size_bytes=len(data), storage_path=path, description=description,
+    )
+
+
+def upload_file_from_temp(
+    db: Database,
+    area: FileArea,
+    uploader: User,
+    filename: str,
+    *,
+    temp_path: Path,
+    sha256: str,
+    size_bytes: int,
+    description: str | None = None,
+) -> FileEntry:
+    """
+    Like `upload_file`, but for a caller that already streamed the
+    content to `temp_path` (`netbbs.files.storage.
+    new_incoming_temp_path`) and computed `sha256`/`size_bytes`
+    incrementally while doing so (GitHub issue #34's streaming Zmodem
+    receive path) — the full content is never held in memory here
+    either, only moved into place by
+    `netbbs.files.storage.move_temp_file_into_storage`.
+
+    `temp_path` is always cleaned up one way or another: moved into
+    content-addressed storage on success, or deleted here if anything
+    fails before that move happens (e.g. `require_level` rejecting the
+    uploader) — never silently leaked as an orphaned staging file
+    either way.
+    """
+    try:
+        require_level(uploader, area.min_write_level)
+        storage_path = move_temp_file_into_storage(db, temp_path, sha256)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return _finalize_upload(
+        db, area, uploader, filename,
+        sha256=sha256, size_bytes=size_bytes, storage_path=storage_path, description=description,
+    )
+
+
+def _finalize_upload(
+    db: Database,
+    area: FileArea,
+    uploader: User,
+    filename: str,
+    *,
+    sha256: str,
+    size_bytes: int,
+    storage_path: Path,
+    description: str | None,
+) -> FileEntry:
+    """The database-row half of an upload, shared by `upload_file` and
+    `upload_file_from_temp` (GitHub issue #34) once each has already
+    placed the content in storage its own way and knows its hash/size —
+    everything from here on is identical regardless of how the bytes
+    got there."""
+    status = "pending" if area.moderated else "approved"
     created_at = utc_now_iso()
     uploader_identifier = uploader.fingerprint or uploader.username
     file_id = compute_content_id(
@@ -120,9 +181,9 @@ def upload_file(
                 area.id,
                 filename,
                 description,
-                len(data),
+                size_bytes,
                 sha256,
-                str(path),
+                str(storage_path),
                 uploader.id,
                 uploader.username,
                 uploader.fingerprint,

@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import hashlib
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -141,13 +144,26 @@ def test_zdle_encode_does_not_escape_zpad():
 
 
 def _round_trip(filename: str, data: bytes) -> tuple[str, bytes]:
+    """Round-trips through a real temp file, same as the real streaming
+    receive path (GitHub issue #34, reopened a second time:
+    receive_file no longer returns the content directly, only its hash/
+    size) -- reads it back afterward purely for this test helper's own
+    assertions, not something production code does."""
+
     async def scenario():
-        sender_session, receiver_session = _session_pair()
-        sender_task = asyncio.create_task(send_file(sender_session, filename, data))
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
-        await sender_task
-        result = await receiver_task
-        return result.filename, result.data
+        with tempfile.TemporaryDirectory() as tmp:
+            dest_path = Path(tmp) / "incoming"
+            sender_session, receiver_session = _session_pair()
+            sender_task = asyncio.create_task(send_file(sender_session, filename, data))
+            receiver_task = asyncio.create_task(
+                receive_file(receiver_session, max_bytes=10_000_000, dest_path=dest_path)
+            )
+            await sender_task
+            result = await receiver_task
+            received = dest_path.read_bytes()
+            assert result.size_bytes == len(received)
+            assert result.sha256 == hashlib.sha256(received).hexdigest()
+            return result.filename, received
 
     return asyncio.run(scenario())
 
@@ -191,7 +207,7 @@ def test_round_trip_preserves_all_256_byte_values():
 # -- error handling ---------------------------------------------------------
 
 
-def test_corrupted_data_raises_zmodem_error():
+def test_corrupted_data_raises_zmodem_error(tmp_path):
     """A bit-flip in transit should be caught as a CRC mismatch, not
     silently accepted -- proves the "abort on error, no retry" scoping
     (design doc round 24) actually detects corruption rather than
@@ -220,7 +236,7 @@ def test_corrupted_data_raises_zmodem_error():
 
         sender_task = asyncio.create_task(send_file(sender_session, "x.txt", b"hello world" * 10))
         with pytest.raises(ZmodemError):
-            await receive_file(receiver_session, max_bytes=10_000_000)
+            await receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
         sender_task.cancel()
         try:
             await sender_task
@@ -228,6 +244,9 @@ def test_corrupted_data_raises_zmodem_error():
             pass
 
     asyncio.run(scenario())
+    # GitHub issue #34: a failed transfer must not leave a partial file
+    # behind in the caller's staging area.
+    assert not (tmp_path / "incoming").exists()
 
 
 def test_no_response_from_peer_times_out(monkeypatch):
@@ -245,11 +264,13 @@ def test_no_response_from_peer_times_out(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_receiver_rejects_unexpected_frame_type():
+def test_receiver_rejects_unexpected_frame_type(tmp_path):
     async def scenario():
         sender_session, receiver_session = _session_pair()
         # Send something that isn't a valid ZFILE after ZRINIT.
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
         await _wait_for_header(sender_session)  # consume the receiver's ZRINIT
         await _send_header(sender_session, ZEOF)  # nonsense at this point
         with pytest.raises(ZmodemError, match="ZFILE"):
@@ -261,10 +282,12 @@ def test_receiver_rejects_unexpected_frame_type():
 # -- GitHub issue #34: bounds on the bulk-data reception path ---------------
 
 
-def test_advertised_size_over_the_limit_is_rejected_before_bulk_data():
+def test_advertised_size_over_the_limit_is_rejected_before_bulk_data(tmp_path):
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10, dest_path=tmp_path / "incoming")
+        )
         # send_file's own ZFILE metadata always advertises the true
         # size (20 bytes here), so this exercises the early-rejection
         # path against an honest sender declaring more than allowed.
@@ -281,7 +304,7 @@ def test_advertised_size_over_the_limit_is_rejected_before_bulk_data():
     asyncio.run(scenario())
 
 
-def test_sender_exceeding_its_own_declared_size_is_rejected():
+def test_sender_exceeding_its_own_declared_size_is_rejected(tmp_path):
     """A malicious sender could advertise a small size (passing the
     early check) and then simply keep sending -- the running received-
     byte count, checked on every subpacket regardless of what was
@@ -289,7 +312,9 @@ def test_sender_exceeding_its_own_declared_size_is_rejected():
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
@@ -308,14 +333,16 @@ def test_sender_exceeding_its_own_declared_size_is_rejected():
     asyncio.run(scenario())
 
 
-def test_unterminated_subpacket_past_the_cap_is_rejected(monkeypatch):
+def test_unterminated_subpacket_past_the_cap_is_rejected(monkeypatch, tmp_path):
     import netbbs.net.zmodem as zmodem_module
 
     monkeypatch.setattr(zmodem_module, "_MAX_SUBPACKET_BYTES", 8)
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
@@ -337,14 +364,16 @@ def test_unterminated_subpacket_past_the_cap_is_rejected(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_stalled_transfer_hits_the_idle_timeout(monkeypatch):
+def test_stalled_transfer_hits_the_idle_timeout(monkeypatch, tmp_path):
     import netbbs.net.zmodem as zmodem_module
 
     monkeypatch.setattr(zmodem_module, "_BULK_IDLE_TIMEOUT", 0.1)
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
@@ -363,7 +392,7 @@ def test_stalled_transfer_hits_the_idle_timeout(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_stall_immediately_after_a_lone_zdle_hits_the_idle_timeout(monkeypatch):
+def test_stall_immediately_after_a_lone_zdle_hits_the_idle_timeout(monkeypatch, tmp_path):
     """Regression test for GitHub issue #34 (reopened): before routing
     every bulk-phase byte through _read_bulk_raw_byte, the byte
     immediately following ZDLE was read via the untimed
@@ -376,7 +405,9 @@ def test_stall_immediately_after_a_lone_zdle_hits_the_idle_timeout(monkeypatch):
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
@@ -395,7 +426,7 @@ def test_stall_immediately_after_a_lone_zdle_hits_the_idle_timeout(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_stall_after_the_terminator_before_crc_hi_hits_the_idle_timeout(monkeypatch):
+def test_stall_after_the_terminator_before_crc_hi_hits_the_idle_timeout(monkeypatch, tmp_path):
     """A valid terminator arrived, but the sender then withholds both
     CRC bytes entirely -- must still time out, not wait forever for a
     CRC that will never come."""
@@ -405,7 +436,9 @@ def test_stall_after_the_terminator_before_crc_hi_hits_the_idle_timeout(monkeypa
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
@@ -424,7 +457,7 @@ def test_stall_after_the_terminator_before_crc_hi_hits_the_idle_timeout(monkeypa
     asyncio.run(scenario())
 
 
-def test_stall_between_crc_hi_and_crc_lo_hits_the_idle_timeout(monkeypatch):
+def test_stall_between_crc_hi_and_crc_lo_hits_the_idle_timeout(monkeypatch, tmp_path):
     """The terminator and the CRC high byte both arrived, but the
     sender withholds the final CRC low byte -- the narrowest possible
     stall position, and the one most likely to be missed by a fix that
@@ -435,7 +468,9 @@ def test_stall_between_crc_hi_and_crc_lo_hits_the_idle_timeout(monkeypatch):
 
     async def scenario():
         sender_session, receiver_session = _session_pair()
-        receiver_task = asyncio.create_task(receive_file(receiver_session, max_bytes=10_000_000))
+        receiver_task = asyncio.create_task(
+            receive_file(receiver_session, max_bytes=10_000_000, dest_path=tmp_path / "incoming")
+        )
 
         frame_type, _ = await _wait_for_header(sender_session)
         assert frame_type == ZRINIT
