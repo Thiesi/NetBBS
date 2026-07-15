@@ -35,6 +35,33 @@ class PostError(Exception):
     """Raised for post creation/lookup/moderation failures."""
 
 
+# Server-side content limits (GitHub issue #32): the only existing
+# input-length safeguard was the transport line editors' 4,096-char
+# single-line cap, which the fullscreen prose editor doesn't share,
+# letting an authenticated user grow an in-memory document (and
+# eventually a stored row) without bound purely by opting into that
+# editor. Enforced here, at the domain layer, rather than only in the
+# editor UI (see netbbs.net.prose_editor's own ceiling) -- a caller
+# going through create_post()/edit_post() directly must not be able to
+# bypass a UI-only restriction. Counted in encoded UTF-8 bytes, not
+# `len()` characters, since that's what actually gets stored/
+# transmitted and multi-byte characters would otherwise undercount.
+# The exact numbers are a product choice, not a correctness one: large
+# enough that no legitimate post ever comes close, small enough to
+# bound worst-case memory/disk/DB-row size to something sane.
+MAX_SUBJECT_BYTES = 300
+MAX_BODY_BYTES = 200_000
+
+
+def _check_content_length(subject: str, body: str) -> None:
+    subject_bytes = len(subject.encode("utf-8"))
+    if subject_bytes > MAX_SUBJECT_BYTES:
+        raise PostError(f"subject too long: {subject_bytes} bytes (max {MAX_SUBJECT_BYTES})")
+    body_bytes = len(body.encode("utf-8"))
+    if body_bytes > MAX_BODY_BYTES:
+        raise PostError(f"body too long: {body_bytes} bytes (max {MAX_BODY_BYTES})")
+
+
 @dataclass(frozen=True)
 class Post:
     id: int
@@ -89,6 +116,7 @@ def create_post(
     and `list_pending_posts` for the moderation queue view.
     """
     require_level(author, board.min_write_level)
+    _check_content_length(subject, body)
 
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
@@ -181,6 +209,7 @@ def edit_post(
     """
     if post.author_user_id != edited_by.id:
         _require_board_permission(db, post, edited_by, BoardPermission.EDIT)
+    _check_content_length(subject, body)
 
     current = db.connection.execute(
         """

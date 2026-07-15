@@ -15,6 +15,8 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import (
+    MAX_BODY_BYTES,
+    MAX_SUBJECT_BYTES,
     PostError,
     approve_post,
     create_post,
@@ -146,6 +148,34 @@ def test_repeated_edits_all_chain_to_the_same_root(db, alice):
     assert v3.root_post_id == original.post_id
     assert v3.edit_of_post_id == v2.post_id  # chains to the immediate predecessor, not the root
     assert list_posts_page(db, board, alice).posts[0].body == "v3"
+
+
+# -- content length limits (GitHub issue #32) -----------------------------
+
+
+def test_create_post_rejects_an_oversized_subject(db, alice):
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(PostError):
+        create_post(db, board, alice, "x" * (MAX_SUBJECT_BYTES + 1), "Body")
+
+
+def test_create_post_rejects_an_oversized_body(db, alice):
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(PostError):
+        create_post(db, board, alice, "Subject", "x" * (MAX_BODY_BYTES + 1))
+
+
+def test_create_post_allows_exactly_the_maximum_body_size(db, alice):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Subject", "x" * MAX_BODY_BYTES)
+    assert len(post.body.encode("utf-8")) == MAX_BODY_BYTES
+
+
+def test_edit_post_rejects_an_oversized_body(db, alice):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Subject", "Body")
+    with pytest.raises(PostError):
+        edit_post(db, post, board, subject="Subject", body="x" * (MAX_BODY_BYTES + 1), edited_by=alice)
 
 
 # -- who can edit --------------------------------------------------------

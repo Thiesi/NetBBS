@@ -10,6 +10,8 @@ and the moderated-board approval/expiry lifecycle (§13, sign-off round
 
 from netbbs.boards.boards import Board, BoardError, create_board, get_board_by_name, list_boards
 from netbbs.boards.posts import (
+    MAX_BODY_BYTES,
+    MAX_SUBJECT_BYTES,
     Post,
     PostCursor,
     PostError,
@@ -32,6 +34,8 @@ __all__ = [
     "create_board",
     "get_board_by_name",
     "list_boards",
+    "MAX_BODY_BYTES",
+    "MAX_SUBJECT_BYTES",
     "Post",
     "PostCursor",
     "PostError",

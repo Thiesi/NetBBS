@@ -86,7 +86,7 @@ def _type(text: str) -> list[str]:
 def test_typing_produces_the_typed_text(tmp_path):
     async def scenario():
         session = FakeSession(_type("hello") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "hello"
@@ -95,7 +95,7 @@ def test_typing_produces_the_typed_text(tmp_path):
 def test_enter_inserts_a_real_line_break(tmp_path):
     async def scenario():
         session = FakeSession(_type("first") + ["ENTER"] + _type("second") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "first\nsecond"
@@ -104,7 +104,7 @@ def test_enter_inserts_a_real_line_break(tmp_path):
 def test_backspace_erases_the_preceding_character(tmp_path):
     async def scenario():
         session = FakeSession(_type("abx") + ["BACKSPACE"] + _type("c") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "abc"
@@ -113,7 +113,7 @@ def test_backspace_erases_the_preceding_character(tmp_path):
 def test_arrow_keys_move_the_cursor_for_mid_line_insertion(tmp_path):
     async def scenario():
         session = FakeSession(_type("ac") + ["LEFT"] + _type("b") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "abc"
@@ -122,7 +122,7 @@ def test_arrow_keys_move_the_cursor_for_mid_line_insertion(tmp_path):
 def test_home_and_end_jump_within_the_line(tmp_path):
     async def scenario():
         session = FakeSession(_type("bcd") + ["HOME"] + _type("a") + ["END"] + _type("e") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "abcde"
@@ -143,7 +143,7 @@ def test_down_from_a_wrapped_row_moves_by_visual_row_not_logical_line(tmp_path):
             _type(long_line) + ["HOME", "DOWN"] + _type("|") + ["CTRL+O"],  # marks where the cursor landed
             width=40,
         )
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     # The inserted "|" must NOT be at the very start (row 0) or the
@@ -161,7 +161,7 @@ def test_down_from_a_wrapped_row_moves_by_visual_row_not_logical_line(tmp_path):
 def test_quit_without_editing_returns_none_with_no_prompt(tmp_path):
     async def scenario():
         session = FakeSession(["CTRL+X"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result is None
@@ -172,7 +172,7 @@ def test_quit_after_editing_prompts_and_discard_returns_none(tmp_path):
 
     async def scenario():
         session = FakeSession(_type("x") + ["CTRL+X", "d"])
-        return await edit_prose(session, initial_text=None, draft_path=draft)
+        return await edit_prose(session, initial_text=None, draft_path=draft, max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result is None
@@ -182,7 +182,7 @@ def test_quit_after_editing_prompts_and_discard_returns_none(tmp_path):
 def test_quit_after_editing_save_choice_saves_and_returns_text(tmp_path):
     async def scenario():
         session = FakeSession(_type("hello") + ["CTRL+X", "s"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "hello"
@@ -191,7 +191,7 @@ def test_quit_after_editing_save_choice_saves_and_returns_text(tmp_path):
 def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):
     async def scenario():
         session = FakeSession(_type("hi") + ["CTRL+X", "c"] + _type("!") + ["CTRL+O"])
-        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "hi!"
@@ -203,7 +203,7 @@ def test_quit_after_editing_cancel_choice_returns_to_the_editor(tmp_path):
 def test_saving_clears_the_screen_before_returning(tmp_path):
     async def scenario():
         session = FakeSession(_type("hello") + ["CTRL+O"])
-        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
         return session
 
     session = asyncio.run(scenario())
@@ -213,7 +213,7 @@ def test_saving_clears_the_screen_before_returning(tmp_path):
 def test_quit_without_editing_clears_the_screen_before_returning(tmp_path):
     async def scenario():
         session = FakeSession(["CTRL+X"])
-        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
         return session
 
     session = asyncio.run(scenario())
@@ -223,7 +223,7 @@ def test_quit_without_editing_clears_the_screen_before_returning(tmp_path):
 def test_quit_after_confirmed_discard_clears_the_screen_before_returning(tmp_path):
     async def scenario():
         session = FakeSession(_type("x") + ["CTRL+X", "d"])
-        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft")
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=100_000)
         return session
 
     session = asyncio.run(scenario())
@@ -236,7 +236,7 @@ def test_save_deletes_a_stale_draft(tmp_path):
 
     async def scenario():
         session = FakeSession(["n"] + _type("x") + ["CTRL+O"])  # decline resuming the stale draft
-        return await edit_prose(session, initial_text=None, draft_path=draft)
+        return await edit_prose(session, initial_text=None, draft_path=draft, max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "x"
@@ -249,7 +249,7 @@ def test_save_deletes_a_stale_draft(tmp_path):
 def test_initial_text_is_loaded_into_the_buffer(tmp_path):
     async def scenario():
         session = FakeSession(["END"] + _type("!") + ["CTRL+O"])
-        return await edit_prose(session, initial_text="hello", draft_path=tmp_path / "d.draft")
+        return await edit_prose(session, initial_text="hello", draft_path=tmp_path / "d.draft", max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "hello!"
@@ -264,7 +264,7 @@ def test_pre_existing_draft_is_offered_and_resumed(tmp_path):
 
     async def scenario():
         session = FakeSession(["y"] + ["END"] + _type("!") + ["CTRL+O"])
-        return await edit_prose(session, initial_text="ignored", draft_path=draft)
+        return await edit_prose(session, initial_text="ignored", draft_path=draft, max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "recovered text!"
@@ -276,10 +276,74 @@ def test_declining_a_pre_existing_draft_uses_initial_text_instead(tmp_path):
 
     async def scenario():
         session = FakeSession(["n"] + ["END"] + _type("!") + ["CTRL+O"])
-        return await edit_prose(session, initial_text="original", draft_path=draft)
+        return await edit_prose(session, initial_text="original", draft_path=draft, max_bytes=100_000)
 
     result = asyncio.run(scenario())
     assert result == "original!"
+
+
+# -- GitHub issue #32: content ceiling ---------------------------------
+
+
+def test_typing_beyond_max_bytes_is_refused(tmp_path):
+    async def scenario():
+        session = FakeSession(_type("abcde") + ["CTRL+O"])
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=3)
+
+    result = asyncio.run(scenario())
+    assert result == "abc"  # only the first 3 bytes were accepted
+
+
+def test_typing_at_max_bytes_sounds_the_bell(tmp_path):
+    async def scenario():
+        session = FakeSession(_type("abcd") + ["CTRL+O"])
+        await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=3)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "\a" in _written_text(session)
+
+
+def test_multibyte_character_respects_the_byte_ceiling_not_char_count(tmp_path):
+    # "é" is 2 UTF-8 bytes -- a 3-byte ceiling must accept it (1 byte
+    # remaining after "a") but refuse a second one.
+    async def scenario():
+        session = FakeSession(_type("aéé") + ["CTRL+O"])
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=3)
+
+    result = asyncio.run(scenario())
+    assert result == "aé"
+    assert len(result.encode("utf-8")) == 3
+
+
+def test_enter_beyond_max_bytes_is_refused(tmp_path):
+    async def scenario():
+        session = FakeSession(_type("ab") + ["ENTER"] + ["CTRL+O"])
+        return await edit_prose(session, initial_text=None, draft_path=tmp_path / "d.draft", max_bytes=2)
+
+    result = asyncio.run(scenario())
+    assert result == "ab"  # the newline was refused, no trailing "\n"
+
+
+def test_pre_existing_content_at_the_limit_shows_in_the_status_line(tmp_path):
+    async def scenario():
+        session = FakeSession(["CTRL+O"])
+        await edit_prose(session, initial_text="abc", draft_path=tmp_path / "d.draft", max_bytes=3)
+        return session
+
+    session = asyncio.run(scenario())
+    assert "AT LENGTH LIMIT" in _written_text(session)
+
+
+def test_deleting_below_the_limit_allows_typing_again(tmp_path):
+    async def scenario():
+        # Cursor loads at the start of the buffer, not the end -- END
+        # first so BACKSPACE actually removes the trailing "c".
+        session = FakeSession(["END", "BACKSPACE"] + _type("x") + ["CTRL+O"])
+        return await edit_prose(session, initial_text="abc", draft_path=tmp_path / "d.draft", max_bytes=3)
+
+    result = asyncio.run(scenario())
+    assert result == "abx"
 
 
 def test_autosave_writes_the_draft_while_dirty(tmp_path):
@@ -288,7 +352,7 @@ def test_autosave_writes_the_draft_while_dirty(tmp_path):
     async def scenario():
         session = FakeSession(_type("A"))
         task = asyncio.create_task(
-            edit_prose(session, initial_text=None, draft_path=draft, autosave_interval_seconds=0.05)
+            edit_prose(session, initial_text=None, draft_path=draft, autosave_interval_seconds=0.05, max_bytes=100_000)
         )
         await asyncio.sleep(0.2)
         task.cancel()
@@ -308,7 +372,7 @@ def test_autosave_does_not_write_when_nothing_changed(tmp_path):
     async def scenario():
         session = FakeSession([])
         task = asyncio.create_task(
-            edit_prose(session, initial_text="unchanged", draft_path=draft, autosave_interval_seconds=0.05)
+            edit_prose(session, initial_text="unchanged", draft_path=draft, autosave_interval_seconds=0.05, max_bytes=100_000)
         )
         await asyncio.sleep(0.2)
         task.cancel()

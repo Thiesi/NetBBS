@@ -29,19 +29,29 @@ _BIO_VISIBLE_KEY = "bio_visible"
 
 MAX_BIO_LINES = 6
 
+# The line cap alone doesn't bound a bio's actual size -- six lines can
+# still each be arbitrarily long (GitHub issue #32). Counted in encoded
+# UTF-8 bytes for the same reason netbbs.boards.posts.MAX_BODY_BYTES
+# is: that's what's actually stored, and multi-byte characters would
+# otherwise undercount against a plain `len()`.
+MAX_BIO_BYTES = 2_000
+
 
 class BioError(Exception):
-    """Raised when a bio fails validation (the 6-line cap)."""
+    """Raised when a bio fails validation (the 6-line cap, or the byte cap)."""
 
 
 def set_bio(db: Database, user: User, text: str) -> None:
     """Set `user`'s bio, rejecting (rather than silently truncating)
-    anything over `MAX_BIO_LINES` lines — better for whoever's setting
-    it to get immediate, actionable feedback than to have it silently
-    cut off later."""
+    anything over `MAX_BIO_LINES` lines or `MAX_BIO_BYTES` bytes —
+    better for whoever's setting it to get immediate, actionable
+    feedback than to have it silently cut off later."""
     line_count = len(text.splitlines())
     if line_count > MAX_BIO_LINES:
         raise BioError(f"bio cannot exceed {MAX_BIO_LINES} lines, got {line_count}")
+    byte_count = len(text.encode("utf-8"))
+    if byte_count > MAX_BIO_BYTES:
+        raise BioError(f"bio cannot exceed {MAX_BIO_BYTES} bytes, got {byte_count}")
     set_user_preference(db, user, _BIO_KEY, text)
 
 

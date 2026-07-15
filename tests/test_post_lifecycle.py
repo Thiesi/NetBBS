@@ -224,7 +224,9 @@ def test_delete_intermediate_edit_referenced_by_a_later_edit_is_refused(db, syso
     grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
     grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop)
     original = create_post(db, board, alice, "Subject", "v1")
+    _age_post(db, original, days_old=2)  # guarantee strict created_at ordering below,
     v2 = edit_post(db, original, board, subject="Subject", body="v2", edited_by=alice)
+    _age_post(db, v2, days_old=1)  # not real-time timing between fast successive calls
     edit_post(db, get_post(db, v2.post_id), board, subject="Subject", body="v3", edited_by=alice)
 
     with pytest.raises(PostError):

@@ -68,8 +68,13 @@ _MIN_HEIGHT = 10
 @dataclass
 class _EditorState:
     buffer: ProseBuffer
+    max_bytes: int
     scroll_row: int = 0  # index into the current wrap_lines() result
     dirty: bool = False
+
+
+def _byte_length(text: str) -> int:
+    return len(text.encode("utf-8"))
 
 
 async def edit_prose(
@@ -77,6 +82,7 @@ async def edit_prose(
     *,
     initial_text: str | None,
     draft_path: Path,
+    max_bytes: int,
     autosave_interval_seconds: float = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
 ) -> str | None:
     """
@@ -88,6 +94,19 @@ async def edit_prose(
     there is offered for recovery on entry instead of `initial_text`;
     saving or explicitly discarding deletes it; a genuine disconnect
     leaves it in place for next time.
+
+    `max_bytes` (GitHub issue #32) is a required content ceiling, not
+    given a generic default -- this module stays deliberately unaware
+    of "board post" vs. "bio" (see module docstring), and those two
+    have genuinely different limits (`netbbs.boards.posts.
+    MAX_BODY_BYTES` vs. `netbbs.directory.MAX_BIO_BYTES`), so every
+    caller must decide rather than silently inheriting one meant for
+    the other. Enforced here, not only at save time in the domain layer
+    -- the DoS this closes is the unbounded *editing* work (full-
+    document rewrap per keystroke, periodic full autosave writes)
+    itself, which already happens before a save is ever attempted.
+    Additional input at the ceiling is refused with a bell and a status
+    line indicator, rather than silently dropped with no feedback.
     """
     width = max(_MIN_WIDTH, session.terminal_width)
     height = max(_MIN_HEIGHT, session.terminal_height) - _STATUS_ROW_OFFSET - 1
@@ -100,7 +119,7 @@ async def edit_prose(
             draft_path.unlink()
         loaded_text = initial_text
 
-    state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""))
+    state = _EditorState(buffer=ProseBuffer.from_text(loaded_text or ""), max_bytes=max_bytes)
     autosave_task = asyncio.create_task(_autosave_loop(state, draft_path, autosave_interval_seconds))
     try:
         await session.write(clear_screen())
@@ -130,7 +149,9 @@ async def edit_prose(
                 _delete_draft(draft_path)
                 return result
 
-            _dispatch(state, key, width, height)
+            rejected = _dispatch(state, key, width, height)
+            if rejected:
+                await session.write("\a")
             previous = await _redraw(session, state, previous, width, height)
     finally:
         # GitHub issue #38: same fix as netbbs.net.ansi_editor's -- every
@@ -148,7 +169,13 @@ async def edit_prose(
             pass
 
 
-def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> None:
+def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> bool:
+    """Applies `key` to `state`. Returns True if the keystroke was
+    refused for being at `state.max_bytes` (GitHub issue #32) rather
+    than applied -- the caller sounds the bell for this, adapting
+    `netbbs.rendering.ansi.reject_keystroke`'s "that key doesn't do
+    anything here" convention to an editor that draws its own screen
+    rather than relying on real terminal echo to visibly undo."""
     buffer = state.buffer
     if key.kind == EditorKeyKind.LEFT:
         buffer.move_left()
@@ -167,6 +194,8 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> N
     elif key.kind == EditorKeyKind.END:
         buffer.move_end()
     elif key.kind == EditorKeyKind.ENTER:
+        if _byte_length(buffer.to_text()) + 1 > state.max_bytes:
+            return True
         buffer.insert_newline()
         state.dirty = True
     elif key.kind == EditorKeyKind.BACKSPACE:
@@ -176,6 +205,8 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> N
         buffer.delete()
         state.dirty = True
     elif key.kind == EditorKeyKind.CHAR and key.char is not None:
+        if _byte_length(buffer.to_text()) + len(key.char.encode("utf-8")) > state.max_bytes:
+            return True
         buffer.insert_char(key.char)
         state.dirty = True
     # TAB and unrecognized kinds: no-op in this round's scope, matching
@@ -185,6 +216,7 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> N
     # not attempted rather than guessed at.
     buffer.clamp_cursor()
     _scroll_into_view(state, width, height)
+    return False
 
 
 def _move_visual_row(state: _EditorState, width: int, *, delta: int) -> None:
@@ -244,6 +276,12 @@ async def _flush(session: Session, state: _EditorState, width: int, height: int)
         f"Line {state.buffer.cursor_line + 1}  Col {state.buffer.cursor_col + 1}  "
         f"Ctrl+O save  Ctrl+X quit"
     )
+    # GitHub issue #32: visible even outside the instant a keystroke
+    # gets rejected at the ceiling, not just a flash-on-reject bell --
+    # once at the limit it stays a standing fact about this document
+    # until something is deleted.
+    if _byte_length(state.buffer.to_text()) >= state.max_bytes:
+        status += "  AT LENGTH LIMIT"
     status = truncate(status, width)
     await session.write(move_cursor(height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())

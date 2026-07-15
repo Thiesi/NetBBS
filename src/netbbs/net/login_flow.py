@@ -22,10 +22,21 @@ from enum import Enum, auto
 from pathlib import Path
 
 from netbbs.auth.users import SYSOP_LEVEL, AuthError, User, authenticate_password_async, list_users
-from netbbs.boards import Board, Post, PostError, PostPage, create_post, edit_post, list_boards, list_posts_page
+from netbbs.boards import (
+    MAX_BODY_BYTES,
+    Board,
+    Post,
+    PostError,
+    PostPage,
+    create_post,
+    edit_post,
+    list_boards,
+    list_posts_page,
+)
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry, format_with_preference
 from netbbs.directory import (
+    MAX_BIO_BYTES,
     MAX_BIO_LINES,
     BioError,
     get_bio,
@@ -748,7 +759,9 @@ async def _compose_body(
     instead, on an edit, so the current content isn't simply invisible
     to anyone who hasn't opted into the fullscreen editor."""
     if fullscreen_editor_enabled(db, user):
-        return await edit_prose(session, initial_text=initial_text, draft_path=draft_path)
+        return await edit_prose(
+            session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES
+        )
     if initial_text:
         await session.write_line(colored("Current body:", fg_color=MUTED_COLOR))
         await session.write_line(reflow(sanitize_text(initial_text, allow_newlines=True), width=session.terminal_width))
@@ -921,7 +934,7 @@ async def _edit_bio(session: Session, db: Database, user: User) -> None:
     if fullscreen_editor_enabled(db, user):
         current = get_bio(db, user) or ""
         result = await edit_prose(
-            session, initial_text=current, draft_path=_bio_draft_path(db, user)
+            session, initial_text=current, draft_path=_bio_draft_path(db, user), max_bytes=MAX_BIO_BYTES
         )
         if result is None:
             return

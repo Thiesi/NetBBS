@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from netbbs.auth.users import create_user, list_users
-from netbbs.directory import BioError, get_bio, get_vcard, is_bio_visible, set_bio, set_bio_visible
+from netbbs.directory import MAX_BIO_BYTES, BioError, get_bio, get_vcard, is_bio_visible, set_bio, set_bio_visible
 from netbbs.storage.database import Database
 
 
@@ -49,6 +49,21 @@ def test_set_bio_allows_exactly_six_lines(db, alice):
     six_lines = "\n".join(f"line {i}" for i in range(6))
     set_bio(db, alice, six_lines)  # must not raise
     assert get_bio(db, alice) == six_lines
+
+
+def test_set_bio_rejects_a_single_huge_line(db, alice):
+    """Regression test for GitHub issue #32: the 6-line cap alone
+    doesn't bound a bio's size -- a single line can still be
+    arbitrarily long."""
+    huge_line = "x" * (MAX_BIO_BYTES + 1)
+    with pytest.raises(BioError):
+        set_bio(db, alice, huge_line)
+
+
+def test_set_bio_allows_exactly_max_bytes(db, alice):
+    exactly_at_limit = "x" * MAX_BIO_BYTES
+    set_bio(db, alice, exactly_at_limit)  # must not raise
+    assert get_bio(db, alice) == exactly_at_limit
 
 
 # -- visibility -------------------------------------------------------------
