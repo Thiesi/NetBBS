@@ -227,6 +227,57 @@ def test_accepting_with_no_pending_invitation_does_not_raise(db, bob, channel):
     accept_invitation(db, channel, bob)  # must not raise
 
 
+# -- GitHub issue #28: accepting an invitation grants real membership ------
+
+
+def test_accept_invitation_grants_persistent_membership(db, alice, bob, channel):
+    """Regression test for the core bug: accepting used to only flip
+    the invitation's own status, never actually inserting a
+    channel_members row -- so access silently reverted to "not a
+    member" the moment the invited user next left the channel."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    assert is_member(db, channel, bob) is False  # not yet -- only invited
+
+    accept_invitation(db, channel, bob)
+
+    assert is_member(db, channel, bob) is True
+
+
+def test_accept_invitation_records_the_inviter_as_granted_by(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    accept_invitation(db, channel, bob)
+
+    row = db.connection.execute(
+        "SELECT granted_by_user_id FROM channel_members WHERE channel_id = ? AND user_id = ?",
+        (channel.id, bob.id),
+    ).fetchone()
+    assert row["granted_by_user_id"] == alice.id
+
+
+def test_membership_survives_leaving_and_rejoining_after_accepting(db, alice, bob, channel):
+    """The exact scenario the bug report described: invite -> first
+    join (accept) -> leave -> second join must succeed, since accepted
+    membership is supposed to persist until explicitly revoked."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    accept_invitation(db, channel, bob)  # first "join"
+
+    # Simulates "leaving" -- nothing about leaving a channel touches
+    # channel_members at all (that's the point: it's persistent), so
+    # this just re-confirms membership is still there afterward with
+    # no further action needed.
+    assert is_member(db, channel, bob) is True  # second "join" would succeed
+
+
+def test_accept_invitation_is_a_no_op_when_already_a_direct_member(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    add_member(db, channel, bob, granted_by=alice)
+    accept_invitation(db, channel, bob)  # no pending invitation -- must not raise
+    assert is_member(db, channel, bob) is True
+
+
 def test_invitations_are_scoped_to_their_own_channel(db, alice, bob, sysop, channel):
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
@@ -235,11 +286,10 @@ def test_invitations_are_scoped_to_their_own_channel(db, alice, bob, sysop, chan
 
 
 def test_expired_invitation_is_not_pending(db, alice, bob, channel):
-    # Nothing in the command surface sets expires_at yet (no /invite
-    # duration argument), but the schema/query must still honor it if
-    # ever set directly -- same expiry-filtering contract
-    # channel_restrictions already has, exercised directly at the row
-    # level here.
+    # Forces an already-past expires_at directly rather than relying on
+    # create_invitation's own default duration (GitHub issue #28) being
+    # short enough to wait out in a test -- same expiry-filtering
+    # contract channel_restrictions already has.
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
     db.connection.execute(
@@ -249,3 +299,32 @@ def test_expired_invitation_is_not_pending(db, alice, bob, channel):
     )
     db.connection.commit()
     assert has_pending_invitation(db, channel, bob) is False
+
+
+def test_create_invitation_sets_a_real_expiry_by_default(db, alice, bob, channel):
+    """GitHub issue #28: expires_at used to always be written as NULL
+    -- the schema/model's own expiry support was structurally present
+    but permanently unused."""
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+
+    row = db.connection.execute(
+        "SELECT expires_at FROM channel_invitations WHERE channel_id = ? AND invited_user_id = ?",
+        (channel.id, bob.id),
+    ).fetchone()
+    assert row["expires_at"] is not None
+
+
+def test_expired_invitation_cannot_be_accepted(db, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    create_invitation(db, channel, bob, invited_by=alice)
+    db.connection.execute(
+        "UPDATE channel_invitations SET expires_at = '2000-01-01T00:00:00.000000Z' "
+        "WHERE channel_id = ? AND invited_user_id = ?",
+        (channel.id, bob.id),
+    )
+    db.connection.commit()
+
+    accept_invitation(db, channel, bob)
+
+    assert is_member(db, channel, bob) is False

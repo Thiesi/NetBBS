@@ -1341,10 +1341,16 @@ async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
 
 async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
     """`/revokeaccess <user>` (design doc round 33 point 8): removes a
-    `channel_members` grant. Deliberately doesn't force out a currently-
-    live session the way `/kick` does — a distinct, narrower action
-    (revoking future access, not ending a present one); a target already
-    connected stays connected until they leave or reconnect."""
+    `channel_members` grant and, for a `members_only` channel, forces
+    out any of the target's currently-live sessions in it (GitHub issue
+    #28) -- for an access-*restricted* channel specifically, letting an
+    already-connected target keep reading/sending indefinitely until
+    they happen to leave or reconnect would make the revocation
+    meaningless in the moment that actually matters. An open (not
+    `members_only`) channel's own membership grant is a lesser, purely
+    persistent-access concept -- revoking it there doesn't eject anyone
+    still present, matching `/kick`'s existing role as the separate,
+    general-purpose "remove someone right now" action for that case."""
     target_name = args.strip()
     if not target_name:
         await _show_usage(ctx.session, "revokeaccess")
@@ -1361,6 +1367,9 @@ async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
             colored("You do not have permission to manage members on this channel.", fg_color=MUTED_COLOR)
         )
         return
+
+    if ctx.channel.members_only:
+        await _kick_live_sessions(ctx.hub, ctx.channel, target, reason="removed")
 
     await ctx.session.write_line(
         colored(f"Revoked {sanitize_text(target.username)}'s access to this channel.", fg_color=MUTED_COLOR)

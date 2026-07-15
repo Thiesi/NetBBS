@@ -277,3 +277,81 @@ def test_open_channel_join_is_unaffected_by_members_only_logic(db, hub, presence
     other = create_channel(db, "offtopic", creator=alice)
     _, action = asyncio.run(_run(db, hub, presence, mailbox, channel, bob, [f"/join {other.name}"]))
     assert isinstance(action, chat_flow._SwitchTo)
+
+
+def test_joining_via_invitation_grants_membership_that_survives_leaving(db, hub, presence, mailbox, alice, bob, channel):
+    """End-to-end regression test for GitHub issue #28's core bug,
+    driven through the real /invite + /join commands rather than the
+    library functions directly: accepting an invitation via /join used
+    to only mark the invitation accepted, never actually granting
+    persistent membership -- so a second /join after leaving was
+    refused."""
+    _grant_manage_members(db, alice, channel)
+    asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/invite bob", "/quit"]))
+
+    other = create_channel(db, "offtopic", creator=alice)
+    asyncio.run(_run(db, hub, presence, mailbox, other, bob, [f"/join {channel.name}"]))  # first join
+
+    assert is_member(db, channel, bob) is True  # real, persistent membership now exists
+
+    # A second /join (simulating having left and come back) must
+    # succeed purely on that persistent membership -- no invitation is
+    # left pending to fall back on this time.
+    _, action = asyncio.run(_run(db, hub, presence, mailbox, other, bob, [f"/join {channel.name}"]))
+    assert isinstance(action, chat_flow._SwitchTo)
+
+
+# -- /revokeaccess ejects a live session in a members_only channel ---------
+
+
+def test_revokeaccess_ejects_a_present_target_from_a_members_only_channel(db, hub, presence, mailbox, alice, bob, channel):
+    _grant_manage_members(db, alice, channel)
+    add_member(db, channel, bob, granted_by=alice)
+
+    async def scenario():
+        history = InputHistory()
+        target_session = FakeSession()  # never types anything
+        target_task = asyncio.create_task(
+            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, history, channel, bob)
+        )
+        await asyncio.sleep(0)  # let bob actually join before revoking
+
+        mod_session = FakeSession(["/revokeaccess bob", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(mod_session, db, hub, presence, mailbox, history, channel, alice), timeout=2
+        )
+        await asyncio.wait_for(target_task, timeout=2)
+        return target_session
+
+    target_session = asyncio.run(scenario())
+    assert "removed" in _written(target_session)
+    assert hub.participant_count(channel.name) == 0
+
+
+def test_revokeaccess_does_not_eject_from_an_open_channel(db, hub, presence, mailbox, alice, bob):
+    """Only a members_only channel's revocation is access-restriction-
+    meaningful enough to force an immediate eject (GitHub issue #28) --
+    an open channel's membership grant is a lesser, purely persistent-
+    access concept, and /kick remains the general "remove someone
+    right now" action for that case."""
+    open_channel = create_channel(db, "open-lobby", creator=alice)
+    _grant_manage_members(db, alice, open_channel)
+    add_member(db, open_channel, bob, granted_by=alice)
+
+    async def scenario():
+        history = InputHistory()
+        target_session = FakeSession(["/quit"])
+        target_task = asyncio.create_task(
+            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, history, open_channel, bob)
+        )
+        await asyncio.sleep(0)
+
+        mod_session = FakeSession(["/revokeaccess bob", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(mod_session, db, hub, presence, mailbox, history, open_channel, alice), timeout=2
+        )
+        await asyncio.wait_for(target_task, timeout=2)
+        return target_session
+
+    target_session = asyncio.run(scenario())
+    assert "removed" not in _written(target_session)

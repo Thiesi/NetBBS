@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from netbbs.config import get_config, get_max_upload_bytes, set_config, set_max_upload_bytes
+from netbbs.config import (
+    get_config,
+    get_invitation_expiry_days,
+    get_max_upload_bytes,
+    set_config,
+    set_invitation_expiry_days,
+    set_max_upload_bytes,
+)
 from netbbs.storage.database import Database
 
 
@@ -68,4 +75,37 @@ def test_set_max_upload_bytes_rejects_non_positive(tmp_path):
         set_max_upload_bytes(db, 0)
     with pytest.raises(ValueError):
         set_max_upload_bytes(db, -1)
+    db.close()
+
+
+# -- channel invitation expiry (GitHub issue #28) -----------------------
+
+
+def test_invitation_expiry_has_a_default(tmp_path):
+    db = Database(tmp_path / "node.db")
+    assert get_invitation_expiry_days(db) is not None
+    assert get_invitation_expiry_days(db) > 0
+    db.close()
+
+
+def test_set_then_get_invitation_expiry_days(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_invitation_expiry_days(db, 14)
+    assert get_invitation_expiry_days(db) == 14
+    db.close()
+
+
+def test_invitation_expiry_can_be_set_to_indefinite(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_invitation_expiry_days(db, None)
+    assert get_invitation_expiry_days(db) is None
+    db.close()
+
+
+def test_set_invitation_expiry_days_rejects_non_positive(tmp_path):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError):
+        set_invitation_expiry_days(db, 0)
+    with pytest.raises(ValueError):
+        set_invitation_expiry_days(db, -1)
     db.close()

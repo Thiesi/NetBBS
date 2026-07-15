@@ -27,8 +27,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+import datetime
+
 from netbbs.auth.users import User, list_users
 from netbbs.chat.channels import Channel
+from netbbs.config import get_invitation_expiry_days
 from netbbs.moderation import ChannelPermission, has_permission, record_action
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -134,6 +137,15 @@ def remove_member(db: Database, channel: Channel, target: User, *, removed_by: U
 # -- invitations --------------------------------------------------------
 
 
+def _expiry_timestamp(days: int) -> str:
+    """`days` from now, same fixed format `utc_now_iso` produces --
+    comparable directly against stored `expires_at` strings, same as
+    `netbbs.boards.posts._cutoff_iso`'s own days-based cutoff (that one
+    counts backward from now; this counts forward)."""
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+    return future.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def create_invitation(db: Database, channel: Channel, target: User, *, invited_by: User) -> ChannelInvitation:
     """
     Create (or upsert, same `ON CONFLICT` pattern as `channel_
@@ -144,6 +156,14 @@ def create_invitation(db: Database, channel: Channel, target: User, *, invited_b
     (design doc round 33 point 11's opt-in) — checked here, not left to
     the caller, so this is the one place that authorization decision is
     made.
+
+    `expires_at` (GitHub issue #28) is populated from
+    `netbbs.config.get_invitation_expiry_days` -- a node-wide default
+    (7 days out of the box) rather than the permanently-`NULL` value
+    this used to always write, which left the schema/model's own
+    expiry support structurally present but never actually operating.
+    `None` remains available (an operator can configure indefinite
+    invitations) — see that config function's own docstring.
     """
     if not (
         has_permission(
@@ -155,18 +175,20 @@ def create_invitation(db: Database, channel: Channel, target: User, *, invited_b
         raise MembershipError(f"{invited_by.username!r} may not invite users to this channel")
 
     created_at = utc_now_iso()
+    expiry_days = get_invitation_expiry_days(db)
+    expires_at = _expiry_timestamp(expiry_days) if expiry_days is not None else None
     db.connection.execute(
         """
         INSERT INTO channel_invitations
             (channel_id, invited_user_id, invited_by_user_id, status, created_at, expires_at)
-        VALUES (?, ?, ?, 'pending', ?, NULL)
+        VALUES (?, ?, ?, 'pending', ?, ?)
         ON CONFLICT(channel_id, invited_user_id) DO UPDATE SET
             invited_by_user_id = excluded.invited_by_user_id,
             status = 'pending',
             created_at = excluded.created_at,
             expires_at = excluded.expires_at
         """,
-        (channel.id, target.id, invited_by.id, created_at),
+        (channel.id, target.id, invited_by.id, created_at, expires_at),
     )
     db.connection.commit()
 
@@ -210,18 +232,46 @@ def has_pending_invitation(db: Database, channel: Channel, user: User) -> bool:
 
 
 def accept_invitation(db: Database, channel: Channel, user: User) -> None:
-    """Marks `user`'s pending invitation (if any) as accepted — called
-    by a successful `/join` (`netbbs.net.chat_flow._handle_join`), not
-    a separate `/accept` command (round 33's "reuse /join" decision). A
-    no-op if there was no pending invitation (e.g. the user was already
-    a direct member, or the channel isn't `members_only` at all) —
-    joining doesn't require one to have existed."""
+    """
+    Accepts `user`'s pending invitation (if any) — called by a
+    successful `/join` (`netbbs.net.chat_flow._handle_join`), not a
+    separate `/accept` command (round 33's "reuse /join" decision). A
+    no-op if there was no pending, non-expired invitation (e.g. the
+    user was already a direct member, or the channel isn't
+    `members_only` at all) — joining doesn't require one to have
+    existed.
+
+    One atomic state transition (GitHub issue #28), not just marking
+    the invitation accepted the way this used to: also inserts (or
+    upserts) `channel_members`, using the inviter (`invited_by_user_id`
+    on the invitation itself) as `granted_by_user_id` — accepting an
+    invitation used to leave the invited user with no actual persistent
+    membership row at all, so access silently reverted to "not a
+    member" the moment they next left the channel.
+    """
+    row = db.connection.execute(
+        """
+        SELECT * FROM channel_invitations
+        WHERE channel_id = ? AND invited_user_id = ? AND status = 'pending'
+              AND (expires_at IS NULL OR expires_at > ?)
+        """,
+        (channel.id, user.id, utc_now_iso()),
+    ).fetchone()
+    if row is None:
+        return
+
+    db.connection.execute(
+        "UPDATE channel_invitations SET status = 'accepted' WHERE id = ?", (row["id"],)
+    )
     db.connection.execute(
         """
-        UPDATE channel_invitations SET status = 'accepted'
-        WHERE channel_id = ? AND invited_user_id = ? AND status = 'pending'
+        INSERT INTO channel_members (channel_id, user_id, granted_by_user_id, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(channel_id, user_id) DO UPDATE SET
+            granted_by_user_id = excluded.granted_by_user_id,
+            created_at = excluded.created_at
         """,
-        (channel.id, user.id),
+        (channel.id, user.id, row["invited_by_user_id"], utc_now_iso()),
     )
     db.connection.commit()
 

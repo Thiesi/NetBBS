@@ -80,3 +80,29 @@ def set_max_upload_bytes(db: Database, max_bytes: int) -> None:
     if max_bytes <= 0:
         raise ValueError(f"max upload size must be positive, got {max_bytes!r}")
     set_config(db, MAX_UPLOAD_BYTES_CONFIG_KEY, str(max_bytes))
+
+
+# Config key for the node-wide default channel-invitation expiry
+# (GitHub issue #28) -- create_invitation() always wrote NULL
+# (indefinite) before this existed, leaving the schema/model's own
+# expires_at support structurally present but permanently unused. A
+# single node-wide default, same shape as the settings above; `None`
+# remains a valid, deliberate choice (indefinite invitations, matching
+# ChannelInvitation.expires_at's own documented "None == indefinite"
+# semantic) for an operator who wants to opt back out.
+INVITATION_EXPIRY_DAYS_CONFIG_KEY = "channel_invitation_expiry_days"
+
+_DEFAULT_INVITATION_EXPIRY_DAYS = 7
+
+
+def get_invitation_expiry_days(db: Database) -> int | None:
+    value = get_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY)
+    if value is None:
+        return _DEFAULT_INVITATION_EXPIRY_DAYS
+    return None if value == "" else int(value)
+
+
+def set_invitation_expiry_days(db: Database, days: int | None) -> None:
+    if days is not None and days <= 0:
+        raise ValueError(f"invitation expiry must be positive or None (indefinite), got {days!r}")
+    set_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY, "" if days is None else str(days))
