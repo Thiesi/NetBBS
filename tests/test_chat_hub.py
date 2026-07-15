@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.chat.hub import ChatHub
+from netbbs.chat.hub import ChatHub, QueueOverflowNotice
 
 
 def test_join_returns_a_queue():
@@ -135,3 +135,72 @@ def test_multiple_broadcasts_are_delivered_in_order():
         assert queue.get_nowait() == "second"
 
     asyncio.run(scenario())
+
+
+# -- GitHub issue #31: bounded queues, no blocking on a full one -----------
+
+
+def test_participant_queue_is_bounded():
+    hub = ChatHub(queue_maxsize=5)
+    queue = hub.join("lobby", "alice")
+    assert queue.maxsize == 5
+
+
+def test_flooding_a_slow_consumer_does_not_grow_its_queue_unbounded():
+    async def scenario():
+        hub = ChatHub(queue_maxsize=3)
+        queue = hub.join("lobby", "alice")
+        for i in range(50):  # far more than the queue can hold
+            await hub.broadcast("lobby", f"message {i}")
+        return queue
+
+    queue = asyncio.run(scenario())
+    assert queue.qsize() <= 3
+
+
+def test_overflow_drops_oldest_and_inserts_a_notice():
+    async def scenario():
+        hub = ChatHub(queue_maxsize=2)
+        queue = hub.join("lobby", "alice")
+        await hub.broadcast("lobby", "first")
+        await hub.broadcast("lobby", "second")
+        await hub.broadcast("lobby", "third")  # queue was full -- overflow
+        return queue
+
+    queue = asyncio.run(scenario())
+    # "first" was dropped to make room; "second" and the overflow notice remain.
+    remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert "first" not in remaining
+    assert "second" in remaining
+    assert any(isinstance(item, QueueOverflowNotice) for item in remaining)
+
+
+def test_broadcast_never_blocks_on_one_full_slow_consumer():
+    """A full queue must not stall delivery to participants after it in
+    the same broadcast -- verified by asserting the fast consumer still
+    gets every message even while the slow one is permanently full."""
+
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        slow = hub.join("lobby", "slow")  # never drained
+        fast = hub.join("lobby", "fast")
+        for i in range(20):
+            await asyncio.wait_for(hub.broadcast("lobby", f"message {i}"), timeout=1)
+            fast.get_nowait()  # keep the fast consumer's queue drained
+        return slow
+
+    slow = asyncio.run(scenario())
+    assert slow.qsize() <= 1
+
+
+def test_send_to_a_full_queue_overflows_instead_of_blocking():
+    async def scenario():
+        hub = ChatHub(queue_maxsize=1)
+        queue = hub.join("lobby", "alice")
+        await hub.broadcast("lobby", "first")  # fills the queue
+        delivered = await asyncio.wait_for(hub.send_to("lobby", "alice", "second"), timeout=1)
+        return queue, delivered
+
+    queue, delivered = asyncio.run(scenario())
+    assert delivered is True
+    assert queue.qsize() <= 1

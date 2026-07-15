@@ -19,7 +19,7 @@ from netbbs.chat.channels import (
     list_channels,
     set_topic,
 )
-from netbbs.chat.hub import ChatHub
+from netbbs.chat.hub import ChatHub, QueueOverflowNotice
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.membership import (
     ChannelInvitation,
@@ -79,6 +79,7 @@ __all__ = [
     "list_channels",
     "set_topic",
     "ChatHub",
+    "QueueOverflowNotice",
     "MessageMailbox",
     "ChannelInvitation",
     "MembershipError",

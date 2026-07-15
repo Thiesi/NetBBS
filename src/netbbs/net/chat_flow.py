@@ -24,6 +24,7 @@ from netbbs.chat import (
     MessageMailbox,
     NickError,
     PresenceRegistry,
+    QueueOverflowNotice,
     TopicError,
     accept_invitation,
     add_member,
@@ -1686,6 +1687,19 @@ async def _chat_loop(
             if isinstance(message, _TimestampedNotice):
                 await session.write_line(
                     format_with_preference(db, user, message.text, message.created_at)
+                )
+                continue
+            if isinstance(message, QueueOverflowNotice):
+                # GitHub issue #31: this session's own queue overflowed
+                # (too far behind the channel's message rate) and one
+                # message was dropped to make room for this notice --
+                # an honest signal that something was missed, rather
+                # than silently losing it.
+                await session.write_line(
+                    colored(
+                        "\r\n*** You're falling behind -- a message was dropped.",
+                        fg_color=MUTED_COLOR,
+                    )
                 )
                 continue
             await session.write_line(message)

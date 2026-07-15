@@ -21,8 +21,40 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 
 from netbbs.timeutil import utc_now_iso
+
+# Every participant queue's fixed capacity (GitHub issue #31): an
+# authenticated user whose transport is slow/stalled (or who simply
+# never reads) previously accumulated every message broadcast to the
+# channel with no ceiling -- one or several slow consumers could grow
+# node memory without bound, and a malicious sender could amplify that
+# by flooding messages while leaving a target session connected but
+# unread. Large enough that no realistically-paced conversation ever
+# comes close (500 messages is a lot of chat to have genuinely
+# unread), small enough to bound worst-case per-participant memory to
+# something sane regardless of how many participants a channel has.
+_DEFAULT_QUEUE_MAXSIZE = 500
+
+
+@dataclass(frozen=True)
+class QueueOverflowNotice:
+    """
+    Delivered in place of a message that didn't fit (GitHub issue #31):
+    the oldest still-queued message is dropped to make room, and this
+    synthetic notice takes its slot, rather than either blocking the
+    whole broadcast on one slow consumer or growing that consumer's
+    queue without bound.
+
+    A distinct object, not a plain string, for the same reason
+    `netbbs.net.chat_flow._KickNotice`/`_TimestampedNotice` are --
+    `ChatHub` stays ignorant of how a caller renders it (see module
+    docstring); `receive_loop` is the one place that turns this into an
+    actual line shown to the affected participant.
+    """
+
+    dropped_count: int
 
 
 class ChatHub:
@@ -37,7 +69,8 @@ class ChatHub:
     per-session request/response.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE) -> None:
+        self._queue_maxsize = queue_maxsize
         self._channels: dict[str, dict[str, asyncio.Queue]] = defaultdict(dict)
         # In-memory only, not persisted — consistent with chat messages
         # themselves not being persisted (see module docstring). A
@@ -50,8 +83,10 @@ class ChatHub:
 
     def join(self, channel_name: str, participant_id: str) -> asyncio.Queue:
         """Register `participant_id` as present in `channel_name`,
-        returning the queue they should read incoming messages from."""
-        queue: asyncio.Queue = asyncio.Queue()
+        returning the queue they should read incoming messages from.
+        Bounded to `queue_maxsize` (GitHub issue #31) -- see
+        `_deliver`'s overflow handling."""
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_maxsize)
         self._channels[channel_name][participant_id] = queue
         return queue
 
@@ -90,13 +125,48 @@ class ChatHub:
         for participant_id, queue in participants:
             if participant_id in exclude:
                 continue
-            await queue.put(message)
+            self._deliver(queue, message)
         # Recorded even if there were zero participants to actually
         # deliver to (e.g. the system-generated join/leave notices) —
         # any broadcast attempt counts as activity on the channel,
         # matching what a user browsing by "most recent activity" would
         # intuitively expect.
         self._last_activity[channel_name] = utc_now_iso()
+
+    def _deliver(self, queue: asyncio.Queue, message: object) -> None:
+        """
+        Enqueue `message`, never blocking (GitHub issue #31).
+
+        `put_nowait`, not `await queue.put`: awaiting a full bounded
+        queue inside `broadcast`'s loop would let one slow recipient
+        stall delivery to every participant still to come, turning a
+        per-consumer backpressure problem into a whole-channel one.
+
+        On overflow, the oldest still-queued message is dropped to make
+        room for a `QueueOverflowNotice` in its place -- bounded memory
+        with an honest signal to the affected participant that they
+        missed something, rather than either unbounded growth or
+        silently discarding new messages with no indication anything
+        was lost.
+        """
+        try:
+            queue.put_nowait(message)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            queue.put_nowait(QueueOverflowNotice(dropped_count=1))
+        except asyncio.QueueFull:
+            # Another producer refilled the slot we just freed before we
+            # could use it -- vanishingly unlikely on a single-threaded
+            # event loop, but nothing more to do here regardless: the
+            # queue is still bounded and the recipient is still falling
+            # behind, which the next overflow will report.
+            pass
 
     def participant_count(self, channel_name: str) -> int:
         return len(self._channels[channel_name])
@@ -131,7 +201,7 @@ class ChatHub:
         queue = self._channels[channel_name].get(participant_id)
         if queue is None:
             return False
-        await queue.put(message)
+        self._deliver(queue, message)
         return True
 
     def last_activity(self, channel_name: str) -> str | None:

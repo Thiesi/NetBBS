@@ -9,7 +9,7 @@ tests/test_chat_flow_private.py and tests/test_login_mailbox_flush.py.
 
 from __future__ import annotations
 
-from netbbs.chat.mailbox import MessageMailbox
+from netbbs.chat.mailbox import _MAX_PENDING_PER_USERNAME, MessageMailbox
 
 _T = "2026-01-01T00:00:00.000000Z"
 
@@ -54,3 +54,24 @@ def test_flushing_one_user_does_not_affect_another():
     mailbox.deliver("bob", "for bob", _T)
     mailbox.flush("alice")
     assert mailbox.flush("bob") == [("for bob", _T)]
+
+
+# -- GitHub issue #31: bounded mailbox --------------------------------------
+
+
+def test_pending_messages_are_bounded_per_username():
+    mailbox = MessageMailbox()
+    for i in range(_MAX_PENDING_PER_USERNAME + 50):
+        mailbox.deliver("alice", f"message {i}", _T)
+    pending = mailbox.flush("alice")
+    assert len(pending) == _MAX_PENDING_PER_USERNAME
+
+
+def test_overflow_drops_the_oldest_entries_first():
+    mailbox = MessageMailbox()
+    for i in range(_MAX_PENDING_PER_USERNAME + 1):
+        mailbox.deliver("alice", f"message {i}", _T)
+    pending = mailbox.flush("alice")
+    texts = [text for text, _ in pending]
+    assert "message 0" not in texts  # the oldest was dropped to make room
+    assert f"message {_MAX_PENDING_PER_USERNAME}" in texts  # the newest survived

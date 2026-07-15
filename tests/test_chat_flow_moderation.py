@@ -261,6 +261,34 @@ def test_unmuted_user_me_still_works(db, hub, presence, mailbox, history, bob, c
     assert any(m.kind == "action" and "waves" in m.body for m in scrollback)
 
 
+# -- GitHub issue #31: bounded queue overflow surfaces to the affected user --
+
+
+def test_falling_behind_notice_appears_when_a_participant_queue_overflows(
+    db, presence, mailbox, history, sysop, bob, channel
+):
+    async def scenario():
+        small_hub = ChatHub(queue_maxsize=2)
+        target_session = FakeSession()  # never reads -- guaranteed to fall behind
+        target_task = asyncio.create_task(
+            chat_flow._chat_loop(target_session, db, small_hub, presence, mailbox, history, channel, bob)
+        )
+        await asyncio.sleep(0)  # let target actually join before flooding
+
+        for i in range(10):  # far more than the queue's capacity of 2
+            await small_hub.broadcast(channel.name, f"flood {i}")
+
+        mod_session = FakeSession(["/kick bob disruptive", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(mod_session, db, small_hub, presence, mailbox, history, channel, sysop), timeout=2
+        )
+        await asyncio.wait_for(target_task, timeout=2)
+        return target_session
+
+    target_session = asyncio.run(scenario())
+    assert "falling behind" in _written_text(target_session)
+
+
 def test_unmuted_user_can_send_again(db, hub, presence, mailbox, history, sysop, bob, channel):
     async def scenario():
         mod_session = FakeSession(["/mute bob", "/unmute bob", "/quit"])

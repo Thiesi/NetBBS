@@ -40,6 +40,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+# Per-username cap on unflushed entries (GitHub issue #31): with no
+# ceiling, an account that stays online but never returns to
+# `_main_menu`'s flush point (deep in boards/files/chat) accumulates
+# every `/msg` sent to it without bound -- generous enough that no
+# realistically-paced correspondence ever comes close, small enough to
+# bound worst-case memory regardless of how long a recipient stays away
+# from the flush point.
+_MAX_PENDING_PER_USERNAME = 200
+
 
 class MessageMailbox:
     def __init__(self) -> None:
@@ -52,8 +61,16 @@ class MessageMailbox:
         recipient's own timestamp preference, read at flush time, can
         still be honored -- the same reason `netbbs.net.chat_flow`'s
         live-broadcast path carries a raw timestamp through the queue
-        instead of baking a rendering decision in at send time."""
-        self._pending[username].append((text, created_at))
+        instead of baking a rendering decision in at send time.
+
+        Bounded to `_MAX_PENDING_PER_USERNAME` (GitHub issue #31): the
+        oldest unflushed entry is dropped to make room, same
+        drop-oldest overflow policy `netbbs.chat.hub.ChatHub` uses for
+        its own per-participant queues, for consistency."""
+        pending = self._pending[username]
+        if len(pending) >= _MAX_PENDING_PER_USERNAME:
+            pending.pop(0)
+        pending.append((text, created_at))
 
     def flush(self, username: str) -> list[tuple[str, str]]:
         """Return and clear whatever's queued for `username` --
