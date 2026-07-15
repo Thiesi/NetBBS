@@ -61,6 +61,7 @@ from netbbs.files.categories import create_category as create_file_category
 from netbbs.files.categories import delete_category as delete_file_category
 from netbbs.files.categories import list_subcategories as list_file_subcategories
 from netbbs.files.categories import list_top_level_categories as list_top_level_file_categories
+from netbbs.files.gc import GCReport, reclaim_orphaned_blobs
 from netbbs.files.entries import (
     FileEntry,
     approve_file,
@@ -1096,15 +1097,76 @@ async def _area_menu(session: Session, db: Database, actor: User) -> None:
             await session.write_line("")
             await _list_areas_screen(session, db, actor)
             await _draw_area_menu(session)
+        elif choice == "g":
+            await session.write_line("")
+            await _gc_screen(session, db)
+            await _draw_area_menu(session)
         else:
             await session.write(reject_keystroke())
 
 
 async def _draw_area_menu(session: Session) -> None:
     header = colored("File areas:", fg_color=HEADER_COLOR, bold=True)
-    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist"), menu_key("B", "ack")])
+    options = "  ".join(
+        [menu_key("C", "reate"), menu_key("L", "ist"), menu_key("G", "C storage"), menu_key("B", "ack")]
+    )
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
+
+
+async def _gc_screen(session: Session, db: Database) -> None:
+    """
+    Reference-aware blob garbage collection (GitHub issue #35): always
+    shows a dry-run report first, then asks separately before actually
+    reclaiming anything -- the same "preview, then explicit confirm"
+    shape delete confirmations elsewhere in this menu use, appropriate
+    here too since this is a one-way filesystem operation the database
+    itself can't undo.
+    """
+    preview = reclaim_orphaned_blobs(db, dry_run=True)
+    await _write_gc_report(session, preview)
+    if preview.reclaimable_blobs == 0:
+        return
+    await session.write("Reclaim this space now? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return
+    result = reclaim_orphaned_blobs(db, dry_run=False)
+    await _write_gc_report(session, result)
+
+
+def _format_bytes(size_bytes: int) -> str:
+    """Human-readable byte count, binary (KiB/MiB/GiB) units -- a small
+    local formatter rather than reaching into
+    `netbbs.net.file_flow`'s own private `_format_size`, which exists
+    for that module's file-listing display specifically."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    size = float(size_bytes) / 1024
+    for unit in ("KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"  # unreachable, satisfies type checkers
+
+
+async def _write_gc_report(session: Session, report: GCReport) -> None:
+    verb = "Would reclaim" if report.dry_run else "Reclaimed"
+    await session.write_line(
+        f"\r\n{verb} {report.reclaimable_blobs} orphaned blob(s), "
+        f"{_format_bytes(report.reclaimable_bytes)}."
+    )
+    if report.skipped_recent:
+        await session.write_line(
+            colored(
+                f"{report.skipped_recent} recently-written orphan(s) skipped this pass "
+                "(safety age not yet reached).",
+                fg_color=MUTED_COLOR,
+            )
+        )
+    for error in report.errors:
+        await session.write_line(colored(f"Error: {error}", fg_color=MUTED_COLOR))
 
 
 async def _create_area_screen(session: Session, db: Database, actor: User) -> None:

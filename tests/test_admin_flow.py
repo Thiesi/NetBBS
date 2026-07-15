@@ -614,6 +614,62 @@ def test_create_and_delete_area_flow(db, sysop):
     assert list_file_areas(db) == []
 
 
+def test_gc_screen_reclaims_an_orphaned_blob(db, sysop):
+    """GitHub issue #35: dry-run report, then explicit confirm, then
+    actual reclaim -- driven end to end through the admin UI."""
+    import os
+    import time
+
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import delete_file, upload_file
+    from netbbs.files.storage import storage_path_for
+
+    area = create_file_area(db, "Docs", creator=sysop)
+    entry = upload_file(db, area, sysop, "file.txt", b"hello")
+    blob_path = storage_path_for(db, entry.sha256)
+    delete_file(db, entry, deleted_by=sysop)
+    backdated = time.time() - 7200  # past the default 1-hour safety age
+    os.utime(blob_path, (backdated, backdated))
+
+    inputs = ["m", "a", "g", "y", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    text = _written_text(session)
+    assert "Would reclaim 1 orphaned blob" in text
+    assert "Reclaimed 1 orphaned blob" in text
+    assert not blob_path.exists()
+
+
+def test_gc_screen_declining_confirmation_does_not_delete(db, sysop):
+    import os
+    import time
+
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import delete_file, upload_file
+    from netbbs.files.storage import storage_path_for
+
+    area = create_file_area(db, "Docs", creator=sysop)
+    entry = upload_file(db, area, sysop, "file.txt", b"hello")
+    blob_path = storage_path_for(db, entry.sha256)
+    delete_file(db, entry, deleted_by=sysop)
+    backdated = time.time() - 7200
+    os.utime(blob_path, (backdated, backdated))
+
+    inputs = ["m", "a", "g", "n", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    assert blob_path.exists()
+
+
+def test_gc_screen_with_nothing_to_reclaim_skips_the_confirmation_prompt(db, sysop):
+    inputs = ["m", "a", "g", "b", "b", "b"]  # no "y"/"n" needed
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+    assert "Would reclaim 0 orphaned blob" in _written_text(session)
+
+
 def test_sysop_approves_a_pending_file_with_zero_grants(db, sysop):
     from netbbs.files.areas import create_file_area
     from netbbs.files.entries import get_file, upload_file
