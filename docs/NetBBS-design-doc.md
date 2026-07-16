@@ -750,6 +750,93 @@ already being made for every post on it, not a new category of trust.
   simultaneous heavy chat fanout + Link sync writes — not CPU. Worth
   monitoring once we're past Phase 2, not a blocker now.
 
+### Database execution model (round 91 — resolves issue #57)
+
+Third piece of Phase 3 design work. Round 30 diagnosed the problem
+(exactly one synchronous `sqlite3.Connection`, shared for the node's
+whole lifetime, blocking the entire event loop per query — see
+`netbbs.storage.database.Database`'s own docstring) and deliberately
+deferred choosing a fix. This round chooses one, scoped to what Phase
+3's continuous background Link activity (peer inventory exchange, event
+verification/ingestion, retry/outbox processing) actually needs, not a
+full rewrite.
+
+**Two dedicated single-worker-thread lanes, not a full actor rewrite and
+not a full reader-connection pool.** A **foreground lane** (interactive
+Telnet/SSH/web session work — everything that exists today) and a
+**background lane** (reserved for Phase 3's continuous Link activity),
+each a `ThreadPoolExecutor(max_workers=1)` owning its own SQLite
+connection (WAL) against the same database file:
+
+- **Existing business-logic functions are unchanged.** Only their call
+  sites move, from a direct synchronous call to `await
+  loop.run_in_executor(lane, existing_function, *args)`. Every function's
+  transaction ownership stays exactly where it already correctly is —
+  this was the deciding factor over option 1 taken literally (a typed-
+  message actor, which would require rewriting every one of these
+  functions' call contracts) and over option 3 in full (a real
+  N-connection reader pool, see below for why that's deferred rather
+  than built now).
+- **Cross-lane write serialization is SQLite's own job.** Two lanes
+  writing concurrently just hit SQLite's existing single-writer lock,
+  retried via the already-configured `busy_timeout` (round 30) — no new
+  application-level locking to build.
+- **Cancellation is safe by a property of the mechanism, not an added
+  check.** If a session disconnects mid-call, the underlying worker
+  thread keeps running to completion regardless of the awaiting
+  coroutine's cancellation — Python doesn't abort a thread mid-flight.
+  A transaction therefore always finishes (commit or rollback), never
+  left half-abandoned; the caller just doesn't get to see the result.
+- **Backpressure:** a bounded semaphore per lane, not the executor's
+  default unbounded queue — new submissions past a configurable depth
+  block/reject rather than growing without limit. Exact numeric limits
+  and observability surfacing are #60's job (operational model); this
+  round only establishes that a bound exists and is enforced.
+- **The standalone admin CLI (`python -m netbbs.admin`) is unaffected** —
+  it's already a separate OS process/connection, already covered by WAL
+  + `busy_timeout`.
+
+**Explicitly deferred: a full N-reader-connection pool for genuine read
+parallelism (option 3 in full).** Confirmed with Thiesi after estimating
+the actual cost, not assumed cheap without checking:
+- The mechanical pool code is small (~100–150 lines). The real cost is
+  auditing every business-logic function — and everything it transitively
+  calls — for hidden write side effects, since a function can look
+  read-only and still write through a nested helper. Concretely found
+  during this round's own analysis: `netbbs.auth.users.
+  authenticate_password` reads a user row and looks pure, but calls
+  `_finish_password_login` → `_touch_last_login`, which writes
+  `last_login_at` — a mechanical "contains SELECT" scan would have
+  misclassified it as safe to route to a reader connection. That's the
+  actual shape of the migration cost, not the boilerplate, and per this
+  project's own track record (round 30's dict-mutation bug, the `goto`
+  bug, the password-masking bug — all only caught by actually running
+  tests, per this project's established working style) this kind of
+  audit should be expected to surface real bugs on the first pass, not
+  complete cleanly.
+- **Two different bottleneck thresholds, kept separate rather than
+  answered with one number:** the **foreground/interactive** lane has
+  comfortable headroom well past this section's declared scale — BBS
+  usage is human-paced and bursty, so aggregate query rate even at
+  "low hundreds of users" is a small fraction of one thread's capacity;
+  estimated headroom into the thousands of low-activity concurrent
+  sessions before queuing delay would be user-visible. The
+  **background/Link** lane's threshold is a genuinely different,
+  currently unmeasurable axis — it depends on aggregate incoming event
+  rate from however many peers a node carries, against SQLite's own
+  single-writer throughput ceiling (a rough, unverified estimate:
+  hundreds to low thousands of small writes/sec on ordinary hardware).
+  Deferring the reader pool doesn't make this axis worse either way — a
+  saturated background lane queues its own work without affecting the
+  foreground lane regardless of whether a reader pool exists.
+- The real threshold is for #59's deterministic multi-node harness to
+  establish empirically, once it can generate synthetic Link traffic
+  against real code — not to guess further now. This matches #57's own
+  acceptance criteria calling for benchmarks under concurrent interactive
+  and Link-sync load.
+- Cheap to add a third+ lane later, using the exact same mechanism, if a
+  specific hot path is ever shown to need it.
+
 ## 15. Feature scope & phasing
 
 Thiesi has delegated release-scope decisions — all listed features are
@@ -830,8 +917,10 @@ tiers which don't actually depend on each other:**
   and the node/user key-lifecycle model (issue #51).
 - *Before continuous sync, ingestion, retry queues, or other background
   Link work is implemented:* the non-blocking DB/background-work
-  execution model (issue #57), plus a *minimal* deterministic test
-  harness and the fault-injection seams it needs (issue #59) — not the
+  execution model (issue #57 — design chosen round 91, §14: two
+  single-worker lanes, foreground and background; implementation itself
+  still pending), plus a *minimal* deterministic test harness and the
+  fault-injection seams it needs (issue #59) — not the
   harness's full end state; that grows in lockstep with later features,
   per the next bullet, rather than needing to be complete up front.
 - *Before the first end-to-end Linked feature is treated as complete:*
@@ -5365,4 +5454,70 @@ of stage 2's eventual answers should require revisiting anything decided
 here — the semantic model and the exact byte representation were
 deliberately kept as separable concerns, per Thiesi's own framing of the
 staged gate.
+
+## Sign-off notes, round 91 (database execution model — resolves issue #57)
+
+Third piece of Phase 3 design work, following round 89 (key lifecycle)
+and round 90 (canonical event model) per the round-88 dependency
+ordering — #57 sits in the "before continuous background Link work"
+tier, alongside a minimal #59 harness.
+
+**Chose two dedicated single-worker-thread lanes (foreground,
+background), each owning its own SQLite connection in WAL mode against
+the same file — full detail in §14's new "Database execution model"
+subsection.** Rejected two more thorough-looking alternatives, both for
+concrete reasons rather than by default preference for the simpler
+option:
+
+- **A full typed-message actor (issue #57's option 1, taken literally)**
+  — would require rewriting every one of the ~90 existing business-logic
+  functions' call contracts into async messages. The chosen model gets
+  the same "off the event loop" property by wrapping existing call sites
+  in `run_in_executor`, with every function body — and its already-
+  correct transaction ownership — completely untouched.
+- **A full N-reader-connection pool (option 3 in full)** — evaluated
+  properly, not dismissed by assumption, after Thiesi asked directly how
+  much code it would touch and where two lanes would actually become a
+  bottleneck. Findings:
+  - The pool mechanism itself is cheap (~100–150 lines), but classifying
+    which of the ~90 functions are safe to route to a reader connection
+    requires tracing each one's *full call graph* for hidden writes, not
+    just scanning for `SELECT`. Concrete near-miss found while doing this
+    analysis: `netbbs.auth.users.authenticate_password` looks read-only
+    but calls `_finish_password_login` → `_touch_last_login`, which
+    writes `last_login_at` — exactly the kind of thing a quick pass
+    would misclassify, and exactly the shape of bug this project's own
+    history says only shows up by actually running things (round 30's
+    dict-mutation bug, the `goto` bug, the password-masking bug).
+  - Bottleneck estimate has two genuinely separate axes, not one number:
+    the foreground/interactive lane has comfortable headroom well past
+    this document's declared scale (§14), since BBS usage is human-paced
+    and bursty; the background/Link lane's ceiling is a currently
+    unmeasurable question of aggregate peer event volume against
+    SQLite's own single-writer throughput, which no amount of estimation
+    before Phase 3 code and #59's harness exist can responsibly answer.
+    Critically, **deferring the reader pool doesn't make the background
+    axis worse** — a saturated background lane queues its own work
+    without touching the foreground lane's latency either way.
+  - Given the audit cost is real (not hand-waved) and the benefit is
+    unmeasurable before #59 exists, deferred rather than built
+    speculatively — cheap to add later via the same mechanism (a third+
+    lane) if a specific hot path is ever shown to need it.
+
+**Also resolved, as direct consequences of choosing the lane model:**
+cross-lane write serialization needs no new application code (SQLite's
+own single-writer lock plus the already-configured `busy_timeout`,
+round 30, handles it); cancellation safety is a property of threads
+outliving coroutine cancellation, not an added check — a disconnected
+session's in-flight DB call still runs to completion, never leaving a
+transaction half-open; backpressure is a bounded semaphore per lane
+rather than the executor's unbounded default queue, with exact numeric
+limits left to #60's operational model; the standalone admin CLI is
+unaffected, already covered by existing WAL/`busy_timeout` handling.
+
+**Explicitly still open:** the actual implementation (wrapping the real
+call sites, wiring the two executors into node startup) — this round is
+a design decision, not code. Benchmark validation of both bottleneck
+estimates above is deferred to #59's harness, matching #57's own
+acceptance criteria.
 
