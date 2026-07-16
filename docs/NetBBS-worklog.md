@@ -6413,3 +6413,95 @@ or allowing the `/upload` hint).
 **Testing**: full suite re-run: **1779 passed, 4 skipped** (up from
 round 102's 1764 -- 15 net new tests overall, no regressions elsewhere).
 
+## Sign-off notes, round 104 (local asynchronous personal mail -- implemented, closes the local half of design doc round 93/issue #52)
+
+The last item in the addendum backlog (self-update, registration mode,
+identity attestation, now mail) before Communities. Local mail only --
+Link messages stay Phase 3 scope, unchanged from round 93's own
+placement.
+
+**`netbbs/mail.py` (new, core module):** `send_mail`, `get_mail`,
+`list_inbox`, `list_sent`, `unread_count`, `mark_read`,
+`delete_for_recipient`, `delete_for_sender`. Subject/body byte caps
+(`MAX_MAIL_SUBJECT_BYTES`/`MAX_MAIL_BODY_BYTES`, same encoded-UTF-8-bytes
+reasoning as `netbbs.directory`'s own caps, issue #32) and a
+per-recipient quota (`MAX_MAIL_PER_RECIPIENT = 500`): over the cap, the
+oldest already-read message is evicted; if every message is unread,
+`send_mail` raises `MailboxFullError` and stores nothing -- the
+bounce-not-silently-drop-unread behavior round 93 specified as an
+acceptance criterion.
+
+**Migration:** new `mail_messages` table --
+`sender_user_id`/`sender_label` (nullable FK `ON DELETE SET NULL` +
+denormalized label, same historical-stability shape as posts' author
+label since round 57), `recipient_user_id` (`NOT NULL`, `ON DELETE
+CASCADE` -- a deleted account can't leave orphaned mail sitting in
+nobody's inbox), independent `sender_deleted_at`/`recipient_deleted_at`,
+hard-deleting the row once both are set. Two indexes on
+`(recipient_user_id, recipient_deleted_at, created_at)` and the sender
+equivalent.
+
+**A real bug caught by the test suite, not just syntax-checking (per
+CLAUDE.md's own standing note on why this matters):**
+`delete_for_recipient`/`delete_for_sender` initially read the *other*
+side's deletion timestamp off the caller-supplied `message` dataclass
+parameter rather than the database's current state. `send_mail` returns
+one `MailMessage` snapshot; a caller that then calls
+`delete_for_recipient` followed by `delete_for_sender` against that same
+original object (exactly what
+`test_message_hard_deletes_once_both_sides_have_deleted_it` does, and
+what the reply/delete UI flow could do across two separate mail-flow
+actions) would pass the *stale, pre-first-delete* value for the side it
+wasn't directly authoritative over -- silently overwriting an
+already-set `recipient_deleted_at`/`sender_deleted_at` back to `NULL`
+instead of hard-deleting, a real regression, structurally identical to
+the check-then-act race GitHub issue #49 already fixed once in this
+codebase (round 81 worklog entry). **Fixed** by having both functions
+re-fetch the row's current state via `get_mail` immediately before
+deciding, rather than trusting the passed-in object for the field they
+don't own. Caught by one failing test on the first run, not by
+inspection -- another data point for this project's "actually run
+pytest" convention.
+
+**`netbbs/net/mail_flow.py` (new):** the main-menu `[E]-mail` UI,
+mirroring `chat_flow.py`/`file_flow.py`'s existing pattern of a
+dedicated flow module rather than growing `login_flow.py` further.
+`[I]nbox`/`[S]ent`/`[C]ompose`/`[B]ack` submenu; inbox/sent browsing
+reuses the shared `netbbs.net.picker.pick_item` (search/goto/paging for
+free, same as boards/channels/file areas already get) rather than a
+bespoke paginator. Message detail screens offer `[R]eply`/`[D]elete` (
+inbox) or `[D]elete` (sent) plus `[B]ack`. Compose/reply body entry
+reuses the fullscreen-prose-editor-or-plain-multiline-prompt split
+already established for bios/posts (`fullscreen_editor_enabled`/
+`edit_prose`, falling back to a repeated-`read_line`-until-blank-line
+loop matching `_edit_bio`'s own plain-path shape -- a letter benefits
+from multiple lines the way a bio does, unlike a board post's
+single-line plain fallback).
+
+**Main menu:** `[E]-mail` is always shown (unlike `[I]nvitations`,
+which only appears when something's actually pending) -- mail is a core
+always-available feature, not a transient notification -- and grows an
+"(N unread)" suffix, re-queried on every redraw with no separate
+seen-tracking state, same convention `[I]nvitations` already uses. `E`
+was chosen over reusing `M` (already `[M]essage Boards`) specifically
+because "E-mail" is the one piece of existing BBS-user muscle memory
+this feature can borrow for free.
+
+**Deliberately not built:** read receipts (round 93 already ruled these
+out explicitly -- optional, privacy-sensitive, not required for
+completeness) and any reuse of `netbbs.attestation`'s
+color-plus-marker verified-name display -- mail is a private 1:1
+exchange with no shared audience to forge an identity in front of, so
+`sender_label` (a plain denormalized username) is shown as-is, unlike
+the public-resource author/uploader labels round 102/103 built.
+
+**Tests**: 37 new -- `tests/test_mail.py` (22: send validation,
+inbox/sent listing, read state, access control, both-sides-deleted
+hard-delete, quota eviction/bounce) and `tests/test_mail_flow.py` (15:
+main-menu badge/dispatch, inbox unread-marker/read/delete/reply, sent
+listing/delete, compose success/unknown-recipient/blank-subject/
+blank-body/mailbox-full-bounce).
+
+**Testing**: full suite re-run: **1816 passed, 4 skipped** (up from
+round 103's 1779 -- 37 net new tests, no regressions elsewhere).
+

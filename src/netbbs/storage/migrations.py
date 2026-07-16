@@ -1121,4 +1121,44 @@ MIGRATIONS = [
             CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL);
         """,
     ),
+    Migration(
+        description=(
+            "Local asynchronous personal mail (design doc round 93, "
+            "netbbs.mail) -- deliberately not the same mechanism as "
+            "/msg (netbbs.chat.mailbox), which stays ephemeral and "
+            "online-only. One row per message; sender_user_id is "
+            "nullable (SET NULL on account deletion, same reasoning as "
+            "posts.author_user_id) with sender_label denormalized "
+            "alongside it so a message's provenance survives the "
+            "sender's account being deleted, matching round 57's "
+            "precedent. recipient_user_id is NOT NULL and CASCADEs --  "
+            "unlike a post, this row has no meaning independent of the "
+            "one recipient's inbox it belongs to. sender_deleted_at/ "
+            "recipient_deleted_at are independent: each side manages "
+            "their own view of the same message, and the row is hard-"
+            "deleted at the application level once both are set, "
+            "rather than a background sweep -- there is no time-based "
+            "expiry here, only two point-in-time user actions to check "
+            "after either one fires."
+        ),
+        sql="""
+        CREATE TABLE mail_messages (
+            id                    INTEGER PRIMARY KEY,
+            sender_user_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            sender_label          TEXT NOT NULL,
+            recipient_user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            subject               TEXT NOT NULL,
+            body                  TEXT NOT NULL,
+            created_at            TEXT NOT NULL,
+            read_at               TEXT,
+            sender_deleted_at     TEXT,
+            recipient_deleted_at  TEXT
+        );
+
+        CREATE INDEX idx_mail_messages_recipient
+            ON mail_messages(recipient_user_id, recipient_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_sender
+            ON mail_messages(sender_user_id, sender_deleted_at, created_at);
+        """,
+    ),
 ]

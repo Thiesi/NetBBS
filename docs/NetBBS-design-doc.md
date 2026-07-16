@@ -423,6 +423,17 @@ Thiesi's own staged-gate framing (round 87).
 
 ### Personal mail: local inbox/outbox, and Link messages (round 93 — resolves issue #52)
 
+Status: **local half fully implemented round 104** (`netbbs.mail` core
+— send/list/read/delete/quota, 22 tests — plus `netbbs.net.mail_flow`'s
+main-menu `[E]-mail` UI: inbox/sent browsing via the shared
+`netbbs.net.picker.pick_item`, compose/reply, and per-side delete, 15
+more tests). **Link messages remain unimplemented** — Phase 3 scope, as
+below; nothing about the local implementation forecloses it, since the
+mailbox schema/module was built with that extension in mind from the
+start (see round 93's own reasoning for why routing turns out simpler
+than boards'). See the round 104 worklog entry for the implementation
+writeup.
+
 Fifth piece of Phase 3 design work, and the first of the two
 feature-specific gates named in round 88's dependency matrix. Two
 layers, deliberately separated: **local asynchronous personal mail**

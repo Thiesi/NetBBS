@@ -90,12 +90,14 @@ from netbbs.directory import (
     set_bio,
     set_bio_visible,
 )
+from netbbs.mail import unread_count as unread_mail_count
 from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.net.chat_flow import browse_channels
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.file_flow import browse_file_areas
+from netbbs.net.mail_flow import browse_mail
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
@@ -647,17 +649,29 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     every pending invitation is accepted/revoked/expired, with no
     separate "mark as seen" bookkeeping needed: this just re-queries
     current truth on every redraw.
+
+    `[E]-mail` (design doc round 93/104, `netbbs.mail`/
+    `netbbs.net.mail_flow`) is always shown, unlike `[I]nvitations` --
+    it's a core always-available feature, not a transient notification --
+    but grows an "(N unread)" suffix the same "re-query on every redraw,
+    no separate seen-tracking" way. Deliberately a different letter and a
+    different persistence model from `[M]essage Boards`/`/msg`: `M` is
+    already taken, and `E` (for "E-mail") is the closest thing to a
+    ready-made convention BBS users already have muscle memory for.
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
 
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
+    unread = unread_mail_count(db, user)
+    mail_label = f"-mail ({unread} unread)" if unread else "-mail"
     option_list = [
         menu_key("M", "essage Boards"),
         menu_key("C", "hat"),
         menu_key("F", "ile areas"),
         menu_key("D", "irectory"),
         menu_key("P", "rofile"),
+        menu_key("E", mail_label),
     ]
     if list_pending_invitations_for_user(db, user):
         option_list.append(menu_key("I", "nvitations"))
@@ -750,6 +764,10 @@ async def _main_menu(
         elif choice == "p":
             await session.write_line("")
             await _edit_profile(session, db, user)
+            await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "e":
+            await session.write_line("")
+            await browse_mail(session, db, user)
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "i" and list_pending_invitations_for_user(db, user):
             await session.write_line("")
