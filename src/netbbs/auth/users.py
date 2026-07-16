@@ -122,6 +122,11 @@ class User:
     # created via the admin screen/CLI, and for every account that
     # existed before this column was added (migration default 0).
     pending_approval: bool = False
+    # A narrow, SysOp-grantable permission independent of the four
+    # moderator scope tiers (design doc §18, round 85 point 6) --
+    # verifying a real-world fact about a person isn't authority over
+    # any specific board/area/channel. See netbbs.attestation.
+    can_verify_identity: bool = False
 
 
 def _password_work_semaphore() -> asyncio.Semaphore:
@@ -504,6 +509,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         last_login_at=row["last_login_at"],
         disabled_at=row["disabled_at"],
         pending_approval=bool(row["pending_approval"]),
+        can_verify_identity=bool(row["can_verify_identity"]),
     )
 
 
@@ -662,6 +668,33 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (target.id,))
     db.connection.commit()
     record_action(db, actor=approved_by, action="approve_registration", target_user_id=target.id)
+    return _get_user_by_id(db, target.id)
+
+
+def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, changed_by: User) -> User:
+    """
+    Grant or revoke `target`'s identity-verification permission (design
+    doc §18, round 85 point 6) -- a plain per-user boolean, independent
+    of `netbbs.moderation.roles`'s four moderator scope tiers, since
+    verifying a real-world fact about a person isn't authority over any
+    specific board/area/channel. No last-SysOp-style lockout guard is
+    needed here (unlike `set_user_disabled`/`delete_user`) -- a SysOp
+    always retains the ability to verify regardless of this flag (see
+    `netbbs.attestation._require_verifier`), so revoking it from every
+    non-SysOp account can never leave a node unable to verify at all.
+    """
+    from netbbs.moderation.log import record_action
+
+    if target.can_verify_identity == can_verify:
+        return target
+    db.connection.execute(
+        "UPDATE users SET can_verify_identity = ? WHERE id = ?", (int(can_verify), target.id)
+    )
+    db.connection.commit()
+    record_action(
+        db, actor=changed_by, action="set_can_verify_identity", target_user_id=target.id,
+        detail=f"can_verify_identity={can_verify}",
+    )
     return _get_user_by_id(db, target.id)
 
 

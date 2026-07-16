@@ -6137,3 +6137,102 @@ suite re-run: **1721 passed, 4 skipped** (up from round 96's 1713 -- 8
 net new tests, matching the net test-count change across all four
 files exactly, no regressions elsewhere).
 
+## Sign-off notes, round 101 (identity attestation -- core mechanism implemented, UI/enforcement wiring deferred)
+
+Third implementation round for the addendum backlog. This is the
+largest single item on the backlog (age-gating symmetric across users/
+boards/channels/areas, real-name attestation/gating/display, a new
+permission, new profile fields), and rather than attempt the whole
+thing at once, this round deliberately scopes to the correctness-
+critical core -- the part that needed the most careful design work --
+and defers the UI/enforcement wiring as an explicit, documented
+follow-up, the same shape round 96's self-update round used for its own
+apply/restart cut.
+
+**A real design gap surfaced and resolved during implementation, not
+just guessed at:** round 85 described attestation signing as reusing
+"round 7's node-vouching fallback." Checking the actual codebase (round
+7's own design-doc text, and `netbbs.auth.users.authenticate_keypair`'s
+docstring) confirmed neither path is actually usable yet: node-vouching
+needs a node identity loaded at runtime, which is Phase 3 scope and
+doesn't exist in any current code; and a live terminal session
+producing a *new* signature over new content (as opposed to
+authenticating with an existing one) needs a client that signs a
+server-issued challenge itself, which "nothing actually uses yet" per
+that docstring's own admission. Building that challenge/response
+protocol just for this one feature would be new Phase-3-shaped
+infrastructure disguised as a narrower feature. Resolved: attestations
+are recorded **unsigned** for now, with `verifier_fingerprint`/
+`signature` columns present but always `NULL` -- the identical
+nullable-until-Phase-3 shape already used for
+`boards.origin_node_fingerprint`. Local accountability instead comes
+from `moderation_log`, which every verification action also writes to.
+
+**Migration**: `users.can_verify_identity` (new, narrow, SysOp-
+grantable permission, independent of the four moderator scope tiers);
+`user_attestations` (subject/attribute/attested_value/verifier/
+signature/created_at/link_visible, one current row per (subject,
+attribute) via a UNIQUE constraint); `min_age`/`name_requirement` added
+to `boards`, `channels`, and `file_areas` -- all nullable, matching
+round 86's confirmed "NULL means inherit" shape for a future Community
+cascade, though nothing consumes that inheritance yet since Communities
+aren't built.
+
+**New `netbbs/attestation.py`**:
+- Self-reported profile fields (`display_name`, `location`,
+  `birthdate`) via `netbbs.user_preferences`, mirroring
+  `netbbs.directory`'s existing `bio` pattern exactly (value + visible
+  companion key, hidden by default).
+- `compute_age`: real date-math (year difference, minus one if this
+  year's birthday hasn't happened yet), computed fresh at every call,
+  never stored -- the exact bug class round 85 already flagged for a
+  naive year-subtraction approach.
+- `meets_age`: no gate passes trivially; otherwise prefers a verified
+  attested birthdate over the self-reported one, and **fails closed**
+  (not permissive) when neither exists -- the one place this
+  deliberately differs in shape from level-gating's permissive default.
+- `meets_name_requirement`: no self-report fallback at all -- `verified`
+  and `verified_and_displayed` both just require an attestation to
+  exist, differing only in display scope, never in pass/fail.
+- `attest_age`/`attest_name`: require `can_verify_identity` or SysOp
+  level (SysOp always passes with no grant row needed, the same
+  convention `netbbs.moderation.roles.has_permission` already applies
+  everywhere).
+- `format_name_for_resource`: round 99's anti-forgery display --
+  `"{display_name or username} (={real name}=)"`, the whole `(=...=)`
+  unit colored via the new `VERIFIED_COLOR` (`netbbs.rendering.theme`),
+  applied directly to the trusted `attested_value`, never derived from
+  `display_name`. Sanitizes both the display name and the attested
+  value before coloring, not after (round 53's established ordering).
+- `set_display_name` rejects the reserved `=` marker (round 99) rather
+  than silently stripping it.
+
+**New `tests/test_attestation.py`, 34 tests**, including a couple worth
+calling out specifically: `test_compute_age_naive_year_subtraction_
+would_have_been_wrong` asserts against the exact wrong answer a naive
+implementation would have produced, not just the right one, so a
+regression back to that bug would fail loudly rather than merely
+losing coverage; and `test_format_name_cannot_be_spoofed_by_an_
+unrestricted_display_name` proves the actual anti-forgery property end
+to end -- a display name containing plain parentheses text never
+produces the colored `(=...=)` pattern, since no ANSI code appears in
+the output at all for an unattested user.
+
+**Testing**: `pytest tests/test_attestation.py -v` -- 34 passed. Full
+suite re-run: **1755 passed, 4 skipped** (up from round 100's 1721 -- 34
+net new tests, no regressions elsewhere, confirming the schema
+migration and `User` dataclass's new `can_verify_identity` field didn't
+disturb any existing behavior).
+
+**Explicitly still open, not silently dropped**: the `[V]erify` main-
+menu screen; profile-edit screen additions for self-reporting
+`display_name`/`location`/`birthdate` plus their visibility toggles;
+admin-menu additions to grant/revoke `can_verify_identity` and to set
+`min_age`/`name_requirement` on boards/channels/file areas; and the
+actual gating enforcement at board/channel/area entry points (mirroring
+where `meets_level` is already checked) plus wiring
+`format_name_for_resource` into post/message/file-listing rendering.
+Without this wiring, nobody can actually exercise the feature end to
+end yet -- tracked as the next piece of this same backlog item, not a
+finished feature.
+

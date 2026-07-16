@@ -27,3 +27,8 @@ NICK_COLOR = 39   # sky blue — a `/nick` alias shown alone in the live chat st
                   # (design doc round 53), distinct from ACCENT_COLOR/SELF_COLOR so
                   # "this is a stand-in name, not necessarily the account's own" reads
                   # as its own visual category rather than blending into either
+VERIFIED_COLOR = 82  # vivid green — a SysOp-verified real name (design doc round
+                     # 99), applied to the whole "(=name=)" unit at render time,
+                     # directly from the trusted attested_value, never derived from
+                     # user-supplied text — see netbbs.attestation's module
+                     # docstring for why that's the actual anti-forgery property

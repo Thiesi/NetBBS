@@ -40,6 +40,7 @@ from netbbs.rendering.theme import (
     MUTED_COLOR,
     NICK_COLOR,
     SELF_COLOR,
+    VERIFIED_COLOR,
 )
 
 __all__ = [
@@ -76,4 +77,5 @@ __all__ = [
     "MUTED_COLOR",
     "NICK_COLOR",
     "SELF_COLOR",
+    "VERIFIED_COLOR",
 ]

@@ -1061,4 +1061,64 @@ MIGRATIONS = [
         CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
         """,
     ),
+    Migration(
+        description=(
+            "Identity attestation (design doc round 85/86/98/99, "
+            "netbbs.attestation): users.can_verify_identity is a new, "
+            "narrow, SysOp-grantable permission independent of the "
+            "four moderator scope tiers -- a plain boolean, since "
+            "verifying a real-world fact about a person isn't authority "
+            "over a specific board/area/channel. user_attestations "
+            "records a verifier's signed claim about a subject's age or "
+            "real name -- attested_value is the actual determined value "
+            "(a birthdate or a real name), not a threshold-specific "
+            "pass/fail, so one attestation stays valid against any "
+            "future gate. verifier_user_id/fingerprint/signature are "
+            "all nullable: a verifier without a personal keypair has no "
+            "node identity to sign with yet (node-vouching is Phase 3 "
+            "scope, same nullable-until-Phase-3 shape already used for "
+            "boards.origin_node_fingerprint) -- local accountability for "
+            "an unsigned attestation still comes from moderation_log, "
+            "which every verify action also writes to. min_age/"
+            "name_requirement on boards/channels/file_areas are "
+            "nullable -- NULL currently just means no gate, but the "
+            "same nullable-means-inherit shape round 86 already "
+            "confirmed will let a future Community cascade a default "
+            "onto them without a second migration."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN can_verify_identity INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE user_attestations (
+            id                   INTEGER PRIMARY KEY,
+            subject_user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            attribute            TEXT NOT NULL CHECK (attribute IN ('age', 'name')),
+            attested_value       TEXT NOT NULL,
+            verifier_user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            verifier_fingerprint TEXT,
+            signature            TEXT,
+            created_at           TEXT NOT NULL,
+            link_visible         INTEGER NOT NULL DEFAULT 0,
+
+            -- One current attestation per (subject, attribute) -- a new
+            -- verification replaces the old one rather than
+            -- accumulating a history nothing here needs yet.
+            UNIQUE (subject_user_id, attribute)
+        );
+
+        CREATE INDEX idx_user_attestations_subject ON user_attestations(subject_user_id);
+
+        ALTER TABLE boards ADD COLUMN min_age INTEGER;
+        ALTER TABLE boards ADD COLUMN name_requirement TEXT
+            CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL);
+
+        ALTER TABLE channels ADD COLUMN min_age INTEGER;
+        ALTER TABLE channels ADD COLUMN name_requirement TEXT
+            CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL);
+
+        ALTER TABLE file_areas ADD COLUMN min_age INTEGER;
+        ALTER TABLE file_areas ADD COLUMN name_requirement TEXT
+            CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL);
+        """,
+    ),
 ]
