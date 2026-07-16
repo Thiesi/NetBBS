@@ -919,8 +919,10 @@ tiers which don't actually depend on each other:**
   Link work is implemented:* the non-blocking DB/background-work
   execution model (issue #57 — design chosen round 91, §14: two
   single-worker lanes, foreground and background; implementation itself
-  still pending), plus a *minimal* deterministic test harness and the
-  fault-injection seams it needs (issue #59) — not the
+  still pending), plus a *minimal* deterministic test harness (issue #59
+  — built round 92: `tests/link_harness.py`, node spawning + fake clock +
+  scripted transport, verified with 6 passing tests) and the
+  fault-injection seams it needs — not the
   harness's full end state; that grows in lockstep with later features,
   per the next bullet, rather than needing to be complete up front.
 - *Before the first end-to-end Linked feature is treated as complete:*
@@ -5520,4 +5522,65 @@ call sites, wiring the two executors into node startup) — this round is
 a design decision, not code. Benchmark validation of both bottleneck
 estimates above is deferred to #59's harness, matching #57's own
 acceptance criteria.
+
+## Sign-off notes, round 92 (minimal deterministic Link test harness — implemented, resolves the entry-gate half of issue #59)
+
+Fourth piece of Phase 3 design work, and the first to produce real code
+rather than a doc-only decision — the round-88/61 dependency matrix
+scopes #59 to a **minimal** harness at this gate ("before continuous
+background Link work"), with the full multi-node fault-injection/
+convergence harness explicitly deferred to a later gate ("before the
+first end-to-end Linked feature is treated as complete").
+
+**Confirmed with Thiesi: in-process, not a small set of subprocesses**
+(the issue's own text allowed either). Each harness "node" is a real
+`Database` plus a real identity keypair, all living in the same test
+process — full OS-level process isolation was judged to add IPC/process-
+lifecycle complexity the *minimal* gate doesn't need, and is cheap to add
+later as a separate, subprocess-based test tier for whatever specifically
+needs it, rather than paying that cost up front.
+
+**Built `tests/link_harness.py`** (shared test-support module, following
+this project's existing convention of importing helpers across test
+files rather than a separate support package):
+- `FakeClock` — fixed arbitrary epoch, only ever advances explicitly,
+  never reads real wall-clock time.
+- `spawn_node(tmp_path, label)` / `HarnessNode` — an isolated `Database`
+  (its own file under a per-node `tmp_path` subdirectory) plus a freshly
+  generated node identity keypair.
+- `ScriptedTransport` — enqueues signed messages between nodes; delivery
+  only happens when a test explicitly calls `deliver()`/`deliver_all()`,
+  and `deliver(index)` lets a test script out-of-order delivery. This is
+  deliberately *not* yet the full duplicate/reorder/drop/partition fault-
+  injection matrix from #59's later gate — just enough test-controlled
+  ordering to prove real Phase 3 code behaves correctly once it exists,
+  without inventing a fuller mechanism the later gate hasn't asked for
+  yet.
+
+**Deliberately does not exercise round 89's key-transition model or
+round 90's event envelope** — neither has been implemented in code yet
+(round 86 confirmed no Link/DAG/gossip modules exist in the tree; still
+true). Building a harness that pretends to test unbuilt logic would be
+hollow, so `HarnessNode` wraps only what already exists in the codebase
+today (`netbbs.storage.database.Database`, `netbbs.identity.keys.
+Identity`) and real Phase 3 feature work plugs into it as rounds 89/90's
+designs actually get implemented, rather than each landing with its own
+bespoke mock.
+
+**Verified, not just written:** `tests/test_link_harness.py` (6 tests —
+node isolation, fake-clock forward-only/fixed-epoch behavior, scripted
+delivery being fully test-gated, explicit reordering, and a 3-node
+signed-message exchange satisfying #59's "at least 3–5 independent node
+identities" acceptance criterion) — all pass. Full suite re-run after
+adding these files: **1682 passed, 4 skipped** (up from 1676 at round 81,
+the last round with a worklog entry — 6 net new tests, matching this
+round's addition exactly).
+
+**Explicitly still open:** everything scoped to the later gate — fault
+injection (duplicate/reorder/drop/partition), 3+ node convergence
+assertions, adversarial/malformed-event injection, and a subprocess-based
+tier if real process-boundary issues ever need covering. Not built now;
+this harness is meant to grow into that as later Phase 3 features
+actually need it, per #61's own framing of #59 growing in lockstep with
+features rather than needing to be complete up front.
 

@@ -5940,3 +5940,52 @@ coverage. Both verified and closed:
    round 80's 1673 — 3 net new tests, since #50 added no new test
    functions, only fixed two existing ones).
 
+## Sign-off notes, round 92 (minimal deterministic Link test harness — implemented)
+
+First implementation-bearing round since 81 — rounds 82–91 were design-
+doc-only (Communities, self-update, identity attestation, the GitHub
+design-doc-review cycle, and Phase 3's key-lifecycle/event-model/DB-
+execution-model decisions), none of them touching code. See the design
+doc's round 92 sign-off note for the architectural reasoning (in-process
+vs. subprocess, why it doesn't exercise round 89/90's not-yet-implemented
+designs); this entry is the implementation/testing record.
+
+**New `tests/link_harness.py`:**
+- `FakeClock` — fixed epoch (`2026-01-01T00:00:00+00:00` default),
+  forward-only `advance()`, raises `ValueError` on a negative delta
+  rather than silently no-op'ing or going backward.
+- `spawn_node(tmp_path, label) -> HarnessNode` — a real
+  `netbbs.storage.database.Database` under its own `tmp_path`
+  subdirectory plus a real `netbbs.identity.keys.Identity.generate(NODE,
+  label)` keypair. `HarnessNode.close()` closes the database connection.
+- `ScriptedTransport` — `send()` signs the payload with the sender's real
+  key and enqueues it; nothing is delivered until `deliver(index=0)` (a
+  test picks which pending message goes next) or `deliver_all()` is
+  called explicitly. `inbox(node)` returns what's actually arrived.
+
+**New `tests/test_link_harness.py`, 6 tests, all passing:**
+1. `test_spawn_node_creates_isolated_identity_and_database` — two spawned
+   nodes get distinct fingerprints and distinct database file paths.
+2. `test_fake_clock_only_advances_and_never_goes_backward` — `advance()`
+   moves forward by exactly the requested delta; a negative delta raises.
+3. `test_fake_clock_start_point_is_fixed_not_real_wall_clock` — two
+   independently constructed `FakeClock()` instances agree exactly,
+   proving neither reads `datetime.now()`.
+4. `test_scripted_transport_delivers_only_when_told_to` — a sent message
+   sits in neither inbox until `deliver_all()`; the delivered message's
+   signature verifies against the real sender key via
+   `netbbs.identity.keys.verify_signature`.
+5. `test_scripted_transport_delivery_order_is_explicitly_controlled` —
+   `deliver(1)` then `deliver(0)` delivers two messages in the opposite
+   of their send order, landing in the recipient's inbox in that same
+   (reordered) sequence.
+6. `test_three_isolated_nodes_can_exchange_signed_messages` — three
+   spawned nodes, all distinct fingerprints, exchange messages correctly;
+   directly satisfies issue #59's "at least 3–5 independent node
+   identities" acceptance criterion at the scale this round targets.
+
+**Testing:** `pytest tests/test_link_harness.py -v` — 6 passed. Full
+suite re-run afterward: **1682 passed, 4 skipped** (up from round 81's
+1676 — 6 net new tests, matching this round's new test count exactly, no
+regressions elsewhere).
+
