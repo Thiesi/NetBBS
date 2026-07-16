@@ -284,10 +284,18 @@ during testing.
   IDs I have" with peers; missing messages get pulled. Content-addressing
   means a message is never stored or re-relayed twice no matter how many
   paths it took to arrive.
-- **Ordering:** causal via DAG parent pointers, timestamp as tiebreaker. No
-  CRDT/vector-clock conflict resolution needed, since content-addressed IDs
-  mean nodes can never disagree about what a given message *is* — only
-  about which ones they've seen yet.
+- **Ordering:** causal via DAG parent pointers, timestamp as tiebreaker,
+  **content-ID as a final deterministic tiebreaker** for genuinely
+  concurrent siblings sharing both a parent and a timestamp (round 90) —
+  timestamps can collide or be lightly spoofed, the hash can't. **No
+  CRDT/vector-clock conflict resolution is needed for *immutable content
+  objects*** (narrowed, round 90 — see the reopened issue #11 discussion
+  that prompted this), since content-addressed IDs mean nodes can never
+  disagree about what a given message *is* — only about which ones
+  they've seen yet. **Mutable/state-changing objects** (post edits,
+  moderator grants, board/channel metadata, key transitions) use a
+  different, non-CRDT mechanism instead — see "Canonical event model,"
+  below — rather than falling under this same blanket claim.
 - **Signing:** DAG parent links + message signatures (via the keypair
   identity system) make forged history very hard to inject.
 - **Store-and-forward:** full support for nodes offline for days/weeks,
@@ -306,6 +314,98 @@ during testing.
   get their own two-level scheme: a chunk ID (transfer ID + chunk number)
   for per-chunk dedup, and a separate transfer-level ID so a completed file
   is never double-imported.
+
+### Canonical event model (semantic layer, round 90 — resolves the semantic-specification half of issue #11)
+
+Stage 1 of #11's staged resolution (round 87): the *semantic* protocol
+model, settled before any wire-visible persistence or endpoint is
+implemented. Stage 2 (exact canonical bytes — Unicode normalization form,
+numeric/duplicate-key/unknown-field handling, golden vectors) remains
+explicitly deferred to whenever real Phase 3 event-store/endpoint code is
+being written, per round 27's original list and Thiesi's own staged-gate
+framing — not resolved here.
+
+**One unifying rule covers every event type that isn't a bare immutable
+content-creation event:** it's an append to a per-object **event chain**,
+headed by a current-state pointer, and every new event must reference
+what it extends (the ID of the event/state it supersedes). Post edits,
+tombstones/closures (§13), moderator grants/revocations (§13), and round
+89's key-transition records all already fit this shape without any new
+mechanism — this round just names it once instead of re-deriving it per
+feature.
+
+- **Envelope:** `{netbbs_protocol, object_type, payload}` (round 27),
+  with one addition — **the hash/signature always covers the whole
+  envelope, never just `payload`.** `object_type` therefore acts as a
+  mandatory domain separator: a signature valid for one event type can
+  never be replayed as valid for a different one, even if payload bytes
+  happened to coincide.
+- **Author reference** is a tagged union matching round 89's three
+  identity tiers: `node_vouched_user` (home-node fingerprint + opaque
+  local ID, for password-only users), `user_key` (a personal keypair
+  fingerprint, opt-in tier), or `node` (the node's own signing key, for
+  node-authored events like board creation or moderator grants).
+  Verifying a signature resolves to a key fingerprint, then — for
+  node-controlled keys — walks round 89's transition chain back to root.
+- **Two event classes, not one:**
+  - **Immutable content-creation events** (a board post, a file
+    descriptor announcement) — content-addressed, causally ordered per
+    above, nothing to project beyond "does it exist."
+  - **Mutable per-object event chains** (board/channel metadata, post
+    edit/tombstone history, moderator roster, key transitions,
+    Community membership) — "effective state" is the fold over the
+    chain from genesis to the current head. A node determines whether
+    an incoming event is new (extends the current head), already known
+    (is an ancestor of it — safe no-op), or a genuine fork (rare,
+    handled the same way a DAG fork already is) — never by "have I seen
+    this ID before."
+- **Replay safety no longer depends on the dedup table — this is the
+  key correction from the reopened issue #11 discussion.** Three
+  previously-conflated things are now explicit and separate:
+  1. **Transport-level dedup** (§7's existing seen-event table, purged
+     after a retention window) is a pure performance optimization —
+     avoids reprocessing/re-relaying an event already handled. It is
+     *not* a safety mechanism.
+  2. **Projection-level idempotency** (the event-chain/head-pointer
+     structure above) is the actual, permanent safety mechanism: a
+     replayed state-changing event is a no-op if it's already an
+     ancestor of the object's current head, regardless of whether the
+     dedup table still remembers ever seeing it — same shape as `git
+     push` of a commit already in history.
+  3. **Tombstones and local storage pruning stay purely local, as
+     already stated for board/channel closure in §13.** A tombstone is
+     just another chain entry, not a deletion of history; pruning bytes
+     locally never revives suppressed/moderated content network-wide,
+     since any node that still holds the chain can re-serve it,
+     tombstone included.
+- **Distinguishing two identical posting actions** (same content, same
+  parent, submitted twice — which would otherwise hash identically and
+  look like a dedup hit): every event carries a **random nonce field**,
+  confirmed with Thiesi over an author-local monotonic sequence counter
+  — no persistent per-identity counter to maintain, which would have
+  been awkward for round 89's opt-in user tier once multi-device support
+  exists (deferred, but not worth designing around before it's real).
+- **Compatibility/version negotiation:** `netbbs_protocol` bumps only for
+  backward-incompatible wire changes; purely additive changes (new
+  optional fields, new event types) don't need one. Peers exchange a
+  supported-version range at handshake (§12). **Unknown event types, or
+  events at a higher protocol version than a node supports, are stored
+  and relayed opaquely — never locally projected or displayed** —
+  confirmed with Thiesi as a deliberate security-relevant default:
+  matches how Git already handles a ref it doesn't understand, and it's
+  safe here specifically because a node that can't parse an event can't
+  act on it or show it to a user either, so nothing bypasses local
+  moderation/quarantine by virtue of being unrecognized. Unknown fields
+  inside a known, understood event type are preserved verbatim in the
+  signed bytes (never stripped or re-serialized, which would break the
+  signature) but ignored for projection.
+
+**Explicitly still deferred to stage 2 (#11's exact-canonicalization
+half) or later:** Unicode normalization form, numeric type/range rules,
+duplicate-key and absent-vs-null field handling, and signed golden test
+vectors — round 27's original list, unresolved by design until real
+Phase 3 event-store/endpoint code is actually being written, per
+Thiesi's own staged-gate framing (round 87).
 
 ## 8. Real-time chat
 
@@ -5186,4 +5286,83 @@ one.
 This substantially resolves issue #51's design-shape question. What
 remains open on that issue is narrower: the exact wire/signature format
 (owned by #11), and the deferred refinements just listed.
+
+## Sign-off notes, round 90 (canonical event model, semantic layer — resolves stage 1 of issue #11)
+
+Second piece of Phase 3 design work, following round 89's key-lifecycle
+model per the round-88 dependency ordering (#51 before #11, since the
+event envelope's identity-reference field needed round 89's identity
+shape to build on). Scoped deliberately to *only* Thiesi's stage 1
+("semantic specification first... golden vectors... second") from the
+#11 thread — exact canonical bytes remain untouched, stage 2, for
+whenever real Phase 3 event-store/endpoint code is actually being
+written.
+
+**Central move: one mechanical rule (event chains with head pointers)
+replaces what would otherwise have been per-feature special-casing.**
+Post edits, tombstones, moderator grants/revocations, and round 89's key
+transitions were each independently described elsewhere in this document
+using compatible but not explicitly-unified language ("a new signed
+event that references and amends it," "a transition record... delegates
+to operational keys"). Round 90 names the shared shape once: an append
+to a per-object chain, headed by a current-state pointer, where a new
+event must reference what it extends.
+
+**This directly resolves the reopened issue's three added protocol-state
+concerns:**
+
+1. **Immutable event identity vs. effective-state resolution** — §7's
+   blanket "no CRDT/vector-clock resolution needed" claim was narrowed
+   to immutable content objects specifically; mutable objects get the
+   event-chain/head-pointer model instead, stated as its own mechanism
+   rather than silently falling under the same claim.
+2. **Replay memory vs. local deletion** — the sharpest result of this
+   round: replay safety for state-changing events no longer depends on
+   the seen-event dedup table (which is pruned after a retention
+   window and was never actually sufficient on its own). Projection-
+   level idempotency — replaying an event that's already an ancestor of
+   an object's current head is a safe no-op — is structural and
+   permanent, the same property that makes `git push` of an old commit
+   harmless. Dedup, tombstones, and local storage pruning are now three
+   explicitly separate things instead of one conflated "have we handled
+   this" question.
+3. **Compatibility negotiation** — `netbbs_protocol` version-bump policy,
+   a peer handshake version-range exchange, and — the one genuine
+   security-relevant default confirmed with Thiesi this round — unknown
+   event types/versions are stored and relayed **opaquely**, never
+   locally projected, matching how Git already handles refs it doesn't
+   understand. Confirmed safe on the reasoning that a node which can't
+   parse an event also can't act on it or display it, so nothing
+   bypasses local moderation/quarantine merely by being unrecognized.
+
+**Two forks confirmed with Thiesi, not decided unilaterally:**
+- **Random nonce, not an author-local monotonic sequence counter**, to
+  distinguish two identical posting actions (same content, same parent,
+  submitted twice — which would otherwise hash identically and look
+  like a dedup hit). Chosen over the sequence-counter alternative
+  specifically to avoid needing persistent per-identity counter state,
+  which would have been awkward once round 89's opt-in user tier grows
+  multi-device support (still deferred, but not worth designing around
+  prematurely).
+- **Opaque store-and-relay for unknown/newer-than-supported events**,
+  confirmed as the deliberate compatibility default rather than
+  rejecting or attempting best-effort partial parsing.
+
+**Also fixed as a direct consequence:** §7's author-reference model now
+has a concrete shape — the tagged union matching round 89's three
+identity tiers (`node_vouched_user`, `user_key`, `node`) — resolving the
+original issue #11's "password-only author identity" question, which
+round 89 had already answered for a different reason (the node-vouched
+opaque local ID) without this round having connected it to the event
+envelope until now.
+
+**Explicitly still deferred to stage 2, unchanged from round 27's
+original list:** Unicode normalization form, numeric type/range rules,
+duplicate-key and absent-vs-null field handling, and signed golden test
+vectors run through at least two independent encode/decode paths. None
+of this round's decisions require stage 2 to be resolved first, and none
+of stage 2's eventual answers should require revisiting anything decided
+here — the semantic model and the exact byte representation were
+deliberately kept as separable concerns, per Thiesi's own framing of the
+staged gate.
 
