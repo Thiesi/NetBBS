@@ -14,6 +14,7 @@ listener behind.
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import sqlite3
 import sys
@@ -286,6 +287,26 @@ def test_a_disabled_sysop_does_not_count_and_still_raises_startup_error(tmp_path
     asyncio.run(scenario())
 
 
+def test_a_pending_approval_sysop_does_not_count_and_still_raises_startup_error(tmp_path):
+    """GitHub issue #44: a self-registered account sitting at SysOp
+    level while still `pending_approval` can't actually log in through
+    any auth path, so it must not satisfy the startup guard any more
+    than a disabled one does (see the sibling
+    `test_a_disabled_sysop_does_not_count...` above)."""
+    config = _config(tmp_path, seed_sysop=False)
+    db = Database(config.db_path)
+    create_user(
+        db, "pending", password="hunter2", user_level=SYSOP_LEVEL, pending_approval=True
+    )
+    db.close()
+
+    async def scenario():
+        with pytest.raises(StartupError, match="no SysOp-level account"):
+            await run(config)
+
+    asyncio.run(scenario())
+
+
 # -- partial-start failure cleanup --------------------------------------------
 
 
@@ -357,6 +378,83 @@ def test_startup_failure_still_closes_the_database(tmp_path):
         conn.execute("SELECT 1")
     finally:
         conn.close()
+
+
+# -- daybreak task failure resilience (GitHub issue #48) --------------------
+
+
+def test_failed_daybreak_task_is_logged(tmp_path, monkeypatch, caplog):
+    """An unexpected exception in the daybreak announcer must be
+    observed (logged), not silently leave the feature dead with no
+    trace -- the original defect this issue reports."""
+
+    async def failing_announcer(db, hub):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("netbbs.__main__.run_daybreak_announcer", failing_announcer)
+
+    async def scenario():
+        config = _config(tmp_path)
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        await asyncio.sleep(0.1)
+        shutdown_event.set()
+        await task
+
+    with caplog.at_level(logging.ERROR, logger="netbbs.__main__"):
+        asyncio.run(scenario())
+
+    assert any(
+        "daybreak announcer task failed" in record.message and record.exc_info
+        for record in caplog.records
+    )
+
+
+def test_failed_daybreak_task_does_not_prevent_listener_and_db_cleanup(tmp_path, monkeypatch):
+    """The core defect: awaiting an already-failed (non-cancelled) task
+    in the shutdown `finally` block used to re-raise its exception and
+    skip stopping listeners / closing the database entirely."""
+
+    async def failing_announcer(db, hub):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("netbbs.__main__.run_daybreak_announcer", failing_announcer)
+
+    captured_db_path = tmp_path / "node.db"
+
+    async def scenario():
+        config = _config(
+            tmp_path, db_path=captured_db_path, telnet=TransportConfig(True, "127.0.0.1", 12394)
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        reader, writer = await _open_connection_when_ready("127.0.0.1", 12394)
+        writer.close()
+        await writer.wait_closed()
+
+        shutdown_event.set()
+        # Must return cleanly -- not re-raise the daybreak task's
+        # RuntimeError -- and must actually finish stopping listeners
+        # and closing the database before doing so.
+        await asyncio.wait_for(task, timeout=5.0)
+
+        with pytest.raises((ConnectionRefusedError, OSError)):
+            await asyncio.open_connection("127.0.0.1", 12394)
+
+    asyncio.run(scenario())
+
+    conn = sqlite3.connect(str(captured_db_path))
+    try:
+        conn.execute("SELECT 1")
+    finally:
+        conn.close()
+
+
+def test_daybreak_task_cancellation_on_normal_shutdown_is_unaffected(tmp_path):
+    """Sibling coverage for the untouched, already-correct path: a
+    daybreak task that's still happily sleeping when shutdown happens
+    is cancelled cleanly, same as before this fix."""
+    asyncio.run(_run_until_ready_then_shut_down(_config(tmp_path)))
 
 
 # -- signal handling -----------------------------------------------------

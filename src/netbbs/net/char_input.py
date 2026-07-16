@@ -503,6 +503,7 @@ async def _read_line_editable(
     overwrite = False
     history_index = 0  # 0 == "not recalling", editing the in-progress line
     saved_in_progress: list[str] | None = None
+    submitted = ""  # set from `line` the moment Enter is handled, below
 
     while True:
         b = await _read_byte(source)
@@ -524,6 +525,24 @@ async def _read_line_editable(
                 if b in (_CR, _LF):
                     if b == _CR:
                         await _consume_optional_lf_or_nul(source)
+                    # GitHub issue #45: the submitted-line capture,
+                    # live_buffer reset, and final CRLF write must all
+                    # happen inside this same per-keystroke critical
+                    # section, not after the lock has already been
+                    # released below -- otherwise a concurrently
+                    # redrawing task (netbbs.net.chat_flow's
+                    # receive_loop) can acquire the lock in the gap and
+                    # redraw a pinned input row from state that doesn't
+                    # yet match the terminal (or race the final "\r\n"
+                    # write itself). Clearing `line`/`cursor` here means
+                    # the `finally` below's existing live_buffer.update
+                    # call does the reset as part of the same mechanism
+                    # every other keystroke already uses, rather than a
+                    # second, separately-timed update after the loop.
+                    submitted = "".join(line)
+                    line = []
+                    cursor = 0
+                    await write("\r\n")
                     break
 
                 if b in (_BS, _DEL):
@@ -630,18 +649,12 @@ async def _read_line_editable(
                 if live_buffer is not None:
                     live_buffer.update(line, cursor)
 
-    if live_buffer is not None:
-        # The line was just submitted (Enter) -- a fresh, empty buffer
-        # is what the pinned input row should show from here, not
-        # whatever was last typed (the caller, netbbs.net.chat_flow's
-        # send_loop, redraws from this immediately after read_line
-        # returns).
-        live_buffer.update([], 0)
-    await write("\r\n")
-    result = "".join(line)
+    # The buffer reset and final CRLF write already happened above,
+    # inside the lock, at the moment Enter was handled (GitHub issue
+    # #45) -- nothing left to do here but finish up with `submitted`.
     if history is not None:
-        history.record(result)
-    return result
+        history.record(submitted)
+    return submitted
 
 
 async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:

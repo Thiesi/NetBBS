@@ -91,6 +91,56 @@ def test_seconds_until_midnight_is_always_positive_at_midnight_itself():
     assert _seconds_until_next_local_midnight(now) == 86400.0
 
 
+# -- GitHub issue #47: DST transitions must not be treated as flat 24h ------
+
+
+def test_seconds_until_midnight_is_23_hours_on_spring_forward():
+    """Europe/Berlin, 2026-03-29: clocks jump 02:00 -> 03:00 CEST, so
+    local midnight to local midnight is only 23 real hours -- a naive
+    wall-clock subtraction (or one that mishandles two aware datetimes
+    sharing one `tzinfo` object) would instead return a flat 24h,
+    making the announcement fire an hour late."""
+    tz = ZoneInfo("Europe/Berlin")
+    now = datetime.datetime(2026, 3, 29, 0, 0, 0, tzinfo=tz)
+    assert _seconds_until_next_local_midnight(now) == 23 * 3600.0
+
+
+def test_seconds_until_midnight_is_25_hours_on_fall_back():
+    """Europe/Berlin, 2026-10-25: clocks fall back 03:00 -> 02:00 CEST,
+    so local midnight to local midnight is 25 real hours -- the same
+    bug in the other direction would fire the announcement an hour
+    early."""
+    tz = ZoneInfo("Europe/Berlin")
+    now = datetime.datetime(2026, 10, 25, 0, 0, 0, tzinfo=tz)
+    assert _seconds_until_next_local_midnight(now) == 25 * 3600.0
+
+
+def test_seconds_until_midnight_partway_through_spring_forward_day():
+    """Same transition day as above, but starting before the 02:00 ->
+    03:00 jump rather than exactly at local midnight -- the naive
+    same-clock-time delta (00:00 next day minus 01:00, i.e. 23h) is
+    still wrong; the real remaining time is 22h because the missing
+    hour is still ahead of this point in the day."""
+    tz = ZoneInfo("Europe/Berlin")
+    now = datetime.datetime(2026, 3, 29, 1, 0, 0, tzinfo=tz)
+    assert _seconds_until_next_local_midnight(now) == 22 * 3600.0
+
+
+def test_seconds_until_midnight_partway_through_fall_back_day():
+    """Before the 03:00 -> 02:00 repeat -- the naive delta (00:00 next
+    day minus 01:00) would say 23h; the real remaining time is 24h
+    because the extra hour is still ahead of this point in the day."""
+    tz = ZoneInfo("Europe/Berlin")
+    now = datetime.datetime(2026, 10, 25, 1, 0, 0, tzinfo=tz)
+    assert _seconds_until_next_local_midnight(now) == 24 * 3600.0
+
+
+def test_seconds_until_midnight_ordinary_day_still_24_hours():
+    tz = ZoneInfo("Europe/Berlin")
+    now = datetime.datetime(2026, 6, 15, 0, 0, 0, tzinfo=tz)
+    assert _seconds_until_next_local_midnight(now) == 86400.0
+
+
 # -- _channels_with_participants -----------------------------------------
 
 
@@ -219,6 +269,43 @@ def test_announcer_sleeps_until_midnight_then_announces(db, alice):
 
     assert sleep_calls[0] == 60.0
     assert "April 4th, 2029" in notice.text  # midnight has now passed into the 4th
+
+
+def test_announcer_sleep_call_reflects_dst_shortened_day(db, alice):
+    """GitHub issue #47, end-to-end through the actual scheduling loop:
+    on Europe/Berlin's spring-forward day, the announcer's first
+    `sleep()` call must receive 23 hours, not a flat 24."""
+    set_display_timezone(db, "Europe/Berlin")
+    channel = create_channel(db, "lobby", creator=alice)
+    hub = ChatHub()
+    queue = hub.join(channel.name, ParticipantId(username="alice", session_key=1))
+
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) > 1:
+            await parked.wait()
+
+    def fake_now() -> datetime.datetime:
+        # 2026-03-29 00:00 CET (Europe/Berlin), expressed in UTC.
+        return datetime.datetime(2026, 3, 28, 23, 0, 0, tzinfo=datetime.timezone.utc)
+
+    async def scenario():
+        task = asyncio.create_task(
+            run_daybreak_announcer(db, hub, now=fake_now, sleep=fake_sleep)
+        )
+        await asyncio.wait_for(queue.get(), timeout=2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert sleep_calls[0] == 23 * 3600.0
 
 
 def test_announcer_stops_cleanly_on_cancellation_while_sleeping(db):

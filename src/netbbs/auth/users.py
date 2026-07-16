@@ -516,14 +516,21 @@ def _get_user_by_id(db: Database, user_id: int) -> User:
 
 def count_sysops(db: Database) -> int:
     """
-    Number of currently-usable (not disabled) SysOp-level accounts.
+    Number of currently-**usable** SysOp-level accounts: level >=
+    `SYSOP_LEVEL`, not disabled, and not still awaiting registration
+    approval (GitHub issue #44).
 
-    Deliberately excludes already-disabled accounts: a disabled SysOp
-    can't rescue a lockout, so it shouldn't count toward preventing one
-    (see `_refuse_if_last_sysop`).
+    A pending account can hold a SysOp-level row (e.g. promoted before
+    being approved, or created directly against the database) but every
+    login path in this module refuses it regardless of level -- so it
+    must not count as a SysOp capable of administering the node any
+    more than a disabled one does (see `_refuse_if_last_sysop`, and the
+    startup guard in `netbbs.__main__.run` which relies on this
+    function returning 0 only when no *usable* SysOp exists).
     """
     row = db.connection.execute(
-        "SELECT COUNT(*) AS n FROM users WHERE user_level >= ? AND disabled_at IS NULL",
+        "SELECT COUNT(*) AS n FROM users "
+        "WHERE user_level >= ? AND disabled_at IS NULL AND pending_approval = 0",
         (SYSOP_LEVEL,),
     ).fetchone()
     return row["n"]
@@ -532,8 +539,8 @@ def count_sysops(db: Database) -> int:
 def _refuse_if_last_sysop(db: Database, target: User, *, removes_active_sysop: bool) -> None:
     if not removes_active_sysop:
         return
-    if target.user_level < SYSOP_LEVEL or target.disabled_at is not None:
-        return  # target isn't currently an active SysOp; nothing to protect
+    if target.user_level < SYSOP_LEVEL or target.disabled_at is not None or target.pending_approval:
+        return  # target isn't currently a usable SysOp; nothing to protect
     if count_sysops(db) <= 1:
         raise UserManagementError(
             f"cannot proceed: {target.username!r} is the only active SysOp-level "
@@ -551,6 +558,16 @@ def set_user_level(db: Database, target: User, new_level: int, *, changed_by: Us
 
     if new_level == target.user_level:
         return target
+    if new_level >= SYSOP_LEVEL and target.pending_approval:
+        # GitHub issue #44: a pending account promoted straight to
+        # SysOp level would satisfy the "last SysOp" check below (it's
+        # a second level-255 row) while remaining unable to log in at
+        # all, letting the node get talked into disabling/demoting/
+        # deleting its one actually-usable SysOp. Approve first.
+        raise UserManagementError(
+            f"cannot promote {target.username!r} to SysOp level while its "
+            "registration is still pending approval -- approve the account first"
+        )
     _refuse_if_last_sysop(db, target, removes_active_sysop=new_level < SYSOP_LEVEL)
     db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, target.id))
     db.connection.commit()

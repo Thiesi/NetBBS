@@ -8,7 +8,6 @@ matches the project's modular-package approach (design doc §3).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -1902,7 +1901,15 @@ async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, hei
     for what's expected to be a rare case (design doc round 79); the
     cursor is left at the end of the truncated view rather than at its
     true, possibly-invisible position when that happens.
+
+    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
+    #46) -- a defensive backstop against constructing an impossible
+    (`height - 2 <= 0`) scroll region, on top of `_chat_loop`'s own
+    `_PinnedUIState` already refusing to reach this call at all once a
+    resize crosses that threshold.
     """
+    if height < _PINNED_UI_MIN_HEIGHT:
+        return
     scroll_bottom = height - 2
     input_row = height - 1
     full_text = _INPUT_PROMPT + live_buffer.text
@@ -1939,7 +1946,12 @@ async def _print_and_redraw_input(
     (design doc round 79's own note on why this isn't a regression from
     the old grows-from-the-top behavior, just a different, arguably
     more correct one now that there's a fixed anchor to grow from).
+
+    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
+    #46) -- same defensive backstop as `_repaint_input_row`.
     """
+    if height < _PINNED_UI_MIN_HEIGHT:
+        return
     scroll_bottom = height - 2
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) + text + "\r\n")
     await _repaint_input_row(session, live_buffer, height)
@@ -1958,9 +1970,72 @@ async def _enter_content_region(session: Session, height: int) -> None:
     row, since the *cursor's* position, not the scroll region alone,
     is what an ordinary newline-driven write respects). Caller is
     responsible for holding `_chat_loop`'s shared write lock.
+
+    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
+    #46) -- same defensive backstop as `_repaint_input_row`.
     """
+    if height < _PINNED_UI_MIN_HEIGHT:
+        return
     scroll_bottom = height - 2
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1))
+
+
+@dataclass
+class _PinnedUIState:
+    """
+    Whether the pinned status/input rows are currently active for one
+    chat session (GitHub issue #46).
+
+    `_chat_loop` used to decide this once, at channel entry, and trust
+    that decision for the rest of the session -- but Telnet NAWS, SSH
+    PTY resize, and the web transport's `resize` event can all update
+    `session.terminal_height` at any point afterward, and the pinned-
+    row helpers (`_repaint_input_row`/`_print_and_redraw_input`/
+    `_enter_content_region`) construct a scroll region from whatever
+    height they're handed with no validation of their own -- shrinking
+    below `_PINNED_UI_MIN_HEIGHT` mid-session made `height - 2` reach
+    zero or negative, and `netbbs.rendering.set_scroll_region` raises
+    `ValueError` on an invalid region, terminating the session.
+
+    `sync()` re-derives the current answer from `session.terminal_height`
+    every time it's called and performs whichever one-time transition
+    is needed the moment the threshold is crossed -- normal-to-too-short
+    hands the whole screen back before any helper above would compute
+    an impossible region; too-short-to-normal re-establishes the region
+    and repaints both pinned rows from scratch, since nothing has kept
+    them up to date while inactive. Every call site that used to read a
+    fixed `pinned_ui_enabled` local now calls `sync()` instead, always
+    under `_chat_loop`'s shared lock -- both because the transition's
+    own writes must never interleave with a concurrent one, and because
+    `receive_loop`/`send_loop` must always agree on which regime is
+    currently active rather than each independently guessing from a
+    possibly-stale read of `terminal_height`.
+    """
+
+    active: bool
+
+    async def sync(
+        self,
+        session: Session,
+        db: Database,
+        hub: ChatHub,
+        presence: PresenceRegistry,
+        channel: Channel,
+        user: User,
+        live_buffer: LiveInputBuffer,
+    ) -> bool:
+        now_active = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
+        if now_active != self.active:
+            if now_active:
+                await session.write(
+                    clear_screen() + set_scroll_region(1, session.terminal_height - 2)
+                )
+                await _repaint_status_line(session, db, hub, presence, channel, user)
+                await _repaint_input_row(session, live_buffer, session.terminal_height)
+            else:
+                await session.write(reset_scroll_region() + clear_screen())
+            self.active = now_active
+        return self.active
 
 
 async def _chat_loop(
@@ -2069,6 +2144,14 @@ async def _chat_loop(
     pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
     live_buffer = LiveInputBuffer()
     lock = asyncio.Lock()
+    # GitHub issue #46: `pinned_ui` tracks this dynamically for the rest
+    # of the session (see `_PinnedUIState`) -- constructed directly from
+    # the boolean just computed, not via `sync()`, since entry's own
+    # setup immediately below already does the equivalent one-time
+    # activation work itself (and repainting the status/input rows here
+    # would be premature -- scrollback and the join notice haven't been
+    # written yet).
+    pinned_ui = _PinnedUIState(active=pinned_ui_enabled)
     if pinned_ui_enabled:
         await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
 
@@ -2126,11 +2209,18 @@ async def _chat_loop(
             docstring), or falls straight back to a plain `write_line`
             when it isn't (a too-short terminal, exactly the old,
             unconfined-scrolling behavior).
+
+            Always acquires `lock` first, then re-derives whether the
+            pinned UI is *currently* active via `pinned_ui.sync()`
+            (GitHub issue #46) -- a resize can flip this at any moment
+            between two deliveries, and `sync()` itself needs the lock
+            held to perform a threshold-crossing transition atomically
+            with respect to `send_loop`.
             """
-            if not pinned_ui_enabled:
-                await session.write_line(text)
-                return
             async with lock:
+                if not await pinned_ui.sync(session, db, hub, presence, channel, user, live_buffer):
+                    await session.write_line(text)
+                    return
                 await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
                 if repaint_status:
                     await _repaint_status_line(session, db, hub, presence, channel, user)
@@ -2201,9 +2291,18 @@ async def _chat_loop(
             # -- same reasoning as netbbs.net.char_input's own per-
             # keystroke `finally`, one level up: per *submitted line*
             # here, rather than per keystroke.
-            guard = lock if pinned_ui_enabled else contextlib.nullcontext()
+            #
+            # `lock` is now taken unconditionally (GitHub issue #46),
+            # not just when the pinned UI was active at channel entry --
+            # `pinned_ui.sync()` needs it held to perform a threshold-
+            # crossing transition atomically, and a resize can enable or
+            # disable the pinned UI at any point during a long-running
+            # session, not just decide it once up front.
             try:
-                async with guard:
+                async with lock:
+                    pinned_ui_enabled = await pinned_ui.sync(
+                        session, db, hub, presence, channel, user, live_buffer
+                    )
                     if pinned_ui_enabled:
                         await _enter_content_region(session, session.terminal_height)
 
@@ -2364,8 +2463,15 @@ async def _chat_loop(
                     if pinned_ui_enabled:
                         await _repaint_status_line(session, db, hub, presence, channel, user)
             finally:
-                if pinned_ui_enabled:
-                    async with lock:
+                # Re-synced once more here, not just trusted from the
+                # top of this same iteration (GitHub issue #46) -- a
+                # resize could have crossed the threshold while this
+                # iteration's own body was busy (command dispatch, a
+                # broadcast, etc.), and this is the one place that
+                # decides whether the final per-iteration repaint below
+                # is even valid to attempt.
+                async with lock:
+                    if await pinned_ui.sync(session, db, hub, presence, channel, user, live_buffer):
                         await _repaint_input_row(session, live_buffer, session.terminal_height)
 
     receive_task = asyncio.create_task(receive_loop())
@@ -2409,7 +2515,14 @@ async def _chat_loop(
         # own -- it always means "exit entirely," same as /quit.
         return outcome or _Quit()
     finally:
-        if pinned_ui_enabled:
+        # `pinned_ui.active` (GitHub issue #46), not the entry-time
+        # `pinned_ui_enabled` local -- a resize during the session may
+        # have changed which regime was actually active by the time
+        # things unwound here, and `send_loop`'s own reassignment of
+        # `pinned_ui_enabled` is local to that nested function, not
+        # visible in this outer scope (`pinned_ui` is the one object
+        # both closures actually share and keep in sync).
+        if pinned_ui.active:
             # Best-effort: a session that's already gone (the common
             # reason this whole function is unwinding in the first
             # place) makes this write raise SessionClosedError, which

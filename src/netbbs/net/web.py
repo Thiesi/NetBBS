@@ -364,6 +364,7 @@ class WebSession(Session):
         overwrite = False
         history_index = 0
         saved_in_progress: list[str] | None = None
+        submitted = ""  # set from `line` the moment Enter is handled, below
 
         while True:
             item = await self._read_item()
@@ -428,6 +429,19 @@ class WebSession(Session):
 
                     char = item
                     if char in (_CR, _LF):
+                        # GitHub issue #45: mirrors
+                        # netbbs.net.char_input._read_line_editable's
+                        # own fix exactly -- capture/clear/final-write
+                        # must all happen inside this same lock-held
+                        # section, not after it releases below. See
+                        # that function's comment for the full
+                        # reasoning; the `finally` clause's existing
+                        # live_buffer.update call does the reset once
+                        # `line`/`cursor` are cleared here.
+                        submitted = "".join(line)
+                        line = []
+                        cursor = 0
+                        await self.write("\r\n")
                         break
 
                     if char in (_BS, _DEL):
@@ -472,13 +486,13 @@ class WebSession(Session):
                     if live_buffer is not None:
                         live_buffer.update(line, cursor)
 
-        if live_buffer is not None:
-            live_buffer.update([], 0)
-        await self.write("\r\n")
-        result = "".join(line)
+        # The buffer reset and final CRLF write already happened above,
+        # inside the lock, at the moment Enter was handled (GitHub
+        # issue #45) -- nothing left to do here but finish up with
+        # `submitted`.
         if history is not None:
-            history.record(result)
-        return result
+            history.record(submitted)
+        return submitted
 
     async def read_key(self, echo: bool = True) -> str:
         while True:

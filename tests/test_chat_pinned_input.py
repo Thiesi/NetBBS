@@ -175,7 +175,15 @@ class _LiveTypingSession(Session):
             self._queue.put_nowait(byte)
 
     def feed_enter(self) -> None:
+        # A full CRLF, not a lone CR: `char_input._consume_optional_lf_
+        # or_nul` peeks for a following LF with a real (50ms)
+        # `_FOLLOWUP_BYTE_TIMEOUT`-bounded wait when none is queued yet
+        # -- sending the LF immediately lets that peek resolve as soon
+        # as it's read instead of always paying the full timeout,
+        # which otherwise races against any test that itself sleeps
+        # ~50ms right after calling this to observe post-Enter state.
         self._queue.put_nowait(0x0D)
+        self._queue.put_nowait(0x0A)
 
     async def write(self, text: str) -> None:
         self.written.append(text)
@@ -284,3 +292,301 @@ def test_in_progress_typing_survives_an_incoming_message(db, hub, presence, mail
     # specifically, not a bare "hello" substring, which bob's own
     # distinct "hello there" would also satisfy.
     assert "<alice>\x1b[0m hello" in text
+
+
+# -- GitHub issue #45: Enter completion must be one atomic critical section -
+
+
+def test_char_input_enter_completion_is_atomic_with_concurrent_lock_holder():
+    """
+    Reproduces the exact race the issue describes at the `char_input.
+    read_line` level: a `write()` that blocks specifically on the final
+    "\\r\\n" (standing in for a transport whose write doesn't land on the
+    wire synchronously). While that write is pending, a concurrent
+    holder of the *same* `lock` (standing in for `_repaint_input_row`
+    racing in from `receive_loop`) must not be able to acquire it, and
+    `live_buffer` must not yet be observable as reset -- both the
+    terminal and the externally-visible state must change together, not
+    in two separately-timed steps with a gap between them.
+    """
+
+    async def scenario():
+        queue: asyncio.Queue[int] = asyncio.Queue()
+
+        class _FeedableSource:
+            async def read_byte(self) -> int | None:
+                return await queue.get()
+
+            async def read_byte_with_timeout(self, timeout: float) -> int | None:
+                try:
+                    return await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    return None
+
+        written: list[str] = []
+        entered_final_write = asyncio.Event()
+        release_final_write = asyncio.Event()
+
+        async def write(text: str) -> None:
+            if text == "\r\n":
+                entered_final_write.set()
+                await release_final_write.wait()
+            written.append(text)
+
+        lock = asyncio.Lock()
+        live_buffer = char_input.LiveInputBuffer()
+
+        read_task = asyncio.create_task(
+            char_input.read_line(_FeedableSource(), write, live_buffer=live_buffer, lock=lock)
+        )
+
+        for byte in b"hi":
+            queue.put_nowait(byte)
+        await asyncio.sleep(0.02)  # let "hi" be consumed and echoed
+
+        queue.put_nowait(0x0D)  # Enter
+        await asyncio.wait_for(entered_final_write.wait(), timeout=2)
+
+        # read_line is now blocked mid-write, *inside* the lock (per the
+        # fix) -- a concurrent lock holder must not get in.
+        outsider_ran = asyncio.Event()
+
+        async def outsider() -> None:
+            async with lock:
+                outsider_ran.set()
+
+        outsider_task = asyncio.create_task(outsider())
+        await asyncio.sleep(0.05)
+        assert not outsider_ran.is_set()
+        # And the externally-visible buffer must not yet show "reset" --
+        # the terminal write hasn't completed, so a concurrent redraw
+        # reading this now would still match what's on screen.
+        assert live_buffer.text == "hi"
+
+        release_final_write.set()
+        result = await asyncio.wait_for(read_task, timeout=2)
+        await asyncio.wait_for(outsider_task, timeout=2)
+
+        assert result == "hi"
+        assert live_buffer.text == ""
+        assert live_buffer.cursor == 0
+        assert written[-1] == "\r\n"
+
+    asyncio.run(scenario())
+
+
+def test_web_session_enter_completion_is_atomic_with_concurrent_lock_holder():
+    """Same property as the byte-oriented test above, for `WebSession.
+    _read_line_editable`'s separate reimplementation (GitHub issue
+    #45) -- the web transport is the one where this bug was hardest to
+    mask, since its `write()` really does await a WebSocket send
+    directly rather than a byte stream that might happen to buffer
+    synchronously."""
+    from netbbs.net.web import WebSession
+
+    class _IdleReadLoopSession(WebSession):
+        # The real `_read_loop` iterates a live websocket; this test
+        # feeds `_char_queue` directly and has no real socket, so the
+        # background reader is parked instead of touching `self._ws`.
+        async def _read_loop(self) -> None:
+            await asyncio.Event().wait()
+
+    async def scenario():
+        session = _IdleReadLoopSession(ws=object(), peer_address="203.0.113.5")
+
+        written: list[str] = []
+        entered_final_write = asyncio.Event()
+        release_final_write = asyncio.Event()
+
+        async def write(text: str) -> None:
+            if text == "\r\n":
+                entered_final_write.set()
+                await release_final_write.wait()
+            written.append(text)
+
+        session.write = write  # type: ignore[method-assign]
+
+        lock = asyncio.Lock()
+        live_buffer = char_input.LiveInputBuffer()
+
+        for ch in "hi":
+            session._char_queue.put_nowait(ch)
+
+        read_task = asyncio.create_task(
+            session._read_line_editable(None, live_buffer=live_buffer, lock=lock)
+        )
+        await asyncio.sleep(0.02)
+
+        session._char_queue.put_nowait("\r")
+        await asyncio.wait_for(entered_final_write.wait(), timeout=2)
+
+        outsider_ran = asyncio.Event()
+
+        async def outsider() -> None:
+            async with lock:
+                outsider_ran.set()
+
+        outsider_task = asyncio.create_task(outsider())
+        await asyncio.sleep(0.05)
+        assert not outsider_ran.is_set()
+        assert live_buffer.text == "hi"
+
+        release_final_write.set()
+        result = await asyncio.wait_for(read_task, timeout=2)
+        await asyncio.wait_for(outsider_task, timeout=2)
+
+        session._reader_task.cancel()
+        try:
+            await session._reader_task
+        except asyncio.CancelledError:
+            pass
+
+        assert result == "hi"
+        assert live_buffer.text == ""
+        assert live_buffer.cursor == 0
+        assert written[-1] == "\r\n"
+
+
+# -- GitHub issue #46: pinned UI must track resize dynamically, not once --
+
+
+def test_shrink_below_minimum_mid_session_then_submit_does_not_crash(db, hub, presence, mailbox, channel, alice):
+    """The core defect: `_chat_loop` used to decide `pinned_ui_enabled`
+    once at entry and trust it for the whole session. Shrinking below
+    `_PINNED_UI_MIN_HEIGHT` afterward made the next submitted line's own
+    repaint attempt `set_scroll_region(1, height - 2)` with `height - 2
+    <= 0`, raising `ValueError` and killing the session."""
+
+    async def scenario():
+        session = _LiveTypingSession()  # starts at 24 rows
+        task = asyncio.create_task(
+            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+        )
+        await asyncio.sleep(0.05)  # join + initial pinned-UI paint
+
+        session.terminal_height = 2  # below _PINNED_UI_MIN_HEIGHT (3)
+        session.feed("hello")
+        session.feed_enter()
+        await asyncio.sleep(0.05)  # would have raised here, pre-fix
+
+        # The session is still alive -- prove it with one more round-trip.
+        session.feed("/quit")
+        session.feed_enter()
+        return await asyncio.wait_for(task, timeout=2)
+
+    action = asyncio.run(scenario())
+    assert isinstance(action, chat_flow._Quit)
+
+
+def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
+    db, hub, presence, mailbox, channel, alice, bob
+):
+    """Same defect, hit via `receive_loop`'s `deliver()` instead of
+    `send_loop` -- an incoming broadcast while too-short must not crash
+    either."""
+
+    async def scenario():
+        alice_session = _LiveTypingSession()
+        alice_task = asyncio.create_task(
+            chat_flow._chat_loop(
+                alice_session, db, hub, presence, mailbox, InputHistory(), channel, alice
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        alice_session.terminal_height = 2  # below _PINNED_UI_MIN_HEIGHT
+
+        bob_session = FakeSession(["hi there", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(bob_session, db, hub, presence, mailbox, InputHistory(), channel, bob),
+            timeout=2,
+        )
+        await asyncio.sleep(0.05)  # let alice's receive_loop process the broadcast
+
+        alice_session.feed("/quit")
+        alice_session.feed_enter()
+        action = await asyncio.wait_for(alice_task, timeout=2)
+        return alice_session, action
+
+    alice_session, action = asyncio.run(scenario())
+    assert "hi there" in alice_session.output
+    assert isinstance(action, chat_flow._Quit)
+
+
+def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(db, hub, presence, mailbox, channel, alice):
+    """The reverse transition, also broken before this fix (design doc
+    round 79's pinned UI never rechecked height after entry at all): a
+    session that enters chat too short to support the pinned UI, then
+    grows past the threshold, must have the scroll region and both
+    pinned rows (re-)initialized -- not remain permanently unpinned."""
+
+    async def scenario():
+        session = _LiveTypingSession()
+        session.terminal_height = 2  # too short from the very start
+        task = asyncio.create_task(
+            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+        )
+        await asyncio.sleep(0.05)
+
+        session.terminal_height = 24  # grows past _PINNED_UI_MIN_HEIGHT
+        session.feed("hello")
+        session.feed_enter()
+        await asyncio.sleep(0.05)
+
+        session.feed("/quit")
+        session.feed_enter()
+        await asyncio.wait_for(task, timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    text = session.output
+    # The pinned input row's prompt marker appears once the terminal
+    # grew back above the threshold -- it never could have before.
+    assert "> " in text
+    # And the scroll region set at that point matches the *current*
+    # (24-row) height, not left unset or computed from the stale
+    # too-short one.
+    assert "\x1b[1;22r" in text  # set_scroll_region(1, 24 - 2)
+
+
+def test_repeated_threshold_crossings_track_the_current_height_each_time(
+    db, hub, presence, mailbox, channel, alice
+):
+    """Shrink, grow, shrink again within one session -- each transition
+    must reflect the terminal's size *at that moment*, and exit cleanup
+    must be driven by the last-known real state
+    (`_PinnedUIState.active`), not the entry-time snapshot `send_loop`'s
+    own local reassignment doesn't even propagate to (GitHub issue
+    #46)."""
+
+    async def scenario():
+        session = _LiveTypingSession()  # starts tall (24 rows)
+        task = asyncio.create_task(
+            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+        )
+        await asyncio.sleep(0.05)
+
+        session.terminal_height = 2  # shrink: hand the screen back
+        session.feed("one")
+        session.feed_enter()
+        await asyncio.sleep(0.05)
+
+        session.terminal_height = 24  # grow back: re-pin at the new size
+        session.feed("two")
+        session.feed_enter()
+        await asyncio.sleep(0.05)
+
+        session.feed("/quit")  # ends "active" -- exit cleanup must run
+        session.feed_enter()
+        await asyncio.wait_for(task, timeout=2)
+        return session
+
+    session = asyncio.run(scenario())
+    text = session.output
+    # Growing back re-set the region at the (still) 24-row size.
+    assert text.count("\x1b[1;22r") >= 2  # once at entry, once on regrowth
+    # Exit cleanup actually ran (ended "active" -- must reset before
+    # handing control to whatever screen comes after /quit).
+    assert text.endswith("\x1b[r" + "\x1b[2J\x1b[H")
+
+    asyncio.run(scenario())

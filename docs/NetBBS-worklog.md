@@ -5729,3 +5729,132 @@ above; SSH/web share the exact same `char_input`/`chat_flow` code paths
 and passed their own transport-level unit tests, but haven't been
 smoke-tested end-to-end the same way).
 
+## Sign-off notes, round 80 (independent audit of rounds 76–79 — 5 issues: #44, #45, #46, #47, #48 — fixed)
+
+An independent reviewer audited the self-service-registration (round
+76) and pinned-chat-UI/daybreak (rounds 77–79) work at commit
+`114ca12`, filing five issues. All five verified against the actual
+code (each reproduced the exact failure described) and closed:
+
+1. **#44: a pending-approval self-registered account could be promoted
+   to SysOp level and would then satisfy the "last SysOp" safety check
+   without ever being able to log in**, letting an operator get talked
+   into disabling/demoting/deleting the node's one genuinely usable
+   SysOp — administrative lockout, survives a restart. `netbbs.auth.
+   users.count_sysops()` now requires `pending_approval = 0` alongside
+   the existing `disabled_at IS NULL`; `_refuse_if_last_sysop`'s own
+   target check gained the same exclusion (so acting on the pending
+   row itself is never blocked by a lockout check that shouldn't apply
+   to it); `set_user_level` now refuses outright to promote a pending
+   account to `SYSOP_LEVEL` (closing the actual repro step), rather
+   than relying solely on the count fix to make the resulting state
+   merely harmless. `netbbs.__main__.run`'s zero-SysOp startup guard
+   needed no code change — it already calls `count_sysops`, so the
+   fix there is automatic — but got its own explicit regression test
+   (a pending-only level-255 database must still refuse to start)
+   alongside `test_user_management.py`'s new coverage.
+2. **#45: the pinned chat input row's Enter-completion sequence
+   (buffer reset + final CRLF write) ran *after* releasing the shared
+   per-keystroke lock**, in both `netbbs.net.char_input.
+   _read_line_editable` and `netbbs.net.web.WebSession.
+   _read_line_editable` — a concurrently-redrawing task (`chat_flow`'s
+   `receive_loop`) could acquire the lock in that gap and redraw a
+   pinned row from state that didn't yet match the terminal, or race
+   the final newline itself. Both functions now capture the submitted
+   line into a `submitted` local, clear `line`/`cursor` in place, and
+   write the final `"\r\n"` — all *before* `break`, inside the existing
+   lock-held section; the per-keystroke `finally`'s existing
+   `live_buffer.update(line, cursor)` call does the reset as a side
+   effect of `line`/`cursor` already being cleared, rather than a
+   second, separately-timed update after the loop. Verified with a
+   deterministic test (a fake `write()` that blocks specifically on the
+   final `"\r\n"`, with a concurrent lock-holder and buffer-state
+   assertion taken while it's blocked) for both the byte-oriented and
+   web-session code paths; confirmed each fails against the pre-fix
+   code before confirming it passes against the fix.
+3. **#46: `_chat_loop` decided `pinned_ui_enabled` once at channel
+   entry and never rechecked it**, so a mid-session resize (Telnet
+   NAWS/SSH PTY-resize/web `resize`) crossing `_PINNED_UI_MIN_HEIGHT`
+   made the next pinned-row repaint compute `height - 2 <= 0` and call
+   `set_scroll_region` with an invalid region, raising `ValueError` and
+   killing the session; the reverse direction (growing back above the
+   threshold) silently never re-activated the pinned UI at all, since
+   nothing was watching for it. New `_PinnedUIState` dataclass
+   (`active: bool`, `sync(...)`) re-derives the current answer from
+   `session.terminal_height` on every use and performs the one-time
+   transition the instant the threshold is crossed — normal-to-too-short
+   hands the screen back before any helper computes an impossible
+   region; too-short-to-normal re-establishes the region and repaints
+   both pinned rows from scratch. Every call site that used to read the
+   static `pinned_ui_enabled` local (`receive_loop`'s `deliver`,
+   `send_loop`'s per-line critical section and its `finally`) now calls
+   `pinned_ui.sync(...)` instead, always under the shared lock so a
+   transition's own writes can't interleave with a concurrent one and
+   both loops always agree on which regime is active. `send_loop` now
+   takes that lock unconditionally rather than conditionally via
+   `contextlib.nullcontext()` (dropped, along with the now-unused
+   import) — `sync()` needs it held regardless. `_repaint_input_row`/
+   `_print_and_redraw_input`/`_enter_content_region` also gained their
+   own defensive `if height < _PINNED_UI_MIN_HEIGHT: return` as a
+   backstop per the reviewer's own suggestion, on top of the state
+   machine already refusing to reach them at an invalid height. Exit
+   cleanup now checks `pinned_ui.active` (the real last-known state)
+   rather than the entry-time `pinned_ui_enabled` local, which
+   `send_loop`'s own reassignment — local to that nested function
+   without a `nonlocal` — never actually updated in the outer scope.
+   Four new tests drive a real `_LiveTypingSession` through shrink/
+   grow/shrink-again transitions mid-session; confirmed each fails
+   against the pre-fix code (one only reliably once `tests/
+   test_chat_pinned_input.py`'s own `feed_enter()` helper was fixed to
+   send a full CRLF instead of a lone CR — a lone CR's optional-LF peek
+   has its own real ~50ms timeout in `char_input`, which raced against
+   the test's own post-Enter observation window often enough to be
+   unusable for this specific timing-sensitive assertion).
+4. **#47: the daybreak announcer's midnight scheduling was off by
+   exactly one hour on both DST transition days.** `_seconds_until_
+   next_local_midnight` constructed the target midnight with the same
+   `ZoneInfo` object as `current_local` and subtracted the two aware
+   datetimes directly — CPython's `datetime.__sub__` special-cases two
+   operands sharing one `tzinfo` *object* by assuming their UTC offsets
+   are equal and subtracting naive wall-clock fields, skipping
+   `utcoffset()` entirely, which is exactly wrong on the one day a
+   timezone's offset actually changes. Fixed by converting both sides
+   to UTC (`astimezone(datetime.timezone.utc)`) before subtracting,
+   keeping the existing same-`tzinfo` construction for the *target*
+   date (still correct and necessary — only the elapsed-duration
+   calculation was the bug). New tests cover Europe/Berlin's
+   spring-forward (23h) and fall-back (25h) days, both from local
+   midnight and partway through, plus confirm the announcer's actual
+   `sleep()` call receives the corrected value end-to-end.
+5. **#48: an unhandled exception in the node-lifetime daybreak task
+   could silently kill the feature and later block shutdown cleanup
+   entirely.** `netbbs.__main__.run` only ever awaited `shutdown_event`,
+   never the daybreak task itself, so a crash went unobserved until
+   shutdown — at which point cancelling an already-failed task is a
+   no-op and awaiting it re-raises the original exception, skipping
+   every listener's `stop()` and `db.close()` below it in the `finally`
+   block. Chosen policy (graceful degrade, not fail-fast or an
+   auto-restarting supervisor): a `add_done_callback` logs the failure
+   immediately, by name, the moment it happens, rather than only
+   surfacing at eventual shutdown; the `finally` block now catches
+   (not just `asyncio.CancelledError` but) any exception when awaiting
+   the cancelled/failed task, since it was already logged and the node's
+   core listener/database cleanup must never be skippable by an
+   ancillary feature's failure. Fail-fast (bring the whole node down)
+   and an auto-restarting supervisor (with its own backoff/give-up
+   policy) were both considered and rejected as disproportionate
+   complexity for what's a purely cosmetic, local-only chat
+   announcement (design doc round 77/78) — logging plus guaranteed
+   cleanup fully addresses both the "silently dead" and "masks the real
+   shutdown reason" complaints the issue raised. Two new tests
+   monkeypatch the announcer to raise immediately and confirm (a) the
+   failure is logged with an exception traceback attached, and (b)
+   listeners still stop and the database still closes despite the
+   unhandled exception — plus one confirming ordinary cancellation on a
+   clean shutdown is unaffected.
+6. **Testing**: all five fixes verified to actually fail against the
+   pre-fix code before confirming they pass against the fix (not just
+   written and trusted) — done by temporarily `git stash`-ing just the
+   relevant source file(s) and re-running the new tests, then restoring.
+   Full suite re-run: **1673 passed, 4 skipped**.
+

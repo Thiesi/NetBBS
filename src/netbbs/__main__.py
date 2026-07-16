@@ -221,7 +221,35 @@ async def run(
     # alongside hub/presence/mailbox/throttle, and cancelled in this
     # function's own `finally` below the same way every listener is
     # already stopped there.
+    #
+    # GitHub issue #48: an unexpected failure in this task (a database
+    # write, timezone lookup, or future broadcast change raising) must
+    # not go unnoticed, and must not be able to block the `finally`
+    # block's listener/database cleanup below. The done-callback logs
+    # the failure the moment it happens -- this is a purely cosmetic,
+    # local-only chat announcement (design doc round 77/78), not
+    # something worth taking the whole node's listeners down for, so
+    # the chosen policy is graceful degrade (log and keep serving,
+    # feature silently retired for the rest of this node's uptime)
+    # rather than fail-fast or an auto-restarting supervisor -- the
+    # latter would need its own backoff/give-up policy for a repeatedly
+    # crashing announcer, complexity this ancillary a feature doesn't
+    # warrant.
     daybreak_task = asyncio.create_task(run_daybreak_announcer(db, hub))
+
+    def _log_daybreak_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _logger.error(
+                "daybreak announcer task failed -- the midnight chat "
+                "announcement will not run again this node uptime "
+                "(other functionality is unaffected)",
+                exc_info=exc,
+            )
+
+    daybreak_task.add_done_callback(_log_daybreak_failure)
 
     async def session_handler(session):
         await handle_session(
@@ -255,10 +283,18 @@ async def run(
 
         await shutdown_event.wait()
     finally:
+        # GitHub issue #48: cancelling an already-failed task is a
+        # no-op, and awaiting it re-raises the original (non-
+        # cancellation) exception -- which must not be allowed to skip
+        # the listener/database cleanup below. That failure was already
+        # logged by `_log_daybreak_failure` above the moment it
+        # happened, so it's safe to swallow it here.
         daybreak_task.cancel()
         try:
             await daybreak_task
         except asyncio.CancelledError:
+            pass
+        except Exception:
             pass
         for server in reversed(servers):
             await server.stop()

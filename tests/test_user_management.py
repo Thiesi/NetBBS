@@ -18,6 +18,7 @@ from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     UserManagementError,
+    approve_pending_user,
     authenticate_keypair,
     authenticate_password,
     authenticate_password_async,
@@ -64,6 +65,24 @@ def test_count_sysops_zero_when_none_exist(db):
     assert count_sysops(db) == 0
 
 
+def test_count_sysops_excludes_pending_approval_sysop_level_accounts(db):
+    """GitHub issue #44: a pending level-255 row (however it got that
+    way) must not be counted as a usable SysOp."""
+    create_user(db, "pending", password="hunter2", user_level=SYSOP_LEVEL, pending_approval=True)
+    assert count_sysops(db) == 0
+
+
+def test_approving_a_pending_sysop_level_account_counts_it_immediately(db, sysop):
+    """GitHub issue #44: once approved, the previously-pending SysOp-
+    level account becomes usable right away, no restart needed."""
+    pending = create_user(
+        db, "pending", password="hunter2", user_level=SYSOP_LEVEL, pending_approval=True
+    )
+    assert count_sysops(db) == 1
+    approve_pending_user(db, pending, approved_by=sysop)
+    assert count_sysops(db) == 2
+
+
 # -- set_user_level -----------------------------------------------------
 
 
@@ -100,6 +119,38 @@ def test_set_user_level_is_a_noop_when_unchanged(db, sysop):
     updated = set_user_level(db, alice, 10, changed_by=sysop)
     assert updated.user_level == 10
     assert list_actions_for_target_user(db, alice.id) == []
+
+
+def test_set_user_level_refuses_to_promote_a_pending_account_to_sysop(db, sysop):
+    """GitHub issue #44: promoting a still-pending registration straight
+    to SysOp level must be refused outright, not merely uncounted --
+    otherwise the safety check below (does this leave a usable SysOp?)
+    is never even reached for the *real* SysOp being removed."""
+    pending = create_user(
+        db, "pending", password="hunter2", user_level=0, pending_approval=True
+    )
+    with pytest.raises(UserManagementError):
+        set_user_level(db, pending, SYSOP_LEVEL, changed_by=sysop)
+    assert count_sysops(db) == 1
+
+
+def test_pending_sysop_level_row_does_not_defeat_last_sysop_protection(db, sysop):
+    """GitHub issue #44 repro: even if a pending account already holds
+    a SysOp-level row (bypassing the promotion-time check above, e.g.
+    via direct database maintenance), it must not let the one real,
+    usable SysOp be disabled/demoted/deleted."""
+    pending = create_user(
+        db, "pending", password="hunter2", user_level=SYSOP_LEVEL, pending_approval=True
+    )
+    with pytest.raises(UserManagementError):
+        set_user_level(db, sysop, 10, changed_by=sysop)
+    with pytest.raises(UserManagementError):
+        set_user_disabled(db, sysop, True, changed_by=sysop)
+    with pytest.raises(UserManagementError):
+        delete_user(db, sysop, deleted_by=sysop)
+    # The pending row itself is not protected -- it was never usable.
+    updated = set_user_disabled(db, pending, True, changed_by=sysop)
+    assert updated.disabled_at is not None
 
 
 # -- set_user_disabled ----------------------------------------------------

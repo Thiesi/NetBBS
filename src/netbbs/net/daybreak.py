@@ -65,17 +65,34 @@ def _seconds_until_next_local_midnight(current_local: datetime.datetime) -> floa
     schedule against.
 
     Constructs the target midnight directly with that same `tzinfo`
-    (rather than just adding a fixed 24-hour `timedelta`) so this stays
-    correct across a DST transition -- `zoneinfo.ZoneInfo` resolves the
-    correct UTC offset for the *target* wall-clock date when the
-    `datetime` is constructed, not whatever offset was in effect a
-    fixed number of seconds ago.
+    (rather than just adding a fixed 24-hour `timedelta`) so the
+    *target* is the correct wall-clock date across a DST transition --
+    `zoneinfo.ZoneInfo` resolves the correct UTC offset for that target
+    date when the `datetime` is constructed, not whatever offset was in
+    effect a fixed number of seconds ago.
+
+    The elapsed-time calculation itself (GitHub issue #47) then
+    converts both ends to UTC before subtracting, rather than
+    subtracting the two aware datetimes directly. `next_midnight` and
+    `current_local` carry the exact same `tzinfo` *object* (`ZoneInfo`
+    instances compare identical when constructed from the same key),
+    and CPython's `datetime.__sub__` special-cases that: when both
+    operands share one `tzinfo` object, it assumes their UTC offsets
+    are equal and subtracts naive wall-clock fields directly, skipping
+    `utcoffset()` entirely. That assumption fails exactly on a DST
+    transition day, silently returning a flat 24 hours for a day that
+    is really 23 (spring-forward) or 25 (fall-back) hours long.
+    Explicit `astimezone(UTC)` on both sides forces the real elapsed
+    duration to be used instead.
     """
     next_day = current_local.date() + datetime.timedelta(days=1)
     next_midnight = datetime.datetime(
         next_day.year, next_day.month, next_day.day, tzinfo=current_local.tzinfo
     )
-    return (next_midnight - current_local).total_seconds()
+    return (
+        next_midnight.astimezone(datetime.timezone.utc)
+        - current_local.astimezone(datetime.timezone.utc)
+    ).total_seconds()
 
 
 def _channels_with_participants(db: Database, hub: ChatHub) -> list[Channel]:

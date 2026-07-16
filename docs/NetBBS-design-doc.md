@@ -3663,3 +3663,43 @@ oversized in-progress line (point 5); a fully merged single-task event
 loop (point 2) — worth revisiting only if the lock-based approach turns
 out to have some real problem in practice, none identified so far.
 
+## Sign-off notes, round 80 (daybreak task failure policy — decided while fixing GitHub issue #48)
+
+An independent reviewer's audit of round 78's daybreak announcer (see
+`NetBBS-worklog.md` round 80 for the full five-issue fix writeup) found
+that an unhandled exception in that node-lifetime background task went
+unobserved and could later block shutdown cleanup — not itself a design
+question, but fixing it required picking one of three genuinely
+different policies for **what a background task's failure should mean
+for the rest of the node**, which hadn't been decided anywhere before
+now.
+
+**Decided: graceful degrade — log the failure immediately, keep serving,
+the feature stays dead for the rest of that node's uptime.** Two
+alternatives were considered and rejected:
+
+- **Fail-fast** (a background task's failure triggers full node
+  shutdown) — rejected because the daybreak announcement is purely
+  cosmetic and strictly local-only (round 77/78's own sign-off note);
+  taking every listener down because a "good morning" message generator
+  broke would be a wildly disproportionate blast radius for what a
+  solo SysOp would actually want.
+- **Auto-restarting supervisor** (catch, log, restart after a bounded
+  delay) — rejected as more machinery than this ancillary a feature
+  warrants: a real implementation needs its own backoff and eventual
+  give-up policy for a repeatedly-crashing task, and nothing about this
+  feature's importance justifies building that now, speculatively, for
+  a failure mode with no evidence of actually recurring.
+
+Graceful degrade fully addresses both real complaints the issue raised
+— "silently dead" (fixed: a done-callback logs it, by name, the instant
+it happens, not just eventually at shutdown) and "masks the real
+shutdown reason" (fixed: the `finally` block's listener-stop/db-close
+sequence can no longer be skipped by an ancillary task's exception) —
+without inventing supervision machinery this codebase has no other
+precedent for. Should another node-lifetime background task get added
+later with a stronger claim to node-critical status, that one can
+reasonably choose fail-fast instead — this decision is scoped to what
+"a background task's failure means" *for tasks no more important than
+this one*, not a blanket policy for every future one.
+
