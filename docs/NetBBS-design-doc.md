@@ -3481,3 +3481,91 @@ scoped:**
   event, what that would even mean is genuinely Phase 3+ design work,
   not decidable now. Not scheduled.
 
+## Sign-off notes, round 78 (local-only midnight "new day" chat announcement)
+
+Thiesi asked to build round 77's discussed-not-decided midnight
+announcement, explicitly confirmed local-only (matching the
+recommendation in that note: a "new day" tied to one node's local
+clock has no coherent meaning federated across nodes in different time
+zones, so this never crosses a Link channel's node boundary — moot for
+now since NetBBS Link is Phase 3 and hasn't started, but the boundary
+is decided regardless of when Link ships).
+
+**1. New module, `netbbs.net.daybreak`, not `netbbs.chat.daybreak`.**
+The natural broadcast envelope to reuse is `netbbs.net.chat_flow`'s
+existing `_TimestampedNotice` — the same one join/leave/chat messages
+already use to reach `_chat_loop`'s `receive_loop`. `netbbs.chat` is
+`chat_flow`'s own dependency, never the reverse, so a module under
+`netbbs.chat` importing `_TimestampedNotice` back from `chat_flow`
+would be a circular import. Living under `netbbs.net` instead (where
+every other session/broadcast-orchestration module already lives —
+`login_flow`, `admin_flow`, `ssh`, `telnet`, `web`) resolves that
+cleanly, and is arguably the more accurate home anyway: this is a
+scheduling/broadcast-orchestration concern built *on top of*
+`netbbs.chat`'s domain primitives (`ChatHub`, `list_channels`,
+`record_message`), not a new primitive belonging to that domain layer
+itself.
+
+**2. Persisted to scrollback, not broadcast-only.** Every other
+system-generated chat event (join/leave/mute/ban/kick/nick) is both
+broadcast live *and* recorded via `record_message`, so a replayed
+scrollback reads coherently rather than looking like it happened in a
+vacuum — the daybreak announcement follows the same convention rather
+than being a special ephemeral-only case. Needed a new `channel_
+messages.kind` value, `'daybreak'`, via the same CHECK-widening
+table-rebuild migration pattern rounds 37/40/41 already established
+(SQLite still has no `ALTER TABLE` for changing a CHECK constraint in
+place). Deliberately a specific `'daybreak'` kind, not a generic
+`'system'` bucket for "any future non-actor announcement" — matches
+round 40's own stated convention of widening only for what's actually
+needed now, not speculatively for a future use case that doesn't exist
+yet. (Found and fixed in passing while touching this: the Python-side
+`MessageKind` `Literal` had already drifted out of sync with the DB —
+missing `"nick"`, which round 41 added to the schema but never back-
+ported to the type hint. Fixed alongside adding `"daybreak"`, not
+tracked as a separate round.)
+
+**3. Only channels with a live participant get the announcement.**
+Thiesi's own explicit ask ("channels which have at least one person
+joined at midnight") — `ChatHub` has no direct "every channel with
+someone in it" query, so this cross-references every existing channel
+(`list_channels`) against `hub.participant_count(name) > 0` per name,
+the same pattern `netbbs.net.chat_flow`'s own per-channel hub lookups
+already use. A dormant channel with dozens of stale scrollback entries
+never gets one, by design — nobody's there to read it, and it would
+just be noise on the next actual visit.
+
+**4. `netbbs.timeutil.get_node_timezone(db) -> ZoneInfo` factored out
+as a small new public helper.** `format_for_display` already resolved
+the node's configured timezone internally, but only as a step toward
+formatting one specific already-known instant — nothing needed the
+actual `ZoneInfo` object for date/time *arithmetic* until this round
+(computing "when is the next local midnight" needs real timezone-aware
+datetime math, not just a formatted string). Left `format_for_display`
+itself untouched rather than restructuring its internals to share this
+new helper — a few lines of harmless duplication versus touching
+well-established, already-tested display-formatting code for a
+refactor with no behavioral benefit.
+
+**5. Scheduling: computed directly from the target date, not a fixed
+24-hour sleep-and-repeat.** `_seconds_until_next_local_midnight`
+constructs the *target* midnight datetime directly with the current
+timezone's `tzinfo`, rather than adding a flat `timedelta(days=1)` to
+"now" — the former stays correct across a DST transition
+(`zoneinfo.ZoneInfo` resolves the correct UTC offset for the
+constructed wall-clock date), the latter would silently drift by an
+hour on a DST-transition day. `now`/`sleep` are both injectable
+parameters on `run_daybreak_announcer`, matching
+`netbbs.net.throttle.LoginThrottle`'s own `clock` injection precedent —
+needed here specifically because this is the first node-lifetime
+background task in the codebase with no existing precedent to test
+against (confirmed by grepping every `asyncio.create_task` call site
+in `src/netbbs`: every other one is per-session/per-connection, not a
+standalone loop running for the whole node's lifetime).
+
+**Left as explicitly out of scope:** no Link-relayed variant of this
+event exists or is planned — see round 77's own note for why that's
+the deliberate, permanent boundary, not a placeholder pending Phase 3.
+No per-channel opt-out/config toggle was requested or added; every
+channel with a participant present gets the announcement unconditionally.
+

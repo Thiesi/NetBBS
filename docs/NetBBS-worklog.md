@@ -5549,3 +5549,81 @@ emulator, not just produce the expected escape sequence) remains
 unverified from this sandboxed dev environment — same standing caveat
 as every other terminal-rendering round.
 
+## Sign-off notes, round 78 (local-only midnight "new day" chat announcement — implemented)
+
+Implementation narrative for design doc round 78's decisions.
+
+1. **New module**: `src/netbbs/net/daybreak.py`. `format_daybreak_
+   message(local_date) -> str` (weekday/month/ordinal-day/year, matches
+   Thiesi's own worked example exactly: "Good morning, chatters! A new
+   day has just begun: where this node lives, it is now Monday, April
+   3rd, 2029."), `_seconds_until_next_local_midnight`,
+   `_channels_with_participants`, `announce_new_day` (records +
+   broadcasts to every occupied channel), and `run_daybreak_announcer`
+   (the node-lifetime loop).
+2. **`netbbs.timeutil.get_node_timezone(db) -> ZoneInfo`**: new small
+   helper, factored logic (not a refactor of `format_for_display`
+   itself) — see design doc note point 4 for why left independent.
+3. **Schema**: new migration widening `channel_messages.kind`'s CHECK
+   to admit `'daybreak'` (standard table-rebuild, rounds 37/40/41
+   pattern) — and, found in passing, backported the already-shipped
+   `'nick'` DB value into the Python-side `MessageKind` `Literal`,
+   which had silently drifted out of sync since round 41.
+   `record_message` now also requires `body` for `kind="daybreak"`,
+   same validation shape as the existing `kind="message"` check.
+4. **Rendering**: `netbbs.net.chat_flow._render_scrollback_message`
+   gained a `"daybreak"` branch — the only kind here with no author at
+   all, so it renders `message.body` directly rather than interpolating
+   `author_label` the way every other branch does.
+5. **Wiring**: `netbbs.__main__.run()` starts `run_daybreak_announcer`
+   as `daybreak_task` right after `hub` is constructed, cancelled in
+   the function's existing `finally` block (mirrored cancel-then-await-
+   swallowing-`CancelledError` shape already used elsewhere in this
+   codebase, e.g. the account-revocation watcher / editor autosave
+   tasks) before the existing per-server `stop()` loop runs.
+6. **A real, hands-on debugging lesson while writing the loop's own
+   test**: the first version of `test_announcer_sleeps_until_midnight_
+   then_announces` used a `fake_sleep` that always returned immediately
+   and a `fake_now` that never advanced — this produced a genuine
+   infinite hang, not a slow test. Root cause, confirmed by direct
+   reproduction with debug prints rather than guessed at: `asyncio.
+   Queue.put()` only actually suspends (yields to the event loop) once
+   the queue is *full* — with nothing else draining it fast enough, the
+   `while True` loop ran many hundreds of iterations in an uninterrupted
+   burst with no genuine `await` suspension point at all, meaning
+   *nothing else in the event loop* ever got a turn, including the
+   test's own polling coroutine and even `task.cancel()` itself (which
+   only takes effect at the next suspension point). Fixed by giving the
+   test's fake `sleep` a real, deliberate suspension point on every call
+   after the first (parking on an unset `asyncio.Event`) — production
+   code was never at fault; the test's own fakes just didn't behave
+   like real async primitives. A second, smaller issue found the same
+   way: `run_daybreak_announcer` originally let `announce_new_day`
+   re-resolve "today" via its own fresh, real `datetime.datetime.now()`
+   call after waking, rather than using the date the loop had just
+   computed for scheduling -- harmless in production (the sleep already
+   landed on that instant for real) but meant a faked, non-advancing
+   `now` in a test produced the *actual* current test-run date instead
+   of the intended simulated one. Fixed by threading the computed
+   `next_local_date` through explicitly (see design doc note point 5).
+7. **Testing**: `tests/test_daybreak.py`, 26 new tests — message
+   formatting (including every ordinal-suffix edge case: 1st/2nd/3rd/
+   4th/11th–13th's irregular "th"/21st–24th), midnight scheduling math
+   (including exactly-at-midnight and a DST-safe construction check),
+   the occupied-channels filter, `announce_new_day` end to end (records
+   to scrollback, broadcasts only to occupied channels, no-op with zero
+   channels, the real-timezone-resolution default path), the announcer
+   loop itself (one full iteration via injected `now`/`sleep`, clean
+   cancellation while genuinely sleeping), `record_message`'s new
+   validation, and scrollback-replay rendering. Full suite re-run:
+   **1648 passed, 4 skipped** (up from round 77's 1622 — 26 new tests).
+
+Not verified from this sandboxed environment (same standing caveat as
+always): whether the announcement actually lands within a reasonable
+margin of *real* local midnight on a long-running node, since that's
+inherently a real-time, real-clock property no test suite run in
+seconds can confirm — worth a spot check from Thiesi's own long-running
+node at some point, though the scheduling math itself was verified
+directly (DST-safe construction, exact boundary behavior at 23:59:00
+and 00:00:01 and exactly 00:00:00).
+

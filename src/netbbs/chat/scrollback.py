@@ -35,7 +35,14 @@ from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-MessageKind = Literal["message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action"]
+MessageKind = Literal[
+    "message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action", "nick", "daybreak"
+]
+# "nick" was already a valid DB-level kind (round 41's CHECK-widening
+# migration; see netbbs.net.chat_flow._announce_nick_change) but had
+# drifted out of sync with this Python-side type hint until now --
+# fixed in passing while adding "daybreak" (design doc round 78) below,
+# not a separate change.
 
 # Config key for the node-wide scrollback retention limit, stored via
 # netbbs.config — same pattern as netbbs.timeutil's display format/
@@ -102,14 +109,17 @@ def record_message(
     Append an event to `channel`'s scrollback and trim it back down to the
     configured limit.
 
-    `body` is required for `kind="message"`; for `"join"`/`"leave"` the
-    kind alone carries the whole meaning of the event (see module
-    docstring), so `body` is ignored. Validated here rather than left to
-    the DB's CHECK constraint so a caller gets an immediate, specific
-    error instead of a generic `IntegrityError`.
+    `body` is required for `kind="message"` and `kind="daybreak"`
+    (design doc round 78 -- the announcement text itself, since a
+    daybreak event has no author to derive display text from the way
+    "join"/"leave" do); for `"join"`/`"leave"` the kind alone carries
+    the whole meaning of the event (see module docstring), so `body` is
+    ignored. Validated here rather than left to the DB's CHECK
+    constraint so a caller gets an immediate, specific error instead of
+    a generic `IntegrityError`.
     """
-    if kind == "message" and body is None:
-        raise ValueError("body is required for kind='message'")
+    if kind in ("message", "daybreak") and body is None:
+        raise ValueError(f"body is required for kind={kind!r}")
 
     created_at = utc_now_iso()
     db.connection.execute(

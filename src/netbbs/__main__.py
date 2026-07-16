@@ -21,6 +21,7 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
@@ -214,6 +215,14 @@ async def run(
     if shutdown_event is None:
         shutdown_event = asyncio.Event()
 
+    # Node-lifetime background task (design doc round 78), not tied to
+    # any one session -- see netbbs.net.daybreak's own module docstring
+    # for what it does and why it's strictly local-only. Started here,
+    # alongside hub/presence/mailbox/throttle, and cancelled in this
+    # function's own `finally` below the same way every listener is
+    # already stopped there.
+    daybreak_task = asyncio.create_task(run_daybreak_announcer(db, hub))
+
     async def session_handler(session):
         await handle_session(
             session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
@@ -246,6 +255,11 @@ async def run(
 
         await shutdown_event.wait()
     finally:
+        daybreak_task.cancel()
+        try:
+            await daybreak_task
+        except asyncio.CancelledError:
+            pass
         for server in reversed(servers):
             await server.stop()
         db.close()

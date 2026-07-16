@@ -140,6 +140,22 @@ def set_display_timezone(db: Database, tz_name: str) -> None:
     set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, tz_name)
 
 
+def get_node_timezone(db: Database) -> ZoneInfo:
+    """
+    The node-wide configured display timezone as an actual `ZoneInfo`
+    object -- the same resolve-and-validate-with-fallback logic
+    `format_for_display` applies internally for its own no-override
+    case, factored out here for a caller that needs to do timezone-
+    aware date/time arithmetic (e.g. `netbbs.chat.daybreak`'s local-
+    midnight scheduling) rather than just formatting one already-known
+    instant into display text.
+    """
+    tz_name = get_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, default=_DEFAULT_DISPLAY_TIMEZONE)
+    if not is_valid_timezone(tz_name):
+        tz_name = _DEFAULT_DISPLAY_TIMEZONE
+    return ZoneInfo(tz_name)
+
+
 def format_for_display(
     iso_timestamp: str,
     db: Database | None = None,

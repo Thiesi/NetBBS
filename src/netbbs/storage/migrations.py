@@ -1024,4 +1024,41 @@ MIGRATIONS = [
         ALTER TABLE users ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    Migration(
+        description=(
+            "Widens channel_messages.kind's CHECK constraint again to "
+            "admit 'daybreak' (design doc round 78) -- a local, per-node "
+            "system announcement broadcast to every channel that "
+            "currently has at least one participant, once at local "
+            "midnight (netbbs.chat.daybreak). Same standard SQLite "
+            "table-rebuild pattern as rounds 37/40/41, since there's "
+            "still no ALTER TABLE for changing a CHECK in place."
+        ),
+        sql="""
+        CREATE TABLE channel_messages_new (
+            id                  INTEGER PRIMARY KEY,
+            channel_id          INTEGER NOT NULL REFERENCES channels(id),
+            kind                TEXT NOT NULL CHECK (
+                kind IN (
+                    'message', 'join', 'leave', 'mute', 'unmute', 'ban', 'unban', 'kick',
+                    'action', 'nick', 'daybreak'
+                )
+            ),
+            author_label        TEXT NOT NULL,
+            author_fingerprint  TEXT,
+            body                TEXT,
+            created_at          TEXT NOT NULL
+        );
+
+        INSERT INTO channel_messages_new
+            SELECT id, channel_id, kind, author_label, author_fingerprint, body, created_at
+            FROM channel_messages;
+
+        DROP TABLE channel_messages;
+
+        ALTER TABLE channel_messages_new RENAME TO channel_messages;
+
+        CREATE INDEX idx_channel_messages_channel_id ON channel_messages(channel_id, id);
+        """,
+    ),
 ]

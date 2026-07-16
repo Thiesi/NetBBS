@@ -400,6 +400,11 @@ def _render_scrollback_message(db: Database, user: User, message: ChannelMessage
             f"*** {sanitize_text(message.author_label)} {sanitize_text(message.body)}",
             fg_color=MUTED_COLOR,
         )
+    elif message.kind == "daybreak":
+        # No author at all (design doc round 78) -- a standalone system
+        # announcement, unlike every other kind here, none of which
+        # reference message.author_label.
+        line = colored(sanitize_text(message.body), fg_color=MUTED_COLOR)
     elif message.kind in _VERB_BY_KIND:
         author_label = sanitize_text(message.author_label)
         detail = f" ({sanitize_text(message.body)})" if message.body else ""
