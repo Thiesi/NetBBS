@@ -176,15 +176,29 @@ of issue #51's design shape for the underlying **cryptographic keys**;
 what remains genuinely open there is the exact wire format (#11) and the
 deferred refinements just listed.
 
-- **Creation (corrected round 87 follow-up — the original text here
-  conflated two different settings; see the round 87 sign-off note):**
-  accounts may be created by a SysOp, or through self-service
-  registration, which is always available on Telnet, web, and SSH — there
-  is no node-wide switch that disables the registration path itself. A
-  separate node-wide setting, `require_registration_approval` (round 76,
-  default off), controls only whether a self-registered account activates
-  immediately or is created `pending_approval` and unable to log in on any
-  auth path until a SysOp approves it.
+- **Creation — a single tri-state `registration_mode` (round 96,
+  superseding round 87's binary description): `open` | `approval_required`
+  | `closed`.** Matches three real, common BBS operating postures rather
+  than an arbitrary flag: **(a) public** — self-registration active
+  immediately (`open`, the default, preserving today's behavior); **(b)
+  closed-but-open-to-signups** — self-registration creates a
+  `pending_approval` account, unable to log in on any auth path until a
+  SysOp approves it (`approval_required`, round 76's existing behavior,
+  unchanged); **(c) private** — no public registration surface at all,
+  every account SysOp-created (`closed`, new — the genuine gap round 87
+  correctly flagged as *currently* true of the code rather than a design
+  goal). A single enum rather than two independent booleans, since one
+  combination of the old shape (registration disabled + require approval)
+  would have been meaningless — same reasoning as round 84's nullable-
+  vs-explicit-zero fix. In `closed` mode, the registration option is
+  **hidden at the login prompt entirely**, not offered and left to fail
+  at the end — matching the conditional-visibility pattern already used
+  for menu options with nothing behind them (round 84). This axis is
+  independent of §6's probation/reputation system: `registration_mode`
+  governs whether an account can log in **at all**; §6 governs what an
+  *already-active* account is currently allowed to **do** — a type (a)
+  public system's brand-new users are still in §6's read-only probation,
+  unaffected by registration mode.
 - **Levels:** a single `level` integer drives all gating (§13), with
   `SYSOP_LEVEL = 255` reserved as the unambiguous top of the range —
   not a separate role flag/table, so it composes with the same
@@ -6044,4 +6058,49 @@ referencing-a-missing-one) before applying any migration.
 actual implementation — this round is a design decision, not code,
 matching every Phase 3 round except 92 (the harness, which had no
 feature to defer building).
+
+## Sign-off notes, round 96 (three-way registration posture: open/approval-required/closed)
+
+Not tied to a GitHub issue — raised directly by Thiesi while reviewing
+the open Phase 3 issues, prompted by noticing that round 87's own
+correction to §5 ("there is no node-wide switch that disables the
+registration path itself") was describing a real product gap, not just
+fixing a documentation error.
+
+**Thiesi's own framing, confirmed accurate:** three real BBS operating
+postures exist, not a binary — **(a) public**, the vast majority of
+systems, new accounts active immediately; **(b) closed-but-signups-open**,
+accounts need explicit SysOp approval; **(c) private**, signups disabled
+entirely, every account SysOp-created. (a) and (b) already exist in the
+shipped code (round 76's `require_registration_approval` boolean); (c)
+was the missing piece round 87 had just described accurately.
+
+**Resolved as a single tri-state `registration_mode` enum
+(`open`/`approval_required`/`closed`), not two independent booleans** —
+confirmed with Thiesi over keeping two separate flags, since one
+combination of the old shape (registration disabled + still requiring
+approval) would have been a representable-but-meaningless state, the
+same category of problem round 84's nullable-vs-explicit-zero fix
+resolved for Community inheritance. Migration is a non-event: old
+`False`/`True` map onto `open`/`approval_required` exactly, default
+stays `open`, so no existing deployment's behavior changes.
+
+**`closed` mode hides the registration option at the login prompt
+entirely**, confirmed with Thiesi over presenting a registration flow
+that always fails at the end — reusing the existing conditional-
+visibility pattern for menu options with nothing behind them (round 84's
+`[E]nter a Community`) rather than a confusing dead end.
+
+**Explicitly kept independent of §6's probation/reputation system** —
+`registration_mode` governs whether an account can log in *at all*; §6
+governs what an already-active account is currently allowed to *do*
+(new-user read-only probation, graduating via time/vouching). A type (a)
+public system's brand-new users are still in §6's probation; the two
+axes were kept from being conflated on purpose.
+
+**Phase placement:** Phase 2 scope, extending round 76's existing
+self-registration feature — not a Phase 3 gate, no dependency on
+anything in rounds 89–95. Implementation (the config migration, the
+admin-menu control, the login-prompt visibility change) is still
+pending.
 
