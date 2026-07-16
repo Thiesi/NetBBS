@@ -322,13 +322,22 @@ what caused the original rewrite.
 - Linked-channel membership is Phase 6 scope: invitations, acceptances, grants, removals, and revocations become signed governance events.
 - Access-restricted Linked channels are not described as end-to-end confidential from participating node operators. True encrypted group confidentiality requires a separate future design covering group keys, rotation, history access, and compromised members.
 
-**Moderator scope tiers** (three levels, each reusing the same underlying
+**Moderator scope tiers** (four levels, each reusing the same underlying
 permission primitives — a "global" moderator is just "moderator of every
 object in a category," not a different mechanism):
 1. **Per-object** — authority over one specific board/area/channel.
-2. **Local-blanket** — authority over every *local-only* board/area/channel
+2. **Community-blanket** — authority over every board/area/channel
+   currently or later assigned to one specific Community (§16).
+   Blanket/automatic over that Community's membership, the same way
+   local-blanket (below) is blanket/automatic over the whole node's
+   local-only resources — not a new automatic-power-grant pattern, an
+   application of the existing one at a narrower scope. Added round 83,
+   specced for local Communities only; extending it to Link Communities
+   is Phase 6 scope, wired up against real signed grants the same way
+   Link-blanket already is for Linked boards/channels.
+3. **Local-blanket** — authority over every *local-only* board/area/channel
    on a given node (i.e., content not carried on NetBBS Link).
-3. **Link-blanket ("global")** — authority over every Link-participating
+4. **Link-blanket ("global")** — authority over every Link-participating
    board/area/channel that node carries.
 
 **Global does not imply local, by design (opinion, confirmed with
@@ -620,18 +629,29 @@ as optional, separately-loadable modules (rather than baked into a core
 editor module) is still good advice regardless of overall project
 structure.
 
-**Communities (topic-oriented navigation layer):** directionally agreed
-but not yet assigned to a phase or fully specced — see §16 below for
-what's decided and what's still open.
+**Communities (topic-oriented navigation layer):** local Communities
+fully specced this round — data model, permission inheritance
+(including a new Community-blanket moderator tier in §13), navigation,
+migration, and phase placement (after Phase 2, before Phase 3) are all
+confirmed. See §16 for the full design. Link Communities remain Phase 6
+scope, layered on top later.
+
+**Self-update mechanism:** local, single-node feature with no Link
+dependency — scoped for after Phase 2 (standalone BBS feature-complete)
+and before Phase 3 (Link connectivity) begins, so the update channel
+already exists by the time Phase 3 might need to ship a protocol-
+version bump. See §17 for the full design.
 
 ---
 
 ## 16. Communities (topic-oriented navigation layer)
 
-Not yet phase-assigned — a directional decision, not a specced
-feature. Recorded here so the reasoning doesn't need rediscovering once
-it's actually scheduled; see round 71 sign-off note for the full
-alternatives-considered discussion.
+Status: **local Communities confirmed and fully specced.** Link
+Communities (the federated variant) remain Phase 6 scope — naming and
+the carry model are settled below, but the rest waits on that phase's
+signed-event governance machinery. See round 71 sign-off note for the
+original directional discussion and round 83 for this round's full
+alternatives-considered writeup.
 
 **The idea:** users navigate NetBBS by topic first, not by resource
 type first. Instead of a main menu offering "[M]essage Boards /
@@ -669,26 +689,176 @@ and in turn receives everything the Link has to offer about that
 topic. This is the same "default-carry-with-visible-opt-out" shape
 already documented for Phase 6's Linked board/channel creation (§15).
 
-**Deliberately not decided yet — needs its own design round before
-implementation:**
-- Data model: does a board/channel/file-area belong to exactly one
-  Community, zero-or-one, or can it belong to several?
-- Permission inheritance mechanics: does a grant on a Community
-  cascade to its boards/channels, and how does a per-resource override
-  interact with that?
-- What happens to resources that don't cleanly belong to any topic —
-  private mail, a SysOp-announcements board, a general lobby channel.
-  These will need to remain reachable outside the Community hierarchy;
-  the shape of that "uncategorized" bucket isn't designed yet.
-- Navigation/UX: veteran users lean on jump-shortcuts to skip menu
-  layers; adding a Community layer without equivalent shortcuts would
-  be a real regression for that workflow. Needs first-class design,
-  not a follow-up afterthought.
-- Migration path for the existing flat, single-Community-shaped
-  install (i.e. Thiesi's own node today) into this model.
-- Phase placement — genuinely unassigned; likely doesn't belong in
-  Phase 3–5 (Link/trust/chat work) or Phase 7 (door games), but hasn't
-  been scoped against Phase 6 governance work either.
+**Data model: zero-or-one, confirmed.** A board/channel/file-area has at
+most one Community (`community_id`, nullable FK), never several. "No
+Community" is a real, distinct, common state — not a fallback synthetic
+Community — since Community rows carry real semantics (carry/moderate/
+brand-able things), and every other Link-participating object in this
+design is meant to be exactly that. Rejected: mandatory-with-a-default-
+"Uncategorized"-Community (simpler schema, but makes Uncategorized a
+fictional Community rather than a real topic) and many-to-many (most
+accurate to real topic overlap, but turns permission inheritance into
+an unresolved conflict-resolution problem — which Community's defaults
+win when two disagree? — and complicates the Link-carry decision: carry
+a resource if *any* of its Communities are opted in, or *all*? No clean
+answer, and nothing forced the question to be answered now).
+
+**Categories (round 18) are unchanged and sit *below* Community, not
+replaced by it.** A Community's board/channel list is exactly round
+18's existing two-level category picker (`board_categories`/
+`channel_categories`), pre-filtered to that Community's `community_id`
+— Community is a new outer layer, the same relationship it already has
+to boards/chat/files themselves per "what stays the same," above.
+
+**Permission inheritance — two different mechanics, matching the two
+different kinds of data §13 already has:**
+- **Scalar defaults** (level-gates, presentation/branding/visibility):
+  same resolution-order pattern already used for display-timestamp
+  config (round 8/9) — a resource's own explicit value wins if set,
+  else its Community's default if it belongs to one, else the
+  hardcoded system default. A resource's override always wins outright;
+  a Community is not a floor/ceiling a child can't loosen past (nothing
+  else in §13's model enforces that shape either). Flagged, not
+  decided: preventing an age-gated Community's child board from setting
+  a laxer level than its Community is a small addition later
+  (compare-and-clamp at write time), not a data-model change.
+- **Moderator grant authority — new Community-blanket tier, added to
+  §13's moderator scope tiers** (now four levels, between per-object and
+  local-blanket). Blanket/automatic over a Community's membership,
+  present and future — the same shape local-blanket already has over
+  the whole node, not a new automatic-power-grant pattern.
+
+**Uncategorized resources — reuses existing picker infrastructure, no
+new UI mechanism.** A permanent "Uncategorized" entry at the main menu,
+alongside the Community list, is the same round-18 category picker
+filtered to `community_id IS NULL`. Resources that were never
+board/channel/area-shaped to begin with — private mail, the user
+directory, admin menu, profile/preferences — were never candidates for
+Community assignment and are untouched by any of this; they keep their
+existing main-menu placement.
+
+**Navigation.** Community selection uses the same shared picker as
+everything else (`netbbs.net.picker.pick_item()`, round 16 point 3),
+now also fronting the Community list itself. Inside a Community, a
+short sub-menu shows only the resource types actually present for that
+topic (per "the idea," above), each opening into its own
+category-picker exactly as today.
+
+**Jump-shortcuts — one new global, cross-Community entry point, not a
+new mechanism.** A "search/jump to any board/channel/area" option at
+the main menu reuses round 18's existing `search`/`goto` commands
+against an *unfiltered* list — stable IDs were already decoupled from
+sort/filter order specifically so `goto` keeps working regardless of
+which view produced it (round 18 point 2), so pointing that same picker
+at the full cross-Community list is a direct application of existing
+machinery, not new design. Scoped to a main-menu entry point only for
+now; a from-anywhere typed command (e.g. usable mid-session from within
+chat) would touch the shared command-dispatch layer more broadly and is
+left as a possible future extension, not decided here.
+
+**Migration path: a non-event, by construction.** Because `community_id`
+is nullable, every existing board/channel/area on an upgraded node
+defaults to `NULL` — functionally "Uncategorized" — with no forced
+categorization pass and no data loss risk. "Create Community" and
+"assign resource to Community" are new SysOp admin actions (extending
+Phase 2's existing admin tooling), not a migration wizard.
+
+**Phase placement: local Communities land after Phase 2, before Phase
+3 — confirmed, no renumbering.** Same treatment as §17's self-update
+mechanism: an addendum pointer in §15 rather than inserting a new
+numbered phase, since the existing 7-phase numbering is referenced by
+number throughout this document. **Link Communities are explicitly
+Phase 6 scope**, not this round's — federated Community creation,
+default-carry-with-visible-opt-out, and cross-node discovery all depend
+on the same signed-event/DAG governance machinery Linked board/channel
+creation already uses (§13, §15 Phase 6), which doesn't exist before
+then. The Community-blanket moderator tier above is specced and built
+now for local Communities only; extending it to Link Communities is
+Phase 6's problem to wire up against real signed grants, the same way
+Link-blanket authority already is for Linked boards/channels today.
+
+---
+
+## 17. Self-update mechanism (SysOp-facing)
+
+Local, single-node feature — no NetBBS Link dependency, though its
+practical motivation is making future Link protocol changes easy to
+roll out once Phase 3+ exists. Scoped for implementation after Phase 2
+(the standalone BBS is feature-complete) and before Phase 3 begins; see
+§15's phase list and round 82 sign-off note for the placement reasoning.
+
+**Update source:** GitHub Releases on the project's public repo, queried
+via the GitHub API (not a raw branch/tag pull), so a release is an
+explicit, versioned unit rather than "whatever HEAD happens to be."
+
+**Three trigger points, three different apply behaviors** — chosen
+because "SysOp is live-serving connections" is not the same situation
+as "process hasn't started yet":
+
+- **Startup check.** Runs before the node binds Telnet/SSH/web ports.
+  If a newer release is found, it's downloaded and applied immediately
+  (nothing to drain — no sessions exist yet), then the node boots
+  straight into the new code.
+- **Manual, admin-menu-triggered.** SysOp explicitly requests a check;
+  if a newer release exists, confirms before applying. Apply triggers
+  the same graceful-drain-then-restart sequence as the background case,
+  below, since the SysOp may already have live sessions open.
+- **Daily automatic background check.** Runs once every 24h while the
+  node is live. On finding a newer release: stop accepting new
+  connections, show currently-connected sessions a countdown notice
+  before restart, then apply and restart. Auto-apply is the default,
+  consistent with "as seamless as possible" being the stated goal — not
+  merely a notification, which would put the actual upgrade back on the
+  SysOp remembering to act.
+
+**Apply mechanism:** download the release, replace the on-disk source
+tree, then re-exec the running process in place (`os.execv`-style) to
+pick up the new code — no separate supervisor/watchdog process
+introduced. Rejected alternative: an external supervisor that restarts
+the main process on a specific exit code (the pattern several other
+self-hosted daemons use) — more moving parts than justified here, since
+self-exec accomplishes the same restart-into-new-code outcome without a
+second long-running component to build, deploy, and keep correct.
+
+**Rollback:** the previous release's source tree is kept on disk
+(rotated out, not deleted, when a new one is applied). If the newly
+applied version fails to start cleanly, the node automatically reverts
+to the previous tree, and the SysOp is notified either way (successful
+update, or failed-and-rolled-back). This matters more given the trust
+model below, not less — see round 82 sign-off note.
+
+**Trust model — deliberately simple for now, confirmed with Thiesi:**
+HTTPS + the GitHub API is the entire trust boundary; there is no
+release-signing scheme layered on top, even though the project already
+has keypair/signing infrastructure available (§5, §11) that could
+provide one. An explicit, discussed tradeoff, not an oversight — see
+round 82 sign-off note for the reasoning and what would need to change
+to harden this later.
+
+**pkgsrc — deliberately not special-cased, confirmed with Thiesi.** No
+pkgsrc packaging exists yet (§3 names NetBSD/pkgsrc as the primary
+target, but no PLIST has been built). The self-updater applies
+unconditionally regardless of install method for now; if/when a pkgsrc
+package is actually built, it will need to reconcile with this
+mechanism at that time rather than the reverse — see round 82 sign-off
+note.
+
+**Off switch:** a `node_config` key (reusing the generic node-wide
+key-value store from round 8's sign-off note) disables the daily
+automatic background check. The startup check and manual admin-menu
+check remain available regardless — a SysOp who wants to stay pinned to
+a specific version can still see what's available without it being
+force-installed.
+
+**Deliberately not designed here: Link protocol-version awareness.**
+The actual motivating case — making future NetBBS Link protocol changes
+easy to roll out — needs the updater to eventually understand
+version/compatibility semantics that don't exist yet, since Phase 3+
+(where the Link protocol itself is built) hasn't started. This section
+scopes the updater as protocol-agnostic plumbing only: it can fetch and
+apply a new release. Teaching it (or the Link handshake) about protocol
+compatibility is Phase 3-or-later work, deferred rather than guessed at
+now.
 
 ---
 
@@ -3702,4 +3872,128 @@ later with a stronger claim to node-critical status, that one can
 reasonably choose fail-fast instead — this decision is scoped to what
 "a background task's failure means" *for tasks no more important than
 this one*, not a blanket policy for every future one.
+
+## Sign-off notes, round 82 (self-update mechanism)
+
+Prompted by Thiesi requesting a SysOp-facing self-update feature ahead
+of Phase 3, motivated by wanting future NetBBS Link protocol changes to
+roll out to existing nodes with minimal friction.
+
+1. New **§17 Self-update mechanism** added in full — three trigger
+   points (startup/manual/daily-background) with different apply
+   behavior, self-exec-based restart with no new supervisor component,
+   rollback-on-failed-start, and a `node_config`-based off switch for
+   the automatic path only.
+2. **pkgsrc conflict — flagged, then deliberately deferred rather than
+   designed around.** §3 names NetBSD/pkgsrc as the primary deployment
+   target, and a self-updater that rewrites files pkgsrc believes it
+   owns will desync pkgsrc's manifest from what's actually on disk,
+   breaking future `pkgin` upgrades/deinstalls on that target. Raised
+   directly with Thiesi, including the option of disabling self-update
+   under a detected pkgsrc install; **Thiesi chose to ignore the
+   conflict for now** and revisit it if/when a pkgsrc package is
+   actually built, rather than design around a packaging path that
+   doesn't exist yet. Recorded here so this isn't rediscovered as a
+   surprise later — it's a known, accepted gap, not an oversight.
+3. **Trust model: HTTPS + GitHub API only, no release signing —
+   confirmed with Thiesi over the stronger alternative.** Raised
+   directly as the higher-stakes of the two open questions: an
+   auto-updater is the highest-leverage attack surface a network-facing
+   server has, and this project's own §6 exists specifically because of
+   a past incident where one privileged construct (the Master Node)
+   became a single point of compromise with network-wide reach — an
+   unsigned update channel risks recreating that same shape (one
+   compromised GitHub account or MITM'd connection, pushing arbitrary
+   code to every node) even though nothing here is Link-facing. The
+   project already has keypair/signing infrastructure (§5, §11) that
+   could underwrite a signed-release scheme. **Thiesi opted for the
+   simpler HTTPS-only model anyway**, deliberately, as a considered
+   tradeoff rather than an unconsidered gap. Automatic rollback on a
+   failed start (§17) is the direct mitigation adopted in exchange —
+   doesn't prevent a malicious release from running, but bounds how
+   long a *broken* one stays live. Revisiting this with real signing
+   remains straightforward later: the release pipeline and the node's
+   verification step are both new, isolated code with no existing
+   behavior depending on the absence of signatures.
+4. **Restart mechanism: in-place self-exec, not an external supervisor
+   process — confirmed.** Considered and rejected the watchdog-process
+   pattern (main process restarted by a separate long-running
+   supervisor on a specific exit code) as more machinery than justified
+   for a solo-maintained project with no other supervisor-shaped
+   component anywhere else in the design.
+5. **Link protocol-version awareness — explicitly out of scope for this
+   round.** The feature's real motivation (easing future Link protocol
+   rollouts) can't be fully designed yet since Phase 3+ (where the Link
+   protocol lives) hasn't started; §17 scopes the updater as
+   protocol-agnostic plumbing only, leaving actual compatibility
+   semantics to whichever future round builds the Link handshake.
+6. **Phase placement: after Phase 2, before Phase 3 — confirmed.**
+   Matches Thiesi's own framing ("towards the end of initial
+   development... when we are feature complete"); also has the
+   practical benefit of the update channel already existing by the time
+   Phase 3 might need to ship a protocol-version bump. §15 updated with
+   a pointer to §17, alongside the existing Communities pointer to §16.
+
+## Sign-off notes, round 83 (Communities — full spec, following round 71's directional decision)
+
+Prompted by Thiesi wanting Communities designed and landed before Phase
+3 starts, so Link/trust/chat work isn't built against a data model that
+still might change underneath it. Worked through as six genuinely
+separable sub-questions, per §16's own "deliberately not decided yet"
+list, rather than attempted in one pass.
+
+1. **Data model: zero-or-one cardinality — confirmed over two
+   alternatives.** A board/channel/file-area belongs to at most one
+   Community. Rejected *exactly-one-with-a-default-bucket* (simpler, but
+   makes "Uncategorized" a fictional Community rather than a real
+   topic) and *many-to-many* (most accurate to real overlap, but has no
+   clean answer for conflicting inherited defaults or for whether a
+   multi-Community resource should be Link-carried on *any*-opted-in or
+   *all*-opted-in). §16 updated with the full reasoning.
+2. **Round 18's existing two-level category system stays exactly as
+   designed — confirmed, not rediscovered as a conflict.** Communities
+   sit as a new outer layer above categories, the same relationship
+   they already have to boards/chat/files themselves; a Community's
+   board list is round 18's picker pre-filtered to that Community. This
+   resolved two of the six sub-questions for free: the uncategorized
+   bucket is the same picker filtered to `community_id IS NULL`, and
+   jump-shortcuts are the same `search`/`goto` machinery (round 18
+   point 2's stable-ID/sort-order decoupling) pointed at an unfiltered,
+   cross-Community list — both reuses of existing infrastructure, no
+   new picker mechanism designed this round.
+3. **Permission inheritance splits into two mechanics — confirmed.**
+   Scalar defaults (level-gates, presentation) follow the existing
+   override-then-fall-back resolution order from round 8/9's
+   display-timestamp config, with a Community's default never enforced
+   as a floor a child resource can't loosen past (flagged as a possible
+   later addition, not designed now). Moderator grant authority gets a
+   genuinely new **Community-blanket tier**, added to §13's moderator
+   scope tiers (now four, was three) — confirmed with Thiesi as a
+   natural extension of the existing "blanket = automatic over a
+   category's membership" pattern rather than a new kind of grant.
+4. **Migration path: confirmed as a non-event.** Direct consequence of
+   decision 1 — a nullable `community_id` column means every existing
+   board/channel/area defaults to `NULL` on upgrade, with no forced
+   categorization pass. No migration wizard designed or needed.
+5. **Phase placement: local Communities after Phase 2, before Phase 3
+   — confirmed, no renumbering of the existing 7 phases.** Same
+   addendum-pointer treatment as round 82's self-update mechanism,
+   for the same reason (the 7-phase numbering is referenced by number
+   throughout this document, so inserting a new numbered phase would
+   invalidate those references for no real benefit).
+6. **Link Communities explicitly separated out as Phase 6 scope, not
+   this round's.** Federated Community creation, default-carry-with-
+   visible-opt-out, and cross-node discovery depend on the same
+   signed-event/DAG governance machinery Linked board/channel creation
+   already uses, which doesn't exist before Phase 6. This round
+   specced and phased *local* Communities only; the Community-blanket
+   moderator tier (point 3) is likewise local-only for now, extended to
+   Link Communities whenever Phase 6 wires up real signed grants for it.
+
+**Deferred, not decided this round:** whether a Community-level scalar
+default should be enforced as a hard floor/ceiling on its children
+(point 3); a from-anywhere typed jump/search command beyond the
+main-menu entry point (would touch the shared command-dispatch layer
+more broadly than this round's scope). Both flagged in §16 so they
+don't need rediscovering later.
 
