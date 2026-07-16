@@ -1985,39 +1985,75 @@ for it. A user who doesn't want that tradeoff in a given resource
 simply doesn't use it, the same choice age-gating already offers.
 
 **Display formatting: primary slot is always self-chosen, real name is
-always parenthetical, never leaves an empty lead.** Format:
-`"{display_name or username} ({attested real name})"` — e.g. `SysOp
-from Hell! (Claude Code)`. If `display_name` is unset, the primary slot
-falls back to `username`, not to nothing: `Thiesi (Claude Code)`.
-Reversing the order (real name first) was considered and rejected —
-`username`/`display_name` are both self-chosen by the user, the real
-name never is, so leading with it would misrepresent how someone wants
-to be known, the same shape of harm as misgendering. `username` is
-guaranteed present (one of only two required signup fields), so this
-fallback chain never bottoms out in a blank/orphaned parenthetical.
+always parenthetical, never leaves an empty lead.** Format (final form,
+incorporating round 99's anti-forgery marker below):
+`"{display_name or username} (={attested real name}=)"` — e.g. `SysOp
+from Hell! (=Claude Code=)`, with the whole `(=...=)` unit rendered in
+`VERIFIED_COLOR` on a color-capable client. If `display_name` is unset,
+the primary slot falls back to `username`, not to nothing: `Thiesi
+(=Claude Code=)`. Reversing the order (real name first) was considered
+and rejected — `username`/`display_name` are both self-chosen by the
+user, the real name never is, so leading with it would misrepresent how
+someone wants to be known, the same shape of harm as misgendering.
+`username` is guaranteed present (one of only two required signup
+fields), so this fallback chain never bottoms out in a blank/orphaned
+parenthetical.
 
-**`display_name` must reject literal `(`/`)` — caught by Thiesi before
-implementation, round 98, same fix as round 53's `/nick` marker
-rejection, applied to a new field with the identical shape of risk.**
-Because the real name's parenthetical is appended *unconditionally* to
-whatever `display_name` already contains, an unrestricted `display_name`
-can visually forge the entire attestation: a user with no verification
-at all could set `display_name` to `Alice (Robert Smith)` and render
-*identically* to a genuinely verified `Alice` whose real name is
-`Robert Smith` — indistinguishable to anyone reading it, since nothing
-in the rendered string is actually reserved for the system-appended
-part. This is a direct structural repeat of the exact problem round 53
-already solved for `/nick`'s marker-wrapped display (`~nick~`): a
-delimiter used to convey trusted, system-attached meaning is worthless
-if the untrusted text it wraps is allowed to contain that same
-delimiter. Fixed the same way — `display_name` rejects `(` and `)` at
-write time (registration and profile-edit alike), so any parenthetical
-a viewer sees is unambiguously the system-appended, verified part, never
-user-supplied text imitating it. Applied unconditionally, on every node,
-regardless of whether real-name-gating/attestation is enabled there —
-not a rule that only activates once the feature is switched on, so a
-node enabling attestation later never has to retroactively confront
-existing display names that already violate it.
+**Anti-forgery mechanism — superseded from round 98's plain character ban
+to a color-plus-marker scheme, round 99.** Round 98 first caught the
+underlying problem (an unrestricted `display_name` can forge the entire
+attestation display — a user with no verification at all could set
+`display_name` to `Alice (Robert Smith)` and render *identically* to a
+genuinely verified `Alice` whose real name is `Robert Smith`) and fixed
+it by rejecting `(`/`)` from `display_name` entirely, mirroring round
+53's `/nick` marker rejection. Round 99 replaces that with a stronger,
+less restrictive mechanism:
+
+- **The entire `(attested real name)` unit — delimiters included — is
+  rendered in a new, dedicated `VERIFIED_COLOR`** (following the exact
+  precedent of `NICK_COLOR`, round 53), applied at the render layer
+  directly to the trusted `attested_value` from the `user_attestations`
+  record — never derived from or combined with unsanitized user text.
+  This is a **rendering-layer guarantee, not a text-pattern guarantee**,
+  and strictly stronger than round 98's approach: round 29's existing
+  terminal-sanitization boundary already strips embedded ANSI/escape
+  sequences out of user-supplied fields like `display_name` before
+  anything renders, so there is no way for a user's own text to acquire
+  `VERIFIED_COLOR` — they can type all the parentheses they want, but
+  never make their own substring render in that color. **`display_name`
+  no longer needs to reject `(`/`)` at all** — round 98's restriction is
+  lifted; ordinary display names (e.g. `Alex (they/them)`) work again.
+- **A reserved marker inside the parenthetical, for when color doesn't
+  survive rendering** (logs, transcripts, and — the deciding factor,
+  not merely "rare" — screen readers, which have no way to perceive
+  color at all, ever, making a color-only signal a permanent equity gap
+  for exactly the population least able to work around it). Format:
+  `"{display_name or username} (={attested real name}=)"` — e.g. `SysOp
+  from Hell! (=Claude Code=)`. The `=` marker is deliberately distinct
+  from `/nick`'s own `~` (the two rendering contexts rarely coincide,
+  per round 53's own note that `/who`/`/whois`/`/names` use the plain
+  `nick|username` form without markers, but keeping them visually
+  distinct costs nothing and avoids any ambiguity where they might).
+  **`display_name` rejects literal `=` at write time**, the same
+  mechanism round 53 already built for `/nick`'s `~` and round 98
+  applied to `(`/`)` — narrower than round 98's restriction (a
+  genuinely rare character in real display names, unlike parentheses),
+  while closing the exact same gap even in a color-stripped view: a
+  spoofed `display_name` can produce `Alice (Robert Smith)` but can
+  never produce the `=`-wrapped inner form, since `=` is rejected before
+  it could ever reach storage.
+- **Chosen over color-only (no marker, no restriction at all) —
+  confirmed with Thiesi, weighing accessibility over implementation
+  cost.** Thiesi had no strong preference either way and asked for a
+  judgment call; decided in favor of the marker specifically because the
+  people most affected by a color-stripped view (screen-reader users)
+  have no alternative way to perceive the distinction, and the
+  implementation cost is low — it reuses round 53's exact validation
+  pattern for a new field rather than building anything new. Applied
+  unconditionally, on every node, regardless of whether real-name-
+  gating/attestation is enabled there, matching round 98's own reasoning
+  for why this shouldn't be a rule that only activates once the feature
+  is switched on.
 
 **A separate, general "verified" badge** — just the boolean fact of
 verification, not the attested value itself — may be shown on a user's
@@ -6313,4 +6349,62 @@ remains on the addendum backlog, next after registration mode. This
 round exists so the character restriction is part of the design from
 the start of that implementation, not bolted on after the fact once
 someone notices real display names already violate it.
+
+## Sign-off notes, round 99 (real-name attestation anti-forgery: color replaces the parens ban)
+
+Thiesi asked, immediately after round 98 landed, whether the same
+distinction could instead be made with color (or `/nick`'s existing
+marker convention) rather than restricting `display_name`'s character
+set — a genuine "would this unify things or just be convoluted"
+question, worked through rather than answered reflexively.
+
+**Color turns out to be a strictly stronger mechanism, not merely a
+prettier one.** Round 98's fix relied on parentheses being a reserved
+*plain-text pattern* — the guarantee only held because the character was
+forbidden. Color is a *rendering-layer* guarantee instead: `VERIFIED_COLOR`
+(new, following `NICK_COLOR`'s precedent) is applied directly to the
+trusted `attested_value`, never derived from user text, and round 29's
+existing terminal-sanitization boundary already strips any ANSI a user
+might try to smuggle into `display_name` — so there is structurally no
+way for user-supplied text to acquire that color. This let round 98's
+`(`/`)` restriction be **lifted entirely** — `display_name` is
+unrestricted again with respect to parentheses.
+
+**Thiesi's own follow-up caught a real flaw in the first version of this
+round's plan.** The initial proposal kept a reserved plain-text marker
+(`=`) purely as a color-stripped fallback, without being explicit that
+the marker only works *if it's also rejected from `display_name`* —
+Thiesi asked directly whether an unrestricted `display_name` of `"Alice
+=Roger Smith="` would be indistinguishable from a genuinely attested
+`Roger Smith` in a plain-text view. Correct: it would be, and for the
+identical reason round 98 existed in the first place — a delimiter only
+protects anything if the untrusted text it wraps can't contain it. The
+marker isn't a free enhancement over banning parens; it's the *same*
+trade-off relocated to a different, rarer character.
+
+**Final decision — color as the primary mechanism, plus a narrowly-
+rejected marker for color-stripped contexts, chosen by Claude at
+Thiesi's explicit invitation to pick based on whichever metric seemed
+right, given Thiesi had no preference either way.** Weighed accessibility
+against implementation cost: the population most affected by a color-
+stripped view — screen-reader users — has no alternative way to ever
+perceive a color-only distinction, a permanent equity gap rather than a
+rare edge case; and the fix costs little, since it reuses round 53's
+exact validation pattern (reject one character from a text field at
+write time) rather than building anything new. Final format:
+`"{display_name or username} (={attested real name}=)"`, the whole unit
+colored, `=` rejected from `display_name` the same way `~` is already
+rejected from `/nick`. Deliberately a *different* marker than `/nick`'s
+`~` — round 53 itself notes `/who`/`/whois`/`/names` use the plain,
+markerless `nick|username` form, so the two contexts rarely coincide,
+but keeping the glyphs distinct costs nothing and removes any residual
+ambiguity where they might.
+
+**Net effect versus round 98:** the actual security property is
+preserved and strengthened (a rendering-layer guarantee, not just a
+text-pattern one) while the practical restriction on ordinary display
+names gets *lighter* — parentheses are freed for legitimate use (e.g.
+`Alex (they/them)`), and only a genuinely rare character (`=`) remains
+reserved. Not yet implemented, same as round 98 — still part of the
+identity-attestation addendum-backlog item, not built yet.
 
