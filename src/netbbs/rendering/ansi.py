@@ -22,6 +22,7 @@ CSI = ESC + "["  # Control Sequence Introducer
 
 RESET = f"{CSI}0m"
 BOLD = f"{CSI}1m"
+REVERSE = f"{CSI}7m"
 
 
 def fg(color: int) -> str:
@@ -37,19 +38,37 @@ def bg(color: int) -> str:
     return f"{CSI}48;5;{color}m"
 
 
-def colored(text: str, *, fg_color: int | None = None, bg_color: int | None = None, bold: bool = False) -> str:
+def colored(
+    text: str,
+    *,
+    fg_color: int | None = None,
+    bg_color: int | None = None,
+    bold: bool = False,
+    reverse: bool = False,
+) -> str:
     """
     Wrap `text` in the given SGR codes, always resetting afterward.
 
-    This is the recommended way to apply color/bold — not calling `fg`/
-    `bg`/`BOLD` directly and forgetting to reset — since formatting that
-    bleeds into whatever comes next is probably the single most common
-    real-world bug with raw ANSI codes. Returns `text` unchanged if no
-    formatting is requested, rather than emitting empty escape sequences.
+    This is the recommended way to apply color/bold/reverse — not
+    calling `fg`/`bg`/`BOLD`/`REVERSE` directly and forgetting to
+    reset — since formatting that bleeds into whatever comes next is
+    probably the single most common real-world bug with raw ANSI
+    codes. Returns `text` unchanged if no formatting is requested,
+    rather than emitting empty escape sequences.
+
+    `reverse` (SGR 7, design doc round 77) swaps foreground/background
+    at the terminal level rather than picking specific colors for
+    both — the chat status line uses this so it reads as a solid,
+    inverted bar regardless of whatever the client's own default
+    foreground/background happen to be, the same reason real terminal
+    status lines (tmux, screen, IRC clients) use reverse video rather
+    than a hardcoded color pair.
     """
     prefix = ""
     if bold:
         prefix += BOLD
+    if reverse:
+        prefix += REVERSE
     if fg_color is not None:
         prefix += fg(fg_color)
     if bg_color is not None:

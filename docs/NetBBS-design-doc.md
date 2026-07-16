@@ -3383,3 +3383,101 @@ second, parallel pending-accounts queue UI, matching how pending
 posts/files are already reviewed through their own existing
 board/area-detail screens rather than a dedicated inbox.
 
+## Sign-off notes, round 77 (chat status line: bugfix, inverse video, expanded content, timestamp format)
+
+Thiesi's feedback on the round-75 chat status line, four separable
+pieces (per this project's own "flag and tackle one at a time"
+convention) — a real bug, two quick approved changes, and one genuine
+UX fork resolved via an `AskUserQuestion` mockup before implementing,
+matching round 75's own DECSTBM precedent.
+
+**1. Bugfix: leaving a channel didn't clear the screen.** Root cause:
+`clear_screen()` was only ever called on chat *entry* (round 75) —
+neither the channel picker (`pick_item`, reached via `/leave`) nor the
+main menu (`_draw_main_menu`, reached via `/quit`) ever cleared it
+themselves, so the last screenful of chat stayed visible until
+unrelated output happened to overwrite it. Only `/join`'s
+"switch channel" path looked clean, as an incidental side effect of
+`_chat_loop` re-clearing on its own next entry, not because leaving was
+actually handled. Fixed by clearing on exit too (`_chat_loop`'s
+`finally` block), symmetric with entry, gated on the same
+`status_line_enabled` condition.
+
+**2. Inverse video.** Added `reverse: bool = False` to
+`netbbs.rendering.ansi.colored()` (SGR 7), applied to the status line
+in place of the previous muted-color/bold styling. Padded to the full
+terminal width (`text.ljust(session.terminal_width)`) before coloring —
+otherwise reverse video would only invert the characters themselves,
+leaving a ragged partly-colored bar rather than one solid inverted row.
+
+**3. Status line content, expanded — structure confirmed via
+`AskUserQuestion` before implementing.** Thiesi asked for a lot more on
+the bar at once (own username, nick, away count, topic, channel
+type/visibility, own privileges) and separately asked whether that much
+information could fit without wrapping oddly on narrow terminals. Three
+structurally different answers were presented with concrete mockups:
+single-line priority-truncated, a two-row reserved bar, or keeping the
+bar minimal and moving the rest to an on-demand command. **Thiesi chose
+single-line, priority-truncated** — matches the existing `truncate()`
+call already in place (round 75) and this project's "must degrade
+gracefully above a 40×24 minimum" requirement better than permanently
+spending a second row of an already-scarce minimum-height terminal.
+Final field order, most- to least-important (`truncate()` only ever
+cuts from the right, so later fields are what silently disappear first
+on a narrow screen): `#channel[type]` → `N online(M away)` → `"topic"`
+(omitted entirely if unset) → `you:username(nick)[privileges][away/
+muted]` → `HH:MM` clock. Compact codes throughout (`pub`/`hidden`/
+`invite` for channel type; `mod`/`edit`/`members` for individual
+`ChannelPermission` bits, collapsed to a single `sysop` label instead
+of enumerating bits for a SysOp, since `has_permission` passes a SysOp
+on every bit regardless of any real grant — listing them all out would
+be misleading busywork, not information).
+
+**Explicitly not implemented: "linked vs. local" channel.** Requested,
+but there is no such distinction anywhere in the schema or code yet —
+NetBBS Link is Phase 3, which per this document's own phase tracking
+has not started. Every channel today is inherently local; adding a
+`[local]` (or worse, hardcoding it) now would need revisiting the
+moment Link actually exists, for a label that carries zero information
+in the meantime. Flagged back to Thiesi rather than guessed at.
+
+**4. Chat timestamp format: date dropped, time-only.** Applies to
+`netbbs.chat.timestamps.format_with_preference` — the per-user
+`/timestamps on|off` preference (round 32/62) now always renders
+`override_format="%H:%M"` when on, not the node's full configured
+date+time format. Same reasoning round 75 already applied to the
+status line's own clock: chat is inherently a *now* context, so a
+per-message date is static clutter for the overwhelming majority of a
+session, not information. Applies uniformly to live messages *and*
+scrollback replay — an old message showing only a time (no date) on
+replay is an accepted trade-off (surrounding chat context, not the
+exact date, is what actually signals "this was from a while ago"), not
+worth a separate format for that one case.
+
+**Discussed, not decided — recorded for whenever either is actually
+scoped:**
+
+- **Moving the input line next to the status line** (mirroring a
+  Claude-Code-style fixed bottom bar): Thiesi asked for Claude's own
+  opinion rather than a decision. Given, not yet acted on — a real
+  layout change (the input prompt currently scrolls with ordinary chat
+  content; pinning it means it needs its own reserved row(s) and
+  cursor-position bookkeeping distinct from what `save_cursor`/
+  `restore_cursor` currently do for the status line alone) large enough
+  to deserve its own design round rather than folding into this one.
+- **A per-channel "good morning" system message at local midnight**:
+  raised as a "what do you think", specifically flagging the awkward
+  Link case (ten nodes across ten time zones each announcing their own
+  midnight Link-wide would be incoherent). Discussed, not decided —
+  Thiesi's own framing already identifies the crux correctly: this is
+  cleanly implementable *today* as a purely local, per-node, per-
+  channel event (no dependency on anything Link-related), but doing it
+  in a way that's still correct once Link exists needs an explicit
+  scope boundary decided *before* writing code, not after — specifically
+  whether such a message ever crosses a Link channel's node boundary at
+  all (most defensible default: never — a "new day" notion tied to one
+  node's local clock has no coherent meaning federated across nodes in
+  different time zones), and if it must ever be *some* Link-relayed
+  event, what that would even mean is genuinely Phase 3+ design work,
+  not decidable now. Not scheduled.
+

@@ -18,6 +18,7 @@ from netbbs.boards import create_board, create_post
 from netbbs.chat import (
     ChatHub,
     MessageMailbox,
+    ParticipantId,
     PresenceRegistry,
     create_channel,
     get_scrollback,
@@ -239,7 +240,8 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     received: list[str] = []
 
     async def scenario():
-        queue = hub.join(channel.name, "bob-participant")
+        bob_participant = ParticipantId(username="bob", session_key=1)
+        queue = hub.join(channel.name, bob_participant)
 
         async def collect_one():
             received.append(await queue.get())  # bob's own join notice from... no, sender's join
@@ -249,7 +251,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
         collector = asyncio.create_task(collect_one())
         await _chat_loop(sender_session, db, hub, presence, mailbox, InputHistory(), channel, sender)
         await collector
-        hub.leave(channel.name, "bob-participant")
+        hub.leave(channel.name, bob_participant)
 
     asyncio.run(scenario())
 

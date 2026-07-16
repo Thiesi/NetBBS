@@ -19,10 +19,11 @@ import asyncio
 import pytest
 
 from netbbs.auth.users import create_user
-from netbbs.chat.channels import create_channel
-from netbbs.chat.hub import ChatHub
+from netbbs.chat.channels import create_channel, get_channel_by_name
+from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.moderation import mute_user
+from netbbs.chat.nick import set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
@@ -88,23 +89,79 @@ async def _run(db, hub, presence, mailbox, channel, user, lines, *, session_regi
 
 
 def test_render_shows_channel_name_and_online_count(db, hub, presence, channel, alice):
-    hub.join(channel.name, "alice:1")
+    hub.join(channel.name, ParticipantId(username="alice", session_key=1))
     text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
     assert "#lobby" in text
     assert "1 online" in text
 
 
 def test_render_reflects_the_live_participant_count(db, hub, presence, channel, alice):
-    hub.join(channel.name, "alice:1")
-    hub.join(channel.name, "bob:2")
-    hub.join(channel.name, "carol:3")
+    hub.join(channel.name, ParticipantId(username="alice", session_key=1))
+    hub.join(channel.name, ParticipantId(username="bob", session_key=2))
+    hub.join(channel.name, ParticipantId(username="carol", session_key=3))
     text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
     assert "3 online" in text
 
 
-def test_render_shows_no_indicators_by_default(db, hub, presence, channel, alice):
+def test_render_reflects_the_away_count_among_current_participants(db, hub, presence, channel, alice, bob):
+    hub.join(channel.name, ParticipantId(username="alice", session_key=1))
+    hub.join(channel.name, ParticipantId(username="bob", session_key=2))
+    presence.set_away(bob.username, "brb")
     text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
-    assert "[" not in text
+    assert "2 online(1 away)" in text
+
+
+def test_render_shows_channel_type(db, hub, presence, channel, alice):
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "[pub]" in text
+
+
+def test_render_shows_own_username(db, hub, presence, channel, alice):
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "you:alice" in text
+
+
+def test_render_shows_own_nick_when_set(db, hub, presence, channel, alice):
+    set_nick(db, alice, "night_owl")
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "you:alice(night_owl)" in text
+
+
+def test_render_shows_topic_when_set(db, hub, presence, channel, alice):
+    # Sets the column directly rather than going through set_topic() --
+    # that requires ChannelPermission.EDIT, an orthogonal concern this
+    # test isn't exercising (see test_render_shows_own_privileges for
+    # the permission-gated case).
+    db.connection.execute("UPDATE channels SET topic = ? WHERE id = ?", ("Welcome to the lounge!", channel.id))
+    db.connection.commit()
+    channel = get_channel_by_name(db, channel.name)
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert '"Welcome to the lounge!"' in text
+
+
+def test_render_omits_topic_when_unset(db, hub, presence, channel, alice):
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert '"' not in text
+
+
+def test_render_shows_own_privileges(db, hub, presence, channel, alice):
+    _grant_moderate(db, alice, channel)
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "you:alice[mod]" in text
+
+
+def test_render_shows_sysop_privilege_label_instead_of_enumerating_bits(db, hub, presence, channel, alice):
+    from netbbs.auth.users import set_user_level
+
+    sysop_actor = create_user(db, "root", password="hunter2", user_level=255)
+    promoted = set_user_level(db, alice, 255, changed_by=sysop_actor)
+    text = chat_flow._render_chat_status_line(db, hub, presence, channel, promoted)
+    assert "you:alice[sysop]" in text
+
+
+def test_render_shows_no_indicators_by_default(db, hub, presence, channel, alice):
+    assert "[away]" not in chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "[muted" not in chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
 
 
 def test_render_shows_away_indicator(db, hub, presence, channel, alice):
@@ -168,7 +225,16 @@ def test_chat_loop_clears_the_screen_on_entry(db, hub, presence, mailbox, channe
 
 def test_chat_loop_resets_the_scroll_region_on_exit(db, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
-    assert _written_text(session).endswith("\x1b[r")
+    assert "\x1b[r" in _written_text(session)
+
+
+def test_chat_loop_clears_the_screen_on_exit(db, hub, presence, mailbox, channel, alice):
+    """Design doc round 77 bugfix: neither the channel picker (/leave)
+    nor the main menu (/quit) ever clear the screen themselves, so
+    without an exit-side clear here the last screenful of chat stayed
+    visible until unrelated output happened to overwrite it."""
+    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+    assert _written_text(session).endswith("\x1b[r\x1b[2J\x1b[H")
 
 
 def test_chat_loop_skips_the_status_line_on_a_too_short_terminal(db, hub, presence, mailbox, channel, alice):

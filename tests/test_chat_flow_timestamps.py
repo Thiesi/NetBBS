@@ -27,7 +27,9 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 from tests.test_chat_flow_moderation import FakeSession
 
-_TIMESTAMP_PATTERN = re.compile(r"\[\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\]")
+#: Time-only (design doc round 77) -- format_with_preference dropped
+#: the date, matching the chat status line clock's own round-75 format.
+_TIMESTAMP_PATTERN = re.compile(r"\[\d{2}:\d{2}\]")
 
 
 @pytest.fixture

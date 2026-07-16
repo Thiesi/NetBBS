@@ -42,8 +42,23 @@ def set_timestamps_enabled(db: Database, user: User, enabled: bool) -> None:
 
 def format_with_preference(db: Database, user: User, text: str, created_at: str) -> str:
     """Prefix `text` with a muted-color display timestamp if `user` has
-    chat timestamps enabled, otherwise return `text` unchanged."""
+    chat timestamps enabled, otherwise return `text` unchanged.
+
+    Deliberately time-only (`override_format="%H:%M"`, design doc round
+    77), not the node's full configured display format (which includes
+    the date) -- the same reasoning round 75 already applied to the
+    status line's own clock: chat is an inherently *now* context, so a
+    per-message date is static clutter, not information, for the
+    overwhelming majority of a session's messages. Unlike the status
+    line, this isn't continuously repainted -- old scrollback still
+    replays with only a time, which is an accepted trade-off (the
+    surrounding chat context, not the exact date, is what tells you
+    "this was from a while ago") rather than a reason to special-case
+    scrollback replay with a different format.
+    """
     if not timestamps_enabled(db, user):
         return text
-    stamp = colored(f"[{format_for_display(created_at, db)}]", fg_color=MUTED_COLOR)
+    stamp = colored(
+        f"[{format_for_display(created_at, db, override_format='%H:%M')}]", fg_color=MUTED_COLOR
+    )
     return f"{stamp} {text}"

@@ -17,7 +17,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel, get_channel_by_name
-from netbbs.chat.hub import ChatHub
+from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
@@ -234,7 +234,7 @@ def test_topic_change_is_broadcast_to_other_participants(db, hub, presence, syso
         permissions=ChannelPermission.EDIT,
         granted_by=sysop,
     )
-    queue = hub.join(channel.name, "bob:1")
+    queue = hub.join(channel.name, ParticipantId(username="bob", session_key=1))
     try:
         asyncio.run(_run(db, hub, presence, channel, sysop, ["/topic Retro chat", "/quit"]))
         received = []

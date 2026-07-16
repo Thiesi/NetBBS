@@ -14,6 +14,7 @@ round B1).
 from netbbs.rendering.ansi import (
     BOLD,
     RESET,
+    REVERSE,
     bg,
     clear_line,
     clear_screen,
@@ -44,6 +45,7 @@ from netbbs.rendering.theme import (
 __all__ = [
     "BOLD",
     "RESET",
+    "REVERSE",
     "bg",
     "clear_line",
     "clear_screen",

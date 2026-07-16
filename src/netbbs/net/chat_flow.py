@@ -12,7 +12,14 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from netbbs.auth.users import AuthError, User, account_still_active, get_user_by_username, list_users
+from netbbs.auth.users import (
+    SYSOP_LEVEL,
+    AuthError,
+    User,
+    account_still_active,
+    get_user_by_username,
+    list_users,
+)
 from netbbs.chat import (
     Channel,
     ChannelError,
@@ -1710,16 +1717,49 @@ def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel,
 _STATUS_LINE_MIN_HEIGHT = 2
 
 
+def _own_channel_privileges(db: Database, channel: Channel, user: User) -> str | None:
+    """A compact label for whatever moderator-level access `user` holds
+    on `channel` -- `None` if none. A SysOp collapses to `"sysop"`
+    rather than enumerating every individual bit (`has_permission`
+    always passes a SysOp regardless of any actual grant row, so
+    listing them out would be misleading busywork, not information);
+    otherwise each `ChannelPermission` bit `user` actually holds
+    (including via a local-blanket grant -- `has_permission`, not the
+    literal-grant-only `get_grant`, is what correctly folds that in)
+    gets its own short label."""
+    if meets_level(user, SYSOP_LEVEL):
+        return "sysop"
+    labels = [
+        label
+        for permission, label in (
+            (ChannelPermission.MODERATE, "mod"),
+            (ChannelPermission.EDIT, "edit"),
+            (ChannelPermission.MANAGE_MEMBERS, "members"),
+        )
+        if has_permission(db, user, object_type="channel", object_id=channel.id, permission=permission)
+    ]
+    return ",".join(labels) if labels else None
+
+
 def _render_chat_status_line(
     db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
 ) -> str:
     """
     The status line's content, as plain formatted text (colored/
-    truncated by the caller) -- channel name, live participant count,
-    this user's own away/mute state if either applies, and a clock.
-    Deliberately *not* included: private-conversation target, `/nick`
-    alias, or anything else -- kept to state a user would actually
-    glance at mid-conversation, not everything knowable.
+    truncated by the caller) -- design doc round 77's expansion of
+    round 75's original channel-name/count/clock bar.
+
+    Fields are ordered most- to least-important on purpose, not
+    alphabetically or by "how it's stored": `truncate()` (the caller)
+    only ever cuts from the *right* on a too-narrow terminal, never
+    wraps, so whatever's listed last here is what silently disappears
+    first on a narrow screen -- the clock, then this user's own
+    identity/privileges/away/mute state, then the topic, while the
+    channel name and live counts always survive. Deliberately still
+    *not* included: any per-channel "linked vs. local" origin -- that
+    distinction doesn't exist anywhere in the schema yet (NetBBS Link
+    is Phase 3, not started -- see design doc round 77's sign-off
+    note), so there is nothing real to render.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -1730,23 +1770,42 @@ def _render_chat_status_line(
     node's configured timezone, which `override_format` alone doesn't
     affect (see that parameter's own resolution order).
     """
-    channel_label = f"#{sanitize_text(channel.name)}"
-    online = f"{hub.participant_count(channel.name)} online"
+    channel_type = "invite" if channel.members_only else ("hidden" if channel.hidden else "pub")
+    channel_label = f"#{sanitize_text(channel.name)}[{channel_type}]"
 
-    indicators = []
+    roster = _roster_usernames(hub, channel)
+    online_count = hub.participant_count(channel.name)
+    away_count = sum(1 for username in roster if presence.is_away(username))
+    online = f"{online_count} online({away_count} away)"
+
+    fields = [channel_label, online]
+
+    if channel.topic:
+        fields.append(f'"{sanitize_text(channel.topic)}"')
+
+    nick = get_nick(db, user)
+    identity = (
+        f"you:{sanitize_text(user.username)}({sanitize_text(nick)})"
+        if nick
+        else f"you:{sanitize_text(user.username)}"
+    )
+    own_indicators = []
+    privileges = _own_channel_privileges(db, channel, user)
+    if privileges is not None:
+        own_indicators.append(privileges)
     if presence.is_away(user.username):
-        indicators.append("away")
+        own_indicators.append("away")
     restriction = is_muted(db, channel, user)
     if restriction is not None:
         if restriction.expires_at is None:
-            indicators.append("muted")
+            own_indicators.append("muted")
         else:
-            indicators.append(f"muted until {format_for_display(restriction.expires_at, db)}")
+            own_indicators.append(f"muted until {format_for_display(restriction.expires_at, db)}")
+    identity += "".join(f"[{indicator}]" for indicator in own_indicators)
+    fields.append(identity)
 
-    parts = [channel_label, online]
-    parts.extend(f"[{indicator}]" for indicator in indicators)
-    parts.append(format_for_display(utc_now_iso(), db, override_format="%H:%M"))
-    return "  ".join(parts)
+    fields.append(format_for_display(utc_now_iso(), db, override_format="%H:%M"))
+    return " ".join(fields)
 
 
 async def _repaint_status_line(
@@ -1780,7 +1839,11 @@ async def _repaint_status_line(
     if height < _STATUS_LINE_MIN_HEIGHT:
         return
     text = truncate(_render_chat_status_line(db, hub, presence, channel, user), session.terminal_width)
-    line = colored(text, fg_color=MUTED_COLOR, bold=True)
+    # Padded to the full row width, not just the text's own length --
+    # otherwise reverse video (design doc round 77) would only invert
+    # the characters themselves, leaving a ragged, only-partly-colored
+    # bar rather than one solid inverted row.
+    line = colored(text.ljust(session.terminal_width), reverse=True)
     await session.write(
         save_cursor()
         + set_scroll_region(1, height - 1)
@@ -2185,8 +2248,18 @@ async def _chat_loop(
             # session moves on to any other screen (the main menu, the
             # channel picker) -- left active, every subsequent screen
             # would keep scrolling inside this same shrunk region.
+            #
+            # clear_screen() is bundled in here too (design doc round
+            # 77 bugfix): neither the channel picker (`pick_item`,
+            # reached via /leave) nor the main menu (`_draw_main_menu`,
+            # reached via /quit) ever clear the screen themselves, so
+            # without this the last screenful of chat stayed visible
+            # until unrelated output happened to overwrite it. Entry
+            # clears for the same reason (setting the scroll region
+            # moves the cursor home as a side effect, see entry's own
+            # comment) -- this is that same clear, mirrored on exit.
             try:
-                await session.write(reset_scroll_region())
+                await session.write(reset_scroll_region() + clear_screen())
             except SessionClosedError:
                 pass
         hub.leave(channel.name, participant_id)

@@ -118,7 +118,14 @@ def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    assert "away" not in _written_text(watcher)
+    # Anchored to the away *reason* text specifically (design doc round
+    # 77), not a blanket "away" never appears anywhere -- the chat
+    # status line's own "N online(M away)" label (round 77) legitimately
+    # contains that word as static chrome regardless of whether anyone
+    # is actually away, so a bare substring check would now always fail
+    # for a reason unrelated to what this test actually protects: that
+    # alice's /away reason never reaches bob's chat stream.
+    assert "gone to lunch" not in _written_text(watcher)
 
 
 # -- sending while away (design doc round 32, point 6) ----------------------

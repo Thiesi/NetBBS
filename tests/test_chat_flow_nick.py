@@ -178,8 +178,15 @@ def test_alias_shown_on_leave(db, hub, presence, alice, bob, channel):
 def test_alias_shown_in_regular_message(db, hub, presence, alice, channel):
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(db, hub, presence, channel, alice, ["hello", "/quit"]))
-    assert "~DeepParse~" in _written_text(session)
-    assert "alice" not in _written_text(session)
+    text = _written_text(session)
+    assert "~DeepParse~" in text
+    # Anchored to the raw-username chat-stream author format (design
+    # doc round 77) -- "<alice>" is what an un-aliased message would
+    # look like -- not a blanket "alice" never appears anywhere: the
+    # status line's own "you:alice(DeepParse)" field (round 77)
+    # legitimately shows the real username, since it's telling the
+    # viewer who *they* are, not attributing a message to anyone.
+    assert "<alice>" not in text
 
 
 def test_alias_shown_in_me_action(db, hub, presence, alice, channel):
@@ -188,7 +195,9 @@ def test_alias_shown_in_me_action(db, hub, presence, alice, channel):
     text = _written_text(session)
     assert "~DeepParse~" in text
     assert "waves" in text
-    assert "alice" not in text
+    # Same anchoring reasoning as test_alias_shown_in_regular_message --
+    # "* alice " is the un-aliased /me action's own author format.
+    assert "* alice " not in text
 
 
 def test_alias_shown_on_scrollback_replay(db, hub, presence, alice, channel):

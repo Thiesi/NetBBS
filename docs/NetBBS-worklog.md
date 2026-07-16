@@ -5463,3 +5463,89 @@ behavior. Deferred final-polish items 1–2 from round 75 (online help,
 menu prettification) remain exactly where round 75 left them — not
 started, not reordered by this round.
 
+## Sign-off notes, round 77 (chat status line: bugfix, inverse video, expanded content, timestamp format — implemented)
+
+Implementation narrative for design doc round 77's decisions — see
+that note for the *why* (including the two "discussed, not decided"
+items: input-line placement and a per-channel midnight message).
+
+1. **Bugfix**: `_chat_loop`'s `finally` block now writes
+   `reset_scroll_region() + clear_screen()` together (was
+   `reset_scroll_region()` alone), still gated on `status_line_enabled`
+   and still wrapped in the existing best-effort `try/except
+   SessionClosedError`.
+2. **Inverse video**: `netbbs.rendering.ansi.colored()` gained
+   `reverse: bool = False` (emits `REVERSE = f"{CSI}7m"` in the SGR
+   prefix); re-exported from `netbbs.rendering`. `_repaint_status_line`
+   now calls `colored(text.ljust(session.terminal_width), reverse=True)`
+   in place of the previous `fg_color=MUTED_COLOR, bold=True`.
+3. **Status line content**: `_render_chat_status_line` rewritten
+   around the confirmed field order. New `_own_channel_privileges(db,
+   channel, user) -> str | None` helper (SysOp → `"sysop"`; otherwise
+   checks `has_permission` per `ChannelPermission` bit — `MODERATE`→
+   `"mod"`, `EDIT`→`"edit"`, `MANAGE_MEMBERS`→`"members"` — joined with
+   commas, `None` if the user holds none). Away count reuses the
+   existing `_roster_usernames(hub, channel)` helper (already used by
+   `/who`/`/names`) cross-referenced against `presence.is_away`, not a
+   new hub/presence mechanism. Channel type derived directly from the
+   existing `channel.members_only`/`channel.hidden` columns (round 33) —
+   no schema change needed. Own nick via the existing `get_nick(db,
+   user)` (round 41), sanitized before display same as everywhere else
+   untrusted/user-set text reaches a terminal.
+4. **Timestamp format**: `format_with_preference` now passes
+   `override_format="%H:%M"` to `format_for_display`, mirroring the
+   status line clock's own round-75 precedent exactly.
+5. **A real, general test hazard found while wiring in the away
+   count**: several pre-existing tests across `tests/test_chat_flow_
+   join.py`, `tests/test_terminal_sanitization.py`, and this round's
+   own `test_chat_status_line.py` fixtures called `hub.join(channel_
+   name, "some-plain-string")` instead of a real `ParticipantId` —
+   worked fine before this round because nothing previously called
+   `.username` on a channel's live roster from within `_chat_loop`
+   itself (`/who`/`/names` are the only pre-existing callers of
+   `_roster_usernames`, and no test happened to combine a raw-string
+   `hub.join` with a real `_chat_loop` run that also exercised those
+   commands). The new status-line away-count computation runs on
+   *every* repaint, so it was the first thing to actually notice.
+   `tests/test_chat_hub.py` (a pure `ChatHub`-in-isolation suite, never
+   touching `_chat_loop`) was deliberately left untouched — the raw
+   strings there are harmless and correct for what that file tests.
+   Fixed at each real call site by constructing a proper
+   `ParticipantId(username=..., session_key=...)` instead, not by
+   loosening `_roster_usernames` to tolerate malformed input — the
+   `ParticipantId` type exists specifically to eliminate this exact
+   class of hazard (GitHub issue #26's own docstring), so working
+   around it quietly here would undermine that fix's whole point.
+6. **A second, more interesting class of test breakage**: three
+   pre-existing tests (`test_chat_flow_away.py::test_away_not_
+   broadcast_to_others`, `test_chat_flow_nick.py::test_alias_shown_in_
+   regular_message`/`test_alias_shown_in_me_action`) asserted a blanket
+   "this substring never appears anywhere in the output" — "away", and
+   the raw username "alice" — to guard real invariants (an away
+   command's reason text never reaching another participant; a nick
+   alias replacing the raw username in the chat stream). Both blanket
+   checks broke once the status line legitimately started containing
+   those exact words as its own static chrome (`"N online(M away)"`
+   always contains "away"; `"you:alice(nick)"` legitimately shows a
+   user their own real username). Same class of collision as round
+   75's `\x1b[2J` terminal-sanitization fix, and fixed the identical
+   way: anchored each check to the specific fragment that actually
+   matters (the away *reason* text; the raw-username chat-stream author
+   format `"<alice>"`/`"* alice "`) instead of a bare substring search,
+   rather than either ignoring the failures or weakening what they
+   actually protect.
+7. **Testing**: `tests/test_chat_status_line.py` gained cases for the
+   away count, channel type label, own username/nick, topic
+   present/absent, own privileges (including the SysOp-collapse case),
+   and a same-file `test_chat_loop_clears_the_screen_on_exit`
+   regression test for the bugfix. `tests/test_chat_timestamps.py`
+   gained a time-only-not-full-date case mirroring the status-line
+   clock's own existing test. Full suite re-run: **1622 passed, 4
+   skipped**.
+
+Real third-party-client verification of the reverse-video rendering
+(does it actually look like a solid inverted bar in a real terminal
+emulator, not just produce the expected escape sequence) remains
+unverified from this sandboxed dev environment — same standing caveat
+as every other terminal-rendering round.
+

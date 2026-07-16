@@ -56,4 +56,14 @@ def test_format_with_preference_prepends_a_timestamp_when_enabled(db, alice):
     result = format_with_preference(db, alice, "hello", "2026-01-01T12:34:00.000000Z")
     assert result != "hello"
     assert "hello" in result
-    assert "01.01.2026 12:34" in result
+    assert "12:34" in result
+
+
+def test_format_with_preference_is_time_only_not_a_full_date(db, alice):
+    """Deliberately a bare HH:MM (design doc round 77), not the node's
+    full configured display format (which includes the date) -- same
+    reasoning as the chat status line's own clock (round 75)."""
+    set_timestamps_enabled(db, alice, True)
+    result = format_with_preference(db, alice, "hello", "2026-01-01T12:34:00.000000Z")
+    assert "2026" not in result
+    assert "01.01" not in result
