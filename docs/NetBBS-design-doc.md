@@ -407,6 +407,100 @@ vectors — round 27's original list, unresolved by design until real
 Phase 3 event-store/endpoint code is actually being written, per
 Thiesi's own staged-gate framing (round 87).
 
+### Personal mail: local inbox/outbox, and Link messages (round 93 — resolves issue #52)
+
+Fifth piece of Phase 3 design work, and the first of the two
+feature-specific gates named in round 88's dependency matrix. Two
+layers, deliberately separated: **local asynchronous personal mail**
+(genuinely local, no Link dependency, placed in the same "after Phase 2,
+before Phase 3" addendum slot as Communities/self-update/identity-
+attestation — see §15) as the prerequisite domain, with **Link
+messages** as a Phase 3 extension of it rather than a separate feature
+invented from scratch.
+
+**Local mail is a new, persistent domain — deliberately not the same
+mechanism as `/msg`.** `/msg` (§8, round 46) stays exactly what it is:
+ephemeral, online-only, session-addressed, with no fallback to
+persistence (round 32's own explicit prohibition). Local mail is the
+opposite shape on purpose: one message per row (sender, recipient,
+subject, body), `read_at` (nullable — unread/read), independent
+`sender_deleted_at`/`recipient_deleted_at` (each side manages their own
+view of the same message; the row hard-deletes once both are set — no
+shared-content reason to keep it around the way a board post sometimes
+needs re-fetching for someone else). **Quota:** a cap on stored
+(non-deleted) messages per recipient; over the cap, the oldest
+**already-read** message is dropped to make room (same drop-oldest
+precedent as `ChatHub`'s queues and `MessageMailbox`'s own per-session
+cap); if the inbox is entirely unread and full, the new message is
+**bounced back to the sender** rather than silently destroying something
+unread — deterministic, matching issue #52's own acceptance criterion,
+and the same "never silently drop something a user hasn't seen yet"
+principle already applied to `/msg`'s own bounded queues. Read receipts
+are explicitly **not** built — optional, privacy-sensitive, nothing
+requires them for this to be a complete feature.
+
+**Link messages extend the same mailbox, and routing turns out to be
+simpler than boards' because a Link message has exactly one intended
+recipient node — not "everyone carrying this board."**
+- **Recipient discovery is free**: addresses already encode the home
+  node (`user@node-fingerprint`, §5), so there's no discovery protocol
+  to design — parse the address. Node/account migration (moving to a
+  different home node) remains explicitly undesigned, per round 87's
+  §5 note — that's #51's job; until it exists, a message to a migrated
+  user's old address simply bounces as unknown-recipient, an honest
+  failure mode rather than a silent one.
+- **Direct point-to-point store-and-forward, not flood-fill gossip.**
+  The sending node retries delivery directly to the one specific
+  recipient node using the existing HTTP+JSON transport (§11), backing
+  off until delivered or expired — no multi-hop routing, so no loop-
+  prevention machinery is needed either. **Confirmed with Thiesi: no
+  dedicated relay/opaque-envelope-storage mechanism for Link messages**
+  — the original issue raised this as an open question, but it's punted
+  entirely to #58 (WAN reachability): if a relay/rendezvous mechanism
+  ever exists at the transport layer, Link messages benefit
+  automatically without a separate design; nothing about a 1:1 message
+  needs its own relay story.
+- **Duplicate delivery is already handled** — a Link message is itself a
+  signed event under round 90's model, so it gets the same seen-event
+  dedup for free; no new mechanism.
+- **Separate signed events for acceptance, delivery failure/bounce, and
+  expiry** (issue #52's own recommendation), never conflating raw
+  transport receipt with actual user-level delivery: a transport ACK
+  only means the bytes arrived; a separate delivery-acceptance event
+  means the recipient's node placed it in that user's mailbox; a bounce
+  event (mailbox full, blocked sender, unknown recipient) is a distinct,
+  explicit signed rejection rather than silence, so the sender gets a
+  specific reason rather than an ambiguous timeout. Node-level blocking
+  reuses the existing local blocklist (§6) — a blocked peer's Link
+  messages are refused at the transport boundary, no new mechanism.
+- **Confidentiality is honestly tiered, matching round 89's identity
+  model rather than promising one uniform guarantee — confirmed with
+  Thiesi rather than assumed.** A recipient with an opt-in personal
+  keypair (round 89 tier 2) gets true end-to-end encryption: unreadable
+  even by their own home node. A password-only recipient (tier 1, the
+  expected majority) has no personal key to encrypt to at all — the
+  message can only be encrypted to their home node's key, meaning that
+  node's operator can technically read it, exactly as they already
+  could technically see any of that account's other local data. This is
+  **best-effort E2E, disclosed plainly, rather than excluding tier-1
+  users from Link messages to preserve a guarantee they never had
+  anyway** — the alternative (Link messages require a personal keypair)
+  would exclude the tier round 89 established as the expected default
+  majority from a core messaging feature, to protect against an
+  exposure that already exists for all their other local data. Which
+  tier applies to a given recipient should be surfaced to the sender at
+  compose time where knowable, not silently assumed.
+- **Metadata visible to any future transport intermediary** (should #58
+  ever introduce one) is limited to what's needed for routing: recipient
+  node fingerprint, coarse expiry, size — never subject/body, which stay
+  encrypted per the tier above.
+
+**Explicitly still open:** the exact schema/table names and command
+surface (menu placement, etc.) are implementation detail for whenever
+this is actually built, not fixed here. Node/account migration (#51) and
+any relay mechanism (#58) remain separately tracked, not solved by this
+round.
+
 ## 8. Real-time chat
 
 Explicitly **not** routed through the DAG/store-and-forward system — real-time chat needs low latency, while boards and Link messages value reliable asynchronous delivery.
@@ -936,9 +1030,11 @@ tiers which don't actually depend on each other:**
   node should not precede these.
 - *Feature-specific gates — settle before the specific Phase 3 feature
   they block, not before Phase 3 as a whole:* local async mail is a
-  prerequisite before **Link messages** specifically (issue #52); the
-  minimum signed lifecycle/succession model before **Linked resource
-  creation, carry, and closure** specifically (issue #53).
+  prerequisite before **Link messages** specifically (issue #52 — design
+  chosen round 93, §7's "Personal mail" subsection; implementation still
+  pending); the minimum signed lifecycle/succession model before
+  **Linked resource creation, carry, and closure** specifically
+  (issue #53).
 - Seed-node bootstrapping
 - Node-to-node transport: **HTTP+JSON with keypair signatures** (§11) —
   *not* Noise, which is reserved for Phase 5's real-time chat only
@@ -1108,6 +1204,14 @@ in the same after-Phase-2/before-Phase-3 window as Communities and
 self-update. Link propagation of attestations is explicitly deferred
 past that, gated on Phase 4 (trust/reputation) rather than Phase 3. See
 §18 for the full design.
+
+**Local asynchronous personal mail:** genuinely local, no Link
+dependency — lands in the same after-Phase-2/before-Phase-3 addendum
+window as Communities, self-update, and identity attestation, so it
+exists as a settled prerequisite domain before Phase 3's Link messages
+extend it. See §7's "Personal mail" subsection (round 93) for the full
+design, including the Link-message extension itself, which stays Phase
+3 scope as originally listed.
 
 ---
 
@@ -5583,4 +5687,73 @@ tier if real process-boundary issues ever need covering. Not built now;
 this harness is meant to grow into that as later Phase 3 features
 actually need it, per #61's own framing of #59 growing in lockstep with
 features rather than needing to be complete up front.
+
+## Sign-off notes, round 93 (local asynchronous mail + Link messages — resolves issue #52, the first feature-specific gate)
+
+Fifth piece of Phase 3 design work, and the first of round 88's two
+feature-specific gates (the second, #53, is next). Full design lives in
+§7's new "Personal mail" subsection; this note records the reasoning and
+what was confirmed with Thiesi rather than assumed.
+
+**Local mail is deliberately a new domain, not a persistence bolt-on to
+`/msg`.** Round 32 already forbade `/msg` silently falling back to
+async delivery, for good reason — the two have opposite lifecycles
+(ephemeral/session-addressed vs. persistent/account-addressed) and
+conflating them would have undone that earlier decision. One message
+table (sender, recipient, subject, body, `read_at`, independent
+per-side deletion timestamps), a stored-message quota per recipient, and
+a **bounce-not-silently-drop** rule when an inbox is full of unread mail
+— reusing the same drop-oldest-when-safe / never-silently-lose-something-
+unread principles already established for `/msg`'s own bounded queues
+and `ChatHub`'s. Placed in the after-Phase-2/before-Phase-3 addendum
+slot alongside Communities/self-update/identity-attestation (§15), since
+it has no Link dependency at all.
+
+**The Link-message extension turned out simpler than expected, because
+of one structural fact: a Link message has exactly one intended
+recipient node, unlike a board's flood-fill-to-everyone-carrying-it
+shape.** That single fact eliminates most of the hard questions the
+original issue raised:
+- Recipient discovery needs no protocol — addresses already encode the
+  home node (§5).
+- No multi-hop routing means no loop-prevention machinery.
+- Duplicate delivery is already solved by round 90's seen-event dedup,
+  since a Link message is just another signed event under that model.
+
+**Two things confirmed with Thiesi rather than decided unilaterally:**
+
+1. **Confidentiality is honestly tiered, not uniformly promised.**
+   Round 89's identity tiers reassert themselves here: a personal-
+   keypair recipient (tier 2) gets true end-to-end encryption; a
+   password-only recipient (tier 1 — the expected majority) can only be
+   encrypted to their home node's key, since they have no personal key
+   of their own, meaning that node's operator can technically read it —
+   exactly as already true of all their other local data, not a new
+   exposure. Chose **best-effort E2E, disclosed plainly** over
+   **requiring a personal keypair for Link messages at all**, since the
+   latter would exclude round 89's expected default majority from a
+   core feature to guard against exposure they never had a stronger
+   guarantee against in the first place.
+2. **No dedicated relay/opaque-envelope-storage mechanism for Link
+   messages.** The original issue raised third-party relay storage as
+   an open question; punted entirely to #58 (WAN reachability) instead
+   of designing it here — if a relay/rendezvous mechanism ever exists at
+   the transport layer, Link messages benefit automatically, and a 1:1
+   message doesn't need its own separate relay story.
+
+**Also resolved, following directly from the "one recipient node" and
+round 90 facts above, without needing separate confirmation:** direct
+point-to-point store-and-forward over the existing HTTP+JSON transport
+(§11) rather than gossip; separate signed events for transport ACK,
+user-level delivery acceptance, and bounce/rejection (issue #52's own
+recommendation) rather than conflating them; node-level blocking reusing
+the existing local blocklist (§6) rather than a new mechanism; read
+receipts explicitly left out, optional and privacy-sensitive, nothing
+requires them.
+
+**Explicitly still open:** the actual implementation (schema, command
+surface) — this round is a design decision, not code, matching rounds
+89–91's pattern (round 92 is the exception, since a test harness has no
+"real feature" to defer building). Node/account migration (#51) and any
+future relay mechanism (#58) remain separately tracked, not solved here.
 
