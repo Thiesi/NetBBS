@@ -1230,7 +1230,8 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
             db, board, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_post_age_days=max_post_age_days,
-            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=board.community_id, changed_by=actor,
         )
     except BoardError as exc:
         await session.write_line(colored(f"Could not update board: {exc}", fg_color=MUTED_COLOR))
@@ -1595,7 +1596,8 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
             db, area, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_file_age_days=max_file_age_days,
-            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=area.community_id, changed_by=actor,
         )
     except FileAreaError as exc:
         await session.write_line(colored(f"Could not update file area: {exc}", fg_color=MUTED_COLOR))
@@ -1898,7 +1900,8 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
             db, channel, name=name, description=description, min_level=min_level,
             category_id=category_id, pinned=pinned, hidden=hidden, members_only=members_only,
             allow_member_invites=allow_member_invites,
-            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=channel.community_id, changed_by=actor,
         )
     except ChannelError as exc:
         await session.write_line(colored(f"Could not update channel: {exc}", fg_color=MUTED_COLOR))

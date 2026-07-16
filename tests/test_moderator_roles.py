@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.boards.boards import create_board
+from netbbs.communities import create_community
 from netbbs.moderation import (
     BoardPermission,
     ChannelPermission,
@@ -211,6 +213,85 @@ def test_list_grants_for_object_includes_blanket_grants(db, sysop, alice, bob):
     grants = list_grants_for_object(db, object_type="board", object_id=1)
     user_ids = {g.user_id for g in grants}
     assert user_ids == {alice.id, bob.id}
+
+
+# -- Community-blanket tier (design doc §16, round 83) ----------------------
+
+
+def test_grant_permissions_community_blanket_uses_none_object_id_and_community_id(db, sysop, alice):
+    community = create_community(db, "Vintage Computing", creator=sysop)
+    grant = grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=community.id,
+        permissions=BoardPermission.APPROVE, granted_by=sysop,
+    )
+    assert grant.object_id is None
+    assert grant.community_id == community.id
+    assert grant.has(BoardPermission.APPROVE)
+
+
+def test_has_permission_true_via_community_blanket_for_a_board_in_that_community(db, sysop, alice):
+    community = create_community(db, "Vintage Computing", creator=sysop)
+    board = create_board(db, "amiga", community_id=community.id, creator=sysop)
+    grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=community.id,
+        permissions=BoardPermission.DELETE, granted_by=sysop,
+    )
+    assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)
+
+
+def test_community_blanket_does_not_leak_to_a_board_in_a_different_community(db, sysop, alice):
+    vintage = create_community(db, "Vintage Computing", creator=sysop)
+    politics = create_community(db, "Politics", creator=sysop)
+    other_board = create_board(db, "elections", community_id=politics.id, creator=sysop)
+    grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=vintage.id,
+        permissions=BoardPermission.DELETE, granted_by=sysop,
+    )
+    assert not has_permission(db, alice, object_type="board", object_id=other_board.id, permission=BoardPermission.DELETE)
+
+
+def test_community_blanket_does_not_leak_to_an_uncategorized_board(db, sysop, alice):
+    community = create_community(db, "Vintage Computing", creator=sysop)
+    uncategorized_board = create_board(db, "general", creator=sysop)  # no community_id
+    grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=community.id,
+        permissions=BoardPermission.DELETE, granted_by=sysop,
+    )
+    assert not has_permission(
+        db, alice, object_type="board", object_id=uncategorized_board.id, permission=BoardPermission.DELETE
+    )
+
+
+def test_community_blanket_and_local_blanket_grants_are_independent(db, sysop, alice):
+    """Community-blanket and local-blanket grants for the same
+    (user, object_type) must coexist as two distinct rows -- confirms
+    the migration's replaced partial unique indexes actually disambiguate
+    them (a regression here would raise IntegrityError on the second
+    grant_permissions call, or silently fold the two grants together)."""
+    community = create_community(db, "Vintage Computing", creator=sysop)
+    grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=community.id,
+        permissions=BoardPermission.APPROVE, granted_by=sysop,
+    )
+    grant_permissions(
+        db, alice, object_type="board", object_id=None,
+        permissions=BoardPermission.EDIT, granted_by=sysop,
+    )
+    community_blanket = get_grant(db, alice, object_type="board", object_id=None, community_id=community.id)
+    local_blanket = get_grant(db, alice, object_type="board", object_id=None)
+    assert community_blanket.has(BoardPermission.APPROVE) and not community_blanket.has(BoardPermission.EDIT)
+    assert local_blanket.has(BoardPermission.EDIT) and not local_blanket.has(BoardPermission.APPROVE)
+
+
+def test_has_permission_true_via_local_blanket_even_with_an_unrelated_community_blanket(db, sysop, alice):
+    community = create_community(db, "Vintage Computing", creator=sysop)
+    other_board = create_board(db, "general", creator=sysop)  # not in `community`
+    grant_permissions(
+        db, alice, object_type="board", object_id=None, community_id=community.id,
+        permissions=BoardPermission.DELETE, granted_by=sysop,
+    )
+    grant_permissions(db, alice, object_type="board", object_id=None, permissions=BoardPermission.EDIT, granted_by=sysop)
+    assert has_permission(db, alice, object_type="board", object_id=other_board.id, permission=BoardPermission.EDIT)
 
 
 # -- audit logging ------------------------------------------------------

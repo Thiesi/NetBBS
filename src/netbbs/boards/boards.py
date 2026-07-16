@@ -45,19 +45,30 @@ class Board:
     board_id: str
     name: str
     description: str | None
-    min_read_level: int
-    min_write_level: int
+    # Nullable (design doc §16, round 84's correction): NULL means
+    # "inherit this Community's default, or the system default of 0 if
+    # this board has no Community" -- see
+    # netbbs.communities.get_effective_min_read_level/
+    # get_effective_min_write_level. An explicit stored value, including
+    # 0, always wins outright over any Community default.
+    min_read_level: int | None
+    min_write_level: int | None
     category_id: int | None
     pinned: bool
     created_at: str
     moderated: bool
     max_post_age_days: int | None
     # Age/name-gating (design doc §18, rounds 85/86/101) -- nullable,
-    # NULL means no gate. Enforced alongside min_read_level/
-    # min_write_level wherever those already are; see
-    # netbbs.net.login_flow's board-browsing/posting checks.
+    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Community's default" if this board belongs to one. Enforced
+    # alongside min_read_level/min_write_level wherever those already
+    # are; see netbbs.net.login_flow's board-browsing/posting checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
+    # Zero-or-one, nullable FK (design doc §16, round 83) -- a board
+    # never belongs to more than one Community; NULL is a real,
+    # distinct, common state ("Uncategorized"), not a fallback.
+    community_id: int | None
 
 
 def create_board(
@@ -65,14 +76,15 @@ def create_board(
     name: str,
     *,
     description: str | None = None,
-    min_read_level: int = 0,
-    min_write_level: int = 0,
+    min_read_level: int | None = 0,
+    min_write_level: int | None = 0,
     category_id: int | None = None,
     pinned: bool = False,
     moderated: bool = False,
     max_post_age_days: int | None = None,
     min_age: int | None = None,
     name_requirement: str | None = None,
+    community_id: int | None = None,
     creator: User,
 ) -> Board:
     """
@@ -102,6 +114,15 @@ def create_board(
     actual check, enforced by callers alongside `min_read_level`/
     `min_write_level` rather than inside this function.
 
+    `min_read_level`/`min_write_level` are also nullable (design doc
+    §16, round 84's correction) -- `None` means inherit `community_id`'s
+    Community default (or the system default of 0 if `community_id` is
+    also `None`), while the default of `0` here preserves this
+    function's original always-explicit behavior for every existing
+    caller. `community_id` (round 83) optionally places the board under
+    a `netbbs.communities.Community` -- zero-or-one, same shape as
+    `category_id` but the outer layer, not a replacement for it.
+
     No permission check on *creating* a board here — board creation is an
     admin-level action with no SysOp/moderator concept defined yet in
     Phase 1; gating who's allowed to call this is left to whatever calls
@@ -125,8 +146,8 @@ def create_board(
             INSERT INTO boards
                 (board_id, name, description, min_read_level, min_write_level,
                  category_id, pinned, created_at, moderated, max_post_age_days,
-                 min_age, name_requirement)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 min_age, name_requirement, community_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 board_id,
@@ -141,6 +162,7 @@ def create_board(
                 max_post_age_days,
                 min_age,
                 name_requirement,
+                community_id,
             ),
         )
         db.connection.commit()
@@ -272,14 +294,15 @@ def update_board(
     *,
     name: str,
     description: str | None,
-    min_read_level: int,
-    min_write_level: int,
+    min_read_level: int | None,
+    min_write_level: int | None,
     category_id: int | None,
     pinned: bool,
     moderated: bool,
     max_post_age_days: int | None,
     min_age: int | None,
     name_requirement: str | None,
+    community_id: int | None,
     changed_by: User,
 ) -> Board:
     """
@@ -291,7 +314,9 @@ def update_board(
     `board_id`/`created_at` are immutable, not accepted here.
 
     `min_age`/`name_requirement` follow design doc §18 (round 101) --
-    see `create_board`'s docstring.
+    see `create_board`'s docstring. `min_read_level`/`min_write_level`
+    (nullable, §16 round 84) and `community_id` (§16 round 83) follow
+    that same docstring's Community-inheritance reasoning.
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise BoardError(f"invalid name_requirement: {name_requirement!r}")
@@ -301,13 +326,13 @@ def update_board(
             UPDATE boards
             SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
                 category_id = ?, pinned = ?, moderated = ?, max_post_age_days = ?,
-                min_age = ?, name_requirement = ?
+                min_age = ?, name_requirement = ?, community_id = ?
             WHERE id = ?
             """,
             (
                 name, description, min_read_level, min_write_level,
                 category_id, int(pinned), int(moderated), max_post_age_days,
-                min_age, name_requirement, board.id,
+                min_age, name_requirement, community_id, board.id,
             ),
         )
         db.connection.commit()
@@ -367,4 +392,5 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         max_post_age_days=row["max_post_age_days"],
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
+        community_id=row["community_id"],
     )

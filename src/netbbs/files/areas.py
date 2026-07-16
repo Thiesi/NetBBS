@@ -45,19 +45,26 @@ class FileArea:
     area_id: str
     name: str
     description: str | None
-    min_read_level: int
-    min_write_level: int
+    # Nullable (design doc §16, round 84's correction) -- see
+    # netbbs.boards.boards.Board's own fields for the full
+    # Community-inheritance reasoning; identical here.
+    min_read_level: int | None
+    min_write_level: int | None
     category_id: int | None
     pinned: bool
     created_at: str
     moderated: bool
     max_file_age_days: int | None
     # Age/name-gating (design doc §18, rounds 85/86/101/102) -- nullable,
-    # NULL means no gate, same shape and enforcement point as
-    # netbbs.boards.boards.Board's own fields; see
+    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Community's default" if this area belongs to one, same shape and
+    # enforcement point as netbbs.boards.boards.Board's own fields; see
     # netbbs.net.file_flow's browse/upload checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
+    # Zero-or-one, nullable FK (design doc §16, round 83), same shape as
+    # Board.community_id.
+    community_id: int | None
 
 
 def create_file_area(
@@ -65,14 +72,15 @@ def create_file_area(
     name: str,
     *,
     description: str | None = None,
-    min_read_level: int = 0,
-    min_write_level: int = 0,
+    min_read_level: int | None = 0,
+    min_write_level: int | None = 0,
     category_id: int | None = None,
     pinned: bool = False,
     moderated: bool = False,
     max_file_age_days: int | None = None,
     min_age: int | None = None,
     name_requirement: str | None = None,
+    community_id: int | None = None,
     creator: User,
 ) -> FileArea:
     """
@@ -93,7 +101,9 @@ def create_file_area(
     `min_age`/`name_requirement` (design doc §18, rounds 85/86/101/102)
     are the same nullable-means-no-gate shape as
     `netbbs.boards.boards.create_board`'s own fields — see that
-    function's docstring.
+    function's docstring. `min_read_level`/`min_write_level` (nullable,
+    §16 round 84) and `community_id` (§16 round 83) follow that same
+    docstring's Community-inheritance reasoning.
 
     No permission check on *creating* an area here — same reasoning as
     board/channel creation: an admin-level action with no SysOp/moderator
@@ -117,8 +127,8 @@ def create_file_area(
             INSERT INTO file_areas
                 (area_id, name, description, min_read_level, min_write_level,
                  category_id, pinned, created_at, moderated, max_file_age_days,
-                 min_age, name_requirement)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 min_age, name_requirement, community_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 area_id,
@@ -133,6 +143,7 @@ def create_file_area(
                 max_file_age_days,
                 min_age,
                 name_requirement,
+                community_id,
             ),
         )
         db.connection.commit()
@@ -243,20 +254,23 @@ def update_file_area(
     *,
     name: str,
     description: str | None,
-    min_read_level: int,
-    min_write_level: int,
+    min_read_level: int | None,
+    min_write_level: int | None,
     category_id: int | None,
     pinned: bool,
     moderated: bool,
     max_file_age_days: int | None,
     min_age: int | None,
     name_requirement: str | None,
+    community_id: int | None,
     changed_by: User,
 ) -> FileArea:
     """Replace `area`'s editable settings with the given full state --
     mirrors `netbbs.boards.boards.update_board` exactly, see that
     function's docstring for the full reasoning. `min_age`/
-    `name_requirement` follow design doc §18 (rounds 101/102)."""
+    `name_requirement` follow design doc §18 (rounds 101/102).
+    `min_read_level`/`min_write_level`/`community_id` follow design doc
+    §16 (rounds 83/84)."""
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
     try:
@@ -265,13 +279,13 @@ def update_file_area(
             UPDATE file_areas
             SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
                 category_id = ?, pinned = ?, moderated = ?, max_file_age_days = ?,
-                min_age = ?, name_requirement = ?
+                min_age = ?, name_requirement = ?, community_id = ?
             WHERE id = ?
             """,
             (
                 name, description, min_read_level, min_write_level,
                 category_id, int(pinned), int(moderated), max_file_age_days,
-                min_age, name_requirement, area.id,
+                min_age, name_requirement, community_id, area.id,
             ),
         )
         db.connection.commit()
@@ -319,4 +333,5 @@ def _row_to_file_area(row: sqlite3.Row) -> FileArea:
         max_file_age_days=row["max_file_age_days"],
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
+        community_id=row["community_id"],
     )

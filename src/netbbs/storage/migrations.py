@@ -1161,4 +1161,141 @@ MIGRATIONS = [
             ON mail_messages(sender_user_id, sender_deleted_at, created_at);
         """,
     ),
+    Migration(
+        description=(
+            "Communities (design doc §16, rounds 71/83/84/86): a "
+            "topic-oriented navigation/container layer above boards/"
+            "channels/file areas. Local Communities only in this "
+            "migration -- Link Communities (round 86) are a property "
+            "layered onto the same `communities` row once Phase 6's "
+            "signed-event machinery exists, not a separate table. "
+            "community_id is a nullable FK on all three resource "
+            "tables (round 83: zero-or-one, never several -- see the "
+            "design doc for why many-to-many and a mandatory-with-"
+            "default-'Uncategorized' shape were both rejected). "
+            "boards.min_read_level/min_write_level and file_areas."
+            "min_read_level/min_write_level become nullable here (round "
+            "84's correction): NULL now means 'inherit this Community's "
+            "default, or the hardcoded system default of 0 if the "
+            "resource has no Community' -- an explicit stored value, "
+            "including 0, always wins outright and is never overridden "
+            "by a Community default. Existing rows keep their current "
+            "explicit 0 unchanged by this migration (a plain column-"
+            "relax, no data rewritten) -- a SysOp opts a given resource "
+            "into inheriting by explicitly clearing it afterwards, per "
+            "round 84. Uses the same table-rebuild pattern as the "
+            "user-deletion-cascade migration above (SQLite has no ALTER "
+            "TABLE to relax a NOT NULL/remove a DEFAULT in place). "
+            "channels.min_level is deliberately NOT touched by this "
+            "migration -- the design doc's round 84 Community edit-"
+            "screen spec names exactly four inheritable defaults "
+            "(min_read_level, min_write_level, min_age, "
+            "name_requirement), all sized for boards/file-areas' read/"
+            "write-pair or all-three-types' age/name shape; it never "
+            "names a channel-specific level default, and channels "
+            "already deliberately have no read/write split (round 18) "
+            "that a hypothetical single inherited level would map onto "
+            "cleanly. Filling that in as a new field the design doc "
+            "never specified would be scope creep, not implementation "
+            "-- channels.min_level stays exactly what it is today, "
+            "not gated through Community, while min_age/"
+            "name_requirement (already nullable on all three tables "
+            "since round 101) gain Community inheritance for channels "
+            "same as boards/file-areas. "
+            "moderator_grants gains a nullable community_id column for "
+            "the new Community-blanket grant tier (round 83: 'the same "
+            "shape local-blanket already has over the whole node,' "
+            "narrowed to one Community's membership) -- the two "
+            "existing partial unique indexes are replaced: local-"
+            "blanket uniqueness now also requires community_id IS NULL "
+            "(so a Community-blanket row for the same user/object_type "
+            "no longer collides with it under SQLite's own NULL-"
+            "distinctness rule), plus a new partial unique index for "
+            "Community-blanket uniqueness itself."
+        ),
+        sql="""
+        CREATE TABLE communities (
+            id                         INTEGER PRIMARY KEY,
+            name                       TEXT NOT NULL UNIQUE,
+            description                TEXT,
+            hidden                     INTEGER NOT NULL DEFAULT 0,
+            default_min_read_level     INTEGER,
+            default_min_write_level    INTEGER,
+            default_min_age            INTEGER,
+            default_name_requirement   TEXT
+                CHECK (default_name_requirement IN ('verified', 'verified_and_displayed')
+                       OR default_name_requirement IS NULL),
+            created_at                 TEXT NOT NULL
+        );
+
+        ALTER TABLE channels ADD COLUMN community_id INTEGER REFERENCES communities(id);
+        CREATE INDEX idx_channels_community_id ON channels(community_id);
+
+        CREATE TABLE boards_new (
+            id                       INTEGER PRIMARY KEY,
+            board_id                 TEXT NOT NULL UNIQUE,
+            name                     TEXT NOT NULL UNIQUE,
+            description              TEXT,
+            origin_node_fingerprint  TEXT,
+            min_read_level           INTEGER,
+            min_write_level          INTEGER,
+            created_at               TEXT NOT NULL,
+            category_id              INTEGER REFERENCES board_categories(id),
+            pinned                   INTEGER NOT NULL DEFAULT 0,
+            moderated                INTEGER NOT NULL DEFAULT 0,
+            max_post_age_days        INTEGER,
+            min_age                  INTEGER,
+            name_requirement         TEXT
+                CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL),
+            community_id             INTEGER REFERENCES communities(id)
+        );
+        INSERT INTO boards_new
+            SELECT id, board_id, name, description, origin_node_fingerprint, min_read_level,
+                   min_write_level, created_at, category_id, pinned, moderated, max_post_age_days,
+                   min_age, name_requirement, NULL AS community_id
+            FROM boards;
+        DROP TABLE boards;
+        ALTER TABLE boards_new RENAME TO boards;
+        CREATE INDEX idx_boards_board_id ON boards(board_id);
+        CREATE INDEX idx_boards_community_id ON boards(community_id);
+
+        CREATE TABLE file_areas_new (
+            id                       INTEGER PRIMARY KEY,
+            area_id                  TEXT NOT NULL UNIQUE,
+            name                     TEXT NOT NULL UNIQUE,
+            description              TEXT,
+            origin_node_fingerprint  TEXT,
+            min_read_level           INTEGER,
+            min_write_level          INTEGER,
+            category_id              INTEGER REFERENCES file_area_categories(id),
+            pinned                   INTEGER NOT NULL DEFAULT 0,
+            created_at               TEXT NOT NULL,
+            moderated                INTEGER NOT NULL DEFAULT 0,
+            max_file_age_days        INTEGER,
+            min_age                  INTEGER,
+            name_requirement         TEXT
+                CHECK (name_requirement IN ('verified', 'verified_and_displayed') OR name_requirement IS NULL),
+            community_id             INTEGER REFERENCES communities(id)
+        );
+        INSERT INTO file_areas_new
+            SELECT id, area_id, name, description, origin_node_fingerprint, min_read_level,
+                   min_write_level, category_id, pinned, created_at, moderated, max_file_age_days,
+                   min_age, name_requirement, NULL AS community_id
+            FROM file_areas;
+        DROP TABLE file_areas;
+        ALTER TABLE file_areas_new RENAME TO file_areas;
+        CREATE INDEX idx_file_areas_area_id ON file_areas(area_id);
+        CREATE INDEX idx_file_areas_community_id ON file_areas(community_id);
+
+        ALTER TABLE moderator_grants ADD COLUMN community_id INTEGER REFERENCES communities(id);
+
+        DROP INDEX idx_moderator_grants_blanket;
+        CREATE UNIQUE INDEX idx_moderator_grants_blanket
+            ON moderator_grants(user_id, object_type)
+            WHERE object_id IS NULL AND community_id IS NULL;
+        CREATE UNIQUE INDEX idx_moderator_grants_community_blanket
+            ON moderator_grants(user_id, object_type, community_id)
+            WHERE object_id IS NULL AND community_id IS NOT NULL;
+        """,
+    ),
 ]

@@ -1494,7 +1494,27 @@ existing patterns are settled, exact wire/signed-event schema deferred
 until Phase 3's DAG substrate actually exists, matching how §13 already
 treats Linked-board moderation. See round 71 for the original
 directional discussion, round 83 for local Communities' full spec, and
-round 86 for Link Communities.
+round 86 for Link Communities. **Implementation status (round 105,
+first slice): the data model and core logic are built and tested** --
+`netbbs.communities` (Community CRUD, deletion cascade, and the four
+`get_effective_*` scalar-default resolvers) plus the schema (`communities`
+table; nullable `community_id` on boards/channels/file areas; boards'/
+file areas' `min_read_level`/`min_write_level` now nullable per round
+84's correction) and the new Community-blanket moderator-grant tier in
+`netbbs.moderation.roles`, 36 new tests. **Not yet built**: any UI at
+all -- no admin-side Community create/edit/delete/assignment screens,
+no main-menu `[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`
+restructuring, no category leak-prevention filtering, and no call site
+(board browsing, posting, channel entry, file areas) yet resolves
+levels/age/name-requirement through a Community -- `get_effective_*`
+exist but nothing calls them yet. See the round 105 worklog entry for
+the full writeup, including the one scope note worth flagging: this
+implementation deliberately does *not* give `channels.min_level` a
+Community-inheritable default (`default_min_level`) -- the design
+doc's own round 84 Community edit-screen spec names exactly four
+inheritable fields, none of them channel-level-shaped, so extending
+the model to a fifth field it never specified would have been scope
+creep rather than implementation of what was agreed.
 
 **The idea:** users navigate NetBBS by topic first, not by resource
 type first. Instead of a main menu offering "[M]essage Boards /

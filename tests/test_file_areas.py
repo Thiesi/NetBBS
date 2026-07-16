@@ -478,7 +478,7 @@ def test_update_file_area_replaces_the_full_state(db, alice):
     updated = update_file_area(
         db, area, name="docs2", description="new desc", min_read_level=1, min_write_level=2,
         category_id=None, pinned=True, moderated=True, max_file_age_days=30,
-        min_age=18, name_requirement="verified", changed_by=alice,
+        min_age=18, name_requirement="verified", community_id=None, changed_by=alice,
     )
     assert updated.name == "docs2"
     assert updated.description == "new desc"
@@ -500,7 +500,7 @@ def test_update_file_area_rejects_a_name_collision(db, alice):
         update_file_area(
             db, area, name="taken", description=None, min_read_level=0, min_write_level=0,
             category_id=None, pinned=False, moderated=False, max_file_age_days=None,
-            min_age=None, name_requirement=None, changed_by=alice,
+            min_age=None, name_requirement=None, community_id=None, changed_by=alice,
         )
 
 
@@ -510,7 +510,7 @@ def test_update_file_area_rejects_invalid_name_requirement(db, alice):
         update_file_area(
             db, area, name="docs", description=None, min_read_level=0, min_write_level=0,
             category_id=None, pinned=False, moderated=False, max_file_age_days=None,
-            min_age=None, name_requirement="bogus", changed_by=alice,
+            min_age=None, name_requirement="bogus", community_id=None, changed_by=alice,
         )
 
 

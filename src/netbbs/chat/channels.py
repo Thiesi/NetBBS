@@ -51,11 +51,18 @@ class Channel:
     members_only: bool
     allow_member_invites: bool
     # Age/name-gating (design doc §18, rounds 85/86/101/102) -- nullable,
-    # NULL means no gate, same shape and enforcement point as
-    # netbbs.boards.boards.Board's own fields; see
-    # netbbs.net.chat_flow's join/message checks.
+    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Community's default" if this channel belongs to one, same shape
+    # and enforcement point as netbbs.boards.boards.Board's own fields;
+    # see netbbs.net.chat_flow's join/message checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
+    # Zero-or-one, nullable FK (design doc §16, round 83), same shape as
+    # Board.community_id. Deliberately does NOT gain Community-level
+    # inheritance for `min_level` itself -- see the round-104 migration
+    # note in netbbs.storage.migrations for why that field was left out
+    # of scope rather than invented.
+    community_id: int | None
 
 
 def create_channel(
@@ -71,6 +78,7 @@ def create_channel(
     allow_member_invites: bool = False,
     min_age: int | None = None,
     name_requirement: str | None = None,
+    community_id: int | None = None,
     creator: User,
 ) -> Channel:
     """Create a new local channel. No permission check on creation here —
@@ -92,6 +100,12 @@ def create_channel(
     are the same nullable-means-no-gate shape as
     `netbbs.boards.boards.create_board`'s own fields — see that
     function's docstring.
+
+    `community_id` (design doc §16, round 83) optionally places the
+    channel under a `netbbs.communities.Community` -- same zero-or-one
+    shape as `Board.community_id`. Unlike boards/file areas,
+    `min_level` itself is NOT nullable/inheritable here -- see
+    `Channel.community_id`'s own docstring comment.
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
@@ -110,12 +124,13 @@ def create_channel(
             """
             INSERT INTO channels
                 (channel_id, name, description, min_level, category_id, pinned, created_at,
-                 hidden, members_only, allow_member_invites, min_age, name_requirement)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 hidden, members_only, allow_member_invites, min_age, name_requirement, community_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 channel_id, name, description, min_level, category_id, int(pinned), created_at,
                 int(hidden), int(members_only), int(allow_member_invites), min_age, name_requirement,
+                community_id,
             ),
         )
         db.connection.commit()
@@ -175,6 +190,7 @@ def update_channel(
     allow_member_invites: bool,
     min_age: int | None,
     name_requirement: str | None,
+    community_id: int | None,
     changed_by: User,
 ) -> Channel:
     """
@@ -189,7 +205,8 @@ def update_channel(
     this SysOp-only full-state replace.
 
     `min_age`/`name_requirement` follow design doc §18 (rounds 101/102)
-    -- see `create_channel`'s docstring.
+    -- see `create_channel`'s docstring. `community_id` follows design
+    doc §16 (round 83) -- see that same docstring.
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
@@ -199,13 +216,13 @@ def update_channel(
             UPDATE channels
             SET name = ?, description = ?, min_level = ?, category_id = ?, pinned = ?,
                 hidden = ?, members_only = ?, allow_member_invites = ?,
-                min_age = ?, name_requirement = ?
+                min_age = ?, name_requirement = ?, community_id = ?
             WHERE id = ?
             """,
             (
                 name, description, min_level, category_id, int(pinned),
                 int(hidden), int(members_only), int(allow_member_invites),
-                min_age, name_requirement, channel.id,
+                min_age, name_requirement, community_id, channel.id,
             ),
         )
         db.connection.commit()
@@ -288,4 +305,5 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         allow_member_invites=bool(row["allow_member_invites"]),
         min_age=row["min_age"],
         name_requirement=row["name_requirement"],
+        community_id=row["community_id"],
     )

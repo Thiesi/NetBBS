@@ -6505,3 +6505,116 @@ blank-body/mailbox-full-bounce).
 **Testing**: full suite re-run: **1816 passed, 4 skipped** (up from
 round 103's 1779 -- 37 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 105 (Communities -- data model and core logic implemented, no UI yet)
+
+First implementation slice of design doc §16 (Communities, specced
+rounds 71/83/84/86) -- the last item in the addendum backlog. Core
+only, following the same core-first staging every prior addendum item
+used (self-update round 96, attestation round 101, mail round 104):
+schema + `netbbs.communities` + the Community-blanket grant tier, fully
+tested, with zero UI wiring yet. Admin CRUD/assignment screens and the
+main-menu `[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`
+restructuring are separate, subsequent passes.
+
+**Migration** (`src/netbbs/storage/migrations.py`): new `communities`
+table (`name` UNIQUE, `description`, `hidden`, `default_min_read_level`/
+`default_min_write_level`/`default_min_age`/`default_name_requirement`
+all nullable, `created_at`). `community_id` (nullable FK) added to
+`channels` via a plain `ALTER TABLE ADD COLUMN` (no rebuild needed --
+nothing about `channels`' existing NOT NULL columns changes).
+`boards`/`file_areas` each get the table-rebuild treatment (same
+pattern as the user-deletion-cascade migration): `min_read_level`/
+`min_write_level` relax from `NOT NULL DEFAULT 0` to nullable, plus
+`community_id` added in the same rebuild. Existing rows keep their
+stored `0` unchanged -- a plain constraint relax, no data rewritten,
+matching round 84's "existing resources keep their current explicit
+values" requirement exactly. `moderator_grants` gains a nullable
+`community_id` column (plain `ADD COLUMN`); its two existing partial
+unique indexes are replaced -- local-blanket uniqueness now also
+requires `community_id IS NULL` (so it no longer collides with a
+Community-blanket row for the same user/object_type under SQLite's
+own NULL-distinctness rule), plus a new partial unique index for
+Community-blanket uniqueness itself. Verified the migration applies
+cleanly and produces the exact expected schema via direct `PRAGMA
+table_info` introspection before writing any application code against
+it.
+
+**A real scope decision made explicit rather than guessed at**:
+`channels.min_level` does NOT get a nullable/Community-inheritable
+treatment, unlike `min_read_level`/`min_write_level`/`min_age`/
+`name_requirement`. The design doc's round 84 Community edit-screen
+spec names exactly four inheritable defaults, sized for boards/file-
+areas' read/write pair and all-three-types' age/name shape -- it never
+names a channel-specific level default, and channels already
+deliberately have no read/write split (round 18) for a hypothetical
+single inherited level to map onto. Inventing a fifth field
+(`default_min_level`) the design doc never specified would have been
+scope creep, not implementation of what was agreed -- flagged in both
+this entry and the design doc's own round 105 status note rather than
+silently decided either way.
+
+**`src/netbbs/communities.py` (new)**: `Community` dataclass;
+`create_community`/`get_community`/`get_community_by_name`/
+`list_communities`/`update_community`/`delete_community`, mirroring
+`netbbs.boards.boards`'s shape (lean create, full-state-replace
+update, "log first" deletion). `delete_community` reverts every
+referencing board/channel/file_area to `community_id = NULL`
+(Uncategorized) rather than cascading their deletion (round 83:
+"migration is a non-event," losing a Community must never destroy what
+was in it) and deletes any Community-blanket grant scoped to it
+outright. Four `get_effective_min_read_level`/
+`get_effective_min_write_level`/`get_effective_min_age`/
+`get_effective_name_requirement` resolvers implement round 84's
+inheritance chain (resource's own explicit value, including `0`, wins
+outright; else the Community's default if it belongs to one and that
+Community sets one; else the hardcoded system default) -- duck-typed
+over any resource exposing the right attributes, so the same age/name
+resolvers work unchanged across boards, channels, and file areas.
+Nothing calls these yet (see the "not yet built" list above) --
+they're ready for the enforcement-wiring pass to pick up.
+
+**`netbbs.moderation.roles`**: `ModeratorGrant` gains `community_id`;
+`grant_permissions`/`revoke_permissions`/`get_grant` gain an optional
+`community_id` keyword (default `None`, so every existing caller is
+unaffected). `has_permission`/`list_grants_for_object` gain a new
+`_resolve_object_community_id` lookup (the one place this module now
+looks outside `moderator_grants` itself, into whichever of
+boards/channels/file_areas the `object_type` names) so a Community-
+blanket grant is folded in alongside the existing per-object/local-
+blanket fallback -- "per-object → Community-blanket → local-blanket,"
+exactly the fallback order the design doc's round 83 "mechanically"
+note specifies.
+
+**`Board`/`Channel`/`FileArea` dataclasses and their
+create_*/update_*/_row_to_* functions** (boards.py/channels.py/
+areas.py): gained `community_id`; `Board`/`FileArea` additionally have
+`min_read_level`/`min_write_level` retyped `int | None`. `create_*`
+keeps a default of `0` for those two fields (not `None`) specifically
+to preserve every existing caller's behavior unchanged -- only a caller
+that explicitly opts in by passing `None` gets Community inheritance
+at creation time. `update_board`/`update_channel`/`update_file_area`
+gained `community_id` as a required keyword (no default), consistent
+with those functions' existing "every field required, full-state-
+replace" convention (the same treatment `min_age`/`name_requirement`
+got in round 101) -- every existing call site (three in
+`netbbs.net.admin_flow`'s edit screens, plus test call sites in
+`tests/test_boards.py`/`test_channels.py`/`test_file_areas.py`) was
+updated to pass the resource's own current `community_id` through
+unchanged, since none of those edit screens prompt for Community
+assignment yet.
+
+**Tests**: 36 new -- `tests/test_communities.py` (30: create/get/list/
+update/delete, deletion's revert-to-Uncategorized and scoped-grant-
+revocation behavior, and all four `get_effective_*` resolvers across
+their explicit-value/Community-default/system-default/no-Community
+cases, including cross-resource-type coverage for the age/name
+resolvers) and `tests/test_moderator_roles.py` (6: Community-blanket
+grant creation, `has_permission` folding it in for a board actually in
+that Community, non-leakage to a board in a different Community, non-
+leakage to an Uncategorized board, independence from a co-existing
+local-blanket grant on the same user/object_type, and local-blanket
+still working normally alongside an unrelated Community-blanket grant).
+
+**Testing**: full suite re-run: **1852 passed, 4 skipped** (up from
+round 104's 1816 -- 36 net new tests, no regressions elsewhere).
+

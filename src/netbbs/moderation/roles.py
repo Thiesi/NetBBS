@@ -13,11 +13,17 @@ this module encodes: a bitmask representation (matching §13's own
 blanket grants, and recording every grant/revoke in the shared
 `netbbs.moderation.log` audit trail.
 
-Three moderator scope tiers exist per §13: per-object, local-blanket
-(`object_id` is `None` here), and Link-blanket ("global"). The last is
-unreachable until Phase 6's Link-wide moderation exists and is
-deliberately not modeled by a third `object_id` sentinel now — decide
-that shape once Phase 6 actually needs it, rather than guessing today.
+Four moderator scope tiers now exist: per-object, **Community-blanket**
+(design doc §16, round 83 -- `object_id` is `None` *and* `community_id`
+is set), local-blanket (`object_id` and `community_id` both `None`), and
+Link-blanket ("global"). The last is unreachable until Phase 6's
+Link-wide moderation exists and is deliberately not modeled by a third
+`object_id` sentinel now — decide that shape once Phase 6 actually
+needs it, rather than guessing today. Community-blanket is local-
+blanket narrowed to one Community's membership, not a structurally new
+kind of grant (design doc §16) -- same additive/no-partial-exception
+shape as every other tier here, just with one more optional scope
+column.
 """
 
 from __future__ import annotations
@@ -67,6 +73,17 @@ _PERMISSION_ENUMS: dict[str, type[IntFlag]] = {
     "channel": ChannelPermission,
 }
 
+# Which table to resolve an object's own community_id from, for
+# has_permission's/list_grants_for_object's Community-blanket fallback
+# (design doc §16, round 83) -- the one place this module knows
+# anything about boards/channels/file_areas specifically, rather than
+# staying purely polymorphic over moderator_grants alone.
+_COMMUNITY_LOOKUP_TABLES: dict[str, str] = {
+    "board": "boards",
+    "file_area": "file_areas",
+    "channel": "channels",
+}
+
 
 class ModeratorGrantError(Exception):
     """Raised for an unknown `object_type`, or a permission bit that
@@ -79,10 +96,17 @@ class ModeratorGrant:
     id: int
     user_id: int
     object_type: str
-    object_id: int | None  # None == local-blanket, see module docstring
+    object_id: int | None  # None == blanket (local- or Community-), see module docstring
     permissions: int
     granted_by_user_id: int
     created_at: str
+    # None == local-blanket (or a per-object grant); set == Community-
+    # blanket, scoped to one Community's membership (design doc §16,
+    # round 83). Only meaningful when object_id is also None -- a
+    # per-object grant with a non-NULL community_id is never produced
+    # by grant_permissions, since a specific object's own community_id
+    # already answers that question without needing it duplicated here.
+    community_id: int | None
 
     def has(self, permission: IntFlag) -> bool:
         return bool(self.permissions & int(permission))
@@ -96,29 +120,36 @@ def grant_permissions(
     object_id: int | None,
     permissions: IntFlag,
     granted_by: User,
+    community_id: int | None = None,
 ) -> ModeratorGrant:
     """
-    Grant `permissions` to `target` on one object (or every local
-    object of `object_type`, if `object_id` is None — a local-blanket
-    grant).
+    Grant `permissions` to `target` on one object, on every local
+    object of `object_type` (`object_id` is `None`, `community_id` is
+    also `None` -- a local-blanket grant), or on every object of
+    `object_type` currently or later belonging to one Community
+    (`object_id` is `None`, `community_id` is set -- design doc §16,
+    round 83's Community-blanket tier).
 
     Additive: repeating this call for the same (user, object_type,
-    object_id) combines with whatever bits are already granted, rather
-    than requiring the caller to already know and re-specify the
-    existing set. Use `revoke_permissions` to remove specific bits.
+    object_id, community_id) combines with whatever bits are already
+    granted, rather than requiring the caller to already know and
+    re-specify the existing set. Use `revoke_permissions` to remove
+    specific bits. `community_id` is ignored (must be left `None`) when
+    `object_id` is set -- a per-object grant's scope is already fully
+    determined by the object itself.
     """
     enum_type = _validate_permission_type(object_type, permissions)
-    row = _get_grant_row(db, target.id, object_type, object_id)
+    row = _get_grant_row(db, target.id, object_type, object_id, community_id)
 
     if row is None:
         new_mask = int(permissions)
         db.connection.execute(
             """
             INSERT INTO moderator_grants
-                (user_id, object_type, object_id, permissions, granted_by_user_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (user_id, object_type, object_id, permissions, granted_by_user_id, created_at, community_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (target.id, object_type, object_id, new_mask, granted_by.id, utc_now_iso()),
+            (target.id, object_type, object_id, new_mask, granted_by.id, utc_now_iso(), community_id),
         )
     else:
         new_mask = row["permissions"] | int(permissions)
@@ -137,7 +168,7 @@ def grant_permissions(
         target_user_id=target.id,
         detail=_describe(enum_type, int(permissions)),
     )
-    return _get_grant(db, target.id, object_type, object_id)
+    return _get_grant(db, target.id, object_type, object_id, community_id)
 
 
 def revoke_permissions(
@@ -148,16 +179,18 @@ def revoke_permissions(
     object_id: int | None,
     permissions: IntFlag,
     revoked_by: User,
+    community_id: int | None = None,
 ) -> ModeratorGrant | None:
     """
-    Remove `permissions` from target's existing grant. If nothing is
-    left in the mask afterwards, the grant row is deleted entirely and
-    None is returned. A no-op (still logged) if target had no grant to
-    begin with — same "idempotent removal" shape as
-    `netbbs.moderation.blocklist.unblock_user`.
+    Remove `permissions` from target's existing grant (matched the same
+    way `grant_permissions` scopes one -- see that function's
+    docstring). If nothing is left in the mask afterwards, the grant
+    row is deleted entirely and None is returned. A no-op (still
+    logged) if target had no grant to begin with — same "idempotent
+    removal" shape as `netbbs.moderation.blocklist.unblock_user`.
     """
     enum_type = _validate_permission_type(object_type, permissions)
-    row = _get_grant_row(db, target.id, object_type, object_id)
+    row = _get_grant_row(db, target.id, object_type, object_id, community_id)
 
     if row is not None:
         new_mask = row["permissions"] & ~int(permissions)
@@ -179,7 +212,7 @@ def revoke_permissions(
         target_user_id=target.id,
         detail=_describe(enum_type, int(permissions)),
     )
-    return _get_grant(db, target.id, object_type, object_id)
+    return _get_grant(db, target.id, object_type, object_id, community_id)
 
 
 def has_permission(
@@ -192,9 +225,11 @@ def has_permission(
 ) -> bool:
     """
     Does `user` hold `permission` on this object — either via a grant
-    on it specifically, or a local-blanket grant covering every local
-    object of `object_type`? (Deliberately no partial-exception
-    blanket grants — see design doc sign-off round 34.)
+    on it specifically, a Community-blanket grant covering the
+    Community this object currently belongs to (design doc §16, round
+    83), or a local-blanket grant covering every local object of
+    `object_type`? (Deliberately no partial-exception blanket grants —
+    see design doc sign-off round 34.)
 
     SysOp-level always satisfies this, with zero grant rows required
     (design doc -- board/area management round, a deliberate, cross-
@@ -211,10 +246,15 @@ def has_permission(
     _validate_permission_type(object_type, permission)
     if user.user_level >= SYSOP_LEVEL:
         return True
+    community_id = _resolve_object_community_id(db, object_type, object_id)
     rows = db.connection.execute(
         "SELECT permissions FROM moderator_grants "
-        "WHERE user_id = ? AND object_type = ? AND (object_id = ? OR object_id IS NULL)",
-        (user.id, object_type, object_id),
+        "WHERE user_id = ? AND object_type = ? AND ("
+        "  object_id = ?"
+        "  OR (object_id IS NULL AND community_id IS NULL)"
+        "  OR (object_id IS NULL AND community_id = ?)"
+        ")",
+        (user.id, object_type, object_id, community_id),
     ).fetchall()
     combined = 0
     for row in rows:
@@ -222,11 +262,13 @@ def has_permission(
     return bool(combined & int(permission))
 
 
-def get_grant(db: Database, user: User, *, object_type: str, object_id: int | None) -> ModeratorGrant | None:
+def get_grant(
+    db: Database, user: User, *, object_type: str, object_id: int | None, community_id: int | None = None
+) -> ModeratorGrant | None:
     """The grant row exactly matching this (user, object_type,
-    object_id) — does NOT fold in a separate blanket grant the way
-    `has_permission` does."""
-    return _get_grant(db, user.id, object_type, object_id)
+    object_id, community_id) — does NOT fold in a separate blanket
+    grant the way `has_permission` does."""
+    return _get_grant(db, user.id, object_type, object_id, community_id)
 
 
 def list_grants_for_user(db: Database, user: User) -> list[ModeratorGrant]:
@@ -239,13 +281,29 @@ def list_grants_for_user(db: Database, user: User) -> list[ModeratorGrant]:
 
 def list_grants_for_object(db: Database, *, object_type: str, object_id: int) -> list[ModeratorGrant]:
     """Every grant that applies to this object: per-object grants on
-    it specifically, plus any local-blanket grant over its
+    it specifically, any Community-blanket grant over the Community it
+    currently belongs to, plus any local-blanket grant over its
     object_type."""
+    community_id = _resolve_object_community_id(db, object_type, object_id)
     rows = db.connection.execute(
-        "SELECT * FROM moderator_grants WHERE object_type = ? AND (object_id = ? OR object_id IS NULL)",
-        (object_type, object_id),
+        "SELECT * FROM moderator_grants WHERE object_type = ? AND ("
+        "  object_id = ?"
+        "  OR (object_id IS NULL AND community_id IS NULL)"
+        "  OR (object_id IS NULL AND community_id = ?)"
+        ")",
+        (object_type, object_id, community_id),
     ).fetchall()
     return [_row_to_grant(row) for row in rows]
+
+
+def _resolve_object_community_id(db: Database, object_type: str, object_id: int) -> int | None:
+    """The Community `object_id` (a board/channel/file_area row)
+    currently belongs to, or `None` if it belongs to none / no longer
+    exists. The one place this module looks outside `moderator_grants`
+    itself -- see `_COMMUNITY_LOOKUP_TABLES`'s comment."""
+    table = _COMMUNITY_LOOKUP_TABLES[object_type]
+    row = db.connection.execute(f"SELECT community_id FROM {table} WHERE id = ?", (object_id,)).fetchone()
+    return row["community_id"] if row is not None else None
 
 
 def _validate_permission_type(object_type: str, permissions: IntFlag) -> type[IntFlag]:
@@ -268,15 +326,20 @@ def _describe(enum_type: type[IntFlag], mask: int) -> str:
     return ",".join(names) if names else "none"
 
 
-def _get_grant_row(db: Database, user_id: int, object_type: str, object_id: int | None) -> sqlite3.Row | None:
+def _get_grant_row(
+    db: Database, user_id: int, object_type: str, object_id: int | None, community_id: int | None = None
+) -> sqlite3.Row | None:
     return db.connection.execute(
-        "SELECT * FROM moderator_grants WHERE user_id = ? AND object_type = ? AND object_id IS ?",
-        (user_id, object_type, object_id),
+        "SELECT * FROM moderator_grants "
+        "WHERE user_id = ? AND object_type = ? AND object_id IS ? AND community_id IS ?",
+        (user_id, object_type, object_id, community_id),
     ).fetchone()
 
 
-def _get_grant(db: Database, user_id: int, object_type: str, object_id: int | None) -> ModeratorGrant | None:
-    row = _get_grant_row(db, user_id, object_type, object_id)
+def _get_grant(
+    db: Database, user_id: int, object_type: str, object_id: int | None, community_id: int | None = None
+) -> ModeratorGrant | None:
+    row = _get_grant_row(db, user_id, object_type, object_id, community_id)
     return _row_to_grant(row) if row is not None else None
 
 
@@ -289,4 +352,5 @@ def _row_to_grant(row: sqlite3.Row) -> ModeratorGrant:
         permissions=row["permissions"],
         granted_by_user_id=row["granted_by_user_id"],
         created_at=row["created_at"],
+        community_id=row["community_id"],
     )

@@ -95,7 +95,7 @@ def test_update_channel_replaces_the_full_state(db, alice):
     updated = update_channel(
         db, channel, name="lobby2", description="new desc", min_level=5, category_id=None,
         pinned=True, hidden=True, members_only=True, allow_member_invites=True,
-        min_age=18, name_requirement="verified", changed_by=alice,
+        min_age=18, name_requirement="verified", community_id=None, changed_by=alice,
     )
     assert updated.name == "lobby2"
     assert updated.description == "new desc"
@@ -117,7 +117,7 @@ def test_update_channel_rejects_a_name_collision(db, alice):
         update_channel(
             db, channel, name="taken", description=None, min_level=0, category_id=None,
             pinned=False, hidden=False, members_only=False, allow_member_invites=False,
-            min_age=None, name_requirement=None, changed_by=alice,
+            min_age=None, name_requirement=None, community_id=None, changed_by=alice,
         )
 
 
@@ -127,7 +127,7 @@ def test_update_channel_rejects_invalid_name_requirement(db, alice):
         update_channel(
             db, channel, name="lobby", description=None, min_level=0, category_id=None,
             pinned=False, hidden=False, members_only=False, allow_member_invites=False,
-            min_age=None, name_requirement="bogus", changed_by=alice,
+            min_age=None, name_requirement="bogus", community_id=None, changed_by=alice,
         )
 
 
