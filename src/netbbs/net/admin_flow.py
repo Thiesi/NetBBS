@@ -56,6 +56,15 @@ from netbbs.chat.categories import delete_category as delete_channel_category
 from netbbs.chat.categories import list_subcategories as list_channel_subcategories
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
+from netbbs.communities import (
+    Community,
+    CommunityError,
+    create_community,
+    delete_community,
+    get_community,
+    list_communities,
+    update_community,
+)
 from netbbs.config import RegistrationMode, get_registration_mode, set_registration_mode
 from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
 from netbbs.files.categories import FileAreaCategory
@@ -80,6 +89,7 @@ from netbbs.moderation.roles import (
     ChannelPermission,
     get_grant,
     grant_permissions,
+    list_grants_for_community,
     revoke_permissions,
 )
 from netbbs.net.picker import pick_item
@@ -897,6 +907,10 @@ async def _content_menu(session: Session, db: Database, actor: User) -> None:
             await session.write_line("")
             await _category_menu(session, db, actor)
             await _draw_content_menu(session)
+        elif choice == "o":
+            await session.write_line("")
+            await _community_menu(session, db, actor)
+            await _draw_content_menu(session)
         elif choice == "g":
             await session.write_line("")
             await _grant_moderator_screen(session, db, actor)
@@ -917,6 +931,7 @@ async def _draw_content_menu(session: Session) -> None:
             menu_key("A", "reas"),
             menu_key("H", "annels"),
             menu_key("C", "ategories"),
+            menu_key("O", "Communities"),
             menu_key("G", "rant moderator"),
             menu_key("R", "evoke moderator"),
             menu_key("B", "ack"),
@@ -938,6 +953,35 @@ async def _read_int(session: Session, *, default: int) -> int | None:
     except ValueError:
         await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return None
+
+
+async def _prompt_optional_int(session: Session, label: str, *, current: int | None) -> tuple[int | None, bool]:
+    """Generic nullable-int prompt -- same "blank = keep, 'none' =
+    clear" shape as `_prompt_min_age` below, factored out separately
+    (rather than having that function delegate here) so its existing
+    "no gate" wording -- already asserted on by
+    tests/test_admin_flow.py and tests/test_board_pagination_ui.py --
+    stays exactly as it is. Used for every nullable-int field
+    introduced by design doc §16's Community inheritance model (round
+    84): boards'/file areas' own `min_read_level`/`min_write_level`
+    (this is the *only* way to ever set one back to `None` -- i.e. opt
+    a resource into inheriting its Community's default -- `_read_int`
+    has no clearing mechanism at all), plus Community's own
+    `default_min_read_level`/`default_min_write_level`. "Clear" is the
+    accurate word in both cases, not "no gate" (a level isn't a gate
+    the way age/name-requirement are)."""
+    shown = current if current is not None else "none"
+    await session.write(f"{label} [{shown}] (blank = keep, 'none' = clear): ")
+    raw = (await session.read_line()).strip()
+    if not raw:
+        return current, True
+    if raw.lower() == "none":
+        return None, True
+    try:
+        return int(raw), True
+    except ValueError:
+        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        return None, False
 
 
 async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
@@ -1022,6 +1066,227 @@ async def _pick_optional_category(session: Session, db: Database, *, list_top_le
     return sub_selected.id if sub_selected is not None else selected.id
 
 
+async def _pick_optional_community(session: Session, db: Database) -> int | None:
+    """Optional Community picker shared by board/channel/area create+
+    edit screens (design doc §16, round 84) -- mirrors
+    `_pick_optional_category` exactly, but flat (a Community has no
+    two-level sub-structure the way categories do). Prompted *before*
+    the existing category prompt at every call site -- Community is the
+    outer layer, chosen first. Returns the chosen Community's id, or
+    `None` if declined or none exist yet."""
+    await session.write("Assign a Community? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return None
+    selected = await pick_item(
+        session, list_communities(db),
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        title="Community",
+        empty_message="No Communities exist yet.",
+    )
+    return selected.id if selected is not None else None
+
+
+def _community_label(db: Database, community_id: int | None) -> str:
+    """Detail-screen display helper -- `(none)` for `community_id is
+    None`, else the Community's own name (sanitized, same as every
+    other user-controlled string shown on these detail screens)."""
+    community = get_community(db, community_id)
+    return sanitize_text(community.name) if community is not None else "(none)"
+
+
+# -- Communities (design doc §16, rounds 71/83/84/86) ------------------
+
+
+async def _community_menu(session: Session, db: Database, actor: User) -> None:
+    await _draw_community_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _create_community_screen(session, db, actor)
+            await _draw_community_menu(session)
+        elif choice == "l":
+            await session.write_line("")
+            await _list_communities_screen(session, db, actor)
+            await _draw_community_menu(session)
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _draw_community_menu(session: Session) -> None:
+    header = colored("Communities:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join([menu_key("C", "reate"), menu_key("L", "ist"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+async def _create_community_screen(session: Session, db: Database, actor: User) -> None:
+    """Create stays lean, Edit carries the rest (design doc §16, round
+    84) -- same split boards already use. Only name/description are
+    prompted here; `hidden` and every `default_*` field start at their
+    own defaults (visible, no gate) and are set via `_edit_community_screen`
+    afterward if the SysOp wants them."""
+    await session.write_line(colored("\r\nCreate Community", fg_color=HEADER_COLOR, bold=True))
+    await session.write("Name: ")
+    name = (await session.read_line()).strip()
+    if not name:
+        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
+        return
+    await session.write("Description (optional): ")
+    description = (await session.read_line()).strip() or None
+
+    try:
+        community = create_community(db, name, description=description, creator=actor)
+    except CommunityError as exc:
+        await session.write_line(colored(f"Could not create Community: {exc}", fg_color=MUTED_COLOR))
+        return
+    await session.write_line(f"Created Community {community.name!r}.")
+    await _community_detail_screen(session, db, actor, community)
+
+
+async def _list_communities_screen(session: Session, db: Database, actor: User) -> None:
+    communities = list_communities(db)
+    selected = await pick_item(
+        session, communities,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        description_of=_community_description,
+        title="Communities",
+        empty_message="No Communities yet.",
+    )
+    if selected is not None:
+        await _community_detail_screen(session, db, actor, selected)
+
+
+def _community_description(community: Community) -> str:
+    return "hidden" if community.hidden else "listed"
+
+
+async def _community_detail_screen(session: Session, db: Database, actor: User, community: Community) -> None:
+    """No "pending" equivalent here, unlike boards/areas -- a Community
+    holds no content of its own (design doc §16, round 84)."""
+    await _draw_community_detail(session, community)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "e":
+            await session.write_line("")
+            updated = await _edit_community_screen(session, db, actor, community)
+            if updated is not None:
+                community = updated
+            await _draw_community_detail(session, community)
+        elif choice == "d":
+            await session.write_line("")
+            deleted = await _delete_community_screen(session, db, actor, community)
+            if deleted:
+                return
+            await _draw_community_detail(session, community)
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _draw_community_detail(session: Session, community: Community) -> None:
+    header = colored(sanitize_text(community.name), fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(f"\r\n{header}")
+    await session.write_line(
+        f"Description: {sanitize_text(community.description) if community.description else '(none)'}"
+    )
+    await session.write_line(f"Hidden: {'yes' if community.hidden else 'no'}")
+    read_default = community.default_min_read_level if community.default_min_read_level is not None else "none"
+    write_default = community.default_min_write_level if community.default_min_write_level is not None else "none"
+    await session.write_line(f"Default read level: {read_default}  Default write level: {write_default}")
+    await session.write_line(
+        f"Default minimum age: "
+        f"{community.default_min_age if community.default_min_age is not None else 'none'}  "
+        f"Default name requirement: {community.default_name_requirement or 'none'}"
+    )
+    options = "  ".join([menu_key("E", "dit"), menu_key("D", "elete"), menu_key("B", "ack")])
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _edit_community_screen(
+    session: Session, db: Database, actor: User, community: Community
+) -> Community | None:
+    await session.write(f"Name [{community.name}]: ")
+    name = (await session.read_line()).strip() or community.name
+    await session.write(f"Description [{community.description or '(none)'}]: ")
+    description = (await session.read_line()).strip() or community.description
+    await session.write(f"Hidden? [{'y' if community.hidden else 'N'}]: ")
+    hidden_answer = (await session.read_key()).lower()
+    await session.write_line("")
+    hidden = hidden_answer == "y" if hidden_answer in ("y", "n") else community.hidden
+
+    default_min_read_level, ok = await _prompt_optional_int(
+        session, "Default minimum read level", current=community.default_min_read_level
+    )
+    if not ok:
+        return None
+    default_min_write_level, ok = await _prompt_optional_int(
+        session, "Default minimum write level", current=community.default_min_write_level
+    )
+    if not ok:
+        return None
+    default_min_age, ok = await _prompt_min_age(session, current=community.default_min_age)
+    if not ok:
+        return None
+    default_name_requirement, ok = await _prompt_name_requirement(
+        session, current=community.default_name_requirement
+    )
+    if not ok:
+        return None
+
+    try:
+        updated = update_community(
+            db, community, name=name, description=description, hidden=hidden,
+            default_min_read_level=default_min_read_level, default_min_write_level=default_min_write_level,
+            default_min_age=default_min_age, default_name_requirement=default_name_requirement,
+            changed_by=actor,
+        )
+    except CommunityError as exc:
+        await session.write_line(colored(f"Could not update Community: {exc}", fg_color=MUTED_COLOR))
+        return None
+    await session.write_line(f"Updated {updated.name!r}.")
+    return updated
+
+
+async def _delete_community_screen(session: Session, db: Database, actor: User, community: Community) -> bool:
+    """Shows the blast radius before committing (design doc §16, round
+    84's exact confirmation wording): how many boards/channels/areas
+    will revert to Uncategorized, and how many Community-blanket
+    moderator grants will be revoked outright."""
+    board_count = sum(1 for b in list_boards(db) if b.community_id == community.id)
+    channel_count = sum(1 for c in list_channels(db) if c.community_id == community.id)
+    area_count = sum(1 for a in list_file_areas(db) if a.community_id == community.id)
+    grant_count = len(list_grants_for_community(db, community.id))
+    await session.write_line(
+        colored(
+            f"\r\nThis Community has {board_count} board(s), {channel_count} channel(s), "
+            f"{area_count} file area(s), and {grant_count} moderator grant(s). Deleting will "
+            "un-categorize its resources and revoke those grants. This cannot be undone.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"Type the Community name {community.name!r} to confirm, or anything else to cancel: ")
+    confirmation = (await session.read_line()).strip()
+    if confirmation != community.name:
+        await session.write_line("Cancelled.")
+        return False
+    delete_community(db, community, deleted_by=actor)
+    await session.write_line(f"{community.name!r} deleted.")
+    return True
+
+
 # -- message boards ----------------------------------------------------
 
 
@@ -1061,14 +1326,13 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
         return
     await session.write("Description (optional): ")
     description = (await session.read_line()).strip() or None
-    await session.write("Minimum read level [0]: ")
-    min_read_level = await _read_int(session, default=0)
-    if min_read_level is None:
+    min_read_level, ok = await _prompt_optional_int(session, "Minimum read level", current=0)
+    if not ok:
         return
-    await session.write("Minimum write level [0]: ")
-    min_write_level = await _read_int(session, default=0)
-    if min_write_level is None:
+    min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=0)
+    if not ok:
         return
+    community_id = await _pick_optional_community(session, db)
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_board_categories,
         list_subcategories=list_board_subcategories, title="Board category",
@@ -1100,7 +1364,8 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
             db, name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_post_age_days=max_post_age_days,
-            min_age=min_age, name_requirement=name_requirement, creator=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=community_id, creator=actor,
         )
     except BoardError as exc:
         await session.write_line(colored(f"Could not create board: {exc}", fg_color=MUTED_COLOR))
@@ -1124,11 +1389,13 @@ async def _list_boards_screen(session: Session, db: Database, actor: User) -> No
 
 def _board_description(board: Board) -> str:
     status = "moderated" if board.moderated else "open"
-    return f"read {board.min_read_level}/write {board.min_write_level}, {status}"
+    read_level = board.min_read_level if board.min_read_level is not None else "inherit"
+    write_level = board.min_write_level if board.min_write_level is not None else "inherit"
+    return f"read {read_level}/write {write_level}, {status}"
 
 
 async def _board_detail_screen(session: Session, db: Database, actor: User, board: Board) -> None:
-    await _draw_board_detail(session, board)
+    await _draw_board_detail(session, db, board)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1140,26 +1407,29 @@ async def _board_detail_screen(session: Session, db: Database, actor: User, boar
             updated = await _edit_board_screen(session, db, actor, board)
             if updated is not None:
                 board = updated
-            await _draw_board_detail(session, board)
+            await _draw_board_detail(session, db, board)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_board_screen(session, db, actor, board)
             if deleted:
                 return
-            await _draw_board_detail(session, board)
+            await _draw_board_detail(session, db, board)
         elif choice == "p":
             await session.write_line("")
             await _pending_posts_screen(session, db, actor, board)
-            await _draw_board_detail(session, board)
+            await _draw_board_detail(session, db, board)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_board_detail(session: Session, board: Board) -> None:
+async def _draw_board_detail(session: Session, db: Database, board: Board) -> None:
     header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
-    await session.write_line(f"Read level: {board.min_read_level}  Write level: {board.min_write_level}")
+    await session.write_line(f"Community: {_community_label(db, board.community_id)}")
+    read_level = board.min_read_level if board.min_read_level is not None else "inherit"
+    write_level = board.min_write_level if board.min_write_level is not None else "inherit"
+    await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
     await session.write_line(
         f"Pinned: {'yes' if board.pinned else 'no'}  Moderated: {'yes' if board.moderated else 'no'}"
     )
@@ -1181,14 +1451,18 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
     name = (await session.read_line()).strip() or board.name
     await session.write(f"Description [{board.description or '(none)'}]: ")
     description = (await session.read_line()).strip() or board.description
-    await session.write(f"Minimum read level [{board.min_read_level}]: ")
-    min_read_level = await _read_int(session, default=board.min_read_level)
-    if min_read_level is None:
+    min_read_level, ok = await _prompt_optional_int(session, "Minimum read level", current=board.min_read_level)
+    if not ok:
         return None
-    await session.write(f"Minimum write level [{board.min_write_level}]: ")
-    min_write_level = await _read_int(session, default=board.min_write_level)
-    if min_write_level is None:
+    min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=board.min_write_level)
+    if not ok:
         return None
+    await session.write("Change Community? [y/N]: ")
+    change_community = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    community_id = board.community_id
+    if change_community:
+        community_id = await _pick_optional_community(session, db)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
@@ -1231,7 +1505,7 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_post_age_days=max_post_age_days,
             min_age=min_age, name_requirement=name_requirement,
-            community_id=board.community_id, changed_by=actor,
+            community_id=community_id, changed_by=actor,
         )
     except BoardError as exc:
         await session.write_line(colored(f"Could not update board: {exc}", fg_color=MUTED_COLOR))
@@ -1427,14 +1701,13 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
         return
     await session.write("Description (optional): ")
     description = (await session.read_line()).strip() or None
-    await session.write("Minimum read level [0]: ")
-    min_read_level = await _read_int(session, default=0)
-    if min_read_level is None:
+    min_read_level, ok = await _prompt_optional_int(session, "Minimum read level", current=0)
+    if not ok:
         return
-    await session.write("Minimum write level [0]: ")
-    min_write_level = await _read_int(session, default=0)
-    if min_write_level is None:
+    min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=0)
+    if not ok:
         return
+    community_id = await _pick_optional_community(session, db)
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_file_categories,
         list_subcategories=list_file_subcategories, title="File-area category",
@@ -1466,7 +1739,8 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
             db, name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_file_age_days=max_file_age_days,
-            min_age=min_age, name_requirement=name_requirement, creator=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=community_id, creator=actor,
         )
     except FileAreaError as exc:
         await session.write_line(colored(f"Could not create file area: {exc}", fg_color=MUTED_COLOR))
@@ -1490,11 +1764,13 @@ async def _list_areas_screen(session: Session, db: Database, actor: User) -> Non
 
 def _area_description(area: FileArea) -> str:
     status = "moderated" if area.moderated else "open"
-    return f"read {area.min_read_level}/write {area.min_write_level}, {status}"
+    read_level = area.min_read_level if area.min_read_level is not None else "inherit"
+    write_level = area.min_write_level if area.min_write_level is not None else "inherit"
+    return f"read {read_level}/write {write_level}, {status}"
 
 
 async def _area_detail_screen(session: Session, db: Database, actor: User, area: FileArea) -> None:
-    await _draw_area_detail(session, area)
+    await _draw_area_detail(session, db, area)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1506,26 +1782,29 @@ async def _area_detail_screen(session: Session, db: Database, actor: User, area:
             updated = await _edit_area_screen(session, db, actor, area)
             if updated is not None:
                 area = updated
-            await _draw_area_detail(session, area)
+            await _draw_area_detail(session, db, area)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_area_screen(session, db, actor, area)
             if deleted:
                 return
-            await _draw_area_detail(session, area)
+            await _draw_area_detail(session, db, area)
         elif choice == "p":
             await session.write_line("")
             await _pending_files_screen(session, db, actor, area)
-            await _draw_area_detail(session, area)
+            await _draw_area_detail(session, db, area)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_area_detail(session: Session, area: FileArea) -> None:
+async def _draw_area_detail(session: Session, db: Database, area: FileArea) -> None:
     header = colored(sanitize_text(area.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(area.description) if area.description else '(none)'}")
-    await session.write_line(f"Read level: {area.min_read_level}  Write level: {area.min_write_level}")
+    await session.write_line(f"Community: {_community_label(db, area.community_id)}")
+    read_level = area.min_read_level if area.min_read_level is not None else "inherit"
+    write_level = area.min_write_level if area.min_write_level is not None else "inherit"
+    await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
     await session.write_line(
         f"Pinned: {'yes' if area.pinned else 'no'}  Moderated: {'yes' if area.moderated else 'no'}"
     )
@@ -1547,14 +1826,18 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
     name = (await session.read_line()).strip() or area.name
     await session.write(f"Description [{area.description or '(none)'}]: ")
     description = (await session.read_line()).strip() or area.description
-    await session.write(f"Minimum read level [{area.min_read_level}]: ")
-    min_read_level = await _read_int(session, default=area.min_read_level)
-    if min_read_level is None:
+    min_read_level, ok = await _prompt_optional_int(session, "Minimum read level", current=area.min_read_level)
+    if not ok:
         return None
-    await session.write(f"Minimum write level [{area.min_write_level}]: ")
-    min_write_level = await _read_int(session, default=area.min_write_level)
-    if min_write_level is None:
+    min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=area.min_write_level)
+    if not ok:
         return None
+    await session.write("Change Community? [y/N]: ")
+    change_community = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    community_id = area.community_id
+    if change_community:
+        community_id = await _pick_optional_community(session, db)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
@@ -1597,7 +1880,7 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_file_age_days=max_file_age_days,
             min_age=min_age, name_requirement=name_requirement,
-            community_id=area.community_id, changed_by=actor,
+            community_id=community_id, changed_by=actor,
         )
     except FileAreaError as exc:
         await session.write_line(colored(f"Could not update file area: {exc}", fg_color=MUTED_COLOR))
@@ -1744,6 +2027,7 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
     min_level = await _read_int(session, default=0)
     if min_level is None:
         return
+    community_id = await _pick_optional_community(session, db)
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_channel_categories,
         list_subcategories=list_channel_subcategories, title="Channel category",
@@ -1774,7 +2058,8 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
             db, name, description=description, min_level=min_level, category_id=category_id,
             pinned=pinned, hidden=hidden, members_only=members_only,
             allow_member_invites=allow_member_invites,
-            min_age=min_age, name_requirement=name_requirement, creator=actor,
+            min_age=min_age, name_requirement=name_requirement,
+            community_id=community_id, creator=actor,
         )
     except ChannelError as exc:
         await session.write_line(colored(f"Could not create channel: {exc}", fg_color=MUTED_COLOR))
@@ -1806,7 +2091,7 @@ def _channel_description(channel: Channel) -> str:
 
 
 async def _channel_detail_screen(session: Session, db: Database, actor: User, channel: Channel) -> None:
-    await _draw_channel_detail(session, channel)
+    await _draw_channel_detail(session, db, channel)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1818,23 +2103,24 @@ async def _channel_detail_screen(session: Session, db: Database, actor: User, ch
             updated = await _edit_channel_screen(session, db, actor, channel)
             if updated is not None:
                 channel = updated
-            await _draw_channel_detail(session, channel)
+            await _draw_channel_detail(session, db, channel)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_channel_screen(session, db, actor, channel)
             if deleted:
                 return
-            await _draw_channel_detail(session, channel)
+            await _draw_channel_detail(session, db, channel)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_channel_detail(session: Session, channel: Channel) -> None:
+async def _draw_channel_detail(session: Session, db: Database, channel: Channel) -> None:
     header = colored(sanitize_text(channel.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(
         f"Description: {sanitize_text(channel.description) if channel.description else '(none)'}"
     )
+    await session.write_line(f"Community: {_community_label(db, channel.community_id)}")
     await session.write_line(f"Minimum level: {channel.min_level}")
     await session.write_line(
         f"Pinned: {'yes' if channel.pinned else 'no'}  Hidden: {'yes' if channel.hidden else 'no'}"
@@ -1861,6 +2147,12 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
     min_level = await _read_int(session, default=channel.min_level)
     if min_level is None:
         return None
+    await session.write("Change Community? [y/N]: ")
+    change_community = (await session.read_key()).lower() == "y"
+    await session.write_line("")
+    community_id = channel.community_id
+    if change_community:
+        community_id = await _pick_optional_community(session, db)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
@@ -1901,7 +2193,7 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
             category_id=category_id, pinned=pinned, hidden=hidden, members_only=members_only,
             allow_member_invites=allow_member_invites,
             min_age=min_age, name_requirement=name_requirement,
-            community_id=channel.community_id, changed_by=actor,
+            community_id=community_id, changed_by=actor,
         )
     except ChannelError as exc:
         await session.write_line(colored(f"Could not update channel: {exc}", fg_color=MUTED_COLOR))
@@ -2087,11 +2379,17 @@ async def _list_categories_screen(
 # -- moderator grants -----------------------------------------------------
 
 
-async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, int | None, str] | None:
-    """Returns `(object_type, object_id, human label)`, or `None` if
-    cancelled. `object_id=None` means a local-blanket grant (design doc
-    -- board/area management round; channel scope added in the channel
-    management round)."""
+async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, int | None, str, int | None] | None:
+    """Returns `(object_type, object_id, human label, community_id)`,
+    or `None` if cancelled. `object_id=None` means a blanket grant
+    (design doc -- board/area management round; channel scope added in
+    the channel management round) -- `community_id` further narrows a
+    blanket grant to one Community's membership (design doc §16, round
+    84's Community-blanket tier) instead of the whole node;
+    `community_id` is always `None` for a per-object grant (`[B]oard`/
+    `[A]rea`/`[H]annel`), since a specific object's own `community_id`
+    already answers that question without needing it duplicated on the
+    grant."""
     await session.write(
         "Scope: [B]oard, [A]rea, [H]annel, blanket across all boards [X], "
         "blanket across all areas [Y], blanket across all channels [Z]: "
@@ -2106,7 +2404,7 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         )
         if board is None:
             return None
-        return "board", board.id, f"board {board.name!r}"
+        return "board", board.id, f"board {board.name!r}", None
     elif scope_key == "a":
         area = await pick_item(
             session, list_file_areas(db, order_by="alphabetical"),
@@ -2115,7 +2413,7 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         )
         if area is None:
             return None
-        return "file_area", area.id, f"file area {area.name!r}"
+        return "file_area", area.id, f"file area {area.name!r}", None
     elif scope_key == "h":
         channel = await pick_item(
             session, list_channels(db),
@@ -2124,16 +2422,44 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         )
         if channel is None:
             return None
-        return "channel", channel.id, f"channel {channel.name!r}"
+        return "channel", channel.id, f"channel {channel.name!r}", None
     elif scope_key == "x":
-        return "board", None, "all boards (blanket)"
+        object_type, label = "board", "all boards (blanket)"
     elif scope_key == "y":
-        return "file_area", None, "all file areas (blanket)"
+        object_type, label = "file_area", "all file areas (blanket)"
     elif scope_key == "z":
-        return "channel", None, "all channels (blanket)"
+        object_type, label = "channel", "all channels (blanket)"
     else:
         await session.write_line(colored("Not a valid scope -- cancelled.", fg_color=MUTED_COLOR))
         return None
+
+    community_id = await _pick_optional_community_blanket_scope(session, db)
+    if community_id is not None:
+        community = get_community(db, community_id)
+        label = f"{label} scoped to Community {community.name!r}"
+    return object_type, None, label, community_id
+
+
+async def _pick_optional_community_blanket_scope(session: Session, db: Database) -> int | None:
+    """The blanket-grant-scoping follow-up (design doc §16, round 84):
+    'Scope this blanket grant to one Community instead of the whole
+    node?' -- extends the existing X/Y/Z blanket keys rather than
+    adding new ones, per that round's own decision. Returns the chosen
+    Community's id, or `None` for an ordinary node-wide (local-)blanket
+    grant."""
+    await session.write("Scope this blanket grant to one Community instead of the whole node? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return None
+    selected = await pick_item(
+        session, list_communities(db),
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        title="Community",
+        empty_message="No Communities exist yet.",
+    )
+    return selected.id if selected is not None else None
 
 
 async def _grant_moderator_screen(session: Session, db: Database, actor: User) -> None:
@@ -2147,7 +2473,7 @@ async def _grant_moderator_screen(session: Session, db: Database, actor: User) -
     scope = await _pick_moderator_scope(session, db)
     if scope is None:
         return
-    object_type, object_id, label = scope
+    object_type, object_id, label, community_id = scope
 
     if object_type == "channel":
         await session.write("Preset: [F]ull moderator (edit+moderate+manage members), [M]oderator only: ")
@@ -2184,7 +2510,8 @@ async def _grant_moderator_screen(session: Session, db: Database, actor: User) -
         return
 
     grant_permissions(
-        db, target, object_type=object_type, object_id=object_id, permissions=permissions, granted_by=actor
+        db, target, object_type=object_type, object_id=object_id, permissions=permissions,
+        granted_by=actor, community_id=community_id,
     )
     await session.write_line(f"Granted {preset_label} on {label} to {target.username!r}.")
 
@@ -2200,9 +2527,9 @@ async def _revoke_moderator_screen(session: Session, db: Database, actor: User) 
     scope = await _pick_moderator_scope(session, db)
     if scope is None:
         return
-    object_type, object_id, label = scope
+    object_type, object_id, label, community_id = scope
 
-    grant = get_grant(db, target, object_type=object_type, object_id=object_id)
+    grant = get_grant(db, target, object_type=object_type, object_id=object_id, community_id=community_id)
     if grant is None:
         await session.write_line(colored(f"{target.username!r} has no grant on {label}.", fg_color=MUTED_COLOR))
         return
@@ -2217,6 +2544,6 @@ async def _revoke_moderator_screen(session: Session, db: Database, actor: User) 
     permission_enum = ChannelPermission if object_type == "channel" else BoardPermission
     revoke_permissions(
         db, target, object_type=object_type, object_id=object_id,
-        permissions=permission_enum(grant.permissions), revoked_by=actor,
+        permissions=permission_enum(grant.permissions), revoked_by=actor, community_id=community_id,
     )
     await session.write_line(f"Revoked {target.username!r}'s grant on {label}.")

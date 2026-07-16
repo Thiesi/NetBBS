@@ -296,6 +296,18 @@ def list_grants_for_object(db: Database, *, object_type: str, object_id: int) ->
     return [_row_to_grant(row) for row in rows]
 
 
+def list_grants_for_community(db: Database, community_id: int) -> list[ModeratorGrant]:
+    """Every Community-blanket grant scoped to this Community, across
+    every user and object_type -- used by
+    `netbbs.communities.delete_community`'s callers to show the blast
+    radius (design doc §16, round 84's confirmation prompt: "...and M
+    moderator grant(s)...") before deleting."""
+    rows = db.connection.execute(
+        "SELECT * FROM moderator_grants WHERE community_id = ?", (community_id,)
+    ).fetchall()
+    return [_row_to_grant(row) for row in rows]
+
+
 def _resolve_object_community_id(db: Database, object_type: str, object_id: int) -> int | None:
     """The Community `object_id` (a board/channel/file_area row)
     currently belongs to, or `None` if it belongs to none / no longer

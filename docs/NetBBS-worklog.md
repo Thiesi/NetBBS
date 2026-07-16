@@ -6618,3 +6618,102 @@ still working normally alongside an unrelated Community-blanket grant).
 **Testing**: full suite re-run: **1852 passed, 4 skipped** (up from
 round 104's 1816 -- 36 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 106 (Communities -- admin UI implemented)
+
+Second implementation slice of design doc §16, following round 105's
+core-only pass with the admin-side UI: create/edit/delete/assignment
+screens, plus blanket-grant Community scoping. Main-menu restructuring
+(`[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`) is still a
+separate, subsequent pass.
+
+**`src/netbbs/net/admin_flow.py` -- new `[O]Communities` content-menu
+entry** (`O` is the next free letter in "Communities" after Categories
+claims `C`, per round 84): `_community_menu`/`_draw_community_menu`
+(`[C]reate [L]ist [B]ack`), `_create_community_screen` (lean -- name/
+description only, auto-navigates into the detail screen once created),
+`_list_communities_screen`/`_community_detail_screen`/
+`_draw_community_detail` (`[E]dit [D]elete [B]ack`, no "pending"
+option -- a Community holds no content of its own), `_edit_community_screen`
+(full-state replace, all four `default_*` fields plus `hidden`),
+`_delete_community_screen` (blast-radius confirmation: counts boards/
+channels/file areas currently in the Community plus Community-blanket
+grants scoped to it, via a new `list_grants_for_community` in
+`netbbs.moderation.roles`, before requiring the Community's name typed
+back to confirm -- mirrors `_delete_board_screen`'s exact shape).
+
+**Assignment wired into every board/channel/area create+edit screen**:
+new `_pick_optional_community` helper (mirrors `_pick_optional_category`
+exactly, but flat -- no two-level sub-structure) prompted *before* the
+existing category prompt at every one of the six call sites (Community
+is the outer layer, chosen first, per round 84). Edit screens gained a
+"Change Community? [y/N]" prompt matching "Change category?"'s existing
+shape; declining keeps the resource's current `community_id` unchanged.
+`_draw_board_detail`/`_draw_area_detail`/`_draw_channel_detail` (and
+the board/area picker-list description helpers) now show which
+Community a resource belongs to, via a new `_community_label` helper.
+
+**Blanket-grant Community scoping**: `_pick_moderator_scope`'s return
+type grew a fourth element (`community_id`); picking `[X]`/`[Y]`/`[Z]`
+(blanket across all boards/areas/channels) now asks one new follow-up,
+`_pick_optional_community_blanket_scope` -- "Scope this blanket grant
+to one Community instead of the whole node?" -- extending the existing
+X/Y/Z keys rather than adding new ones, exactly as round 84 specified.
+`_grant_moderator_screen`/`_revoke_moderator_screen` thread
+`community_id` through to `grant_permissions`/`revoke_permissions`/
+`get_grant`.
+
+**A real gap caught and fixed, not just a wording nit**: round 105 made
+`min_read_level`/`min_write_level` nullable so a board/area *could*
+inherit a Community's default, but the existing `_read_int` helper
+backing those fields' create/edit prompts has no "clear to None"
+mechanism at all -- only blank-keeps-current or an-explicit-int. That
+meant the admin UI, as first wired up this round, had **no way for a
+SysOp to ever actually opt a resource into inheriting** -- the entire
+point of round 84's nullable-levels correction would have silently
+gone unreachable through the UI. Caught by manually tracing the
+create/edit flows against the design doc's own stated intent before
+running any tests, not by a failing test. Fixed with a new
+`_prompt_optional_int(session, label, *, current)` helper -- same
+"blank = keep, 'none' = clear" contract `_prompt_min_age` already has,
+factored out separately (rather than having `_prompt_min_age` delegate
+to it) specifically so that function's existing "no gate" wording --
+already asserted on by two existing test files -- stays exactly as it
+is; `_prompt_optional_int` uses the more accurate "clear" wording for a
+level default, which isn't a gate the way age/name-requirement are.
+Now backs `min_read_level`/`min_write_level` at both create and edit
+time for boards and file areas, and Community's own
+`default_min_read_level`/`default_min_write_level`.
+
+**A second bug caught the same way, in the test-writing pass itself**:
+`_create_community_screen` auto-navigates into the detail screen once
+a Community is created (unlike board/area/channel creation, which
+returns directly to their own menu) -- an initial draft of
+`test_create_community_flow`'s scripted key sequence was traced by
+hand against the actual dispatch nesting and came up one `"b"` short
+(needing to exit the detail screen *in addition to* the community
+menu, content menu, and admin menu, four levels total rather than
+three) before it was ever run. Fixed before the first test run, not
+discovered by a failure.
+
+**Tests**: 4 new -- `tests/test_admin_flow.py`
+(`test_create_community_flow`: create-Community flow landing on its
+detail screen; `test_edit_and_delete_community_flow`: full default-
+fields round trip through edit, then delete; `test_create_board_assigns_a_community`:
+board creation assigning a Community via the new picker;
+`test_grant_blanket_scoped_to_a_community`: a blanket grant scoped to
+one Community actually gates `has_permission` for a board in it but
+not one outside it). Plus 7 previously-passing tests needed their
+scripted input sequences updated (not new tests, just new keys
+inserted at the right point) for the new "Assign/Change a Community?"
+and "Scope this blanket grant to one Community?" prompts
+(`test_create_board_flow`, `test_edit_and_delete_board_flow`,
+`test_create_and_delete_area_flow`, `test_grant_blanket_across_all_boards`,
+`test_create_channel_flow`, `test_edit_and_delete_channel_flow`,
+`test_grant_blanket_across_all_channels` -- same "every new prompt
+breaks existing scripted tests" pattern this project has hit
+repeatedly since round 100, fixed the same way each time: trace the
+exact new prompt sequence, insert the right scripted key).
+
+**Testing**: full suite re-run: **1856 passed, 4 skipped** (up from
+round 105's 1852 -- 4 net new tests, no regressions elsewhere).
+

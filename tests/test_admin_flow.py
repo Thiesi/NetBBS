@@ -538,6 +538,7 @@ def test_create_board_flow(db, sysop):
     inputs = [
         "m", "m", "c",
         "General", "A general board", "0", "0",
+        "n",  # assign a Community? no
         "n",  # assign category? no
         "n",  # pinned? no
         "y",  # moderated? yes
@@ -563,13 +564,14 @@ def test_edit_and_delete_board_flow(db, sysop):
 
     # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
     # read level(keep), blank write level(keep), n(don't change
-    # category), y(pin), n(mod), 'none'(unlimited), blank(keep min age),
-    # blank(keep name requirement) -> back to detail -> d(elete) ->
-    # retype new name -> back x3
+    # Community), n(don't change category), y(pin), n(mod),
+    # 'none'(unlimited), blank(keep min age), blank(keep name
+    # requirement) -> back to detail -> d(elete) -> retype new name ->
+    # back x3
     inputs = [
         "m", "m", "l", "0", "1", "e",
         "General2", "", "", "",
-        "n", "y", "n", "none",
+        "n", "n", "y", "n", "none",
         "", "",
         "d", "General2",
         "b", "b", "b",
@@ -604,6 +606,7 @@ def test_create_and_delete_area_flow(db, sysop):
     inputs = [
         "m", "a", "c",
         "Docs", "Documents area", "0", "0",
+        "n",  # assign a Community? no
         "n", "n", "n", "",
         "", "",  # min age, name requirement -- both blank, no gate
         "l", "0", "1", "d", "Docs",
@@ -737,8 +740,9 @@ def test_grant_blanket_across_all_boards(db, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "General", creator=sysop)
 
-    # scope 'x' = blanket across all boards, no board picker needed.
-    inputs = ["m", "g", "0", "1", "x", "f", "y", "b", "b"]
+    # scope 'x' = blanket across all boards, no board picker needed;
+    # 'n' declines scoping the blanket grant to one Community.
+    inputs = ["m", "g", "0", "1", "x", "n", "f", "y", "b", "b"]
     session = FakeSession(inputs)
     _run(session, db, sysop)
     assert "Granted" in _written_text(session)
@@ -752,6 +756,7 @@ def test_create_channel_flow(db, sysop):
     inputs = [
         "m", "h", "c",
         "Lobby", "A general channel", "0",
+        "n",  # assign a Community? no
         "n",  # assign category? no
         "n",  # pinned? no
         "n",  # hidden? no
@@ -774,14 +779,14 @@ def test_edit_and_delete_channel_flow(db, sysop):
     create_channel(db, "Lobby", creator=sysop)
 
     # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
-    # min level(keep), n(don't change category), y(pin), n(hidden),
-    # n(members-only), n(allow invites), blank(min age), blank(name
-    # requirement) -> back to detail -> d(elete) -> retype new name ->
-    # back x3
+    # min level(keep), n(don't change Community), n(don't change
+    # category), y(pin), n(hidden), n(members-only), n(allow invites),
+    # blank(min age), blank(name requirement) -> back to detail ->
+    # d(elete) -> retype new name -> back x3
     inputs = [
         "m", "h", "l", "0", "1", "e",
         "Lobby2", "", "",
-        "n", "y", "n", "n", "n",
+        "n", "n", "y", "n", "n", "n",
         "", "",
         "d", "Lobby2",
         "b", "b", "b",
@@ -845,13 +850,102 @@ def test_grant_blanket_across_all_channels(db, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    # scope 'z' = blanket across all channels, no channel picker needed.
-    inputs = ["m", "g", "0", "1", "z", "f", "y", "b", "b"]
+    # scope 'z' = blanket across all channels, no channel picker needed;
+    # 'n' declines scoping the blanket grant to one Community.
+    inputs = ["m", "g", "0", "1", "z", "n", "f", "y", "b", "b"]
     session = FakeSession(inputs)
     _run(session, db, sysop)
     assert "Granted" in _written_text(session)
     assert has_permission(
         db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MANAGE_MEMBERS
+    )
+
+
+# -- Communities (design doc §16, rounds 71/83/84/86) ----------------------
+
+
+def test_create_community_flow(db, sysop):
+    from netbbs.communities import list_communities
+
+    # content menu -> Communities -> create -> name, description ->
+    # lands on detail screen (create auto-navigates there, unlike board
+    # create) -> back out of detail -> back to community menu -> back x2
+    inputs = ["m", "o", "c", "Vintage Computing", "Old iron", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    communities = list_communities(db)
+    assert [c.name for c in communities] == ["Vintage Computing"]
+    assert "Created Community 'Vintage Computing'." in _written_text(session)
+
+
+def test_edit_and_delete_community_flow(db, sysop):
+    from netbbs.communities import create_community, list_communities
+
+    create_community(db, "Politics", creator=sysop)
+
+    # content menu -> Communities -> list -> pick(01) -> e(dit): keep
+    # name/desc, hidden=y, default read/write level blank(keep=None),
+    # default min age blank(keep=None), default name requirement
+    # blank(keep=None) -> back to detail -> d(elete) -> retype name ->
+    # deletion returns straight up to the community menu (redraws) ->
+    # back x3 (community menu, content menu, admin menu)
+    inputs = [
+        "m", "o", "l", "0", "1", "e",
+        "", "", "y", "", "", "", "",
+        "d", "Politics",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    text = _written_text(session)
+    assert "Updated 'Politics'" in text
+    assert "'Politics' deleted." in text
+    assert list_communities(db) == []
+
+
+def test_create_board_assigns_a_community(db, sysop):
+    from netbbs.boards.boards import list_boards
+    from netbbs.communities import create_community
+
+    community = create_community(db, "Vintage Computing", creator=sysop)
+
+    inputs = [
+        "m", "m", "c",
+        "Amiga", "Old computers", "0", "0",
+        "y", "0", "1",  # assign a Community? yes -> pick #01
+        "n",  # assign category? no
+        "n", "n", "", "", "",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    board = next(b for b in list_boards(db) if b.name == "Amiga")
+    assert board.community_id == community.id
+
+
+def test_grant_blanket_scoped_to_a_community(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.communities import create_community
+    from netbbs.moderation.roles import BoardPermission, has_permission
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    community = create_community(db, "Politics", creator=sysop)
+    board = create_board(db, "Elections", community_id=community.id, creator=sysop)
+    other_board = create_board(db, "General", creator=sysop)  # not in the Community
+
+    # scope 'x' = blanket across all boards, then 'y' to scope it to one
+    # Community, pick #01 (the only one).
+    inputs = ["m", "g", "0", "1", "x", "y", "0", "1", "f", "y", "b", "b"]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    assert "Granted" in _written_text(session)
+    assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)
+    assert not has_permission(
+        db, alice, object_type="board", object_id=other_board.id, permission=BoardPermission.DELETE
     )
 
 

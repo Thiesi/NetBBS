@@ -1501,20 +1501,34 @@ first slice): the data model and core logic are built and tested** --
 table; nullable `community_id` on boards/channels/file areas; boards'/
 file areas' `min_read_level`/`min_write_level` now nullable per round
 84's correction) and the new Community-blanket moderator-grant tier in
-`netbbs.moderation.roles`, 36 new tests. **Not yet built**: any UI at
-all -- no admin-side Community create/edit/delete/assignment screens,
-no main-menu `[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`
-restructuring, no category leak-prevention filtering, and no call site
-(board browsing, posting, channel entry, file areas) yet resolves
-levels/age/name-requirement through a Community -- `get_effective_*`
-exist but nothing calls them yet. See the round 105 worklog entry for
-the full writeup, including the one scope note worth flagging: this
-implementation deliberately does *not* give `channels.min_level` a
-Community-inheritable default (`default_min_level`) -- the design
-doc's own round 84 Community edit-screen spec names exactly four
-inheritable fields, none of them channel-level-shaped, so extending
-the model to a fifth field it never specified would have been scope
-creep rather than implementation of what was agreed.
+`netbbs.moderation.roles`, 36 new tests. **Round 106 (second slice):
+admin-side UI built** -- the `[O]Communities` create/list/edit/delete
+screens (mirroring `_board_menu`/`_board_detail_screen` exactly, per
+round 84's own spec), `_pick_optional_community` wired into board/
+channel/area create+edit (prompted before the existing category
+prompt), the blanket-grant screens' new Community-scoping follow-up
+(extending the existing X/Y/Z keys, not new ones), and the delete
+confirmation's blast-radius message. A real gap was caught and fixed
+in the same round: `min_read_level`/`min_write_level` becoming nullable
+in round 105 was necessary but not sufficient -- the existing `_read_int`
+helper had no way to ever set a value back to `None` (i.e. actually opt
+a board/area into inheriting a Community's default), so a new
+`_prompt_optional_int` helper (same "blank = keep, 'none' = clear"
+shape `_prompt_min_age` already uses) now backs those two fields at
+both create and edit time. 15 new tests. **Not yet built**: the
+main-menu `[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`
+restructuring, category leak-prevention filtering, and no board/chat/
+file-area call site yet actually resolves levels/age/name-requirement
+through a Community -- `get_effective_*` exist and are now assignable
+via the admin UI, but nothing reads them back yet. See the round 105/
+106 worklog entries for the full writeups, including the one scope
+note worth flagging: this implementation deliberately does *not* give
+`channels.min_level` a Community-inheritable default
+(`default_min_level`) -- the design doc's own round 84 Community
+edit-screen spec names exactly four inheritable fields, none of them
+channel-level-shaped, so extending the model to a fifth field it never
+specified would have been scope creep rather than implementation of
+what was agreed.
 
 **The idea:** users navigate NetBBS by topic first, not by resource
 type first. Instead of a main menu offering "[M]essage Boards /
