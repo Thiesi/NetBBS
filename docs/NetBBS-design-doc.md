@@ -76,27 +76,105 @@ implementation and bugfix history, see
 
 ## 5. Identity
 
-- **Cryptographic keypairs** for both **nodes** and **individual users** —
-  not hierarchical (no FidoNet-style zone:net/node addressing), since
-  routing happens dynamically based on live Link membership rather than a
-  fixed topology.
+- **Cryptographic keypairs** — **mandatory for nodes**, **optional for
+  users** (see the key-lifecycle model below, round 89 — this asymmetry
+  is deliberate, not an oversight: node keys underwrite network-wide
+  provenance, user keys don't). Not hierarchical (no FidoNet-style
+  zone:net/node addressing), since routing happens dynamically based on
+  live Link membership rather than a fixed topology.
 - **Addressing:** Matrix-federation-style human-facing addresses
   (`user@node-fingerprint`), but using a pubkey fingerprint instead of a DNS
   domain for the node part. This avoids DNS as a single point of
   failure/censorship (domains can be seized; a pubkey can't be revoked by
   anyone but its owner) while keeping addresses legible.
-- **User login/auth:** both supported — traditional password auth as a
-  simple/fallback option, and keypair-based (passwordless) auth available
-  for those who want it.
+- **User login/auth:** both supported — traditional password auth as the
+  **default, zero-cryptography-exposure path**, and keypair-based
+  (passwordless) auth available as an **opt-in** for users who already
+  have a keypair/agent set up for other reasons (SSH, etc.) and want to
+  reuse it. See round 89 for why this is the recommended default rather
+  than a secondary option.
+
+**Key lifecycle (normative, round 89 — resolves issue #51's core design
+shape and the target-audience question that made it hard to answer;
+exact transition-record wire format remains #11/Phase 3 protocol work).**
+Driven by a simple observation: NetBBS's node operators and its ordinary
+users are different audiences with very different cryptographic
+competence and very different stakes if a key is mishandled. Treating
+them identically — the mistake the original round 87 draft of this
+section made — either over-burdens ordinary users or under-protects
+nodes. Three tiers, matched to those different stakes:
+
+- **Password-only users (the default, and expected to remain the vast
+  majority): no personal keypair at all.** Exactly the BBS login
+  experience that's existed since dial-up — a username and a password,
+  nothing to generate, back up, rotate, or lose. On NetBBS Link, such a
+  user is represented as an **opaque, node-vouched local ID** (per
+  issue #11's own suggestion for password-only-author identity): their
+  content carries their *home node's* signature, not a signature of
+  their own. Key rotation, revocation, and recovery are consequently not
+  concepts that apply to this tier at all — they're entirely the node's
+  problem (see the node tier, below), invisible to the user, the same
+  way nobody browsing HTTPS has ever had to think about a server's
+  certificate rotation.
+- **Opt-in personal user keypair, for users who already run their own
+  key/agent for other reasons and want passwordless login: a single
+  key, no root/operational split.** The stakes don't justify more
+  structure — a compromised personal key costs one person their own
+  session and reputation, not the network's provenance chain. No
+  bespoke recovery mechanism is built for this tier either: losing the
+  key just demotes that identity back to new-arrival status under §6's
+  existing probation/vouching model, exactly like any newcomer — reusing
+  a mechanism that already exists for a different reason rather than
+  inventing key-recovery infrastructure.
+- **Node keys (mandatory, SysOp-operated): a root key plus two
+  purpose-specific operational keys — signing and transport.** A node
+  key underwrites every post, board, and moderator grant it originates,
+  so the stakes here are the ones that justify real structure: a
+  long-lived **root key**, whose fingerprint is the node's stable
+  identity for as long as the node exists, delegates to **operational
+  keys** via signed transition records — one record either authorizes a
+  new operational key (rotation) or marks one revoked (compromise
+  response), and any node can verify a signature by walking the
+  transition chain back to the root, so historical signatures stay
+  verifiable across rotations. Splitting **signing** (content/events)
+  from **transport** (the Noise static key, §11) directly answers the
+  reuse risk issue #51 flagged, without going further than two keys —
+  nothing today needs per-device keys or a separate recovery key, and
+  both are cheap to add later via the same transition-record mechanism
+  if a real need appears. **Root-key loss or compromise has no
+  cryptographic recovery** — stated plainly rather than engineered
+  around, the same no-free-lunch stance already taken for decentralized
+  identity in §6; a future social/M-of-N recovery scheme is a flagged
+  extension point (same treatment as §6's jurisdiction-bound authority
+  keys), not designed now because nothing requires it yet.
+  **UX, deliberately unceremonious:** root and operational keys both
+  auto-generate silently at first node bootstrap — no manual key
+  ceremony to get running. Rotation is a single guided admin-menu/CLI
+  action that handles the transition-record bookkeeping for the SysOp.
+  Root-key custody folds into #60's ordinary backup/restore story
+  (back it up like anything else critical) rather than requiring
+  separate offline/HSM handling — a SysOp who wants stronger custody
+  can pursue it, but nothing in NetBBS assumes they will, matching the
+  actual competence floor of a hobbyist self-hoster rather than a
+  professional PKI operator.
+
+**Explicitly deferred, not decided now:** the exact transition-record
+wire/signature format (#11 owns this, as part of the canonical event
+envelope, once Phase 3's semantic model is being written); multi-device/
+multiple-keys-per-user for the opt-in user tier; and social/M-of-N root-
+key recovery for nodes. None of these are needed for the shape above to
+be sound — they're refinements to add later if a real need for them
+appears, following the same transition-record mechanism rather than a
+new one.
 
 **Account lifecycle (normative section, added round 87 — consolidates
 standing behavior that was previously only recoverable by reading
 sign-off notes in order; resolves issue #62's point on this).** This
-section covers *account*-level lifecycle only. Rotation, revocation,
-recovery, and subordinate-key semantics for the underlying **cryptographic
-keys** are a separate, still-open concern tracked in issue #51 — see the
-round 87 sign-off note for why those two are deliberately kept apart
-(account state is settled; key-lifecycle semantics are not).
+section covers *account*-level lifecycle only — level, disable/delete,
+registration. The key-lifecycle model above (round 89) now covers most
+of issue #51's design shape for the underlying **cryptographic keys**;
+what remains genuinely open there is the exact wire format (#11) and the
+deferred refinements just listed.
 
 - **Creation (corrected round 87 follow-up — the original text here
   conflated two different settings; see the round 87 sign-off note):**
@@ -324,8 +402,13 @@ Phase 5 carries typed chat events (`message`, `action`, `private`, presence and 
   format may reasonably use signed JSON metadata plus a raw bounded HTTP
   body rather than base64-encoding large chunks into JSON — left for
   Phase 3 protocol work, per #11.)
-- **Real-time chat** (§8): **Noise Protocol Framework**, using the same
-  keypairs as Noise static keys for mutual authentication. A persistent,
+- **Real-time chat** (§8): **Noise Protocol Framework**, using the node's
+  dedicated **transport key** (§5, round 89) as its Noise static key for
+  mutual authentication — **not** the same key used for content/event
+  signing. Originally specified as key reuse; split into two
+  purpose-specific operational keys under one root identity in round 89,
+  directly resolving issue #51's flagged risk of mixing a signing key
+  and a Noise DH key rather than leaving it unresolved. A persistent,
   low-latency encrypted stream is the right shape here, unlike the
   store-and-forward path.
 
@@ -5027,4 +5110,80 @@ Phase 3 gate granularity above — the origination-authority rewrite,
 terminology correction, "same content" wording, file-chunk clarification,
 and Communities "thin" wording all held up against this follow-up
 review.
+
+## Sign-off notes, round 89 (node/user key lifecycle — resolves issue #51, UX-first redesign)
+
+The first pass at this design (proposed as part of starting Phase 3
+design work, before any of it was written into the doc) modeled node and
+user identity identically: one root key plus purpose-specific
+operational keys, transition records, the works — enterprise-PKI shaped.
+Thiesi's pushback was the actual design driver here, and it's worth
+recording precisely because it's a recurring risk for this project, not
+a one-off: **a mechanism can be perfectly sound cryptographically and
+still be the wrong design if it assumes a level of key-management
+comfort the target audience doesn't have.** Thiesi's own framing: he
+already runs Pageant on every machine and handles keys professionally,
+but recently mentioned running Mystic on NetBSD (with Linux emulation)
+on a Mystic community board and found people didn't recognize the
+concept at all — evidence that even people actively running/using BBS
+software today aren't necessarily technical in the way a sysadmin is.
+Building identity infrastructure that assumes everyone is Thiesi would
+have been a real mistake.
+
+**Resolution: split by audience and stakes, not one identity model for
+everyone.** Three tiers, written up in full in §5's new "Key lifecycle"
+section:
+
+1. **Password-only users (the default, expected majority): no personal
+   keypair, no cryptographic concept exposed at all.** Represented on
+   Link as an opaque, node-vouched local ID — this was already the right
+   answer sitting unused in issue #11's own suggestion for password-only
+   author identity; round 89's contribution was recognizing it should be
+   the *default* shape for ordinary users generally, not a fallback case
+   for people who merely skipped keypair setup. Rotation/revocation/
+   recovery aren't concepts that apply here; it's the node's problem,
+   invisible to the user.
+2. **Opt-in personal user keypair, for people who already run a
+   key/agent for other reasons (Thiesi's actual situation) and want to
+   reuse it for passwordless login.** Single key, deliberately no root/
+   operational split — a compromised personal key costs one person their
+   session and reputation, not network-wide provenance, so the extra
+   structure wouldn't buy anything proportionate to the risk. No new
+   recovery mechanism either: losing it just demotes that identity to
+   new-arrival status under §6's existing probation/vouching model,
+   reusing infrastructure that already exists for unrelated reasons
+   rather than building bespoke key recovery.
+3. **Node keys (mandatory, SysOp-operated): root key + two operational
+   keys (signing, transport) via signed transition records**, matching
+   the original proposal — but with the ceremony stripped out. Root and
+   operational keys auto-generate silently at bootstrap; rotation is one
+   guided admin action; root-key custody folds into #60's ordinary
+   backup story rather than assuming offline/HSM handling. The
+   justification for *this* tier having real structure, unlike tiers 1–2,
+   is that a node key underwrites every post/board/moderator-grant it
+   originates — the blast radius of getting this wrong is network-wide,
+   not personal, which is exactly the stakes threshold that justifies
+   asking more of a SysOp (who, per §3's existing target-audience
+   assumptions, self-hosts a server already) than of an arbitrary dial-in
+   user.
+
+**Also fixed as a direct consequence:** §11's real-time-chat transport
+description previously said Noise reuses "the same keypairs" as content
+signing — the exact reuse issue #51 flagged as needing justification or
+separation. Now correctly describes the node's dedicated transport key
+(distinct from its signing key) as the Noise static key.
+
+**Explicitly still deferred, matching the shape of every other
+extension point in this document (§6's jurisdiction-bound authority
+keys is the direct precedent):** the exact transition-record wire/
+signature format (§11 owns this as part of #11's canonical event
+envelope work), multi-device support for the opt-in user tier, and
+social/M-of-N root-key recovery for nodes. None of these block the
+shape above from being sound; they're additions for if/when a real need
+appears, using the same transition-record mechanism rather than a new
+one.
+
+This substantially resolves issue #51's design-shape question. What
+remains open on that issue is narrower: the exact wire/signature format
+(owned by #11), and the deferred refinements just listed.
 
