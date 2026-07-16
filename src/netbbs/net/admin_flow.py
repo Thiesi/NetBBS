@@ -85,6 +85,15 @@ from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
+from netbbs.selfupdate import (
+    UpdateError,
+    check_latest_release,
+    get_auto_update_check_enabled,
+    get_last_check_summary,
+    is_newer,
+    record_check_outcome,
+    set_auto_update_check_enabled,
+)
 from netbbs.net.ansi_editor import edit_ansi_art
 from netbbs.net.welcome_banner import (
     MAX_BANNER_SIZE_BYTES,
@@ -158,6 +167,10 @@ async def admin_menu(
             await session.write_line("")
             await _content_menu(session, db, user)
             await _draw_admin_menu(session, node_controls)
+        elif choice == "u":
+            await session.write_line("")
+            await _update_settings_screen(session, db, user)
+            await _draw_admin_menu(session, node_controls)
         else:
             await session.write(reject_keystroke())
 
@@ -173,6 +186,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
         menu_key("D", "elete user"),
         menu_key("M", "anage boards/areas/channels"),
         menu_key("W", "elcome banner"),
+        menu_key("U", "pdate"),
     ]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
@@ -355,6 +369,76 @@ async def _registration_settings_screen(session: Session, db: Database, actor: U
     await session.write_line(
         f"Approval requirement is now {'ON' if not current else 'off'}."
     )
+
+
+# -- self-update (design doc §17, round 82; round 95/96 implementation) --
+
+
+async def _update_settings_screen(session: Session, db: Database, actor: User) -> None:
+    """
+    Check-for-updates and the daily-automatic-check off switch (§17's
+    "off switch: ... disables the daily automatic background check").
+
+    Deliberately **check-only** in this screen: it reports whether a
+    newer release exists and records the outcome (`netbbs.selfupdate.
+    record_check_outcome`), but does not download/apply/restart. The
+    graceful-drain-then-restart apply flow (§17) needs to coordinate
+    with the live node process's own shutdown/re-exec sequence, which
+    isn't wired up yet -- a deliberate scope cut for this
+    implementation pass, not an oversight, so this screen doesn't
+    promise automation that isn't safely built and tested yet.
+    """
+    from netbbs import __version__ as current_version
+
+    auto_enabled = get_auto_update_check_enabled(db)
+    checked_at, outcome = get_last_check_summary(db)
+
+    header = colored("\r\nSelf-update:", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(header)
+    await session.write_line(f"Running version: {current_version}")
+    await session.write_line(f"Daily automatic check: {'ON' if auto_enabled else 'off'}")
+    if checked_at is not None:
+        when = format_for_display(checked_at, db)
+        await session.write_line(f"Last check: {when} -- {sanitize_text(outcome or '')}")
+    else:
+        await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
+
+    await session.write("\r\nCheck for a new release now? [y/N]: ")
+    if (await session.read_key()).lower() == "y":
+        await session.write_line("")
+        try:
+            release = await check_latest_release()
+        except UpdateError as exc:
+            await session.write_line(colored(f"Could not check for updates: {exc}", fg_color=MUTED_COLOR))
+        else:
+            if is_newer(current_version, release.tag_name):
+                record_check_outcome(db, f"newer release available: {release.tag_name}")
+                await session.write_line(
+                    f"A newer release is available: {release.tag_name} "
+                    f"(published {release.published_at})."
+                )
+                await session.write_line(
+                    colored(
+                        "Automatic download/apply is not yet available from this "
+                        "screen -- update manually for now.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+            else:
+                record_check_outcome(db, f"up to date ({current_version})")
+                await session.write_line(f"Already up to date ({current_version}).")
+
+    new_state = "off" if auto_enabled else "ON"
+    await session.write(f"\r\nTurn daily automatic check {new_state}? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
+        return
+    set_auto_update_check_enabled(db, not auto_enabled)
+    record_action(
+        db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}"
+    )
+    await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
 
 
 # -- promote/demote, enable/disable ---------------------------------------

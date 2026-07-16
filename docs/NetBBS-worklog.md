@@ -5989,3 +5989,89 @@ suite re-run afterward: **1682 passed, 4 skipped** (up from round 81's
 1676 — 6 net new tests, matching this round's new test count exactly, no
 regressions elsewhere).
 
+## Sign-off notes, round 96 (self-update mechanism — check-only slice implemented)
+
+First implementation round for the "addendum backlog" — five Phase-2-
+adjacent design decisions (Communities, self-update, identity
+attestation, local async mail, registration mode) that had accumulated
+as fully-specced but zero-code, since Phase 2 was already declared
+complete before any of them were designed. Thiesi asked directly when
+this backlog would ever get built if it kept landing in a "Phase 2
+addendum slot" with no actual scheduling; see the design doc's round 96
+sign-off note for the fuller discussion. Self-update went first, since
+it's a safety net the other four benefit from (any one of them shipping
+via self-update would bundle a schema migration).
+
+**New `src/netbbs/selfupdate.py`:**
+- `is_newer(current, candidate_tag)` — tolerant version-tuple comparison
+  (strips a leading `v`, truncates non-numeric pre-release suffixes
+  rather than raising, compares numerically not lexicographically so
+  `"1.9.0" < "1.10.0"` compares correctly).
+- `check_latest_release(*, fetch=...)` — queries GitHub's releases API;
+  `fetch` is injectable (same dependency-injection shape as `netbbs.net.
+  daybreak`'s `now`/`sleep`) so tests exercise real JSON-parsing/error-
+  handling logic against canned bytes, never a real network call. Uses
+  `urllib.request` + `asyncio.to_thread`, not a new `aiohttp` core
+  dependency, so self-update works on every node regardless of which
+  optional extras (`ssh`/`web`) are installed — consistent with round
+  91's "blocking I/O moves off-loop via a thread" pattern.
+- `download_and_extract_release` — downloads a release tarball and
+  extracts it to `releases_root/{tag}/`, guarding against path traversal
+  manually (checked against every member's resolved path) *and* via
+  `tarfile.extractall`'s own `filter="data"` where available (3.12+,
+  falls back gracefully on 3.11 — this project's stated minimum).
+- `snapshot_database`/`restore_database` — SQLite's own online-backup
+  API, not a raw file copy (safe under WAL), implementing round 95's
+  DB-before-blobs safety net narrowed to just the DB half (no blob
+  storage is at risk from an application-code update, only a schema
+  migration is).
+- `prepare_update`/`get_pending_update`/`confirm_update`/
+  `roll_back_update` — the pending-update state machine, persisted via
+  `netbbs.config`'s existing generic key-value store (no new table).
+  **Caught and fixed during writing, not left in**: an early draft
+  cleared pending state by writing an empty-string sentinel value,
+  which doesn't work — `get_config` only treats a *missing row* as
+  absent, so `get_pending_update` would have kept seeing a "pending
+  update" forever after the first one. Fixed by deleting the rows
+  directly instead.
+
+**New `tests/test_selfupdate.py`, 24 tests** — version comparison
+(8 parametrized cases), release-check success/empty/malformed/missing-
+field, tarball extraction success/existing-target/multiple-top-level-
+entries/path-traversal, DB snapshot+restore round-trip, the auto-check
+toggle, check-outcome recording, and full prepare→confirm and
+prepare→rollback state-machine round trips (the rollback test verifies
+actual data restoration, not just that the function runs, by mutating
+the database between snapshot and rollback and asserting the pre-
+mutation value comes back).
+
+**Admin menu**: new `[U]pdate` screen (`netbbs.net.admin_flow.
+_update_settings_screen`) — shows running version and last-check
+summary, offers a manual check (reporting up-to-date or a newer
+release, never auto-applying), and the daily-automatic-check on/off
+toggle. **Deliberately check-only this round**: actually downloading/
+applying/restarting needs to coordinate with the live node's own
+graceful-shutdown sequence and re-exec into new code, and that
+process-replacement step can't be safely exercised end-to-end in this
+sandbox — building it without being able to actually test it would risk
+shipping something untested in the highest-stakes code path this
+project has (an auto-updater). Scoped down rather than rushed. New
+`tests/test_admin_flow.py` coverage: 7 tests (no-prior-check display,
+declining the check, up-to-date report, newer-release report without
+auto-applying, a check-failure handled gracefully, and both directions
+of the auto-check toggle).
+
+**Testing:** `pytest tests/test_selfupdate.py tests/test_admin_flow.py
+-q` — 24 + 66 passed (66 includes the 7 new update-screen tests plus
+all pre-existing admin_flow coverage, unaffected). Full suite re-run:
+**1713 passed, 4 skipped** (up from round 92's 1682 — 31 net new tests:
+24 in `test_selfupdate.py` + 7 in `test_admin_flow.py`, exactly
+matching).
+
+**Explicitly still open**: the startup-check and daily-background-check
+trigger points (§17), the actual apply/restart orchestration (graceful
+drain reusing `netbbs.net.shutdown.run_shutdown_sequence`, re-exec,
+rollback-on-failed-start wired into `netbbs.__main__`), and real-world
+verification against GitHub's actual API and a real process restart —
+tracked as follow-up work, not silently dropped.
+

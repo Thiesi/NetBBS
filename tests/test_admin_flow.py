@@ -1023,3 +1023,95 @@ def test_registration_settings_screen_shows_pending_count(db, sysop):
     session = FakeSession(["r", "n", "b"])
     _run(session, db, sysop)
     assert "1 account(s) awaiting approval" in _written_text(session)
+
+
+# -- self-update (design doc §17, round 82; round 95/96) --------------------
+
+
+def _fake_release(tag: str):
+    from netbbs.selfupdate import ReleaseInfo
+
+    return ReleaseInfo(tag_name=tag, tarball_url=f"https://example.invalid/{tag}.tar.gz", published_at="2026-01-01T00:00:00Z")
+
+
+def test_update_screen_shows_no_prior_check(db, sysop):
+    session = FakeSession(["u", "n", "n", "b"])
+    _run(session, db, sysop)
+    assert "No check has been run on this node yet." in _written_text(session)
+
+
+def test_update_screen_declining_check_leaves_state_unchanged(db, sysop):
+    from netbbs.selfupdate import get_last_check_summary
+
+    session = FakeSession(["u", "n", "n", "b"])
+    _run(session, db, sysop)
+    assert get_last_check_summary(db) == (None, None)
+
+
+def test_update_screen_reports_up_to_date(db, sysop, monkeypatch):
+    import netbbs.net.admin_flow as admin_flow
+    from netbbs import __version__
+    from netbbs.selfupdate import get_last_check_summary
+
+    async def fake_check(*, fetch=None):
+        return _fake_release(f"v{__version__}")
+
+    monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
+
+    session = FakeSession(["u", "y", "n", "b"])
+    _run(session, db, sysop)
+
+    assert f"Already up to date ({__version__})" in _written_text(session)
+    _, outcome = get_last_check_summary(db)
+    assert outcome == f"up to date ({__version__})"
+
+
+def test_update_screen_reports_newer_release_without_auto_applying(db, sysop, monkeypatch):
+    import netbbs.net.admin_flow as admin_flow
+    from netbbs.selfupdate import get_last_check_summary
+
+    async def fake_check(*, fetch=None):
+        return _fake_release("v999.0.0")
+
+    monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
+
+    session = FakeSession(["u", "y", "n", "b"])
+    _run(session, db, sysop)
+
+    text = _written_text(session)
+    assert "A newer release is available: v999.0.0" in text
+    assert "Automatic download/apply is not yet available" in text
+    _, outcome = get_last_check_summary(db)
+    assert outcome == "newer release available: v999.0.0"
+
+
+def test_update_screen_handles_check_failure_gracefully(db, sysop, monkeypatch):
+    import netbbs.net.admin_flow as admin_flow
+    from netbbs.selfupdate import UpdateError
+
+    async def fake_check(*, fetch=None):
+        raise UpdateError("could not reach the release API: timed out")
+
+    monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
+
+    session = FakeSession(["u", "y", "n", "b"])
+    _run(session, db, sysop)
+    assert "Could not check for updates: could not reach the release API: timed out" in _written_text(session)
+
+
+def test_update_screen_toggles_auto_check(db, sysop):
+    from netbbs.selfupdate import get_auto_update_check_enabled
+
+    assert get_auto_update_check_enabled(db) is True
+    session = FakeSession(["u", "n", "y", "b"])
+    _run(session, db, sysop)
+    assert get_auto_update_check_enabled(db) is False
+    assert "off" in _written_text(session)
+
+
+def test_update_screen_declining_toggle_leaves_auto_check_unchanged(db, sysop):
+    from netbbs.selfupdate import get_auto_update_check_enabled
+
+    session = FakeSession(["u", "n", "n", "b"])
+    _run(session, db, sysop)
+    assert get_auto_update_check_enabled(db) is True

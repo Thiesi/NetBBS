@@ -1699,6 +1699,23 @@ roll out once Phase 3+ exists. Scoped for implementation after Phase 2
 (the standalone BBS is feature-complete) and before Phase 3 begins; see
 §15's phase list and round 82 sign-off note for the placement reasoning.
 
+**Implementation status (round 96, first addendum-backlog item
+built):** version comparison, GitHub release checking, tarball download/
+extraction (with a path-traversal guard), database snapshot/restore
+(round 95's DB-safety-net addition), and the pending/confirm/rollback
+state machine are implemented and tested (`netbbs.selfupdate`, 24
+tests). The admin-menu `[U]pdate` screen currently supports **checking
+only** — it reports whether a newer release exists and records the
+outcome, but does not download/apply/restart. The actual apply
+orchestration described below (graceful drain, re-exec, rollback-on-
+failed-start, the startup/daily-background trigger points) is **not
+yet wired up** — a deliberate scope cut for this pass, not an
+oversight: real GitHub network access and real process replacement
+(`os.execv`) can't be safely exercised end-to-end from this sandboxed
+environment, matching this project's existing, already-accepted
+limitation for SSH/Zmodem/browser-rendering verification. See the
+round 96 worklog entry for the full implementation writeup.
+
 **Update source:** GitHub Releases on the project's public repo, queried
 via the GitHub API (not a raw branch/tag pull), so a release is an
 explicit, versioned unit rather than "whatever HEAD happens to be."
