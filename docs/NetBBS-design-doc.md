@@ -298,10 +298,25 @@ what caused the original rewrite.
   approval before becoming visible.
 - Moderator edits are flagged inline in the edited post itself.
 - All moderation actions are logged.
+- Boards, file areas, and channels alike support minimum-age gating and
+  real-name-verification gating (§18), symmetric with level-gating
+  rather than chat-only — added round 85, alongside the discovery that
+  the age-gating claim below had never actually been implemented.
+- `min_read_level`, `min_write_level`, and the new `min_age` are all
+  **nullable**, not `NOT NULL DEFAULT 0` — corrected round 84. `NULL`
+  means "no explicit value, inherit the containing Community's default
+  (§16) if any, else system default 0/no-gate"; an explicit value,
+  including an explicit `0`, always wins outright. Existing resources
+  keep whatever they currently have stored on migration (no retroactive
+  nulling) — a SysOp clears a field explicitly (typing `inherit` in the
+  edit screen) to opt an existing resource into a Community's default.
 
 **Chat permissions & moderation:**
-- Channels support minimum-age gating, same mechanism as existing
-  age-restriction support (§5's user model), extended to chat.
+- Channels support minimum-age gating (see §18 — round 85 discovered
+  this line previously described a mechanism, citing §5, that was never
+  actually implemented anywhere; §18 now specifies the real one:
+  self-attested birthdate, verifiable via the identity-attestation
+  system, computed fresh at check time).
 - Channels support minimum user-level gating, optionally combined with
   individual per-user access grants that bypass the level requirement —
   and optionally hidden entirely (not just inaccessible) from users who
@@ -339,6 +354,16 @@ object in a category," not a different mechanism):
    on a given node (i.e., content not carried on NetBBS Link).
 4. **Link-blanket ("global")** — authority over every Link-participating
    board/area/channel that node carries.
+
+**Identity-verification authority is a separate trust domain, not a
+fifth moderator tier.** `can_verify_identity` (§18) is a plain per-user
+boolean, SysOp-grantable, with no scope tiers of its own — verifying
+someone's real-world age or name isn't authority over a specific
+board/area/channel, it's a fact-finding role about the person, so it
+doesn't fit the per-object/Community/local/Link-blanket shape above at
+all. Deliberately kept independent of content moderation: a SysOp can
+grant both to the same person, but neither implies the other, same
+reasoning as "global does not imply local," below.
 
 **Global does not imply local, by design (opinion, confirmed with
 Thiesi).** Local-only content is a single-SysOp trust domain; Link-wide
@@ -642,6 +667,14 @@ and before Phase 3 (Link connectivity) begins, so the update channel
 already exists by the time Phase 3 might need to ship a protocol-
 version bump. See §17 for the full design.
 
+**Identity attestation (age & real-name verification):** local
+mechanism fully specced — self-attested birthdate, SysOp-delegated
+verification, and gating for boards/channels/areas/Communities all land
+in the same after-Phase-2/before-Phase-3 window as Communities and
+self-update. Link propagation of attestations is explicitly deferred
+past that, gated on Phase 4 (trust/reputation) rather than Phase 3. See
+§18 for the full design.
+
 ---
 
 ## 16. Communities (topic-oriented navigation layer)
@@ -712,49 +745,136 @@ to boards/chat/files themselves per "what stays the same," above.
 
 **Permission inheritance — two different mechanics, matching the two
 different kinds of data §13 already has:**
-- **Scalar defaults** (level-gates, presentation/branding/visibility):
-  same resolution-order pattern already used for display-timestamp
-  config (round 8/9) — a resource's own explicit value wins if set,
-  else its Community's default if it belongs to one, else the
-  hardcoded system default. A resource's override always wins outright;
-  a Community is not a floor/ceiling a child can't loosen past (nothing
-  else in §13's model enforces that shape either). Flagged, not
-  decided: preventing an age-gated Community's child board from setting
-  a laxer level than its Community is a small addition later
-  (compare-and-clamp at write time), not a data-model change.
+- **Scalar defaults** (level-gates, age-gates, name-verification
+  requirement, presentation/branding/visibility): same resolution-order
+  pattern already used for display-timestamp config (round 8/9) — a
+  resource's own explicit value wins if set, else its Community's
+  default if it belongs to one, else the hardcoded system default
+  (0/none). A resource's override always wins outright; a Community is
+  not a floor/ceiling a child can't loosen past (nothing else in §13's
+  model enforces that shape either; still flagged, not decided, as a
+  possible later addition). **Correction, round 84:** this only works
+  if "unset" is actually distinguishable from "explicitly set to the
+  default" — `min_read_level`/`min_write_level` shipped as `NOT NULL
+  DEFAULT 0`, meaning every existing resource already has an explicit
+  stored `0`, so a Community default could never actually apply to any
+  pre-existing resource under the wording above. Fixed: these, plus the
+  new `min_age` and `name_requirement` fields (§18), are all nullable —
+  `NULL` means inherit, an explicit value (including `0`) always wins.
+  Existing resources keep their current explicit values unchanged on
+  migration; a SysOp opts one into inheriting by explicitly clearing it
+  (`inherit` in the edit screen). Community itself gains
+  `default_min_read_level`, `default_min_write_level`, `default_min_age`,
+  and `default_name_requirement`, cascading identically.
 - **Moderator grant authority — new Community-blanket tier, added to
   §13's moderator scope tiers** (now four levels, between per-object and
   local-blanket). Blanket/automatic over a Community's membership,
   present and future — the same shape local-blanket already has over
   the whole node, not a new automatic-power-grant pattern.
 
-**Uncategorized resources — reuses existing picker infrastructure, no
-new UI mechanism.** A permanent "Uncategorized" entry at the main menu,
-alongside the Community list, is the same round-18 category picker
-filtered to `community_id IS NULL`. Resources that were never
-board/channel/area-shaped to begin with — private mail, the user
-directory, admin menu, profile/preferences — were never candidates for
-Community assignment and are untouched by any of this; they keep their
-existing main-menu placement.
+**Main-menu navigation — replaces the resource-type-first split, per
+round 84.** `[M]essage Boards`/`[C]hat`/`[F]ile areas` are removed as
+top-level main-menu entries, replaced by `[E]nter a Community`,
+`[U]ncategorized`, and `[J]ump to...`. Both `[E]nter a Community` and
+`[U]ncategorized` are **conditionally visible** — hidden when there are
+zero Communities, or zero uncategorized resources, respectively — the
+same conditional-visibility pattern the main menu already uses for
+`[I]nvitations`. On a freshly upgraded node with no Communities created
+yet, the main menu reduces to `[U]ncategorized  [J]ump to...` plus the
+untouched non-Community-shaped entries, functionally identical to
+today's flat menu — the concrete UI consequence of "migration is a
+non-event," below.
 
-**Navigation.** Community selection uses the same shared picker as
-everything else (`netbbs.net.picker.pick_item()`, round 16 point 3),
-now also fronting the Community list itself. Inside a Community, a
-short sub-menu shows only the resource types actually present for that
-topic (per "the idea," above), each opening into its own
-category-picker exactly as today.
+**Three entry points, one shared sub-menu shape.** `[E]nter a
+Community` (via `pick_item` over Communities), `[U]ncategorized`, and
+`[J]ump to...` all lead to the same sub-menu: `[M]essage Boards
+[C]hat [F]ile areas [B]ack`, offering only the resource types that
+actually have a matching item. **Caught during design: `[B]oards`
+collides with `[B]ack`** — resolved by reusing the *original*
+`[M]/[C]/[F]` letters one level in, rather than inventing new ones, so
+existing muscle memory isn't fully lost, just relocated one screen
+deeper. Each entry point differs only in what filter it applies to the
+existing `_browse_boards_in_category`-style functions (which gain a new
+`community_id: int | None` parameter threaded through the existing
+category recursion — `stable_id_of`/category-negation trick unchanged):
+Community → `community_id = X`; Uncategorized → `community_id IS NULL`;
+Jump → no community filter at all (today's full list, categories
+intact). Headers give orientation: `"{Community name} — message
+boards"`, `"Uncategorized — message boards"`, and the unchanged
+`"Available message boards"` for Jump.
 
-**Jump-shortcuts — one new global, cross-Community entry point, not a
-new mechanism.** A "search/jump to any board/channel/area" option at
-the main menu reuses round 18's existing `search`/`goto` commands
-against an *unfiltered* list — stable IDs were already decoupled from
-sort/filter order specifically so `goto` keeps working regardless of
-which view produced it (round 18 point 2), so pointing that same picker
-at the full cross-Community list is a direct application of existing
-machinery, not new design. Scoped to a main-menu entry point only for
-now; a from-anywhere typed command (e.g. usable mid-session from within
-chat) would touch the shared command-dispatch layer more broadly and is
-left as a possible future extension, not decided here.
+**Categories (round 18) stay schema-unchanged; leak prevention happens
+at the query layer.** Since Community and category are two independent
+nullable FKs on a resource, nothing stops the same category from
+holding resources in different Communities, which would leak another
+Community's resources into what looks like a Community-scoped category
+view. Resolved without touching `board_categories`/`channel_categories`
+at all: both the end-user browse path and the admin-side assignment
+picker (below) apply a community-scoped *existence filter* — "only
+show/offer categories currently used by ≥1 resource in this Community"
+— so cross-Community category reuse stays possible in principle but is
+never surfaced by the UI, and in practice never happens.
+
+**Jump-shortcuts — deliberately scoped to one resource type per use,
+not a unified cross-type search, confirmed round 84.** `[J]ump to...`
+reuses round 18's existing `search`/`goto` commands (stable IDs already
+decoupled from sort/filter order, round 18 point 2) against an
+unfiltered list, but asks resource type first via the same shared
+sub-menu above. A single search spanning boards+channels+areas at once
+would need a new multi-type stable-ID scheme (today's category-vs-
+resource negation trick only disambiguates two ID spaces per type); the
+per-type version is a strict subset of that and doesn't foreclose
+building it later, so it's the version shipped now.
+
+**Resources that were never Community-shaped to begin with** — private
+mail, the user directory, admin menu, profile/preferences — are
+untouched by any of this; they keep their existing main-menu placement.
+
+**Admin-side management, mirroring existing SysOp tooling rather than
+inventing new patterns — added round 84.**
+- New content-menu entry **`[O]Communities`** (the next free letter in
+  "Communities" after Categories claims "C," same disambiguation rule
+  already used for `[H]annels`), with its own `[C]reate [L]ist [B]ack`
+  submenu and `[E]dit [D]elete [B]ack` detail screen, mirroring
+  `_board_menu`/`_board_detail_screen` exactly — no "pending posts"
+  equivalent, a Community holds no content of its own.
+- **Create stays lean, Edit carries the rest** — same split boards
+  already use. Create: `"Name: "` → `"Description (optional): "` → land
+  on the detail screen. Edit adds the cascading scalar defaults
+  (`"Default minimum read level [0]: "`, `"...write level [0]: "`,
+  `"Default minimum age [0]: "`, `"Require verified real name?
+  [none/verified/verified+displayed]: "` — see §18) plus `"Hidden? [y/N
+  or current]: "`, reusing §13's existing listed/hidden visibility
+  language. A richer branding concept (e.g. an ANSI banner shown on
+  entry, reusing whatever `[W]elcome banner` already does) is
+  deliberately not designed this round — Description is the only
+  presentation field for now.
+- **Community assignment mirrors `_pick_optional_category` exactly** —
+  a new `_pick_optional_community` helper, invoked from board/channel/
+  area create *and* edit screens, prompted **before** the existing
+  category prompt (Community is the outer layer, chosen first):
+  `"Assign a Community? [y/N]: "` → `pick_item` over Communities.
+- **Community-blanket grants (§13) extend the existing `X`/`Y`/`Z`
+  blanket keys rather than adding new ones.** After picking "blanket
+  across all boards `[X]`" (or areas `[Y]`/channels `[Z]`), one new
+  follow-up: `"Scope this blanket grant to one Community instead of the
+  whole node? [y/N]: "` → if yes, `pick_item` over Communities. Reuses
+  the exact same per-type preset vocabulary local-blanket already has
+  rather than inventing a parallel one — Community-blanket is
+  local-blanket narrowed to one Community's membership, not a
+  structurally new kind of grant. Mechanically: one new nullable
+  `community_id` column on the existing grants table, alongside the
+  existing nullable `object_id`; the authority check gains one more
+  fallback (per-object → Community-blanket → local-blanket). Revoke
+  mirrors the grant flow's shape automatically.
+- **Deletion** reverts every referencing resource to `community_id =
+  NULL` (Uncategorized — the reverse of assignment, consistent with
+  "migration is a non-event," below) and revokes any Community-blanket
+  grants scoped to it outright, rather than leaving them dangling.
+  Confirmation shows the blast radius before committing: `"This
+  Community has N board(s)/channel(s)/area(s) and M moderator grant(s).
+  Deleting will un-categorize its resources and revoke those grants.
+  Continue? [y/N]: "`.
 
 **Migration path: a non-event, by construction.** Because `community_id`
 is nullable, every existing board/channel/area on an upgraded node
@@ -859,6 +979,169 @@ scopes the updater as protocol-agnostic plumbing only: it can fetch and
 apply a new release. Teaching it (or the Link handshake) about protocol
 compatibility is Phase 3-or-later work, deferred rather than guessed at
 now.
+
+---
+
+## 18. Identity attestation (age & real-name verification)
+
+Status: **local mechanism confirmed and specced** (round 85). Link
+propagation of attestations is explicitly out of scope for now — see
+"Phase placement," below, for why it's gated on Phase 4 specifically,
+not Phase 3.
+
+**Why this exists, in Thiesi's own framing:** NetBBS can't itself
+define who counts as a minor or what counts as age- or identity-
+restricted content — those are jurisdiction-specific policy questions.
+Rather than NetBBS guessing at a global answer, this delegates the
+judgment call to whoever's actually accountable to local law and
+actually knows their own community: the SysOp (or someone the SysOp
+trusts to do it). NetBBS's job is to give that judgment a real
+cryptographic mechanism to act on, reusing the identity/signing
+infrastructure §5/§11 already established rather than inventing a
+parallel trust system.
+
+**New voluntary user fields**, alongside the already-existing username
+(required) and password/keypair (required, one or the other):
+`birthdate` (full date, not just year — see below for why),
+`display_name`, `location` (deliberately coarse: free text, no
+structured city/region/country fields forcing precision). All three are
+nullable, self-reported, and get the same independently-toggleable
+public/private visibility every existing profile field already has.
+`display_name` is a new, directory/vCard-level field — distinct from
+the existing chat-only `/nick` alias (round 41 deliberately kept
+`/nick` out of the directory; this doesn't change that).
+
+**Age is computed fresh at check time from a stored birthdate, never
+stored as a derived "current age."** Same computed-at-read-time
+philosophy already established for display timestamps (round 8/9),
+applied here because storing a derived age is actively wrong, not just
+imprecise: a value like "attested age: 17" is frozen the instant it's
+written and never re-evaluates, so a verified 17-year-old would never
+be recognized as correctly-18 without someone manually re-attesting —
+worse for someone born early in the year, who'd wait up to a year
+longer than necessary. A stored birthdate with real date-math computed
+on every check is self-correcting forever, with zero further action
+from anyone. Year-only birth data was considered and rejected for the
+same reason: `current_year − birth_year` is systematically biased
+toward *overestimating* age for anyone whose birthday hasn't yet
+happened in the current year — exactly the wrong direction for a safety
+gate.
+
+**`meets_age(user, min_age)`:** `min_age` unset/0 → always passes (no
+gate). Otherwise: prefer a verified attested birthdate if one exists
+(below), else fall back to the self-reported `birthdate`, else **fail
+closed** — an age gate that treats "unknown" as "assume old enough"
+defeats its own purpose. This is the one place age-gating and
+level-gating genuinely differ in shape, not just in name: level-gating
+defaults permissive (`min_level` unset/0 = no gate, and a user with no
+special level still has a real, always-present `user_level`); age-
+gating's *resource* side defaults permissive the same way, but its
+*user* side fails closed when data is simply missing.
+
+**Attestation mechanism.** A `user_attestations` record — not just a
+flag on the user row, since it needs real provenance and a signature to
+be worth anything: `(subject_user, attribute: 'age' | 'name',
+attested_value, verifier_fingerprint, signature, created_at,
+link_visible)`. `attested_value` is an actual determined value (an
+attested birthdate, or an attested real name) supplied by the verifier
+from whatever real-world verification they used — a local meetup, ID
+shown in person, whatever the SysOp judges sufficient for their
+jurisdiction and community — never a threshold-specific pass/fail
+against one particular resource's gate, so a single attestation stays
+valid and reusable against any future gate, however strict. Signing
+reuses round 7's existing node-vouching fallback exactly, applied to a
+new kind of claim rather than a new mechanism: a verifier with a
+personal keypair signs the attestation themselves; a password-only
+verifier has their node sign on their behalf. For `attribute = 'age'`,
+an attestation's `attested_value` always takes precedence over
+self-reported `birthdate` in `meets_age` when both exist — verified is
+strictly more trustworthy than self-reported by construction.
+
+**`can_verify_identity` — a new, narrow, SysOp-grantable permission,
+deliberately independent of §13's four moderator tiers** (see §13's own
+note on this). A plain per-user boolean, no scope tiers — verifying a
+person's real-world age or name isn't authority over a specific
+board/area/channel, it's a fact-finding role about the person, and can
+reasonably be granted to someone with no other moderator role at all
+(e.g. a trusted local meetup organizer). Verifiers get a new,
+conditionally-visible main-menu entry, **`[V]erify`** (same conditional
+pattern as `[I]nvitations`/`[A]dmin`, hidden for everyone else): pick a
+user, see their self-reported values (visible to the verifier
+regardless of the subject's own visibility toggle — verifying is a
+privileged trust action, not browsing the public directory), enter the
+attested value, confirm, sign, store.
+
+**Real name vs. display name: never overwritten, always coexist.**
+Attestation never touches `display_name`. This mirrors §8's existing
+`/nick` principle exactly — an alias/display name is presentation
+metadata the user chose for themselves; canonical/verified identity is
+layered alongside it, never replacing it. Beyond consistency, this
+matters practically: a user might keep a pseudonymous display name for
+ordinary use while still wanting to pass a real-name gate for one
+specific resource (legal-liability accountability, a professional-
+networking Community). Auto-overwriting the moment a verifier checks a
+box would silently strip that choice away as a side effect of what's
+supposed to be a narrow gate-passing mechanism.
+
+**`name_requirement`: a three-state field
+(`none`/`verified`/`verified_and_displayed`), not two independent
+booleans.** "Displayed but not verified" isn't a coherent state, so the
+field's own shape rules it out rather than needing separate validation.
+`verified` covers a SysOp needing to be *able* to identify someone
+(legal compulsion, escalated moderation) without broadcasting it;
+`verified_and_displayed` covers a community where mutual visible
+accountability is the actual point. Unlike age-gating, **there is no
+self-report fallback for name-gating** — `display_name` never satisfies
+`min_name_verification_required`, since the entire point is a verified
+identity; an unverified self-report satisfying it would defeat the
+feature outright.
+
+**Display scope: the specific resource only, never BBS-wide.** A
+Community/board/channel/area requiring `verified_and_displayed` shows
+the real name only within its own rendering, never elsewhere on the
+node — same reasoning as not overwriting `display_name`: one resource's
+disclosure requirement shouldn't leak into contexts that never asked
+for it. A user who doesn't want that tradeoff in a given resource
+simply doesn't use it, the same choice age-gating already offers.
+
+**Display formatting: primary slot is always self-chosen, real name is
+always parenthetical, never leaves an empty lead.** Format:
+`"{display_name or username} ({attested real name})"` — e.g. `SysOp
+from Hell! (Claude Code)`. If `display_name` is unset, the primary slot
+falls back to `username`, not to nothing: `Thiesi (Claude Code)`.
+Reversing the order (real name first) was considered and rejected —
+`username`/`display_name` are both self-chosen by the user, the real
+name never is, so leading with it would misrepresent how someone wants
+to be known, the same shape of harm as misgendering. `username` is
+guaranteed present (one of only two required signup fields), so this
+fallback chain never bottoms out in a blank/orphaned parenthetical.
+
+**A separate, general "verified" badge** — just the boolean fact of
+verification, not the attested value itself — may be shown on a user's
+own profile, gated by the same existing per-field visibility toggle
+everything else uses, entirely independent of any specific resource's
+`name_requirement`. The user controls whether even the fact of
+verification is public.
+
+**Phase placement: local mechanism ships in the same before-Phase-3
+window as Communities and self-update; Link propagation is explicitly
+gated on Phase 4, not Phase 3 — and that's a different reason than Link
+Communities' Phase 6 gate.** Local attestation (verifying your own
+node's users, gating your own node's resources) is fully self-contained
+and has no Link dependency at all. A *remote* node honoring *your*
+attestation needs two things that don't exist before Phase 4
+specifically: Phase 3's signed-event sync to carry the attestation, and
+— the actual blocker — Phase 4's trust/reputation system to give a
+remote node any basis for deciding whether to honor an attestation from
+a verifier it doesn't know. Without that, a remote gate would be
+trusting the signature's authenticity while having no way to judge the
+signer's credibility — exactly the "trust the signature, not the
+signer" gap §6's web-of-trust design exists to close. So: `link_visible`
+defaults to `false` on every attestation, and even once Phase 4 exists,
+propagation additionally requires the *subject user's* own separate
+opt-in consent — it's their sensitive data, and the existing profile-
+privacy philosophy (§13) already gives users that kind of control over
+everything else.
 
 ---
 
@@ -3996,4 +4279,184 @@ default should be enforced as a hard floor/ceiling on its children
 main-menu entry point (would touch the shared command-dispatch layer
 more broadly than this round's scope). Both flagged in §16 so they
 don't need rediscovering later.
+
+## Sign-off notes, round 84 (Communities navigation UI, admin-side tooling, and a scalar-default bug fix)
+
+Prompted by Thiesi wanting the uncategorized-bucket UI and admin-side
+Community tooling detailed enough that the build phase can proceed
+without design interruptions. Grounded in the real implementation
+(`netbbs/net/picker.py`, `netbbs/net/login_flow.py`,
+`netbbs/net/admin_flow.py`, `netbbs/boards/categories.py`) rather than
+designed in the abstract, since Phase 1/2 code already exists here.
+
+1. **Main-menu structure: `[M]/[C]/[F]` replaced, not kept alongside
+   Community-first navigation — confirmed with Thiesi over two
+   coexistence alternatives.** Matches §16's original round-71 pitch
+   ("instead of a main menu offering `[M]essage Boards / [C]hat /
+   [F]ile areas`...") literally rather than hedging it. `[E]nter a
+   Community`, `[U]ncategorized`, and `[J]ump to...` take their place,
+   both of the first two conditionally visible using the exact
+   conditional-visibility pattern `[I]nvitations` already established
+   in this codebase — new UI concept avoided by reuse, not invented.
+2. **Bug caught before it shipped: `[B]oards` collides with `[B]ack`
+   in the new per-entry-point sub-menu.** Fixed by reusing the original
+   `[M]/[C]/[F]` letters one level deeper rather than picking new ones
+   — a side benefit is that veteran muscle memory isn't fully lost, just
+   relocated one screen in, softening the disruption from point 1.
+3. **Categories (round 18) stay schema-unchanged — confirmed with
+   Thiesi over adding a `community_id` column to them.** The
+   alternative (making categories themselves Community-scoped) would
+   have been a real change to "unchanged" categories for no clear
+   benefit; a community-scoped *existence filter* at the query layer
+   achieves the same leak-prevention property without touching
+   `board_categories`/`channel_categories` at all.
+4. **Jump-shortcuts scoped to one resource type per use, not a unified
+   cross-type search — confirmed as a deliberate scope-reduction, not
+   an oversight.** A true unified search needs a new multi-type
+   stable-ID scheme beyond today's two-space (category vs. resource)
+   negation trick; the per-type version is a strict, non-foreclosing
+   subset, so it's what ships now.
+5. **Admin-side Community management mirrors existing board/category
+   admin patterns exactly, including a real letter-disambiguation
+   precedent already in the codebase.** `[O]Communities` follows the
+   same rule that produced `[H]annels` (next free letter once
+   Categories claims "C"); create/edit split follows boards' own lean-
+   create/rich-edit shape; Community assignment reuses
+   `_pick_optional_category`'s exact structure via a new
+   `_pick_optional_community` helper, ordered before category
+   assignment since Community is the outer layer.
+6. **Community-blanket moderator grants extend the existing
+   local-blanket `X`/`Y`/`Z` keys with one optional follow-up question,
+   rather than adding new scope letters or a parallel preset
+   vocabulary — confirmed as the minimal-surface-area option.**
+   Mechanically one new nullable `community_id` column on the existing
+   grants table.
+7. **Deletion cascade specified:** referencing resources revert to
+   Uncategorized (the reverse of assignment), scoped Community-blanket
+   grants are revoked outright rather than left dangling, and the
+   confirmation prompt shows the blast radius (affected resource and
+   grant counts) before committing.
+8. **Bug found and fixed in round 83's own design, not just new
+   scope:** `min_read_level`/`min_write_level` shipped as `NOT NULL
+   DEFAULT 0`, which silently defeated round 83's own "resource's own
+   explicit value wins if set, else Community default" resolution
+   order — every existing resource already has an explicit stored `0`,
+   so no pre-existing resource could ever actually inherit a Community
+   default. Fixed by making these fields (and the new `min_age`/
+   `name_requirement` from round 85) nullable, with `NULL` meaning
+   "inherit" and an explicit value — including `0` — always winning.
+   Existing resources keep their current explicit values unchanged on
+   migration; opting one into inheritance requires a SysOp to
+   deliberately clear it. Caught while designing round 85's age-gating
+   resolution order, which forced the same NULL-vs-explicit-zero
+   question to be answered precisely for a second field and exposed
+   that round 83 had never actually answered it for the first.
+
+## Sign-off notes, round 85 (age-gating, real-name-gating, and identity attestation)
+
+Prompted by Thiesi asking whether Communities should support
+age-gating alongside the already-designed level-gating.
+
+1. **Discovered, not assumed: §13's existing "channels support
+   minimum-age gating" claim was never implemented anywhere** — no age
+   field on `users`, no `min_age` on `channels`, and its own citation
+   ("§5's user model") doesn't define an age concept either. Verified
+   directly against the actual schema/code before designing anything
+   further, rather than building Community age-gating on top of a
+   premise that turned out to be false. §13 corrected to point here.
+2. **Scope: full symmetric build across users, boards, channels, areas,
+   and Communities — confirmed with Thiesi over two narrower
+   alternatives** (channels-only matching the original false claim's
+   scope; deferring age-gating entirely). Chosen specifically so a
+   Community's cascading default isn't a half-feature that only ever
+   reaches some of its children.
+3. **Birthdate, not birth-year — corrected after Thiesi identified a
+   real correctness bug in the first proposal, not just an imprecision
+   concern.** `current_year − birth_year` is systematically biased
+   toward *overestimating* age for anyone whose birthday hasn't yet
+   happened that year — the unsafe direction for a safety gate. Worse,
+   storing any derived "current age" (self-reported or attested) freezes
+   it at write time with nothing to ever re-evaluate it, so a verified
+   17-year-old would never be recognized as 18 without manual
+   re-attestation. Fixed by storing a full birthdate and computing age
+   fresh via real date-math at every check, both self-reported and
+   attested — self-correcting forever, same computed-at-read-time
+   philosophy as round 8/9's timestamp handling, just not applied here
+   the first time until Thiesi caught it.
+4. **`meets_age` fails closed on missing user data, deliberately
+   asymmetric with level-gating's permissive default.** A resource's
+   own `min_age` still defaults to no-gate, same as `min_level` — but a
+   user with no usable birthdate (self-reported or attested) does not
+   pass a gate that is actually set, since treating "unknown" as "old
+   enough" would defeat the gate's purpose.
+5. **Identity attestation mechanism adopted from Thiesi's own proposal**
+   — real-world age/name verification, performed by whatever means a
+   SysOp-delegated verifier judges sufficient for their own jurisdiction
+   and community, recorded as a signed claim rather than a bare flag.
+   Explicitly framed by Thiesi as outsourcing a policy question NetBBS
+   structurally can't answer globally (who is a minor, what counts as
+   restricted content) to whoever is actually locally accountable.
+   Signing reuses round 7's node-vouching fallback unchanged, applied to
+   a new claim type rather than new infrastructure — a direct
+   consequence of already having keypair identity (§5) and a
+   Linked-board-grant-shaped signed-event precedent (§13) to build on.
+6. **`can_verify_identity` is a new, narrow, SysOp-grantable permission
+   independent of §13's four moderator tiers — confirmed with Thiesi
+   over folding it into the existing moderator-grant flow.** A plain
+   per-user boolean with no scope tiers, since verifying a real-world
+   fact about a person isn't authority over any specific board/area/
+   channel and can reasonably be granted to someone with no other
+   moderator role at all. Gets its own conditionally-visible main-menu
+   entry (`[V]erify`) rather than living inside the admin menu, since a
+   granted verifier may not have admin access otherwise.
+7. **Real-name-gating designed this round, not deferred — confirmed
+   with Thiesi over noting it as a future extension only.** Small
+   incremental addition given the attestation mechanism is already
+   shared; modeled as a three-state `name_requirement`
+   (`none`/`verified`/`verified_and_displayed`) rather than two
+   independent booleans, so "displayed but not verified" is impossible
+   by construction rather than requiring separate validation. Unlike
+   age, there is no self-reported fallback — an unverified `display_name`
+   never satisfies this gate, since the entire point is verification.
+8. **Real name never overwrites display name; the two always coexist —
+   resolved by direct analogy to §8's existing `/nick` principle**
+   (alias is presentation metadata, canonical identity stays visible
+   alongside it, never replaced by it). Raised by Thiesi as a concrete
+   scenario (a user's chosen display name differing entirely from their
+   verified real name) rather than an abstract concern.
+9. **Display formatting: primary slot is always self-chosen, real name
+   is always parenthetical — refined twice from Thiesi's own follow-up
+   questions.** First pass (`display_name (real name)`) broke when
+   `display_name` was unset, collapsing to an orphaned `(real name)`
+   with nothing leading it. Reversing the order was considered and
+   explicitly rejected by Thiesi: `display_name` is chosen, the real
+   name isn't, so leading with the involuntary name would misrepresent
+   how someone wants to be known — the same shape of harm as
+   misgendering, in Thiesi's own framing. Resolved by falling the
+   primary slot back to `username` (also self-chosen, just less
+   expressive) instead of to nothing, since username is guaranteed
+   present as one of only two required signup fields — never reorders,
+   never collapses to an orphaned parenthetical.
+10. **Link propagation of attestations deferred, and specifically gated
+    on Phase 4, not Phase 3 — a different reason than Link Communities'
+    Phase 6 gate, worth distinguishing rather than reflexively citing
+    "Link phase" for every Link-adjacent deferral.** Phase 3's
+    signed-event sync alone isn't sufficient — a remote node would be
+    trusting an attestation's signature authenticity while having no
+    basis to judge the signer's credibility, exactly the "trust the
+    signature, not the signer" gap §6's web-of-trust system exists to
+    close. Phase 4 (trust/reputation) is the actual prerequisite. Even
+    once available, propagation additionally requires the *subject
+    user's* own opt-in consent (`link_visible`, defaults `false`),
+    consistent with existing profile-privacy philosophy (§13) rather
+    than assuming Link-sharing sensitive verification data by default.
+11. **New voluntary signup fields (`display_name`, `location`,
+    `birthdate`) confirmed as distinct from the existing chat-only
+    `/nick` alias** — round 41 deliberately kept `/nick` out of the
+    directory; this round's `display_name` is a directory/vCard-level
+    field and doesn't revisit or conflict with that separation.
+    `location` deliberately stays free-text and coarse, no structured
+    fields forcing city/region/country precision, on the same
+    minimal-disclosure reasoning applied to attestation Link-visibility
+    in point 10.
 
