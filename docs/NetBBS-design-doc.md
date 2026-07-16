@@ -1996,6 +1996,29 @@ to be known, the same shape of harm as misgendering. `username` is
 guaranteed present (one of only two required signup fields), so this
 fallback chain never bottoms out in a blank/orphaned parenthetical.
 
+**`display_name` must reject literal `(`/`)` — caught by Thiesi before
+implementation, round 98, same fix as round 53's `/nick` marker
+rejection, applied to a new field with the identical shape of risk.**
+Because the real name's parenthetical is appended *unconditionally* to
+whatever `display_name` already contains, an unrestricted `display_name`
+can visually forge the entire attestation: a user with no verification
+at all could set `display_name` to `Alice (Robert Smith)` and render
+*identically* to a genuinely verified `Alice` whose real name is
+`Robert Smith` — indistinguishable to anyone reading it, since nothing
+in the rendered string is actually reserved for the system-appended
+part. This is a direct structural repeat of the exact problem round 53
+already solved for `/nick`'s marker-wrapped display (`~nick~`): a
+delimiter used to convey trusted, system-attached meaning is worthless
+if the untrusted text it wraps is allowed to contain that same
+delimiter. Fixed the same way — `display_name` rejects `(` and `)` at
+write time (registration and profile-edit alike), so any parenthetical
+a viewer sees is unambiguously the system-appended, verified part, never
+user-supplied text imitating it. Applied unconditionally, on every node,
+regardless of whether real-name-gating/attestation is enabled there —
+not a rule that only activates once the feature is switched on, so a
+node enabling attestation later never has to retroactively confront
+existing display names that already violate it.
+
 **A separate, general "verified" badge** — just the boolean fact of
 verification, not the attested value itself — may be shown on a user's
 own profile, gated by the same existing per-field visibility toggle
@@ -6249,4 +6272,45 @@ into until Phase 3's peer-connection code exists — the fetch/parse logic
 itself is self-contained and could be built earlier if useful, mirroring
 `check_latest_release`'s shape, but that's a future implementation
 choice, not decided now.
+
+## Sign-off notes, round 98 (real-name attestation display spoofing — caught and fixed before implementation)
+
+Raised directly by Thiesi while reviewing round 85's identity-
+attestation design, before any of it had been built — good timing,
+since this is a correctness fix to a design, not a retrofit to shipped
+code. The concern: round 85's display format unconditionally appends
+`(attested real name)` after whatever `display_name` the user already
+chose, with no restriction on what `display_name` itself may contain.
+
+**The actual vulnerability, once traced through:** it's not merely
+"confusing" if `display_name` contains parentheses — it's a complete
+forgery of the entire feature. A user with **no verification at all**
+could set `display_name` to `Alice (Robert Smith)` and render
+*identically* to a genuinely verified `Alice` whose real name is
+`Robert Smith`. Nothing in the rendered string is actually reserved for
+the system-appended part, so there is no way for a viewer to distinguish
+"this person typed this themselves" from "a SysOp-delegated verifier
+attested this" — which defeats the entire point of the feature, since
+that distinction *is* the feature.
+
+**This is a direct structural repeat of a problem this project already
+solved once, for a different field — round 53's `/nick` marker
+rejection.** Round 53 wraps a nick in `~marker~` for the live chat
+stream specifically so it's visually distinct from plain text, and
+"`/nick` now rejects the marker character from submitted nick content"
+was the fix that made that distinction actually trustworthy — a
+delimiter meant to convey trusted, system-attached meaning is worthless
+if the untrusted text it wraps can contain that same delimiter. Applying
+the identical fix here: `display_name` rejects literal `(` and `)` at
+write time. §18 updated directly (not left for an implementer to
+rediscover), applied unconditionally on every node rather than only once
+attestation is actively enabled, so a node that turns the feature on
+later never has to retroactively confront pre-existing display names
+that already violate the rule.
+
+**Not yet implemented** — identity attestation as a whole (round 85/86)
+remains on the addendum backlog, next after registration mode. This
+round exists so the character restriction is part of the design from
+the start of that implementation, not bolted on after the fact once
+someone notices real display names already violate it.
 
