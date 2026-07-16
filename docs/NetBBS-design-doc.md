@@ -780,6 +780,35 @@ already being made for every post on it, not a new category of trust.
   action is the same shape of problem as the Master Node — a small set of
   privileged users able to act on infrastructure they don't own — even
   though the stakes here are lower than that original failure.
+- **Origin succession, transfer, and orphan/fork policy (round 94 —
+  resolves issue #53's remaining scope).** Since origin authority for a
+  Linked resource *is* its originating node's identity, most of
+  succession is already solved by round 89's key-lifecycle model applied
+  here rather than invented fresh: **routine rotation and compromise-
+  with-root-intact** need nothing new — verification already walks the
+  transition chain, and a revoked key's forged events already fail.
+  **Voluntary origin transfer** (a SysOp deliberately handing a
+  board/channel to a different node) is modeled as just another entry in
+  the resource's own event chain (round 90's general shape), requiring
+  **mutual consent** — the old origin signs the handoff, the new origin
+  signs acceptance, before any other node honors it — directly reusing
+  the existing "an invitation alone never creates membership" pattern
+  above for channel invitations, not a new trust shape. **Root-key loss
+  or compromise has no cryptographic recovery**, symmetric with round
+  89's own stance on node/user keys: the resource becomes **orphaned** —
+  it keeps existing exactly as last known (still content-addressed,
+  still re-fetchable), but accepts no further origin-authorized events.
+  **Orphan recognition and fork handling are kept purely local, not a
+  network-wide protocol state — confirmed with Thiesi over a lightweight
+  opt-in signal piggybacking on §6's quarantine-flag machinery.** There
+  is no cryptographic proof that an origin is gone versus merely
+  offline, so — consistent with §6's core principle that no single
+  node's observation gets an automatic network-wide effect — each node
+  independently judges and decides for itself. A fork is simply a new
+  resource with a new origin, optionally carrying a non-authoritative
+  `forked_from` pointer for discoverability; each node locally decides
+  whether to carry the frozen original, the fork, both, or neither,
+  exactly like today's default-carry-with-visible-opt-out.
 - **Default-carry policy for Link participation:** joining NetBBS Link
   **carries every Linked board/channel by default** — this gives "same
   content available on any node" as the **default availability/behavior**,
@@ -1034,7 +1063,8 @@ tiers which don't actually depend on each other:**
   chosen round 93, §7's "Personal mail" subsection; implementation still
   pending); the minimum signed lifecycle/succession model before
   **Linked resource creation, carry, and closure** specifically
-  (issue #53).
+  (issue #53 — succession/orphan/fork policy chosen round 94, §13's
+  board/channel lifecycle bullets; implementation still pending).
 - Seed-node bootstrapping
 - Node-to-node transport: **HTTP+JSON with keypair signatures** (§11) —
   *not* Noise, which is reserved for Phase 5's real-time chat only
@@ -1112,9 +1142,11 @@ it depends on (trust system, chat) is already proven by this point.
 resource to exist without inventing temporary authority rules is a
 Phase 3 gate (see that phase's note) — what stays here is the *advanced*
 delegated governance below (Link-blanket moderator grants, membership
-governance, the governance log/activity feed), plus origin succession/
-fork policy, which is still open design work regardless of which phase
-it lands in (issue #53, built on issue #51's key-transition primitives).
+governance, the governance log/activity feed). Origin succession,
+transfer, and orphan/fork policy — the other half of issue #53 — was
+designed round 94 (§13's board/channel lifecycle bullets, built on issue
+#51's key-transition primitives) and doesn't wait on this phase either;
+implementation of both halves is still pending.
 - **Link-blanket ("global") moderator tier and Linked board/channel
   moderation** (§13): signed grant/edit events, verified against the
   granting event
@@ -5756,4 +5788,53 @@ surface) — this round is a design decision, not code, matching rounds
 89–91's pattern (round 92 is the exception, since a test harness has no
 "real feature" to defer building). Node/account migration (#51) and any
 future relay mechanism (#58) remain separately tracked, not solved here.
+
+## Sign-off notes, round 94 (origin succession, transfer, and orphan/fork policy — resolves the remainder of issue #53)
+
+Sixth piece of Phase 3 design work, and the second of round 88's two
+feature-specific gates. Full design lives in §13's board/channel
+lifecycle bullets (new "Origin succession, transfer, and orphan/fork
+policy" entry); this note records the reasoning.
+
+**The central move was recognizing this had almost no new ground to
+cover, because round 87 already made origin authority *the originating
+node's identity*, and round 89 already gave that identity a full key-
+lifecycle model.** Applying round 89 directly, rather than designing a
+separate resource-level authority system:
+- **Routine rotation and compromise-with-root-intact** need nothing
+  new — the same transition-chain verification and revocation already
+  cover a Linked resource's origin the moment its authority is
+  understood as "the node's identity," not a separate credential.
+- **Voluntary transfer** is modeled as one more entry in the resource's
+  own event chain (round 90's general shape: an append that references
+  what it extends), requiring **mutual consent** — old origin signs the
+  handoff, new origin signs acceptance — reusing §13's own existing
+  "an invitation alone never creates membership" pattern for channel
+  invitations rather than inventing a new trust shape for this one case.
+- **Root-key loss or compromise has no cryptographic recovery**,
+  symmetric with round 89's stance on node/user keys generally — a
+  resource in that state becomes **orphaned**: it keeps existing exactly
+  as last known, but accepts no further origin-authorized events.
+
+**Confirmed with Thiesi: orphan recognition and fork handling stay
+purely local, not a network-wide protocol state.** The alternative
+considered — a lightweight opt-in signal piggybacking on §6's existing
+quarantine-flag machinery, so nodes could converge on "X is orphaned"
+faster than each independently noticing — was rejected in favor of the
+simpler, already-established principle: there's no cryptographic proof
+an origin is gone versus merely offline, so no single node's observation
+should get an automatic network-wide effect, the same reasoning §6
+already applies to quarantine and trust generally. A fork is just a new
+resource with a new origin, optionally carrying a non-authoritative
+`forked_from` pointer for discoverability; each node locally decides
+whether to carry the frozen original, the fork, both, or neither — the
+same default-carry-with-visible-opt-out shape already used everywhere
+else in this section.
+
+**This resolves issue #53 in full** (round 87 already covered the
+genesis/carry/closure conceptual model; this round covers the succession/
+orphan/fork half that remained). What's still open is the actual
+implementation of both halves, and the general event-chain/transition-
+record mechanics remain #11's exact-wire-format territory, not
+duplicated here.
 
