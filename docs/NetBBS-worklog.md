@@ -5235,3 +5235,114 @@ Both issues closed pending the reviewer's next verification pass; round
 were not in question this round, only these two narrower gaps in their
 implementation.
 
+## Sign-off notes, round 75 (chat status line — implemented)
+
+Following v2.0.0's release, Thiesi asked for two final-polish items
+(online contextual help, menu prettification) to be recorded as
+deliberately last-priority — done, see this round's own design-doc
+sign-off note — and for the chat status line to be built next, checked
+for blockers first. None found; built using the scroll-region (DECSTBM)
+approach Thiesi chose over a simpler no-new-primitives alternative
+(see the design-doc note for the fork itself).
+
+1. **Two new ANSI primitives**, `netbbs.rendering.ansi`:
+   `set_scroll_region(top, bottom)`/`reset_scroll_region()` (DECSTBM,
+   `CSI {top};{bottom} r` / `CSI r`) and `save_cursor()`/
+   `restore_cursor()` (the classic VT100 `ESC 7`/`ESC 8`, not the
+   ANSI.SYS `CSI s`/`CSI u` variant, for the widest real-terminal
+   support). Neither existed anywhere in the codebase before this —
+   confirmed by a repo-wide grep before starting.
+2. **`netbbs.net.chat_flow._chat_loop` now reserves the terminal's
+   last row** for a pinned status line, set up once per channel entry:
+   `clear_screen()` followed by `set_scroll_region(1, height - 1)`.
+   The `clear_screen()` is not cosmetic — DECSTBM moves the real
+   terminal cursor to its home position as an unavoidable side effect
+   of the escape sequence itself, so without it the jump would
+   overwrite whatever screen preceded chat rather than land on a
+   blank canvas. A genuine, visible behavior change from before (chat
+   used to just continue printing inline under the previous screen).
+   Skipped entirely below `_STATUS_LINE_MIN_HEIGHT` (2) — a client can
+   report an arbitrarily small terminal height (`clamp_terminal_size`'s
+   own floor is 1, not a sane minimum), and this degrades cleanly to
+   the exact old unconfined-scrolling behavior rather than trying to
+   render a status line with nothing left to reserve it from.
+3. **`_render_chat_status_line`** (pure function) formats channel
+   name, live participant count (`ChatHub.participant_count`), this
+   user's own away/mute indicators (`[away]`, `[muted]`, or `[muted
+   until HH:MM]`), and a clock — deliberately a bare `%H:%M`
+   (`format_for_display`'s `override_format`), not the node's full
+   configured display format (which includes the date) and would
+   waste width on a bar that's redrawn continuously and only ever
+   shows the current moment. Still honors the node's configured
+   timezone, which `override_format` alone doesn't affect.
+   `_repaint_status_line` wraps it with `save_cursor`/
+   `set_scroll_region` (re-issued every call, not just at entry —
+   see point 5) /`move_cursor`/`clear_line`/`restore_cursor`, so an
+   in-progress input line is never disturbed.
+4. **Five repaint call sites**, not fifty: one in `receive_loop`
+   (after every `_TimestampedNotice` — covers joins/leaves/topic
+   changes/moderation notices with one call, rather than enumerating
+   which specific notice types are "count-relevant"), three in
+   `send_loop` (after any dispatched slash command, when a muted
+   message is rejected — the user may be learning they're muted for
+   the first time right there, and after an ordinary message is sent),
+   plus the initial draw right after the join broadcast. Centralized
+   to these two functions' own bodies rather than scattered across the
+   ~50 individual command handlers that write to the session directly.
+5. **Resize handling with no dedicated resize-event hook**:
+   `_repaint_status_line` re-reads `session.terminal_height` and
+   re-issues `set_scroll_region` on *every* call, not just once at
+   entry — confirmed via research that Telnet NAWS/SSH PTY-resize/web
+   `resize` all update `terminal_height` live already, just passively,
+   with nothing in the codebase reacting to the change as an event.
+   Re-sending an unchanged region is harmless, so piggybacking on the
+   repaint calls that already happen regularly gets basic resize
+   adaptation for free without inventing a new notification mechanism.
+6. **Cleanup**: `reset_scroll_region()` runs in `_chat_loop`'s
+   existing `finally` block, wrapped in its own `try/except
+   SessionClosedError` — best-effort, since the common reason this
+   block is even running is that the session is already gone, and a
+   failure here must not replace/mask whatever exception is already
+   propagating out of the `try` above. Must happen before the session
+   moves on to any other screen (the main menu, the channel picker) —
+   left active, every subsequent screen would keep scrolling inside
+   this same shrunk region.
+7. **A real, foreseeable collision with an existing security test,
+   found and fixed correctly rather than papered over**:
+   `test_terminal_sanitization.py`'s hostile-payload test asserted a
+   blanket "`\x1b[2J` never appears anywhere in the transcript" to
+   confirm an attacker's embedded clear-screen sequence didn't survive
+   sanitization — which broke the moment chat legitimately started
+   emitting a real `clear_screen()` of its own on entry, containing
+   the identical two bytes for a completely unrelated reason. Fixed by
+   anchoring the check to the hostile payload's own contiguous
+   fragment (`"PWNED\x07\x1b[2Jmore text"`) instead of a bare
+   substring search — correctly distinguishes "the attacker's sequence
+   survived" from "this byte sequence also legitimately occurs
+   elsewhere in the same output," the identical class of collision the
+   test's own docstring already flagged for `colored()`'s SGR codes,
+   just not yet for a control sequence needing intact-survival
+   checking. The security property itself is unweakened; every other
+   assertion in that helper is untouched.
+8. **Testing**: `test_ansi.py` gained 7 new cases for the two ANSI
+   primitives (including rejecting an inverted/invalid scroll region
+   and accepting a single-row region). The new `test_chat_status_line.py`
+   covers the rendered content directly (channel/count/away/mute/clock,
+   confirming the clock is genuinely time-only with no 4-digit year
+   anywhere) and the surrounding mechanics through the real
+   `_chat_loop`: scroll-region set on entry, screen cleared on entry,
+   region reset on exit, gracefully skipped on a too-short terminal,
+   the reset write's own failure doesn't crash cleanup, a repaint after
+   `/away`, a repaint when a muted message is rejected, and — the one
+   requiring two concurrent `_chat_loop` tasks — one participant's
+   status line correctly reflecting a second participant's live
+   arrival. Full suite re-run: **1579 passed, 4 skipped**.
+
+Real third-party-client verification (a genuine Telnet client, SSH
+client, and the web xterm.js terminal actually rendering the scroll
+region correctly) remains unverified from this sandboxed dev
+environment — flagged explicitly, same standing caveat this project's
+other terminal-rendering work already carries, not a new one specific
+to this feature. The self-service registration workflow is next, per
+Thiesi's own explicit ordering (see this round's design-doc note).
+

@@ -76,6 +76,55 @@ def move_cursor(row: int, col: int) -> str:
     return f"{CSI}{row};{col}H"
 
 
+def set_scroll_region(top: int, bottom: int) -> str:
+    """
+    DECSTBM (`CSI {top};{bottom} r`) — confines *ordinary* scrolling
+    (a newline written past the bottom of the screen) to rows `top`
+    through `bottom` (1-indexed, inclusive), leaving anything outside
+    that range untouched by it. The chat status line (design doc round
+    75) is the first consumer: excluding the terminal's last row from
+    the region keeps a status line pinned there while ordinary chat
+    text scrolls normally within the rest of the screen — the same
+    mechanism real BBS/IRC status bars and tools like `tmux` use, not
+    a repaint-after-every-line trick.
+
+    A cursor move to any row, including inside the excluded region, is
+    still possible via `move_cursor` regardless of the active
+    region — DECSTBM only affects what *scrolling* touches, not
+    direct addressing. Must be paired with `reset_scroll_region()`
+    before returning control to any other screen; a caller that exits
+    without resetting leaves every subsequent screen scrolling inside
+    the same shrunk region, an easy-to-miss bug with no `move_cursor`
+    call anywhere near it to make it obvious.
+    """
+    if top < 1 or bottom < top:
+        raise ValueError(f"top must be >= 1 and <= bottom, got top={top}, bottom={bottom}")
+    return f"{CSI}{top};{bottom}r"
+
+
+def reset_scroll_region() -> str:
+    """Restores the scroll region to the whole screen — see
+    `set_scroll_region`'s docstring for why every caller that narrows
+    the region must call this before giving up control of the
+    session."""
+    return f"{CSI}r"
+
+
+def save_cursor() -> str:
+    """DEC save-cursor (`ESC 7`) — the classic VT100 sequence, not the
+    ANSI.SYS `CSI s` variant, for the widest real-terminal support.
+    Saves position *and* character attributes; paired with
+    `restore_cursor()` so a caller can jump elsewhere (e.g. to repaint
+    the chat status line's pinned row) and return to exactly where
+    the user was typing without disturbing it."""
+    return f"{ESC}7"
+
+
+def restore_cursor() -> str:
+    """The other half of `save_cursor()` (`ESC 8`)."""
+    return f"{ESC}8"
+
+
 def reject_keystroke(count: int = 1) -> str:
     """
     Erase the `count` most recently echoed characters and sound the

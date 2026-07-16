@@ -61,10 +61,25 @@ from netbbs.directory import VCard, get_vcard
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory
 from netbbs.net.picker import pick_item
-from netbbs.net.session import Session
+from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, colored, menu_key, sanitize_text
+from netbbs.rendering import (
+    ACCENT_COLOR,
+    MUTED_COLOR,
+    SELF_COLOR,
+    clear_line,
+    clear_screen,
+    colored,
+    menu_key,
+    move_cursor,
+    reset_scroll_region,
+    restore_cursor,
+    sanitize_text,
+    save_cursor,
+    set_scroll_region,
+    truncate,
+)
 from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display, utc_now_iso
 
@@ -1682,6 +1697,100 @@ def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel,
     return completer
 
 
+# -- chat status line (design doc round 75) ---------------------------------
+
+# The scroll region reserves the terminal's last row for the status line
+# (rows 1..height-1 scroll normally; the status row never does) -- at
+# least 2 rows are needed for that split to mean anything at all. Below
+# this, the status line is skipped entirely and chat behaves exactly as
+# it did before this feature: plain, unconfined scrolling. A client can
+# report an arbitrarily small height (`netbbs.net.session.
+# clamp_terminal_size`'s own floor is 1, not a sane minimum), so this
+# has to be a real runtime check, not an assumption.
+_STATUS_LINE_MIN_HEIGHT = 2
+
+
+def _render_chat_status_line(
+    db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+) -> str:
+    """
+    The status line's content, as plain formatted text (colored/
+    truncated by the caller) -- channel name, live participant count,
+    this user's own away/mute state if either applies, and a clock.
+    Deliberately *not* included: private-conversation target, `/nick`
+    alias, or anything else -- kept to state a user would actually
+    glance at mid-conversation, not everything knowable.
+
+    The clock forces a bare `%H:%M` (`override_format`), not the
+    node-configured display format `format_for_display` would otherwise
+    use elsewhere (e.g. scrollback timestamps) -- that format normally
+    includes the full date, sensible for a timestamp attached to one
+    specific past event, but wasted width on a bar that's redrawn
+    continuously and only ever shows *right now*. Still honors the
+    node's configured timezone, which `override_format` alone doesn't
+    affect (see that parameter's own resolution order).
+    """
+    channel_label = f"#{sanitize_text(channel.name)}"
+    online = f"{hub.participant_count(channel.name)} online"
+
+    indicators = []
+    if presence.is_away(user.username):
+        indicators.append("away")
+    restriction = is_muted(db, channel, user)
+    if restriction is not None:
+        if restriction.expires_at is None:
+            indicators.append("muted")
+        else:
+            indicators.append(f"muted until {format_for_display(restriction.expires_at, db)}")
+
+    parts = [channel_label, online]
+    parts.extend(f"[{indicator}]" for indicator in indicators)
+    parts.append(format_for_display(utc_now_iso(), db, override_format="%H:%M"))
+    return "  ".join(parts)
+
+
+async def _repaint_status_line(
+    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+) -> None:
+    """
+    Redraws the pinned status row in place, leaving the user's own
+    in-progress input line untouched (design doc round 75).
+
+    Re-reads `session.terminal_height` and re-issues `set_scroll_region`
+    on every call, not just once at entry -- the cheapest way to stay
+    correct across a mid-session resize (Telnet NAWS/SSH PTY-resize/web
+    `resize` all update `terminal_height` live, but passively, with no
+    event this function could otherwise hook) without a dedicated
+    resize-notification mechanism, which doesn't exist anywhere in this
+    codebase yet. Re-sending an unchanged region is harmless. Falls
+    back to doing nothing if the terminal is too short for a status
+    line to make sense (`_STATUS_LINE_MIN_HEIGHT`) -- matches whatever
+    `_chat_loop` itself decided at entry, recomputed fresh here in case
+    a resize crossed that threshold mid-session.
+
+    `save_cursor`/`restore_cursor`, not a remembered logical position:
+    the user's own terminal already knows exactly where its cursor is
+    mid-line-edit (including any client-side echo/cursor movement this
+    server-side code has no visibility into) — asking the terminal
+    itself to remember and restore it is the only way to guarantee this
+    doesn't disturb in-progress typing, regardless of what transport or
+    client is on the other end.
+    """
+    height = session.terminal_height
+    if height < _STATUS_LINE_MIN_HEIGHT:
+        return
+    text = truncate(_render_chat_status_line(db, hub, presence, channel, user), session.terminal_width)
+    line = colored(text, fg_color=MUTED_COLOR, bold=True)
+    await session.write(
+        save_cursor()
+        + set_scroll_region(1, height - 1)
+        + move_cursor(height, 1)
+        + clear_line()
+        + line
+        + restore_cursor()
+    )
+
+
 async def _chat_loop(
     session: Session,
     db: Database,
@@ -1746,6 +1855,19 @@ async def _chat_loop(
     sign-off round 37): an unexpired ban means the user never enters
     the loop at all. Mute has no equivalent join-time check — a muted
     user can still read, just not send (enforced in `send_loop`).
+
+    A pinned status row occupies the terminal's last line for the
+    duration of the session, via a VT100 scroll region (design doc
+    round 75; see `_repaint_status_line`) — everything above it,
+    including the scrollback replay and "Joined" line below, scrolls
+    normally within the shrunk region. Setting that region moves the
+    real terminal cursor to its home position as an unavoidable side
+    effect of the escape sequence itself, so entry clears the screen
+    first — a deliberate, visible transition into chat, not previously
+    true (chat used to just continue printing inline below whatever
+    screen preceded it). Skipped entirely on a too-short terminal
+    (`_STATUS_LINE_MIN_HEIGHT`), which degrades to exactly the old,
+    unconfined scrolling behavior.
     """
     restriction = is_banned(db, channel, user)
     if restriction is not None:
@@ -1761,6 +1883,10 @@ async def _chat_loop(
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
+
+    status_line_enabled = session.terminal_height >= _STATUS_LINE_MIN_HEIGHT
+    if status_line_enabled:
+        await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 1))
 
     channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
     quit_hint = menu_key("/quit", " to leave")
@@ -1798,6 +1924,8 @@ async def _chat_loop(
         ),
         exclude={participant_id},
     )
+    if status_line_enabled:
+        await _repaint_status_line(session, db, hub, presence, channel, user)
 
     async def receive_loop() -> None:
         while True:
@@ -1811,6 +1939,13 @@ async def _chat_loop(
                 await session.write_line(
                     format_with_preference(db, user, message.text, message.created_at)
                 )
+                # Covers every reason this notice type exists -- joins/
+                # leaves (participant count), topic changes, and
+                # moderation notices alike -- with one call rather than
+                # enumerating which specific notices are "count-
+                # relevant" (design doc round 75).
+                if status_line_enabled:
+                    await _repaint_status_line(session, db, hub, presence, channel, user)
                 continue
             if isinstance(message, QueueOverflowNotice):
                 # GitHub issue #31: this session's own queue overflowed
@@ -1892,6 +2027,13 @@ async def _chat_loop(
                     continue
                 if action is not None:
                     return action
+                # A dispatched command may have changed status-line-
+                # relevant state of this user's own (/away, /nick) --
+                # repainting after every command, not just those two,
+                # is simpler than enumerating which ones matter and no
+                # more expensive (design doc round 75).
+                if status_line_enabled:
+                    await _repaint_status_line(session, db, hub, presence, channel, user)
                 continue
 
             if private_target is not None:
@@ -1928,6 +2070,12 @@ async def _chat_loop(
                 await session.write_line(
                     colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
                 )
+                # The user may be learning they're muted right now, for
+                # the first time -- there's no live-push notice for a
+                # new mute the way kick/ban get one, so this rejection
+                # is the first opportunity to reflect it.
+                if status_line_enabled:
+                    await _repaint_status_line(session, db, hub, presence, channel, user)
                 continue
 
             # Two differently-colored copies of the same message, not
@@ -1982,6 +2130,8 @@ async def _chat_loop(
                 await session.write_line(
                     colored("(You are still marked away.)", fg_color=MUTED_COLOR)
                 )
+            if status_line_enabled:
+                await _repaint_status_line(session, db, hub, presence, channel, user)
 
     receive_task = asyncio.create_task(receive_loop())
     send_task = asyncio.create_task(send_loop())
@@ -2024,6 +2174,21 @@ async def _chat_loop(
         # own -- it always means "exit entirely," same as /quit.
         return outcome or _Quit()
     finally:
+        if status_line_enabled:
+            # Best-effort: a session that's already gone (the common
+            # reason this whole function is unwinding in the first
+            # place) makes this write raise SessionClosedError, which
+            # must not replace/mask whatever exception is already
+            # propagating out of the try block above (design doc round
+            # 75) -- there's nothing left to reset for a session that's
+            # already disconnected anyway. Must happen before this
+            # session moves on to any other screen (the main menu, the
+            # channel picker) -- left active, every subsequent screen
+            # would keep scrolling inside this same shrunk region.
+            try:
+                await session.write(reset_scroll_region())
+            except SessionClosedError:
+                pass
         hub.leave(channel.name, participant_id)
         recorded_leave = record_message(
             db, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint

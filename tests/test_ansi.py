@@ -11,6 +11,10 @@ from netbbs.rendering.ansi import (
     colored,
     fg,
     move_cursor,
+    reset_scroll_region,
+    restore_cursor,
+    save_cursor,
+    set_scroll_region,
 )
 
 
@@ -88,3 +92,37 @@ def test_move_cursor_rejects_non_positive_coordinates():
         move_cursor(5, 0)
     with pytest.raises(ValueError):
         move_cursor(-1, 5)
+
+
+# -- design doc round 75: scroll region + save/restore cursor --------------
+# -- (the chat status line's underlying primitives) -------------------------
+
+
+def test_set_scroll_region():
+    assert set_scroll_region(1, 23) == "\x1b[1;23r"
+
+
+def test_set_scroll_region_rejects_top_below_one():
+    with pytest.raises(ValueError):
+        set_scroll_region(0, 23)
+
+
+def test_set_scroll_region_rejects_bottom_before_top():
+    with pytest.raises(ValueError):
+        set_scroll_region(10, 5)
+
+
+def test_set_scroll_region_accepts_a_single_row_region():
+    set_scroll_region(5, 5)  # top == bottom -- must not raise
+
+
+def test_reset_scroll_region():
+    assert reset_scroll_region() == "\x1b[r"
+
+
+def test_save_cursor():
+    assert save_cursor() == "\x1b7"
+
+
+def test_restore_cursor():
+    assert restore_cursor() == "\x1b8"

@@ -21,6 +21,10 @@ from netbbs.rendering.ansi import (
     fg,
     move_cursor,
     reject_keystroke,
+    reset_scroll_region,
+    restore_cursor,
+    save_cursor,
+    set_scroll_region,
 )
 from netbbs.rendering.ansi_art import decode_ansi_bytes, encode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
@@ -50,6 +54,10 @@ __all__ = [
     "fg",
     "move_cursor",
     "reject_keystroke",
+    "reset_scroll_region",
+    "restore_cursor",
+    "save_cursor",
+    "set_scroll_region",
     "menu_key",
     "DEFAULT_WIDTH",
     "reflow",

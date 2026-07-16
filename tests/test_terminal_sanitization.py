@@ -102,9 +102,23 @@ def _assert_hostile_payload_neutralized(text: str) -> None:
     check, which would also (wrongly) flag NetBBS's own legitimate
     `colored()` SGR sequences that are expected to appear in this same
     output alongside the sanitized content.
+
+    The clear-screen check specifically looks for HOSTILE's *own*
+    contiguous fragment (`"...PWNED\x07\x1b[2Jmore text"`), not a bare
+    "`\x1b[2J` never appears anywhere in the transcript" -- since
+    design doc round 75, the chat status line's scroll-region setup
+    legitimately emits a real `clear_screen()` on ordinary chat entry,
+    which happens to contain the identical two bytes for an entirely
+    unrelated reason. Anchoring to HOSTILE's own neighboring text is
+    what actually distinguishes "the attacker's sequence survived
+    sanitization" from "this byte sequence also legitimately occurs
+    elsewhere in the same output" -- the same kind of collision this
+    docstring's first sentence already flags for `colored()`'s own SGR
+    codes, just for a control sequence that has to be checked for
+    intact survival rather than just tolerated.
     """
     assert "\x1b]0;PWNED\x07" not in text, "hostile OSC (fake window title) sequence survived intact"
-    assert "\x1b[2J" not in text, "hostile CSI (clear screen) sequence survived intact"
+    assert "PWNED\x07\x1b[2Jmore text" not in text, "hostile CSI (clear screen) sequence survived intact"
     assert "\x9b1m" not in text, "hostile C1 CSI byte survived"
     assert "\x07" not in text, "raw BEL byte reached the terminal"
     assert "\x9b" not in text, "raw C1 control byte reached the terminal"

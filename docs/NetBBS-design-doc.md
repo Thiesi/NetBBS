@@ -3174,3 +3174,50 @@ by whatever's stored, not attacker-controlled growth the way an
 upload's declared/actual size is, so it was never the same class of
 problem.
 
+## Sign-off notes, round 75 (two final-polish items deferred to last; a real self-registration gap identified)
+
+Recorded directly from Thiesi, v2.0.0 having just shipped (Phase 1+2
+complete plus two rounds of security hardening) — three scope items,
+none implemented this round.
+
+**1. Online contextual help — deferred until 100% feature-complete.**
+A short, in-context description of what an option/keystroke actually
+does, shown before a user commits to pressing it — not a full manual;
+closer to a one-line-per-option hint than a help system in its own
+right. Deliberately deferred, not scoped further now: Thiesi's own
+reasoning is that workflows and behaviors need to stop moving first,
+since writing accurate help text against a UI that's still changing
+means rewriting it repeatedly for no benefit. Revisit once the feature
+set is genuinely done, not before.
+
+**2. Menu prettification — deferred until 100% feature-complete,
+direction not yet chosen.** The current menu presentation (colored
+bracketed hotkeys, one-line option lists) is functional but plain —
+Thiesi's own words, "not a pleasant place to be." Real candidate
+directions were named but explicitly not decided between: ANSI/TUI
+"windows" in a DOS-application style (feasible now that round 64's
+screen-buffer/diff TUI core exists), or simply cleaner, non-one-liner
+menu layouts without a full windowing model. To be designed and
+confirmed once actually reached — recorded here so the direction
+question doesn't need rediscovering, not as a spec.
+
+**3. Newly identified gap: no self-service account registration.**
+Confirmed by inspection (grepping every call site of
+`netbbs.auth.users.create_user`): there is no code path anywhere that
+lets a new, unauthenticated Telnet/SSH/web connection create its own
+account. Every existing route into `create_user` — the in-session
+`[A]dmin` menu, the standalone `python -m netbbs.admin` CLI, and dev
+bootstrap scripts — requires either an already-authenticated SysOp or
+direct machine access. No phase (§15) ever specified self-registration
+as in-scope, and Phase 1's "Password + keypair auth" bullet, in
+hindsight, only ever meant authenticating an *existing* account.
+Unlike items 1–2 above, this is **not** deferred — it's a genuinely
+missing core feature for what a BBS is, flagged as the next real
+implementation task after the in-progress chat status line, not a
+someday item.
+
+**Ordering, as given:** chat status line first (checked for blockers
+before starting; see its own worklog entry once done), then
+self-service registration, ASAP. Items 1–2 above sit at the very end
+of the list, after everything else, including registration.
+
