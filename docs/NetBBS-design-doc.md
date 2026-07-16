@@ -712,6 +712,77 @@ inventing new ones:
   the existing ANSI welcome-banner toggle (round 63) — autonomy
   preserved via opt-out, automation preserved via the default.
 
+### Live seed-list refresh via the self-update channel (round 97)
+
+Prompted by Thiesi asking, after self-update's first implementation
+pass (round 96) landed, whether that same mechanism could address a
+gap in the seed-bootstrap model above: the seed list is fixed/hardcoded
+at ship time, so every node installed at time T stays anchored to
+whatever seeds existed then, forever, unless a SysOp manually
+intervenes — the "operator-overridable, learn-more-peers-once-connected"
+resilience round 95 already built helps *after* first contact, but does
+nothing for the list a brand-new node starts from.
+
+**Decided: fetch a small, independently-updated seed list over the same
+HTTPS/GitHub channel self-update already uses, as a supplement to —
+never a replacement for — the operator-configured and shipped-fallback
+seeds.** Reasoning:
+
+- **Reuses an already-accepted trust boundary for a strictly lower-stakes
+  payload, not a new one.** Round 82 already accepted HTTPS + the GitHub
+  API as self-update's entire trust boundary specifically because it's
+  needed to deliver *code* — the highest-stakes payload a network-facing
+  server can receive. A seed list is a strictly lower-stakes payload than
+  that: the actual damage a hostile list can do is already bounded by
+  decisions made elsewhere in this document — seed introduction never
+  implies trust (this section, above), and seed compromise can't
+  impersonate peers, since identity is keypair-based and independent of
+  network location. A malicious list can get a node to *attempt*
+  connections to attacker-controlled addresses; it cannot force trust,
+  fake a real peer's identity, or exempt a new node from §6's low-trust
+  probation regardless of who introduced it.
+- **Named residual risk, not hidden — an eclipse attack during the
+  bootstrap window.** If the channel were compromised at exactly the
+  moment a brand-new node's candidate pool were 100% attacker-supplied,
+  that node's early view of the Link could be selectively distorted
+  before it builds any peer relationships of its own. This risk already
+  exists today with a hardcoded list compromised at ship time; this
+  mechanism doesn't create the risk, it widens the window it could occur
+  in, by turning a one-time bootstrap artifact into an ongoing
+  dependency on the same channel. Recorded here explicitly, matching
+  round 82's own style of naming accepted trade-offs plainly rather than
+  letting them ride as an unexamined side effect.
+- **Fetched via a well-known raw file path, decoupled from the software
+  release cycle — confirmed with Thiesi over two alternatives.**
+  Rejected piggybacking the seed list onto release assets (ties seed-
+  list freshness to the software release cadence, the wrong coupling —
+  a seed going offline shouldn't have to wait for the next NetBBS
+  release to be dropped from the list) and a separate parallel "release
+  train" reusing `check_latest_release`'s exact machinery (more code
+  reuse, but stretches what a GitHub release is conceptually for).
+  Fetching a plain file (e.g. `seeds.json`) from a fixed repo path via
+  GitHub's raw-content delivery lets the seed list update on its own
+  cadence, independent of versioned software releases.
+- **Supplements, never replaces, the existing seed sources.** Priority
+  order: operator-configured seeds first (explicit intent always wins),
+  then the software-shipped fallback list (used if the live fetch fails
+  — no network yet, GitHub unreachable, or a deliberately air-gapped
+  test node), with the live-fetched list layered in as a freshness
+  improvement on top, not a dependency the "every configured seed
+  unavailable" resilience path (round 95) now requires to function.
+- **No new trigger-point machinery.** Refreshed at the same three points
+  self-update already checks at (startup/manual/daily-background, §17)
+  — most valuable for a brand-new node with no learned peers yet, but
+  available to any node, since there's no harm in an established node
+  also refreshing its candidate pool if its own learned peers have gone
+  stale.
+
+**Phase placement:** part of Phase 3 (WAN reachability, issue #58) — the
+fetch/parse logic itself has no Link-protocol dependency and could be
+built as a small, self-contained piece (mirroring `check_latest_release`'s
+shape) whenever that's useful, but it has nothing to plug into until
+Phase 3's actual peer-connection code exists.
+
 ## 13. Permissions & Moderation
 
 Covers intra-node user/board/channel permissions — a distinct layer from
@@ -6120,4 +6191,62 @@ self-registration feature — not a Phase 3 gate, no dependency on
 anything in rounds 89–95. Implementation (the config migration, the
 admin-menu control, the login-prompt visibility change) is still
 pending.
+
+## Sign-off notes, round 97 (live seed-list refresh, reusing the self-update channel — resolves a gap in issue #58's seed-bootstrap model)
+
+Raised directly by Thiesi as a brainstorming session, immediately after
+round 96 landed self-update's first implementation pass — noticing that
+the same GitHub-Releases-API channel just built for code delivery could
+also address something round 95's WAN-reachability design left
+unresolved: the seed list is fixed at ship time, so a node installed at
+time T stays anchored to whatever seeds existed then, forever, absent
+manual SysOp intervention. Round 95's "learn more peers once connected"
+resilience helps *after* first contact; it does nothing for the list a
+brand-new node starts from.
+
+**Core argument, and why this isn't a new trust decision:** round 82
+already accepted HTTPS + the GitHub API as self-update's entire trust
+boundary, for delivering *code* — the highest-stakes payload a network-
+facing server can receive. A seed list is strictly lower-stakes: the
+damage a hostile list can do is already bounded by decisions made
+elsewhere (seed introduction never implies trust; seed compromise can't
+impersonate peers, since identity is keypair-based and independent of
+network location). Trusting the same already-accepted channel for a
+lower-stakes payload isn't a new risk category, just a reuse of one
+already signed off on.
+
+**Named explicitly rather than left implicit, matching round 82's own
+transparency about self-update's trade-offs:** this turns a one-time
+bootstrap artifact into an ongoing dependency on the same channel,
+widening the window (not the shape) of an already-existing eclipse-
+attack risk — if the channel were compromised at exactly the moment a
+new node's entire candidate pool were attacker-supplied, its early Link
+view could be distorted before it builds its own peer relationships. A
+hardcoded list compromised at ship time already carries this same risk
+today; this mechanism doesn't introduce the risk, it makes the window
+recurring rather than one-time.
+
+**Mechanism: a well-known raw file path (e.g. `seeds.json`), not tied to
+the release cycle — confirmed with Thiesi over two alternatives.**
+Rejected piggybacking on release assets (couples seed-list freshness to
+software-release cadence, the wrong coupling) and a parallel "release
+train" reusing `check_latest_release`'s machinery (more code reuse, but
+stretches what a GitHub release is conceptually for). A plain file
+fetched via GitHub's raw-content delivery lets the list update
+independently of versioned releases — seed churn and software releases
+are genuinely different cadences.
+
+**Supplements, never replaces, existing seed sources** — operator-
+configured seeds first, the shipped fallback list next (used if the
+live fetch fails), the live list layered in as a freshness improvement
+on top, not a new dependency of the "every configured seed unavailable"
+resilience path round 95 already built. Reuses self-update's existing
+three trigger points (startup/manual/daily) rather than inventing a
+fourth.
+
+**Phase placement:** Phase 3 (issue #58), since it has nothing to plug
+into until Phase 3's peer-connection code exists — the fetch/parse logic
+itself is self-contained and could be built earlier if useful, mirroring
+`check_latest_release`'s shape, but that's a future implementation
+choice, not decided now.
 
