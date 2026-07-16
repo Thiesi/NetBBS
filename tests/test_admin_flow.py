@@ -605,6 +605,7 @@ def test_create_and_delete_area_flow(db, sysop):
         "m", "a", "c",
         "Docs", "Documents area", "0", "0",
         "n", "n", "n", "",
+        "", "",  # min age, name requirement -- both blank, no gate
         "l", "0", "1", "d", "Docs",
         "b", "b", "b",
     ]
@@ -755,6 +756,7 @@ def test_create_channel_flow(db, sysop):
         "n",  # pinned? no
         "n",  # hidden? no
         "n",  # members-only? no
+        "", "",  # min age, name requirement -- both blank, no gate
         "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -773,12 +775,14 @@ def test_edit_and_delete_channel_flow(db, sysop):
 
     # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
     # min level(keep), n(don't change category), y(pin), n(hidden),
-    # n(members-only), n(allow invites) -> back to detail -> d(elete) ->
-    # retype new name -> back x3
+    # n(members-only), n(allow invites), blank(min age), blank(name
+    # requirement) -> back to detail -> d(elete) -> retype new name ->
+    # back x3
     inputs = [
         "m", "h", "l", "0", "1", "e",
         "Lobby2", "", "",
         "n", "y", "n", "n", "n",
+        "", "",
         "d", "Lobby2",
         "b", "b", "b",
     ]

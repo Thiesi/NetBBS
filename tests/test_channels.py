@@ -94,7 +94,8 @@ def test_update_channel_replaces_the_full_state(db, alice):
     channel = create_channel(db, "lobby", creator=alice)
     updated = update_channel(
         db, channel, name="lobby2", description="new desc", min_level=5, category_id=None,
-        pinned=True, hidden=True, members_only=True, allow_member_invites=True, changed_by=alice,
+        pinned=True, hidden=True, members_only=True, allow_member_invites=True,
+        min_age=18, name_requirement="verified", changed_by=alice,
     )
     assert updated.name == "lobby2"
     assert updated.description == "new desc"
@@ -103,6 +104,8 @@ def test_update_channel_replaces_the_full_state(db, alice):
     assert updated.hidden is True
     assert updated.members_only is True
     assert updated.allow_member_invites is True
+    assert updated.min_age == 18
+    assert updated.name_requirement == "verified"
     entries = list_actions_for_object(db, "channel", channel.id)
     assert any(e.action == "update_channel" for e in entries)
 
@@ -114,8 +117,29 @@ def test_update_channel_rejects_a_name_collision(db, alice):
         update_channel(
             db, channel, name="taken", description=None, min_level=0, category_id=None,
             pinned=False, hidden=False, members_only=False, allow_member_invites=False,
-            changed_by=alice,
+            min_age=None, name_requirement=None, changed_by=alice,
         )
+
+
+def test_update_channel_rejects_invalid_name_requirement(db, alice):
+    channel = create_channel(db, "lobby", creator=alice)
+    with pytest.raises(ChannelError, match="name_requirement"):
+        update_channel(
+            db, channel, name="lobby", description=None, min_level=0, category_id=None,
+            pinned=False, hidden=False, members_only=False, allow_member_invites=False,
+            min_age=None, name_requirement="bogus", changed_by=alice,
+        )
+
+
+def test_create_channel_rejects_invalid_name_requirement(db, alice):
+    with pytest.raises(ChannelError, match="name_requirement"):
+        create_channel(db, "lobby", creator=alice, name_requirement="bogus")
+
+
+def test_create_channel_defaults_no_age_or_name_gate(db, alice):
+    channel = create_channel(db, "lobby", creator=alice)
+    assert channel.min_age is None
+    assert channel.name_requirement is None
 
 
 def test_delete_channel_cascades_scrollback_restrictions_membership_and_grants(db, alice, bob, sysop):

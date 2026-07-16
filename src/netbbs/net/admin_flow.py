@@ -1453,12 +1453,19 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
         except ValueError:
             await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
             return
+    min_age, ok = await _prompt_min_age(session, current=None)
+    if not ok:
+        return
+    name_requirement, ok = await _prompt_name_requirement(session, current=None)
+    if not ok:
+        return
 
     try:
         area = create_file_area(
             db, name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
-            moderated=moderated, max_file_age_days=max_file_age_days, creator=actor,
+            moderated=moderated, max_file_age_days=max_file_age_days,
+            min_age=min_age, name_requirement=name_requirement, creator=actor,
         )
     except FileAreaError as exc:
         await session.write_line(colored(f"Could not create file area: {exc}", fg_color=MUTED_COLOR))
@@ -1523,6 +1530,10 @@ async def _draw_area_detail(session: Session, area: FileArea) -> None:
     )
     age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
     await session.write_line(f"Max file age: {age} days")
+    await session.write_line(
+        f"Minimum age: {area.min_age if area.min_age is not None else 'none'}  "
+        f"Name requirement: {area.name_requirement or 'none'}"
+    )
     options = "  ".join(
         [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending files"), menu_key("B", "ack")]
     )
@@ -1572,12 +1583,19 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
         except ValueError:
             await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
             return None
+    min_age, ok = await _prompt_min_age(session, current=area.min_age)
+    if not ok:
+        return None
+    name_requirement, ok = await _prompt_name_requirement(session, current=area.name_requirement)
+    if not ok:
+        return None
 
     try:
         updated = update_file_area(
             db, area, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
-            moderated=moderated, max_file_age_days=max_file_age_days, changed_by=actor,
+            moderated=moderated, max_file_age_days=max_file_age_days,
+            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
         )
     except FileAreaError as exc:
         await session.write_line(colored(f"Could not update file area: {exc}", fg_color=MUTED_COLOR))
@@ -1742,12 +1760,19 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
         await session.write("Allow members to invite others? [y/N]: ")
         allow_member_invites = (await session.read_key()).lower() == "y"
         await session.write_line("")
+    min_age, ok = await _prompt_min_age(session, current=None)
+    if not ok:
+        return
+    name_requirement, ok = await _prompt_name_requirement(session, current=None)
+    if not ok:
+        return
 
     try:
         channel = create_channel(
             db, name, description=description, min_level=min_level, category_id=category_id,
             pinned=pinned, hidden=hidden, members_only=members_only,
-            allow_member_invites=allow_member_invites, creator=actor,
+            allow_member_invites=allow_member_invites,
+            min_age=min_age, name_requirement=name_requirement, creator=actor,
         )
     except ChannelError as exc:
         await session.write_line(colored(f"Could not create channel: {exc}", fg_color=MUTED_COLOR))
@@ -1816,6 +1841,10 @@ async def _draw_channel_detail(session: Session, channel: Channel) -> None:
         f"Members-only: {'yes' if channel.members_only else 'no'}  "
         f"Allow member invites: {'yes' if channel.allow_member_invites else 'no'}"
     )
+    await session.write_line(
+        f"Minimum age: {channel.min_age if channel.min_age is not None else 'none'}  "
+        f"Name requirement: {channel.name_requirement or 'none'}"
+    )
     options = "  ".join([menu_key("E", "dit"), menu_key("D", "elete"), menu_key("B", "ack")])
     await session.write_line(f"\r\n{options}")
     await session.write("Choice: ")
@@ -1857,12 +1886,19 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
     allow_member_invites = (
         invites_answer == "y" if invites_answer in ("y", "n") else channel.allow_member_invites
     )
+    min_age, ok = await _prompt_min_age(session, current=channel.min_age)
+    if not ok:
+        return None
+    name_requirement, ok = await _prompt_name_requirement(session, current=channel.name_requirement)
+    if not ok:
+        return None
 
     try:
         updated = update_channel(
             db, channel, name=name, description=description, min_level=min_level,
             category_id=category_id, pinned=pinned, hidden=hidden, members_only=members_only,
-            allow_member_invites=allow_member_invites, changed_by=actor,
+            allow_member_invites=allow_member_invites,
+            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
         )
     except ChannelError as exc:
         await session.write_line(colored(f"Could not update channel: {exc}", fg_color=MUTED_COLOR))

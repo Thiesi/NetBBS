@@ -158,3 +158,85 @@ def test_download_reports_a_clear_error_for_a_truly_nonexistent_file(tmp_path, m
 
     assert "No file named 'does-not-exist.txt' in this area." in session.output
     db.close()
+
+
+# -- identity attestation: verified-name display + age/name gating (design doc §18, round 103) --
+
+
+def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):
+    from netbbs.attestation import attest_name
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "docs", creator=alice, name_requirement="verified_and_displayed")
+    upload_file(db, area, alice, "file.txt", b"hello")
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+
+    session = FakeSession(lines=["b"])
+    asyncio.run(_show_area(session, db, area, alice))
+
+    assert "(=Alice Smith=)" in session.output
+    db.close()
+
+
+def test_file_listing_does_not_leak_current_display_name_for_ungated_area(tmp_path):
+    from netbbs.attestation import set_display_name
+
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "docs", creator=alice)  # no name_requirement
+    upload_file(db, area, alice, "file.txt", b"hello")
+    set_display_name(db, alice, "New Display Name")
+
+    session = FakeSession(lines=["b"])
+    asyncio.run(_show_area(session, db, area, alice))
+
+    assert "New Display Name" not in session.output
+    assert "alice" in session.output
+    db.close()
+
+
+def test_min_age_gate_hides_the_upload_hint_when_unmet(tmp_path):
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "adults", creator=alice, min_age=18)
+    upload_file(db, area, alice, "file.txt", b"hello")
+    session = FakeSession(lines=["b"])
+
+    asyncio.run(_show_area(session, db, area, alice))
+
+    assert "/upload" not in session.output
+    db.close()
+
+
+def test_min_age_gate_allows_upload_hint_once_met(tmp_path):
+    from datetime import date
+
+    from netbbs.attestation import set_birthdate
+
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    set_birthdate(db, alice, date(1990, 1, 1))
+    area = create_file_area(db, "adults", creator=alice, min_age=18)
+    upload_file(db, area, alice, "file.txt", b"hello")
+    session = FakeSession(lines=["b"])
+
+    asyncio.run(_show_area(session, db, area, alice))
+
+    assert "/upload" in session.output
+    db.close()
+
+
+def test_name_requirement_hides_the_upload_hint_when_unmet(tmp_path):
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "verified-only", creator=alice, name_requirement="verified")
+    upload_file(db, area, alice, "file.txt", b"hello")
+    session = FakeSession(lines=["b"])
+
+    asyncio.run(_show_area(session, db, area, alice))
+
+    assert "/upload" not in session.output
+    db.close()

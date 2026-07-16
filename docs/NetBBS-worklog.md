@@ -6342,3 +6342,74 @@ rendering and file-listing uploader rendering. Mechanical, not a new
 design question -- the boards work in this round is the pattern to
 repeat, not rediscover.
 
+## Sign-off notes, round 103 (identity attestation -- channels and file areas repeat round 102's pattern)
+
+Repeats round 102's boards wiring for the two remaining gatable resource
+types, confirming the pattern really was mechanical.
+
+**`netbbs.chat.channels`/`netbbs.files.areas`:** `min_age`/
+`name_requirement` added to `Channel`/`FileArea`, `create_channel`/
+`create_file_area`, `update_channel`/`update_file_area`, and both
+`_row_to_*` functions -- identical shape to round 102's `Board` changes,
+same invalid-`name_requirement` validation in both create and update.
+
+**`netbbs.net.admin_flow`:** the shared `_prompt_min_age`/
+`_prompt_name_requirement` helpers built in round 102 specifically so
+this round could reuse them unchanged -- wired into channel and
+file-area create/edit screens with no new helper code needed, confirming
+that design choice paid off.
+
+**Enforcement -- one genuine design question resolved per resource
+type, not just copy-pasted:**
+- **Channels have no read/write split** (`netbbs.chat.channels.Channel`
+  has a single `min_level`, not boards' separate read/write pair) --
+  so unlike boards, where `meets_name_requirement` only gated posting,
+  `_authorize_channel_entry` checks **both** `meets_age` and
+  `meets_name_requirement` at the same single point, since entry itself
+  is the one gate chat has. `meets_age` is also checked a second time in
+  `_visible_channels_for` (the browse-list filter), matching boards'
+  visibility-vs-entry distinction; `meets_name_requirement` is
+  deliberately *not* checked there, for the same participation-not-
+  content-restriction reasoning as boards -- a name-gated channel stays
+  visible/selectable, entry is what's refused, with a specific message
+  ("This channel requires a verified real name to participate.").
+- **File areas do have a read/write split**, so they mirror boards
+  exactly: `meets_age` added to the area-listing filter alongside
+  `meets_level`; `meets_age` **and** `meets_name_requirement` both added
+  to `can_write` (gating the `/upload` hint), matching boards' `can_post`
+  treatment precisely.
+
+**Display**: `_uploader_display_name` (file_flow.py) mirrors
+`_author_display_name` (login_flow.py) exactly -- live lookup only when
+`name_requirement` is `verified_and_displayed`, plain historical
+`uploader_label` otherwise, preserving the same denormalization
+property round 57 established and round 102 already protected for
+posts.
+
+**Explicitly still open, and why it's not a mechanical repeat this
+time**: the live chat *message stream*'s own per-message rendering
+(`chat_stream_label` and friends) doesn't yet show a colored verified
+name the way post/file listings now do. Channel *entry* is fully gated
+(nobody unverified or underage gets into a gated channel at all), but
+once inside, messages don't individually re-render with
+`format_name_for_resource`. Unlike posts/files (static, page-rendered,
+denormalized-label lookups), chat's live stream is genuinely a
+different rendering architecture -- per-event broadcast through
+`ChatHub`, with its own established `NICK_COLOR`/`~marker~` scheme
+(round 53) already solving a similar-shaped problem for a different
+field. Wiring verified-name display in without risking that existing,
+working path needs its own dedicated design/implementation pass, not a
+copy of this round's pattern -- deferred rather than rushed.
+
+**Tests**: 15 new -- `tests/test_channels.py`/`tests/test_file_areas.py`
+(6: invalid `name_requirement` rejected on create/update, default-no-gate,
+for both resource types), `tests/test_chat_flow_picker_authorization.py`
+(4: `min_age` hides a channel from the picker/allows entry once met,
+`name_requirement` denies/allows entry with the specific message),
+`tests/test_file_area_pagination_ui.py` (5: verified-name display,
+historical-stability preservation, `min_age`/`name_requirement` hiding
+or allowing the `/upload` hint).
+
+**Testing**: full suite re-run: **1779 passed, 4 skipped** (up from
+round 102's 1764 -- 15 net new tests overall, no regressions elsewhere).
+

@@ -197,3 +197,57 @@ def test_selecting_an_open_channel_still_works_unaffected(db, hub, presence, ali
 
     assert "not authorized" not in _written_text(session)
     assert "Joined" in _written_text(session)
+
+
+# -- identity attestation: age/name gating on channel entry (design doc §18, round 103) --
+
+
+def test_min_age_gate_hides_the_channel_from_the_picker(db, hub, presence, alice, bob):
+    create_channel(db, "adults", creator=alice, min_age=18)
+
+    # No birthdate on file for bob -- meets_age fails closed, so the
+    # channel never even appears in the picker's list.
+    session = asyncio.run(_run(db, hub, presence, bob, []))
+
+    assert "No chat channels are available" in _written_text(session)
+
+
+def test_min_age_gate_allows_entry_once_met(db, hub, presence, alice, bob):
+    from datetime import date
+
+    from netbbs.attestation import set_birthdate
+
+    set_birthdate(db, bob, date(1990, 1, 1))
+    create_channel(db, "adults", creator=alice, min_age=18)
+
+    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+
+    assert "not authorized" not in _written_text(session)
+    assert "Joined" in _written_text(session)
+
+
+def test_name_requirement_denies_entry_without_attestation(db, hub, presence, alice, bob):
+    channel = create_channel(db, "verified-only", creator=alice, name_requirement="verified")
+
+    # Age-gating hides a channel from the picker entirely (fails
+    # closed), but name_requirement is a participation gate, not a
+    # content restriction -- the channel stays visible/selectable, and
+    # entry itself is refused with a specific message.
+    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "b"]))
+
+    assert "requires a verified real name" in _written_text(session)
+    assert is_member(db, channel, bob) is False
+
+
+def test_name_requirement_allows_entry_once_attested(db, hub, presence, alice, bob):
+    from netbbs.attestation import attest_name
+    from netbbs.auth.users import set_can_verify_identity
+
+    alice = set_can_verify_identity(db, alice, True, changed_by=alice)
+    attest_name(db, bob, "Bob Smith", verifier=alice)
+    create_channel(db, "verified-only", creator=alice, name_requirement="verified")
+
+    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+
+    assert "requires a verified real name" not in _written_text(session)
+    assert "Joined" in _written_text(session)

@@ -50,6 +50,12 @@ class Channel:
     hidden: bool
     members_only: bool
     allow_member_invites: bool
+    # Age/name-gating (design doc §18, rounds 85/86/101/102) -- nullable,
+    # NULL means no gate, same shape and enforcement point as
+    # netbbs.boards.boards.Board's own fields; see
+    # netbbs.net.chat_flow's join/message checks.
+    min_age: int | None
+    name_requirement: str | None  # None | "verified" | "verified_and_displayed"
 
 
 def create_channel(
@@ -63,6 +69,8 @@ def create_channel(
     hidden: bool = False,
     members_only: bool = False,
     allow_member_invites: bool = False,
+    min_age: int | None = None,
+    name_requirement: str | None = None,
     creator: User,
 ) -> Channel:
     """Create a new local channel. No permission check on creation here —
@@ -78,7 +86,15 @@ def create_channel(
     command exists yet (matches every earlier track's precedent — no
     SysOp channel/board-creation UI), so these are seeded here directly,
     e.g. by test fixtures, the same way round 21's file-area equivalents
-    already are."""
+    already are.
+
+    `min_age`/`name_requirement` (design doc §18, rounds 85/86/101/102)
+    are the same nullable-means-no-gate shape as
+    `netbbs.boards.boards.create_board`'s own fields — see that
+    function's docstring.
+    """
+    if name_requirement not in (None, "verified", "verified_and_displayed"):
+        raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
     created_at = utc_now_iso()
     channel_id = compute_content_id(
         {
@@ -94,12 +110,12 @@ def create_channel(
             """
             INSERT INTO channels
                 (channel_id, name, description, min_level, category_id, pinned, created_at,
-                 hidden, members_only, allow_member_invites)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 hidden, members_only, allow_member_invites, min_age, name_requirement)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 channel_id, name, description, min_level, category_id, int(pinned), created_at,
-                int(hidden), int(members_only), int(allow_member_invites),
+                int(hidden), int(members_only), int(allow_member_invites), min_age, name_requirement,
             ),
         )
         db.connection.commit()
@@ -157,6 +173,8 @@ def update_channel(
     hidden: bool,
     members_only: bool,
     allow_member_invites: bool,
+    min_age: int | None,
+    name_requirement: str | None,
     changed_by: User,
 ) -> Channel:
     """
@@ -169,18 +187,25 @@ def update_channel(
     function -- it stays gated by `set_topic`'s own
     `ChannelPermission.EDIT` check and audit trail, not folded into
     this SysOp-only full-state replace.
+
+    `min_age`/`name_requirement` follow design doc §18 (rounds 101/102)
+    -- see `create_channel`'s docstring.
     """
+    if name_requirement not in (None, "verified", "verified_and_displayed"):
+        raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
     try:
         db.connection.execute(
             """
             UPDATE channels
             SET name = ?, description = ?, min_level = ?, category_id = ?, pinned = ?,
-                hidden = ?, members_only = ?, allow_member_invites = ?
+                hidden = ?, members_only = ?, allow_member_invites = ?,
+                min_age = ?, name_requirement = ?
             WHERE id = ?
             """,
             (
                 name, description, min_level, category_id, int(pinned),
-                int(hidden), int(members_only), int(allow_member_invites), channel.id,
+                int(hidden), int(members_only), int(allow_member_invites),
+                min_age, name_requirement, channel.id,
             ),
         )
         db.connection.commit()
@@ -261,4 +286,6 @@ def _row_to_channel(row: sqlite3.Row) -> Channel:
         hidden=bool(row["hidden"]),
         members_only=bool(row["members_only"]),
         allow_member_invites=bool(row["allow_member_invites"]),
+        min_age=row["min_age"],
+        name_requirement=row["name_requirement"],
     )

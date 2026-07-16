@@ -18,7 +18,8 @@ the error and returns to browsing).
 
 from __future__ import annotations
 
-from netbbs.auth.users import User
+from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
+from netbbs.auth.users import User, get_user_by_id
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
     FileArea,
@@ -59,7 +60,14 @@ async def _browse_areas_in_category(
     disambiguation trick (negated category IDs). See that function's
     docstring for the full rationale.
     """
-    all_areas = [a for a in list_file_areas(db) if meets_level(user, a.min_read_level)]
+    # name_requirement deliberately does not gate reading here -- same
+    # participation-vs-content-restriction split as
+    # netbbs.net.login_flow._browse_boards_in_category (design doc §18);
+    # see the upload check below for where it actually applies.
+    all_areas = [
+        a for a in list_file_areas(db)
+        if meets_level(user, a.min_read_level) and meets_age(db, user, a.min_age)
+    ]
     areas_here = [a for a in all_areas if a.category_id == category_id]
 
     categories_here = (
@@ -127,13 +135,19 @@ def _format_size(size_bytes: int) -> str:
 
 
 async def _render_area_page(
-    session: Session, db: Database, area_name: str, page: FileEntryPage, *, can_write: bool
+    session: Session,
+    db: Database,
+    area_name: str,
+    page: FileEntryPage,
+    *,
+    can_write: bool,
+    name_requirement: str | None,
 ) -> None:
     """Renders one page of files plus its navigation options and command
     hints — the unit that should be redrawn on an actual page change
     (initial entry, Older/Newer/Recent), not on every loop iteration
     regardless of whether anything changed."""
-    await _render_file_page(session, db, area_name, page)
+    await _render_file_page(session, db, area_name, page, name_requirement=name_requirement)
     options = []
     if page.has_older:
         options.append(menu_key("O", "lder"))
@@ -178,12 +192,16 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     """
     area_name = sanitize_text(area.name)
     page = list_files_page(db, area, user)
-    can_write = meets_level(user, area.min_write_level)
+    can_write = (
+        meets_level(user, area.min_write_level)
+        and meets_age(db, user, area.min_age)
+        and meets_name_requirement(db, user, area.name_requirement)
+    )
 
     if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        await _render_area_page(session, db, area_name, page, can_write=can_write)
+        await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
         while True:
             await session.write("Choice or command: ")
             choice = (await session.read_line()).strip()
@@ -193,14 +211,14 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
             elif choice.lower() == "o" and page.has_older:
                 oldest = page.entries[0]
                 page = list_files_page(db, area, user, before=(oldest.created_at, oldest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
             elif choice.lower() == "n" and page.has_newer:
                 newest = page.entries[-1]
                 page = list_files_page(db, area, user, after=(newest.created_at, newest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
             elif choice.lower() == "r" and page.has_newer:
                 page = list_files_page(db, area, user)
-                await _render_area_page(session, db, area_name, page, can_write=can_write)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
             elif choice.lower() == "/upload" and can_write:
                 await _handle_upload(session, db, area, user)
                 return
@@ -228,7 +246,24 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
         await session.write_line("Unknown command.")
 
 
-async def _render_file_page(session: Session, db: Database, area_name: str, page: FileEntryPage) -> None:
+def _uploader_display_name(db: Database, entry, *, name_requirement: str | None) -> str:
+    """The uploader label to render for one file entry (design doc §18,
+    round 102) -- mirrors `netbbs.net.login_flow._author_display_name`
+    exactly: only looks up the live account when the area actually
+    requires `verified_and_displayed` names, otherwise renders the
+    plain historical `uploader_label` unchanged, for the identical
+    reason (a mutable `display_name` must not retroactively rewrite an
+    already-uploaded entry's attribution)."""
+    if name_requirement == "verified_and_displayed":
+        uploader = get_user_by_id(db, entry.uploader_user_id)
+        if uploader is not None:
+            return format_name_for_resource(db, uploader, name_requirement=name_requirement)
+    return sanitize_text(entry.uploader_label)
+
+
+async def _render_file_page(
+    session: Session, db: Database, area_name: str, page: FileEntryPage, *, name_requirement: str | None
+) -> None:
     header = colored(f"[{area_name}]", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     for entry in page.entries:
@@ -236,7 +271,8 @@ async def _render_file_page(session: Session, db: Database, area_name: str, page
         size = _format_size(entry.size_bytes)
         name_line = colored(f"{sanitize_text(entry.filename)} ({size})", fg_color=ACCENT_COLOR)
         await session.write_line(f"\r\n{name_line}")
-        await session.write_line(f"  uploaded by {sanitize_text(entry.uploader_label)} ({when})")
+        uploader_display = _uploader_display_name(db, entry, name_requirement=name_requirement)
+        await session.write_line(f"  uploaded by {uploader_display} ({when})")
         if entry.description:
             await session.write_line(f"  {sanitize_text(entry.description)}")
 

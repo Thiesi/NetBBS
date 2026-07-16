@@ -1865,16 +1865,21 @@ now.
 ## 18. Identity attestation (age & real-name verification)
 
 Status: **local mechanism confirmed and specced** (round 85); **core
-implemented round 101** (`netbbs.attestation`, 34 tests); **UI wiring
-and boards enforcement implemented round 102** — the `[V]erify`
-main-menu screen, profile-edit additions (display name/location/
-birthdate + visibility), the `can_verify_identity` admin toggle, and
-full age/name-gating enforcement + anti-forgery display wired into
-message boards specifically, as the reference implementation. **Still
-open**: the identical wiring for chat channels and file areas — same
-schema (already migrated for all three resource types), same
-enforcement shape, just not yet repeated for those two — see the round
-102 worklog entry for the exact accounting. Link propagation of
+implemented round 101** (`netbbs.attestation`, 34 tests); **full
+enforcement + display now implemented across all three gatable
+resource types** — boards (round 102), chat channels and file areas
+(round 103) — plus the `[V]erify` main-menu screen, profile-edit
+additions (display name/location/birthdate + visibility), and the
+`can_verify_identity` admin toggle (round 102). **One piece
+deliberately still open**: the live chat *message stream*'s own
+verified-name display (channel entry/membership gating is fully
+enforced; only the per-message rendering inside an already-entered
+channel isn't wired to show a colored verified name) — chat's live
+per-event streaming architecture is structurally different from posts'/
+files' static, page-rendered listings, and wiring it in without risking
+the established `/nick`/`NICK_COLOR` rendering path needs its own
+dedicated pass rather than a mechanical repeat — see the round 103
+worklog entry for the exact accounting. Link propagation of
 attestations is explicitly out of scope for now — see "Phase
 placement," below, for why it's gated on Phase 4 specifically, not
 Phase 3.

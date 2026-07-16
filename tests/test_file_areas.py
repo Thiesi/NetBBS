@@ -477,7 +477,8 @@ def test_update_file_area_replaces_the_full_state(db, alice):
     area = create_file_area(db, "docs", creator=alice)
     updated = update_file_area(
         db, area, name="docs2", description="new desc", min_read_level=1, min_write_level=2,
-        category_id=None, pinned=True, moderated=True, max_file_age_days=30, changed_by=alice,
+        category_id=None, pinned=True, moderated=True, max_file_age_days=30,
+        min_age=18, name_requirement="verified", changed_by=alice,
     )
     assert updated.name == "docs2"
     assert updated.description == "new desc"
@@ -486,6 +487,8 @@ def test_update_file_area_replaces_the_full_state(db, alice):
     assert updated.pinned is True
     assert updated.moderated is True
     assert updated.max_file_age_days == 30
+    assert updated.min_age == 18
+    assert updated.name_requirement == "verified"
     entries = list_actions_for_object(db, "file_area", area.id)
     assert any(e.action == "update_file_area" for e in entries)
 
@@ -496,8 +499,30 @@ def test_update_file_area_rejects_a_name_collision(db, alice):
     with pytest.raises(FileAreaError):
         update_file_area(
             db, area, name="taken", description=None, min_read_level=0, min_write_level=0,
-            category_id=None, pinned=False, moderated=False, max_file_age_days=None, changed_by=alice,
+            category_id=None, pinned=False, moderated=False, max_file_age_days=None,
+            min_age=None, name_requirement=None, changed_by=alice,
         )
+
+
+def test_update_file_area_rejects_invalid_name_requirement(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    with pytest.raises(FileAreaError, match="name_requirement"):
+        update_file_area(
+            db, area, name="docs", description=None, min_read_level=0, min_write_level=0,
+            category_id=None, pinned=False, moderated=False, max_file_age_days=None,
+            min_age=None, name_requirement="bogus", changed_by=alice,
+        )
+
+
+def test_create_file_area_rejects_invalid_name_requirement(db, alice):
+    with pytest.raises(FileAreaError, match="name_requirement"):
+        create_file_area(db, "docs", creator=alice, name_requirement="bogus")
+
+
+def test_create_file_area_defaults_no_age_or_name_gate(db, alice):
+    area = create_file_area(db, "docs", creator=alice)
+    assert area.min_age is None
+    assert area.name_requirement is None
 
 
 def test_delete_file_area_removes_files_and_moderator_grants(db, alice, bob):

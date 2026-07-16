@@ -12,11 +12,13 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
     User,
     account_still_active,
+    get_user_by_id,
     get_user_by_username,
     list_users,
 )
@@ -187,7 +189,7 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     """
     visible = []
     for channel in list_channels(db):
-        if not meets_level(user, channel.min_level):
+        if not meets_level(user, channel.min_level) or not meets_age(db, user, channel.min_age):
             continue
         if channel.hidden and not (
             is_member(db, channel, user)
@@ -306,9 +308,19 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     `is_member`, `has_pending_invitation`, `accept_invitation`) already
     is, and there's no `await` point for a race to open up between them
     within a single call.
+
+    `meets_age`/`meets_name_requirement` (design doc §18, round 102) are
+    both checked here, not split across a separate read/write boundary
+    the way `netbbs.boards.boards.Board`'s gates are -- chat has no
+    meaningful read/write split (this module's own docstring, and
+    `netbbs.chat.channels.Channel`'s single `min_level` already reflect
+    that), so entry itself is the one point where both age content-
+    restriction and name-verification participation-requirement apply.
     """
-    if not meets_level(user, channel.min_level):
+    if not meets_level(user, channel.min_level) or not meets_age(db, user, channel.min_age):
         return False, "You are not authorized to enter that channel."
+    if not meets_name_requirement(db, user, channel.name_requirement):
+        return False, "This channel requires a verified real name to participate."
     if not channel.members_only:
         return True, None
     if is_member(db, channel, user):
