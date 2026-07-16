@@ -4,11 +4,15 @@ for uploaded file bytes."""
 from __future__ import annotations
 
 import hashlib
+import os
+
+import pytest
 
 from netbbs.files.storage import (
     compute_sha256,
     move_temp_file_into_storage,
     new_incoming_temp_path,
+    purge_incoming_staging,
     read_bytes,
     storage_root,
     store_bytes,
@@ -126,4 +130,72 @@ def test_move_temp_file_into_storage_discards_the_temp_file_when_already_stored(
 
     assert final_path.read_bytes() == b"hello world"
     assert not temp_path.exists()  # discarded, not left behind as a duplicate
+    db.close()
+
+
+# -- GitHub issue #34 (reopened a third time): startup crash-recovery purge --
+
+
+def test_purge_incoming_staging_removes_a_stale_partial_file(tmp_path):
+    db = Database(tmp_path / "netbbs.db")
+    stray = new_incoming_temp_path(db)
+    stray.write_bytes(b"leftover from a crashed upload")
+
+    removed = purge_incoming_staging(db)
+
+    assert removed == 1
+    assert not stray.exists()
+    db.close()
+
+
+def test_purge_incoming_staging_removes_every_stale_file(tmp_path):
+    db = Database(tmp_path / "netbbs.db")
+    for _ in range(3):
+        new_incoming_temp_path(db).write_bytes(b"x")
+
+    removed = purge_incoming_staging(db)
+
+    assert removed == 3
+    assert list((storage_root(db) / ".incoming").iterdir()) == []
+    db.close()
+
+
+def test_purge_incoming_staging_leaves_content_addressed_blobs_untouched(tmp_path):
+    db = Database(tmp_path / "netbbs.db")
+    _, stored_path = store_bytes(db, b"a real, already-committed upload")
+    new_incoming_temp_path(db).write_bytes(b"an unrelated stale partial")
+
+    purge_incoming_staging(db)
+
+    assert stored_path.exists()
+    assert stored_path.read_bytes() == b"a real, already-committed upload"
+    db.close()
+
+
+def test_purge_incoming_staging_is_harmless_when_incoming_does_not_exist(tmp_path):
+    db = Database(tmp_path / "netbbs.db")
+    assert not (storage_root(db) / ".incoming").exists()
+
+    assert purge_incoming_staging(db) == 0
+    db.close()
+
+
+def test_purge_incoming_staging_skips_a_symlink_rather_than_following_or_deleting_it(tmp_path):
+    db = Database(tmp_path / "netbbs.db")
+    incoming = storage_root(db) / ".incoming"
+    incoming.mkdir(parents=True)
+    real_target = tmp_path / "outside_storage.txt"
+    real_target.write_bytes(b"must not be touched")
+    link = incoming / "suspicious_link"
+    try:
+        os.symlink(real_target, link)
+    except (OSError, NotImplementedError):
+        db.close()
+        pytest.skip("symlink creation needs a privilege this sandbox doesn't have")
+
+    removed = purge_incoming_staging(db)
+
+    assert removed == 0
+    assert real_target.exists()
+    assert real_target.read_bytes() == b"must not be touched"
     db.close()

@@ -162,6 +162,30 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
     asyncio.run(scenario())
 
 
+# -- GitHub issue #34 (reopened a third time): startup staging purge --------
+
+
+def test_run_purges_stale_incoming_staging_files_before_accepting_sessions(tmp_path):
+    """A file left under .incoming from a previous run that was
+    killed/crashed/lost power mid-upload must be gone by the time
+    run() actually starts accepting connections -- confirms the purge
+    wired into run() itself, not just netbbs.files.storage.
+    purge_incoming_staging in isolation (already covered in
+    test_file_storage.py)."""
+    from netbbs.files.storage import new_incoming_temp_path
+
+    config = _config(tmp_path)
+    setup_db = Database(config.db_path)
+    stray = new_incoming_temp_path(setup_db)
+    stray.write_bytes(b"leftover from a crashed upload")
+    setup_db.close()
+    assert stray.exists()
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+    assert not stray.exists()
+
+
 # -- graceful shutdown --------------------------------------------------------
 
 

@@ -122,5 +122,56 @@ def move_temp_file_into_storage(db: Database, temp_path: Path, sha256: str) -> P
     return path
 
 
+def purge_incoming_staging(db: Database) -> int:
+    """
+    Remove every regular file left behind under the `.incoming` staging
+    directory (GitHub issue #34, reopened a third time) — meant to be
+    called exactly once, at node startup, before any session is
+    accepted.
+
+    `receive_file`'s own `except BaseException` cleanup (see
+    `netbbs.net.zmodem`) only runs for an ordinary Python exception or
+    task cancellation — it can't run at all for an abrupt process
+    kill, crash, or power loss mid-upload, which leaves a UUID-named
+    partial file behind with no code path left to ever clean it up:
+    the existing content-addressed blob GC (`netbbs.files.gc`)
+    deliberately only recognizes 64-character sha256 filenames, so it
+    already, correctly, never touches anything under `.incoming`.
+    Left unaddressed, repeated interrupted uploads across crashes/
+    restarts could accumulate indefinitely and eventually exhaust the
+    data volume.
+
+    Safe to call unconditionally at startup specifically *because* it
+    runs before any session is accepted: nothing can have a
+    legitimately in-progress upload yet at that point, so every
+    regular file already present under `.incoming` is guaranteed
+    left over from some previous run that never finished cleanly.
+    Calling this while uploads could genuinely be in flight (it is
+    not meant to be, and nothing in this codebase does) would be
+    unsafe -- it does not distinguish an in-progress transfer's temp
+    file from an abandoned one.
+
+    Deliberately conservative about anything that isn't a plain
+    regular file: a symlink or a directory is skipped rather than
+    followed or recursively deleted, since nothing legitimate should
+    ever put one there — if something unexpected did, silently
+    destroying it is worse than leaving it for a human to look at.
+
+    Returns how many files were actually removed, for the caller to
+    log if useful.
+    """
+    directory = _incoming_dir(db)
+    if not directory.is_dir():
+        return 0
+    removed = 0
+    for entry in directory.iterdir():
+        if entry.is_symlink():
+            continue
+        if entry.is_file():
+            entry.unlink()
+            removed += 1
+    return removed
+
+
 def read_bytes(path: Path) -> bytes:
     return path.read_bytes()

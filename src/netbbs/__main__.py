@@ -20,6 +20,7 @@ import sys
 
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+from netbbs.files.storage import purge_incoming_staging
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
@@ -179,6 +180,20 @@ async def run(
         _logger.warning(warning)
 
     db = Database(config.db_path)
+
+    # GitHub issue #34, reopened a third time: any file left under
+    # .incoming staging is guaranteed stale at this exact point --
+    # nothing has had a chance to start a legitimate upload yet, so
+    # anything already there survived from a previous run that was
+    # killed, crashed, or lost power mid-transfer, skipping
+    # receive_file's own exception-based cleanup entirely. Must run
+    # before _start_servers below, not after -- once listeners are up,
+    # a genuinely in-progress upload's temp file would no longer be
+    # safely distinguishable from an abandoned one.
+    purged = purge_incoming_staging(db)
+    if purged:
+        _logger.info("removed %d stale upload staging file(s) from a previous run", purged)
+
     hub = ChatHub()
     presence = PresenceRegistry()
     mailbox = MessageMailbox()

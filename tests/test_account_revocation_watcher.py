@@ -73,6 +73,20 @@ class FakeSession:
         raise AssertionError("unreachable")
 
 
+class _BlockingNoticeSession(FakeSession):
+    """`write_line()` blocks forever specifically for the revocation
+    notice -- simulates a client that has simply stopped reading (real
+    TCP backpressure on a still-open connection), not a closed one
+    (`SessionClosedError`, already covered separately). Regression test
+    for GitHub issue #29, reopened a third time: cancellation must not
+    depend on this write ever completing."""
+
+    async def write_line(self, text: str = "") -> None:
+        if "no longer active" in text:
+            await asyncio.Event().wait()  # blocks forever, like real backpressure
+        self.written.append(text + "\n")
+
+
 def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
@@ -86,9 +100,11 @@ def db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _fast_polling(monkeypatch):
-    # Real interval (5s) would make every test glacially slow -- this
-    # is purely an implementation timing knob, not behavior under test.
+    # Real intervals (5s poll, 1s notice timeout) would make every test
+    # glacially slow -- both are purely implementation timing knobs, not
+    # behavior under test.
     monkeypatch.setattr(login_flow, "_REVOCATION_CHECK_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(login_flow, "_REVOCATION_NOTICE_TIMEOUT_SECONDS", 0.05)
 
 
 def _node_controls(registry: ActiveSessionRegistry) -> NodeControls:
@@ -136,7 +152,39 @@ def test_watcher_disconnects_a_genuinely_idle_session_at_the_main_menu(db):
         await _wait_until_done(task)
 
     asyncio.run(scenario())
-    assert "no longer active" in _written_text(session)
+
+
+def test_watcher_cancels_the_session_even_if_the_notice_write_blocks_forever(db):
+    """Regression test for GitHub issue #29, reopened a third time:
+    the watcher used to write its "Disconnecting" notice *before*
+    calling cancel_one(), so a peer that stopped reading (real TCP
+    backpressure, not a closed connection) could stall the notice
+    write indefinitely and delay the actual security-critical
+    cancellation right along with it. Proven here with a session whose
+    write_line() never returns for that specific notice -- the session
+    must still be cancelled within a bounded time regardless."""
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    hub, presence, mailbox = ChatHub(), PresenceRegistry(), MessageMailbox()
+    registry = ActiveSessionRegistry()
+    session = _BlockingNoticeSession([])  # never types anything at all
+
+    async def scenario():
+        task = asyncio.create_task(_drive(db, hub, presence, mailbox, registry, alice, session))
+        await asyncio.sleep(0.05)
+        set_user_disabled(db, alice, True, changed_by=alice)
+        # A tight bound -- must complete well within the (patched-down)
+        # notice timeout plus a small margin, not hang until the outer
+        # test-suite timeout kills it.
+        await _wait_until_done(task, timeout=1.0)
+        return task
+
+    task = asyncio.run(scenario())
+    assert task.done()
+    assert len(registry) == 0  # _drive's own finally: registry.leave() still ran
+    # The blocked notice write itself never completes (by construction --
+    # write_line() never returns for it), so it never reaches
+    # session.written either; that's the point, not a gap in the
+    # assertion above.
 
 
 def test_watcher_does_not_disconnect_a_still_active_session(db):

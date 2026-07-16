@@ -5176,3 +5176,62 @@ design-doc sign-off note for that decision and its reasoning).
    leaves no temp file and no entry behind. Full suite re-run: **1551
    passed, 3 skipped**.
 
+## Sign-off notes, round 74 (round 73 verification — two narrow gaps in #29/#34 — fixed)
+
+The reviewer verified round 73's two architectural fixes (the
+revocation watcher, the streaming upload rewrite) and confirmed both
+directions were sound — this round closes two specific gaps found
+during that verification, not further architecture questions.
+
+1. **#29 (reopened a third time): the watcher's own disconnect notice
+   could stall the disconnect itself.** `_watch_for_account_revocation`
+   wrote its "Disconnecting" notice, *then* called `cancel_one` —
+   `session.write_line` is an unbounded transport operation, and a peer
+   that's stopped reading (real TCP backpressure on a still-open
+   connection, distinct from a closed one, which already raised
+   `SessionClosedError`) could stall that write indefinitely, delaying
+   the actual security-critical cancellation right along with it.
+   Fixed by wrapping the write in `asyncio.wait_for` (a new
+   `_REVOCATION_NOTICE_TIMEOUT_SECONDS = 1.0`) and moving
+   `cancel_one` into a `finally` — cancellation now happens
+   unconditionally, regardless of whether the notice write finishes,
+   times out, or fails. Regression test: a session whose `write_line`
+   never returns for that specific notice text, confirmed to still get
+   cancelled within a bounded time — verified non-vacuous by reverting
+   to the old write-then-cancel ordering and confirming the test times
+   out against it.
+2. **#34 (reopened a third time): no crash/restart recovery for
+   staging files.** `receive_file`'s `except BaseException` cleanup
+   only runs for an ordinary Python exception or task cancellation — a
+   `kill -9`, crash, or power loss mid-upload skips it entirely,
+   leaving a UUID-named partial file under `.incoming` with no code
+   path left to ever remove it (the existing blob GC deliberately only
+   recognizes 64-character sha256 filenames, so it already, correctly,
+   never touches `.incoming`). Fixed with a new
+   `netbbs.files.storage.purge_incoming_staging()`, called once in
+   `netbbs.__main__.run()` right after opening the database and before
+   `_start_servers` — safe specifically because nothing can have a
+   legitimate upload in flight yet at that point, so every regular
+   file already present is guaranteed stale. Conservative about
+   anything that isn't a plain regular file (a symlink or directory is
+   skipped, not followed or recursively deleted) per the reviewer's own
+   suggestion, since nothing legitimate should ever put one there.
+3. **Testing**: `test_account_revocation_watcher.py` gained the
+   blocking-notice regression test above. `test_file_storage.py`
+   gained unit coverage for `purge_incoming_staging` (removes stale
+   files, leaves real content-addressed blobs untouched, harmless when
+   `.incoming` doesn't exist, skips a symlink rather than following it
+   — this last one honestly `pytest.skip()`s on this sandboxed dev
+   environment, which lacks the privilege to create a symlink at all,
+   rather than silently passing without exercising it). A new test in
+   `test_main_lifecycle.py` confirms the purge is actually wired into
+   `run()` itself, not just correct in isolation — a stray file
+   written before `run()` starts is gone by the time it's actually
+   accepting connections. Full suite re-run: **1557 passed, 4
+   skipped**.
+
+Both issues closed pending the reviewer's next verification pass; round
+73's two directions (background watcher, streaming upload rewrite)
+were not in question this round, only these two narrower gaps in their
+implementation.
+

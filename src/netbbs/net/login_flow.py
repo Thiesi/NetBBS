@@ -100,6 +100,11 @@ _MAX_LOGIN_ATTEMPTS = 3
 # scale (§14, dozens to low hundreds of concurrent sessions).
 _REVOCATION_CHECK_INTERVAL_SECONDS = 5.0
 
+# Bounds the watcher's own "you're disconnected" notice (GitHub issue
+# #29, reopened a third time) -- see _watch_for_account_revocation's
+# docstring for why this can't be allowed to block indefinitely.
+_REVOCATION_NOTICE_TIMEOUT_SECONDS = 1.0
+
 
 class LoginOutcome(Enum):
     """Terminal outcomes from the interactive login flow."""
@@ -301,17 +306,34 @@ async def _watch_for_account_revocation(
     `disconnect_one` from inside this watcher task would deadlock
     against this same session's own cleanup trying to cancel *this*
     watcher task in turn.
+
+    The "you're disconnected" notice is best-effort and *bounded*
+    (GitHub issue #29, reopened a third time) — `session.write_line`
+    is an unbounded transport operation; a real Telnet/SSH write
+    ultimately awaits the socket/channel drain, and a peer that has
+    simply stopped reading (TCP backpressure, not a closed connection —
+    `SessionClosedError` only covers the latter) can stall it
+    indefinitely. Cancellation is the actual security invariant here
+    and must not depend on this presentation detail succeeding, so
+    `cancel_one` runs from a `finally`, guaranteed to fire whether the
+    write finishes, fails, or times out.
     """
     while True:
         await asyncio.sleep(_REVOCATION_CHECK_INTERVAL_SECONDS)
         if not account_still_active(db, user):
             try:
-                await session.write_line(
-                    colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+                await asyncio.wait_for(
+                    session.write_line(
+                        colored(
+                            "\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR
+                        )
+                    ),
+                    timeout=_REVOCATION_NOTICE_TIMEOUT_SECONDS,
                 )
-            except SessionClosedError:
+            except (asyncio.TimeoutError, SessionClosedError):
                 pass
-            session_registry.cancel_one(session)
+            finally:
+                session_registry.cancel_one(session)
             return
 
 
