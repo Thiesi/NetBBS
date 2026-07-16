@@ -491,7 +491,8 @@ def test_update_board_replaces_the_full_state(db, alice):
     board = create_board(db, "general", creator=alice)
     updated = update_board(
         db, board, name="general2", description="new desc", min_read_level=1, min_write_level=2,
-        category_id=None, pinned=True, moderated=True, max_post_age_days=30, changed_by=alice,
+        category_id=None, pinned=True, moderated=True, max_post_age_days=30,
+        min_age=18, name_requirement="verified", changed_by=alice,
     )
     assert updated.name == "general2"
     assert updated.description == "new desc"
@@ -500,6 +501,8 @@ def test_update_board_replaces_the_full_state(db, alice):
     assert updated.pinned is True
     assert updated.moderated is True
     assert updated.max_post_age_days == 30
+    assert updated.min_age == 18
+    assert updated.name_requirement == "verified"
     entries = list_actions_for_object(db, "board", board.id)
     assert any(e.action == "update_board" for e in entries)
 
@@ -510,8 +513,30 @@ def test_update_board_rejects_a_name_collision(db, alice):
     with pytest.raises(BoardError):
         update_board(
             db, board, name="taken", description=None, min_read_level=0, min_write_level=0,
-            category_id=None, pinned=False, moderated=False, max_post_age_days=None, changed_by=alice,
+            category_id=None, pinned=False, moderated=False, max_post_age_days=None,
+            min_age=None, name_requirement=None, changed_by=alice,
         )
+
+
+def test_update_board_rejects_invalid_name_requirement(db, alice):
+    board = create_board(db, "general", creator=alice)
+    with pytest.raises(BoardError, match="name_requirement"):
+        update_board(
+            db, board, name="general", description=None, min_read_level=0, min_write_level=0,
+            category_id=None, pinned=False, moderated=False, max_post_age_days=None,
+            min_age=None, name_requirement="bogus", changed_by=alice,
+        )
+
+
+def test_create_board_rejects_invalid_name_requirement(db, alice):
+    with pytest.raises(BoardError, match="name_requirement"):
+        create_board(db, "general", creator=alice, name_requirement="bogus")
+
+
+def test_create_board_defaults_no_age_or_name_gate(db, alice):
+    board = create_board(db, "general", creator=alice)
+    assert board.min_age is None
+    assert board.name_requirement is None
 
 
 def test_delete_board_removes_posts_and_moderator_grants(db, alice, bob):

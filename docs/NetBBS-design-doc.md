@@ -1865,16 +1865,19 @@ now.
 ## 18. Identity attestation (age & real-name verification)
 
 Status: **local mechanism confirmed and specced** (round 85); **core
-implemented round 101** — profile fields, age computation, attestation
-records, gating checks, and anti-forgery display formatting
-(`netbbs.attestation`, 34 tests). **UI wiring and enforcement not yet
-built**: the `[V]erify` screen, profile-edit additions, and boards/
-channels/file-areas admin screens + actual gating enforcement at
-board/channel/area entry points remain a follow-up piece of this same
-backlog item — see the round 101 worklog entry for exactly what's done
-versus what's left. Link propagation of attestations is explicitly out
-of scope for now — see "Phase placement," below, for why it's gated on
-Phase 4 specifically, not Phase 3.
+implemented round 101** (`netbbs.attestation`, 34 tests); **UI wiring
+and boards enforcement implemented round 102** — the `[V]erify`
+main-menu screen, profile-edit additions (display name/location/
+birthdate + visibility), the `can_verify_identity` admin toggle, and
+full age/name-gating enforcement + anti-forgery display wired into
+message boards specifically, as the reference implementation. **Still
+open**: the identical wiring for chat channels and file areas — same
+schema (already migrated for all three resource types), same
+enforcement shape, just not yet repeated for those two — see the round
+102 worklog entry for the exact accounting. Link propagation of
+attestations is explicitly out of scope for now — see "Phase
+placement," below, for why it's gated on Phase 4 specifically, not
+Phase 3.
 
 **Why this exists, in Thiesi's own framing:** NetBBS can't itself
 define who counts as a minor or what counts as age- or identity-

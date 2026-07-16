@@ -18,9 +18,35 @@ editor that's the actual reason it's needed (design doc round 26).
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from enum import Enum, auto
 from pathlib import Path
 
+from netbbs.attestation import (
+    AttestationError,
+    ProfileFieldError,
+    attest_age,
+    attest_name,
+    compute_age,
+    format_name_for_resource,
+    get_attestation,
+    get_birthdate,
+    get_display_name,
+    get_location,
+    is_birthdate_visible,
+    is_display_name_visible,
+    is_location_visible,
+    is_verified_badge_visible,
+    meets_age,
+    meets_name_requirement,
+    set_birthdate,
+    set_birthdate_visible,
+    set_display_name,
+    set_display_name_visible,
+    set_location,
+    set_location_visible,
+    set_verified_badge_visible,
+)
 from netbbs.auth.users import (
     MIN_REGISTRATION_PASSWORD_LENGTH,
     NEW_ACCOUNT_SENTINEL,
@@ -30,6 +56,7 @@ from netbbs.auth.users import (
     account_still_active,
     authenticate_password_async,
     create_user_async,
+    get_user_by_id,
     get_user_by_username,
     list_users,
 )
@@ -634,6 +661,8 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     ]
     if list_pending_invitations_for_user(db, user):
         option_list.append(menu_key("I", "nvitations"))
+    if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
+        option_list.append(menu_key("V", "erify"))
     if meets_level(user, SYSOP_LEVEL):
         option_list.append(menu_key("A", "dmin"))
     option_list.append(menu_key("L", "ogoff"))
@@ -725,6 +754,10 @@ async def _main_menu(
         elif choice == "i" and list_pending_invitations_for_user(db, user):
             await session.write_line("")
             await _show_pending_invitations(session, db, user)
+            await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
+            await session.write_line("")
+            await _verify_identity_menu(session, db, user)
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "a" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
@@ -990,7 +1023,12 @@ async def _browse_boards_in_category(
     (`-item.id`) — boards keep their real, positive ID unchanged, so
     existing board `goto` numbers aren't affected by this at all.
     """
-    all_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level)]
+    # name_requirement deliberately does not gate reading here -- it's a
+    # participation/accountability requirement (design doc §18 point 7:
+    # "mutual visible accountability" among people posting), not a
+    # content-restriction the way min_age is; see can_post's own check,
+    # below, for where it actually applies.
+    all_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level) and meets_age(db, user, b.min_age)]
     boards_here = [b for b in all_boards if b.category_id == category_id]
 
     categories_here = (
@@ -1055,13 +1093,20 @@ def _can_edit_post(db: Database, post: Post, user: User) -> bool:
 
 
 async def _render_board_page(
-    session: Session, db: Database, board_name: str, page: PostPage, user: User, *, can_post: bool
+    session: Session,
+    db: Database,
+    board_name: str,
+    page: PostPage,
+    user: User,
+    *,
+    can_post: bool,
+    name_requirement: str | None,
 ) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
     Older/Newer/Recent), not on every loop iteration regardless of
     whether anything changed."""
-    await _render_post_page(session, db, board_name, page)
+    await _render_post_page(session, db, board_name, page, name_requirement=name_requirement)
     options = []
     if page.has_older:
         options.append(menu_key("O", "lder"))
@@ -1094,7 +1139,11 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     issue #39) -- `[B]ack` now always means back, nothing else.
     """
     board_name = sanitize_text(board.name)
-    can_post = meets_level(user, board.min_write_level)
+    can_post = (
+        meets_level(user, board.min_write_level)
+        and meets_age(db, user, board.min_age)
+        and meets_name_requirement(db, user, board.name_requirement)
+    )
 
     def _refetch_current_page() -> PostPage:
         """Re-fetches whichever page is currently on screen, using the
@@ -1142,7 +1191,7 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             await _compose_new_post()
         return
 
-    await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+    await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1151,29 +1200,29 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             oldest = page.posts[0]
             page_anchor = ("before", (oldest.created_at, oldest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
         elif choice == "n" and page.has_newer:
             await session.write_line("")
             newest = page.posts[-1]
             page_anchor = ("after", (newest.created_at, newest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
         elif choice == "r" and page.has_newer:
             await session.write_line("")
             page_anchor = None
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
         elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
             await session.write_line("")
             await _edit_existing_post(session, db, board, page, user)
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
         elif choice == "p" and can_post:
             await session.write_line("")
             await _compose_new_post()
             page_anchor = None  # a freshly-created post always lands on the newest page
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
         elif choice == "b":
             await session.write_line("")
             return
@@ -1274,12 +1323,38 @@ async def _compose_body(
     return (await session.read_line()).strip()
 
 
-async def _render_post_page(session: Session, db: Database, board_name: str, page: PostPage) -> None:
+def _author_display_name(db: Database, post: Post, *, name_requirement: str | None) -> str:
+    """
+    The author label to render for one post (design doc §18, round
+    101). Only looks up the live account behind `post.author_label`
+    when this board actually requires `verified_and_displayed` names --
+    that's the one case where showing the *current* attested real name
+    is intentional (an attestation, like an age gate, is a living fact
+    re-evaluated at read time, not frozen at post time). Every other
+    case renders the plain, already-sanitized `author_label` exactly as
+    it always has: `author_label` is deliberately denormalized so a
+    post's history still reads correctly even if the account is later
+    renamed or removed (design doc round 57) -- substituting a user's
+    *current* `display_name` there for the ordinary case would quietly
+    break that property, since `display_name` (unlike `username`) is
+    actually mutable.
+    """
+    if name_requirement == "verified_and_displayed":
+        author = get_user_by_id(db, post.author_user_id)
+        if author is not None:
+            return format_name_for_resource(db, author, name_requirement=name_requirement)
+    return sanitize_text(post.author_label)
+
+
+async def _render_post_page(
+    session: Session, db: Database, board_name: str, page: PostPage, *, name_requirement: str | None
+) -> None:
     header = colored(f"[{board_name}]", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     for position, post in enumerate(page.posts, start=1):
         when = format_for_display(post.created_at, db)
         edited_marker = " (edited)" if post.is_edited else ""
+        author_display = _author_display_name(db, post, name_requirement=name_requirement)
         # Position numbers are 1-indexed *within this page only* -- not
         # a stable identity across page changes, purely a same-screen
         # selector for [E]dit (design doc -- prose editor round B2:
@@ -1287,10 +1362,18 @@ async def _render_post_page(session: Session, db: Database, board_name: str, pag
         # currently on screen" role a picker's page-relative numbering
         # already plays elsewhere, just inline here since a board page
         # is at most 5 posts, too small to need a real picker for it.
-        post_header = colored(
-            f"[{position}] {sanitize_text(post.subject)} -- "
-            f"{sanitize_text(post.author_label)} ({when}){edited_marker}",
-            fg_color=ACCENT_COLOR,
+        #
+        # Built from three separately-colored segments, not one
+        # colored() call wrapping the whole line -- author_display may
+        # already contain its own colored+reset unit (round 99's
+        # verified-name formatting), and nesting that inside a single
+        # outer colored() would have the inner segment's own reset code
+        # clear the outer ACCENT_COLOR early, leaving the trailing
+        # "(timestamp)" text in the terminal's default color instead.
+        post_header = (
+            colored(f"[{position}] {sanitize_text(post.subject)} -- ", fg_color=ACCENT_COLOR)
+            + author_display
+            + colored(f" ({when}){edited_marker}", fg_color=ACCENT_COLOR)
         )
         await session.write_line(f"\r\n{post_header}")
         # Reflowed to this specific session's actual detected width
@@ -1376,7 +1459,13 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
     await session.write_line(f"Fullscreen editor for posts/bio: {'on' if editor_on else 'off'}")
 
     options = "  ".join(
-        [menu_key("E", "dit bio"), menu_key("V", "isibility"), menu_key("F", "ullscreen editor"), menu_key("B", "ack")]
+        [
+            menu_key("E", "dit bio"),
+            menu_key("V", "isibility"),
+            menu_key("F", "ullscreen editor"),
+            menu_key("N", "ame & details"),
+            menu_key("B", "ack"),
+        ]
     )
     await session.write_line(f"\r\n{options}")
     await session.write("Choice: ")
@@ -1419,6 +1508,10 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
             await session.write_line(
                 f"Fullscreen editor is now {'on' if fullscreen_editor_enabled(db, user) else 'off'}."
             )
+            visible = await _render_profile(session, db, user)
+        elif choice == "n":
+            await session.write_line("")
+            await _identity_details_screen(session, db, user)
             visible = await _render_profile(session, db, user)
         else:
             await session.write(reject_keystroke())
@@ -1474,3 +1567,243 @@ async def _toggle_bio_visibility(
     new_value = not currently_visible
     set_bio_visible(db, user, new_value)
     await session.write_line(f"Bio is now {'public' if new_value else 'private'}.")
+
+
+# -- identity attestation: self-reported profile fields (design doc §18, round 101) --
+
+
+async def _identity_details_screen(session: Session, db: Database, user: User) -> None:
+    """
+    Self-reported `display_name`/`location`/`birthdate` plus the general
+    "verified" badge visibility toggle (design doc §18) -- a separate
+    screen from `_edit_profile`'s own bio/fullscreen-editor options
+    rather than crowding four more fields onto that one menu. Each of
+    `[D]isplay name`/`[L]ocation`/`[A]ge/birthdate` combines editing the
+    value and setting its visibility into one action (unlike bio's
+    separate edit/visibility actions) specifically to avoid needing
+    eight top-level options for three fields.
+    """
+    await _render_identity_details(session, db, user)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "d":
+            await session.write_line("")
+            await _edit_display_name(session, db, user)
+            await _render_identity_details(session, db, user)
+        elif choice == "l":
+            await session.write_line("")
+            await _edit_location(session, db, user)
+            await _render_identity_details(session, db, user)
+        elif choice == "a":
+            await session.write_line("")
+            await _edit_birthdate(session, db, user)
+            await _render_identity_details(session, db, user)
+        elif choice == "v":
+            await session.write_line("")
+            new_value = not is_verified_badge_visible(db, user)
+            set_verified_badge_visible(db, user, new_value)
+            await session.write_line(f"Verified badge is now {'public' if new_value else 'private'}.")
+            await _render_identity_details(session, db, user)
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _render_identity_details(session: Session, db: Database, user: User) -> None:
+    display_name = get_display_name(db, user)
+    location = get_location(db, user)
+    birthdate = get_birthdate(db, user)
+    age_attestation = get_attestation(db, user, "age")
+    name_attestation = get_attestation(db, user, "name")
+
+    await session.write_line(colored("\r\nName & details:", fg_color=HEADER_COLOR, bold=True))
+    await session.write_line(
+        f"Display name: {sanitize_text(display_name) if display_name else '(not set)'} "
+        f"({'public' if is_display_name_visible(db, user) else 'private'})"
+    )
+    await session.write_line(
+        f"Location: {sanitize_text(location) if location else '(not set)'} "
+        f"({'public' if is_location_visible(db, user) else 'private'})"
+    )
+    if birthdate is not None:
+        await session.write_line(
+            f"Birthdate: {birthdate.isoformat()} (age {compute_age(birthdate)}) "
+            f"({'public' if is_birthdate_visible(db, user) else 'private'})"
+        )
+    else:
+        await session.write_line(
+            f"Birthdate: (not set) ({'public' if is_birthdate_visible(db, user) else 'private'})"
+        )
+    if age_attestation is not None or name_attestation is not None:
+        verified_parts = []
+        if age_attestation is not None:
+            verified_parts.append("age")
+        if name_attestation is not None:
+            verified_parts.append("name")
+        await session.write_line(
+            colored(
+                f"Verified: {', '.join(verified_parts)} "
+                f"({'public' if is_verified_badge_visible(db, user) else 'private'})",
+                fg_color=ACCENT_COLOR,
+            )
+        )
+    else:
+        await session.write_line(colored("Verified: (none)", fg_color=MUTED_COLOR))
+
+    options = "  ".join(
+        [
+            menu_key("D", "isplay name"),
+            menu_key("L", "ocation"),
+            menu_key("A", "ge/birthdate"),
+            menu_key("V", "erified badge visibility"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"\r\n{options}")
+    await session.write("Choice: ")
+
+
+async def _edit_display_name(session: Session, db: Database, user: User) -> None:
+    current = get_display_name(db, user)
+    await session.write(f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep): ")
+    new_value = (await session.read_line()).strip()
+    if new_value:
+        try:
+            set_display_name(db, user, new_value)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save display name: {exc}", fg_color=MUTED_COLOR))
+            return
+        await session.write_line("Display name updated.")
+    await session.write("Show it publicly? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    set_display_name_visible(db, user, answer == "y")
+
+
+async def _edit_location(session: Session, db: Database, user: User) -> None:
+    current = get_location(db, user)
+    await session.write(f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep): ")
+    new_value = (await session.read_line()).strip()
+    if new_value:
+        try:
+            set_location(db, user, new_value)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save location: {exc}", fg_color=MUTED_COLOR))
+            return
+        await session.write_line("Location updated.")
+    await session.write("Show it publicly? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    set_location_visible(db, user, answer == "y")
+
+
+async def _edit_birthdate(session: Session, db: Database, user: User) -> None:
+    current = get_birthdate(db, user)
+    await session.write(
+        f"\r\nBirthdate [{current.isoformat() if current else '(not set)'}] "
+        "-- new value as YYYY-MM-DD (blank to keep): "
+    )
+    raw = (await session.read_line()).strip()
+    if raw:
+        try:
+            new_birthdate = date.fromisoformat(raw)
+        except ValueError:
+            await session.write_line(colored("Not a valid date (expected YYYY-MM-DD).", fg_color=MUTED_COLOR))
+            return
+        try:
+            set_birthdate(db, user, new_birthdate)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save birthdate: {exc}", fg_color=MUTED_COLOR))
+            return
+        await session.write_line("Birthdate updated.")
+    await session.write("Show it publicly? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    set_birthdate_visible(db, user, answer == "y")
+
+
+# -- identity attestation: the [V]erify main-menu screen (design doc §18) --
+
+
+async def _verify_identity_menu(session: Session, db: Database, verifier: User) -> None:
+    """
+    Conditionally-visible main-menu entry for users with
+    `can_verify_identity` (or SysOp level) -- lives at the main menu
+    rather than inside the admin menu, since a granted verifier may not
+    have admin access otherwise (design doc §18, round 85 point 6).
+    """
+    candidates = [u for u in list_users(db) if u.id != verifier.id]
+    selected = await pick_item(
+        session,
+        candidates,
+        name_of=lambda u: u.username,
+        stable_id_of=lambda u: u.id,
+        description_of=lambda u: _verification_status_description(db, u),
+        title="Verify a user's identity",
+        empty_message="No other users to verify.",
+    )
+    if selected is not None:
+        await _verify_user(session, db, verifier, selected)
+
+
+def _verification_status_description(db: Database, user: User) -> str:
+    parts = []
+    if get_attestation(db, user, "age") is not None:
+        parts.append("age verified")
+    if get_attestation(db, user, "name") is not None:
+        parts.append("name verified")
+    return ", ".join(parts) if parts else "not verified"
+
+
+async def _verify_user(session: Session, db: Database, verifier: User, subject: User) -> None:
+    await session.write_line(
+        colored(f"\r\nVerifying {sanitize_text(subject.username)!r}:", fg_color=HEADER_COLOR, bold=True)
+    )
+
+    self_birthdate = get_birthdate(db, subject)
+    self_display_name = get_display_name(db, subject)
+    await session.write_line(
+        f"Self-reported birthdate: {self_birthdate.isoformat() if self_birthdate else '(not set)'}"
+    )
+    await session.write_line(
+        f"Self-reported display name: {sanitize_text(self_display_name) if self_display_name else '(not set)'}"
+    )
+
+    existing_age = get_attestation(db, subject, "age")
+    if existing_age is not None:
+        await session.write_line(f"Currently attested birthdate: {existing_age.attested_value}")
+    existing_name = get_attestation(db, subject, "name")
+    if existing_name is not None:
+        await session.write_line(f"Currently attested real name: {sanitize_text(existing_name.attested_value)}")
+
+    await session.write("\r\nAttest a birthdate? [y/N]: ")
+    if (await session.read_key()).lower() == "y":
+        await session.write_line("")
+        await session.write("Attested birthdate (YYYY-MM-DD): ")
+        raw = (await session.read_line()).strip()
+        try:
+            birthdate = date.fromisoformat(raw)
+            attest_age(db, subject, birthdate, verifier=verifier)
+        except (ValueError, AttestationError) as exc:
+            await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
+        else:
+            await session.write_line("Age attested.")
+    else:
+        await session.write_line("")
+
+    await session.write("Attest a real name? [y/N]: ")
+    if (await session.read_key()).lower() == "y":
+        await session.write_line("")
+        await session.write("Attested real name: ")
+        raw = (await session.read_line()).strip()
+        try:
+            attest_name(db, subject, raw, verifier=verifier)
+        except AttestationError as exc:
+            await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
+        else:
+            await session.write_line("Real name attested.")
+    else:
+        await session.write_line("")

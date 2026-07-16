@@ -31,6 +31,7 @@ from netbbs.auth.users import (
     delete_user,
     get_user_by_username,
     list_users,
+    set_can_verify_identity,
     set_user_disabled,
     set_user_level,
 )
@@ -324,6 +325,24 @@ async def _show_user_detail(session: Session, db: Database, actor: User, target:
         if answer == "y":
             updated = approve_pending_user(db, target, approved_by=actor)
             await session.write_line(f"{updated.username!r} approved.")
+
+    # Design doc §18, round 85 point 6 / round 101: a narrow, SysOp-
+    # grantable permission independent of the four moderator scope
+    # tiers -- toggled here rather than a dedicated screen, same shape
+    # as the pending-approval prompt just above.
+    await session.write_line(
+        f"\r\nCan verify identity (age/name attestation): "
+        f"{'yes' if target.can_verify_identity else 'no'}"
+    )
+    new_state = "revoke" if target.can_verify_identity else "grant"
+    await session.write(f"{new_state.capitalize()} identity-verification permission? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer == "y":
+        updated = set_can_verify_identity(db, target, not target.can_verify_identity, changed_by=actor)
+        await session.write_line(
+            f"{updated.username!r} can now verify identity: {'yes' if updated.can_verify_identity else 'no'}."
+        )
 
 
 # -- self-service registration settings (design doc round 76) -----------
@@ -921,6 +940,48 @@ async def _read_int(session: Session, *, default: int) -> int | None:
         return None
 
 
+async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
+    """Shared min_age prompt for board/channel/area create+edit screens
+    (design doc §18, round 101). Returns `(value, ok)` -- `ok=False`
+    means the caller should cancel; blank keeps `current` (which may
+    itself already be `None`, meaning no gate), `'none'` clears any
+    existing gate, otherwise a plain integer sets it."""
+    label = current if current is not None else "none"
+    await session.write(f"Minimum age [{label}] (blank = keep, 'none' = no gate): ")
+    raw = (await session.read_line()).strip()
+    if not raw:
+        return current, True
+    if raw.lower() == "none":
+        return None, True
+    try:
+        return int(raw), True
+    except ValueError:
+        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+        return None, False
+
+
+async def _prompt_name_requirement(session: Session, *, current: str | None) -> tuple[str | None, bool]:
+    """Shared name_requirement prompt (design doc §18, round 101) --
+    `none` (no gate), `verified` (SysOp can identify but nothing is
+    displayed), or `verified_and_displayed` (shown within this
+    resource's own rendering, design doc round 99)."""
+    label = current or "none"
+    await session.write(
+        f"Name requirement [{label}] (none/verified/verified_and_displayed, blank = keep): "
+    )
+    raw = (await session.read_line()).strip().lower()
+    if not raw:
+        return current, True
+    if raw == "none":
+        return None, True
+    if raw in ("verified", "verified_and_displayed"):
+        return raw, True
+    await session.write_line(
+        colored("Must be none/verified/verified_and_displayed -- cancelled.", fg_color=MUTED_COLOR)
+    )
+    return None, False
+
+
 async def _pick_optional_category(session: Session, db: Database, *, list_top_level, list_subcategories, title: str):
     """Optional category picker shared by board/area create+edit
     screens. Top-level categories are shown first; picking one that has
@@ -1027,12 +1088,19 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
         except ValueError:
             await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
             return
+    min_age, ok = await _prompt_min_age(session, current=None)
+    if not ok:
+        return
+    name_requirement, ok = await _prompt_name_requirement(session, current=None)
+    if not ok:
+        return
 
     try:
         board = create_board(
             db, name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
-            moderated=moderated, max_post_age_days=max_post_age_days, creator=actor,
+            moderated=moderated, max_post_age_days=max_post_age_days,
+            min_age=min_age, name_requirement=name_requirement, creator=actor,
         )
     except BoardError as exc:
         await session.write_line(colored(f"Could not create board: {exc}", fg_color=MUTED_COLOR))
@@ -1097,6 +1165,10 @@ async def _draw_board_detail(session: Session, board: Board) -> None:
     )
     age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
     await session.write_line(f"Max post age: {age} days")
+    await session.write_line(
+        f"Minimum age: {board.min_age if board.min_age is not None else 'none'}  "
+        f"Name requirement: {board.name_requirement or 'none'}"
+    )
     options = "  ".join(
         [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts"), menu_key("B", "ack")]
     )
@@ -1146,12 +1218,19 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
         except ValueError:
             await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
             return None
+    min_age, ok = await _prompt_min_age(session, current=board.min_age)
+    if not ok:
+        return None
+    name_requirement, ok = await _prompt_name_requirement(session, current=board.name_requirement)
+    if not ok:
+        return None
 
     try:
         updated = update_board(
             db, board, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
-            moderated=moderated, max_post_age_days=max_post_age_days, changed_by=actor,
+            moderated=moderated, max_post_age_days=max_post_age_days,
+            min_age=min_age, name_requirement=name_requirement, changed_by=actor,
         )
     except BoardError as exc:
         await session.write_line(colored(f"Could not update board: {exc}", fg_color=MUTED_COLOR))

@@ -52,6 +52,12 @@ class Board:
     created_at: str
     moderated: bool
     max_post_age_days: int | None
+    # Age/name-gating (design doc §18, rounds 85/86/101) -- nullable,
+    # NULL means no gate. Enforced alongside min_read_level/
+    # min_write_level wherever those already are; see
+    # netbbs.net.login_flow's board-browsing/posting checks.
+    min_age: int | None
+    name_requirement: str | None  # None | "verified" | "verified_and_displayed"
 
 
 def create_board(
@@ -65,6 +71,8 @@ def create_board(
     pinned: bool = False,
     moderated: bool = False,
     max_post_age_days: int | None = None,
+    min_age: int | None = None,
+    name_requirement: str | None = None,
     creator: User,
 ) -> Board:
     """
@@ -88,11 +96,19 @@ def create_board(
     board's own maintenance/expiry threshold (design doc §13); `None`
     means retain indefinitely, the default.
 
+    `min_age`/`name_requirement` (design doc §18, round 101) are the
+    same nullable-means-no-gate shape as everything else here — see
+    `netbbs.attestation.meets_age`/`meets_name_requirement` for the
+    actual check, enforced by callers alongside `min_read_level`/
+    `min_write_level` rather than inside this function.
+
     No permission check on *creating* a board here — board creation is an
     admin-level action with no SysOp/moderator concept defined yet in
     Phase 1; gating who's allowed to call this is left to whatever calls
     it (a future admin tool), not baked in here.
     """
+    if name_requirement not in (None, "verified", "verified_and_displayed"):
+        raise BoardError(f"invalid name_requirement: {name_requirement!r}")
     created_at = utc_now_iso()
     board_id = compute_content_id(
         {
@@ -108,8 +124,9 @@ def create_board(
             """
             INSERT INTO boards
                 (board_id, name, description, min_read_level, min_write_level,
-                 category_id, pinned, created_at, moderated, max_post_age_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 category_id, pinned, created_at, moderated, max_post_age_days,
+                 min_age, name_requirement)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 board_id,
@@ -122,6 +139,8 @@ def create_board(
                 created_at,
                 int(moderated),
                 max_post_age_days,
+                min_age,
+                name_requirement,
             ),
         )
         db.connection.commit()
@@ -259,6 +278,8 @@ def update_board(
     pinned: bool,
     moderated: bool,
     max_post_age_days: int | None,
+    min_age: int | None,
+    name_requirement: str | None,
     changed_by: User,
 ) -> Board:
     """
@@ -268,18 +289,25 @@ def update_board(
     responsible for pre-filling a caller's edits with the board's
     current values as defaults, keeping this function itself simple.
     `board_id`/`created_at` are immutable, not accepted here.
+
+    `min_age`/`name_requirement` follow design doc §18 (round 101) --
+    see `create_board`'s docstring.
     """
+    if name_requirement not in (None, "verified", "verified_and_displayed"):
+        raise BoardError(f"invalid name_requirement: {name_requirement!r}")
     try:
         db.connection.execute(
             """
             UPDATE boards
             SET name = ?, description = ?, min_read_level = ?, min_write_level = ?,
-                category_id = ?, pinned = ?, moderated = ?, max_post_age_days = ?
+                category_id = ?, pinned = ?, moderated = ?, max_post_age_days = ?,
+                min_age = ?, name_requirement = ?
             WHERE id = ?
             """,
             (
                 name, description, min_read_level, min_write_level,
-                category_id, int(pinned), int(moderated), max_post_age_days, board.id,
+                category_id, int(pinned), int(moderated), max_post_age_days,
+                min_age, name_requirement, board.id,
             ),
         )
         db.connection.commit()
@@ -337,4 +365,6 @@ def _row_to_board(row: sqlite3.Row) -> Board:
         created_at=row["created_at"],
         moderated=bool(row["moderated"]),
         max_post_age_days=row["max_post_age_days"],
+        min_age=row["min_age"],
+        name_requirement=row["name_requirement"],
     )

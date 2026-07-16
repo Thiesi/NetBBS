@@ -6236,3 +6236,109 @@ Without this wiring, nobody can actually exercise the feature end to
 end yet -- tracked as the next piece of this same backlog item, not a
 finished feature.
 
+## Sign-off notes, round 102 (identity attestation -- UI wiring + boards enforcement implemented)
+
+Completes the piece round 101 explicitly left open: nobody could
+exercise the attestation mechanism at all until this round wired it
+into real screens and one real resource type (boards, as the reference
+implementation channels/file-areas will mechanically repeat later).
+
+**`netbbs.net.login_flow` additions:**
+- **`[V]erify` main-menu screen**, conditionally visible for
+  `can_verify_identity` or SysOp (design doc §18 point 6: lives at the
+  main menu, not inside the admin menu, since a granted verifier may not
+  have admin access otherwise). Picks a user via the shared
+  `netbbs.net.picker.pick_item`, shows their self-reported birthdate/
+  display name and any existing attestation, then offers to attest an
+  age and/or a real name.
+- **"Name & details" profile sub-screen** (`_identity_details_screen`),
+  reached from `_edit_profile`'s new `[N]` option -- combines editing a
+  value and setting its visibility into one action per field
+  (`[D]isplay name`, `[L]ocation`, `[A]ge/birthdate`), a deliberate
+  simplification from bio's separate edit/visibility actions, made
+  specifically to avoid needing eight top-level options for three
+  fields. `[V]erified badge visibility` toggles the general verified
+  fact's own visibility.
+
+**`netbbs.net.admin_flow` additions:**
+- `can_verify_identity` grant/revoke prompt added to `_show_user_detail`,
+  same shape as the existing pending-approval prompt just above it.
+- Shared `_prompt_min_age`/`_prompt_name_requirement` helpers, wired into
+  both the create-board and edit-board screens -- written as shared
+  helpers specifically so channels/file-areas can reuse them unchanged
+  when their own admin screens get the same treatment.
+
+**`netbbs.boards.boards` additions:** `min_age`/`name_requirement` added
+to `Board`, `create_board`, `update_board`, `_row_to_board` -- required
+keyword parameters on `update_board`, matching that function's existing
+"every field required, no partial update" convention, not defaulted.
+
+**Enforcement, wired into `netbbs.net.login_flow`:**
+- `meets_age` added to board-listing filtering (`_browse_boards_in_category`),
+  alongside the existing `meets_level` check.
+- **`meets_name_requirement` deliberately does *not* gate reading** --
+  only `meets_age` does. Reasoned through explicitly: `name_requirement`
+  is a participation/accountability requirement (design doc §18 point 7:
+  "mutual visible accountability" among people *posting*), not a
+  content restriction the way `min_age` is; a board could reasonably
+  require verified names to post while still letting anyone read.
+  `meets_age` **and** `meets_name_requirement` are both added to the
+  `can_post` check instead, where `name_requirement` actually belongs.
+- `_author_display_name`, new: looks up the *live* account behind a
+  post's denormalized `author_label` only when the board's
+  `name_requirement` is exactly `verified_and_displayed` -- every other
+  case renders the plain historical label unchanged. This distinction
+  matters and was reasoned through carefully: `author_label` is
+  deliberately denormalized (round 57) so a post's history survives an
+  account being renamed or removed, but `display_name` (unlike
+  `username`) is mutable -- substituting a user's *current*
+  `display_name` for the ordinary case would have quietly broken that
+  historical-stability property the moment anyone changed their display
+  name after posting. Only the verified-name gate is supposed to show a
+  *living* fact (an attestation, like an age gate, is re-evaluated at
+  read time, not frozen at post time), so only that one case does the
+  live lookup.
+- **A real rendering bug caught and fixed while wiring this in, not
+  shipped:** the original plan was to wrap a post's whole header line
+  (`[N] subject -- author (timestamp)`) in one `colored(..., fg_color=
+  ACCENT_COLOR)` call. Since `author` can now itself contain an
+  already-colored-and-reset unit (round 99's `(=name=)` in
+  `VERIFIED_COLOR`), nesting it inside one outer `colored()` call would
+  have had the inner segment's own reset code clear `ACCENT_COLOR`
+  early, leaving the trailing `(timestamp)` text in the terminal's
+  default color instead of gold. Fixed by building the line from three
+  independently-colored segments concatenated together, each managing
+  its own color/reset, rather than one call wrapping the whole string.
+
+**New `netbbs.auth.users.get_user_by_id`**: a public, non-raising
+counterpart to the existing private `_get_user_by_id`, added
+specifically for `_author_display_name`'s "look up the live account,
+tolerate it no longer existing" need -- `_get_user_by_id` raises on a
+missing row, the wrong behavior for a denormalized-label caller that
+must treat "account deleted" as an ordinary, expected case.
+
+**Tests**: 9 new -- `tests/test_boards.py` (3: invalid `name_requirement`
+rejected on create and update, `min_age`/`name_requirement` default to
+no gate), `tests/test_admin_flow.py` (2: grant and revoke
+`can_verify_identity` through the real detail screen, plus scripted-
+input fixes across 7 existing tests that needed an extra key for the
+new prompt), and `tests/test_board_pagination_ui.py` (4, driving the
+real `_show_board` loop end to end: a `verified_and_displayed` board
+renders the colored `(=name=)` unit; an ungated board does *not* leak a
+later `display_name` change into an old post's rendering, proving the
+historical-stability property survives; `min_age` hides `[P]ost` when
+unmet and allows it once a birthdate satisfies the gate).
+
+**Testing**: full suite re-run: **1764 passed, 4 skipped** (up from
+round 101's 1755 -- 9 net new tests, no regressions elsewhere).
+
+**Explicitly still open**: the identical wiring (dataclass fields
+already migrated, admin-screen helpers already shared and ready) for
+chat channels (`netbbs.chat.channels`) and file areas
+(`netbbs.files.areas`) -- same `min_age`/`meets_age` read-gate,
+`name_requirement`/`meets_name_requirement` participation-gate split,
+and `format_name_for_resource` wired into channel member/message
+rendering and file-listing uploader rendering. Mechanical, not a new
+design question -- the boards work in this round is the pattern to
+repeat, not rediscover.
+

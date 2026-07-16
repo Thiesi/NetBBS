@@ -520,6 +520,19 @@ def _get_user_by_id(db: Database, user_id: int) -> User:
     return _row_to_user(row)
 
 
+def get_user_by_id(db: Database, user_id: int) -> User | None:
+    """
+    Public, non-raising counterpart to `_get_user_by_id` -- for callers
+    that need to look up a live account behind a *denormalized* label
+    (e.g. `netbbs.boards.posts.Post.author_label`) and must handle "the
+    account no longer exists" as a normal, expected case (the account
+    was deleted, but the post's own label survives it -- design doc
+    round 57) rather than an error.
+    """
+    row = db.connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return _row_to_user(row) if row is not None else None
+
+
 def count_sysops(db: Database) -> int:
     """
     Number of currently-**usable** SysOp-level accounts: level >=

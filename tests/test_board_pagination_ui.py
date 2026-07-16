@@ -128,6 +128,78 @@ def test_recent_key_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch
     db.close()
 
 
+# -- identity attestation: verified-name display + age/name gating (design doc §18, round 101) --
+
+
+def test_post_shows_verified_and_displayed_real_name(tmp_path):
+    from netbbs.attestation import attest_name
+    from netbbs.auth.users import SYSOP_LEVEL
+
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice, name_requirement="verified_and_displayed")
+    create_post(db, board, alice, "Hello", "World")
+    attest_name(db, alice, "Alice Smith", verifier=sysop)
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, alice))
+
+    assert "(=Alice Smith=)" in session.output
+    db.close()
+
+
+def test_post_does_not_leak_current_display_name_for_ungated_board(tmp_path):
+    from netbbs.attestation import set_display_name
+
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)  # no name_requirement
+    create_post(db, board, alice, "Hello", "World")
+    set_display_name(db, alice, "New Display Name")
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, alice))
+
+    # Historical author_label ("alice"), not the current display_name --
+    # design doc round 57's denormalization property must survive a
+    # later display_name change, since no gate here actually calls for
+    # the live value.
+    assert "New Display Name" not in session.output
+    assert "alice" in session.output
+    db.close()
+
+
+def test_min_age_gate_hides_the_post_option_when_unmet(tmp_path):
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "adults", creator=alice, min_age=18)
+    session = FakeSession(keys=["b"])
+
+    asyncio.run(_show_board(session, db, board, alice))
+
+    assert "]ost" not in session.output  # "[P]ost" not offered -- no birthdate on file
+    db.close()
+
+
+def test_min_age_gate_allows_posting_once_met(tmp_path):
+    from datetime import date
+
+    from netbbs.attestation import set_birthdate
+
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    set_birthdate(db, alice, date(1990, 1, 1))
+    board = create_board(db, "adults", creator=alice, min_age=18)
+    create_post(db, board, alice, "Hello", "World")  # non-empty, so [B]ack shows the normal menu
+    session = FakeSession(keys=["b"])
+
+    asyncio.run(_show_board(session, db, board, alice))
+
+    assert "]ost" in session.output
+    db.close()
+
+
 def test_single_page_board_offers_no_older_newer_recent_options(tmp_path, monkeypatch):
     db = Database(tmp_path / "node.db")
     board, user = _make_board_with_posts(db, count=2, monkeypatch=monkeypatch)

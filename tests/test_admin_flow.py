@@ -172,7 +172,7 @@ def test_create_user_with_blank_username_is_cancelled(db, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, sysop):
-    session = FakeSession(["l", "0", "1", "b"])
+    session = FakeSession(["l", "0", "1", "n", "b"])
     _run(session, db, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _written_text(session)
@@ -542,6 +542,8 @@ def test_create_board_flow(db, sysop):
         "n",  # pinned? no
         "y",  # moderated? yes
         "",   # max age blank = unlimited
+        "",   # min age blank = no gate
+        "",   # name requirement blank = no gate
         "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -561,12 +563,14 @@ def test_edit_and_delete_board_flow(db, sysop):
 
     # list -> pick(01) -> e(dit) -> new name, blank desc(keep), blank
     # read level(keep), blank write level(keep), n(don't change
-    # category), y(pin), n(mod), 'none'(unlimited) -> back to detail ->
-    # d(elete) -> retype new name -> back x3
+    # category), y(pin), n(mod), 'none'(unlimited), blank(keep min age),
+    # blank(keep name requirement) -> back to detail -> d(elete) ->
+    # retype new name -> back x3
     inputs = [
         "m", "m", "l", "0", "1", "e",
         "General2", "", "", "",
         "n", "y", "n", "none",
+        "", "",
         "d", "General2",
         "b", "b", "b",
     ]
@@ -964,7 +968,7 @@ def test_list_users_shows_pending_approval_status(db, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["l", "0", "1", "n", "b"])
+    session = FakeSession(["l", "0", "1", "n", "n", "b"])
     _run(session, db, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -973,7 +977,7 @@ def test_approving_a_pending_user_clears_the_gate(db, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["l", "0", "1", "y", "b"])
+    session = FakeSession(["l", "0", "1", "y", "n", "b"])
     _run(session, db, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is False
@@ -984,7 +988,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["l", "0", "1", "n", "b"])
+    session = FakeSession(["l", "0", "1", "n", "n", "b"])
     _run(session, db, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is True
@@ -993,9 +997,33 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["l", "0", "1", "b"])
+    session = FakeSession(["l", "0", "1", "n", "b"])
     _run(session, db, sysop)
     assert "Approve this account" not in _written_text(session)
+
+
+def test_detail_screen_can_grant_verify_identity_permission(db, sysop):
+    from netbbs.auth.users import list_users
+
+    create_user(db, "carol", password="hunter2pw")
+    # carol sorts before sysop alphabetically -- item 01.
+    session = FakeSession(["l", "0", "1", "y", "b"])
+    _run(session, db, sysop)
+    updated = next(u for u in list_users(db) if u.username == "carol")
+    assert updated.can_verify_identity is True
+    assert "can now verify identity: yes" in _written_text(session)
+
+
+def test_detail_screen_can_revoke_verify_identity_permission(db, sysop):
+    from netbbs.auth.users import list_users, set_can_verify_identity
+
+    carol = create_user(db, "carol", password="hunter2pw")
+    set_can_verify_identity(db, carol, True, changed_by=sysop)
+    session = FakeSession(["l", "0", "1", "y", "b"])
+    _run(session, db, sysop)
+    updated = next(u for u in list_users(db) if u.username == "carol")
+    assert updated.can_verify_identity is False
+    assert "can now verify identity: no" in _written_text(session)
 
 
 def test_registration_settings_screen_defaults_to_open(db, sysop):
