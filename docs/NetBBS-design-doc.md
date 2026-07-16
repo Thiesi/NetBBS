@@ -98,34 +98,51 @@ keys** are a separate, still-open concern tracked in issue #51 — see the
 round 87 sign-off note for why those two are deliberately kept apart
 (account state is settled; key-lifecycle semantics are not).
 
-- **Creation:** SysOp-created by default. Self-service registration is a
-  separate, later-added opt-in path (round 76) a SysOp can enable/disable
-  per node.
+- **Creation (corrected round 87 follow-up — the original text here
+  conflated two different settings; see the round 87 sign-off note):**
+  accounts may be created by a SysOp, or through self-service
+  registration, which is always available on Telnet, web, and SSH — there
+  is no node-wide switch that disables the registration path itself. A
+  separate node-wide setting, `require_registration_approval` (round 76,
+  default off), controls only whether a self-registered account activates
+  immediately or is created `pending_approval` and unable to log in on any
+  auth path until a SysOp approves it.
 - **Levels:** a single `level` integer drives all gating (§13), with
   `SYSOP_LEVEL = 255` reserved as the unambiguous top of the range —
   not a separate role flag/table, so it composes with the same
   `meets_level`/`require_level` checks used everywhere else.
 - **Promote/demote, soft-disable/enable, hard delete:** all SysOp
   actions (round 57), sharing one lockout guard that refuses any action
-  which would leave the node with zero *active* SysOps (disabled
-  accounts don't count as active). Self-delete/self-disable is allowed,
-  gated by the same guard.
+  which would leave the node with zero *usable* SysOps. "Usable"
+  (corrected round 87 follow-up, restating the exact invariant fixed
+  under issue #44) means all three: level ≥ `SYSOP_LEVEL`, not disabled,
+  and not still `pending_approval` — a pending account can hold a
+  SysOp-level row (promoted before approval, or created directly against
+  the database) but every login path refuses it regardless of level, so
+  it must not count toward the guard any more than a disabled account
+  does. Self-delete/self-disable is allowed, gated by the same guard;
+  promoting a still-pending account straight to SysOp level is refused
+  outright (approve first) rather than allowed to silently satisfy the
+  guard while remaining unable to log in.
 - **Hard delete's `ON DELETE` behavior** is explicit per table (round 57):
   authorship/uploader columns `SET NULL` (denormalized display labels
   already survive account removal); administrative data (moderator
   grants, channel membership/invitations, preferences, blocklist entries)
   `CASCADE`s; `moderation_log`'s actor/target columns `SET NULL`, since an
-  audit trail should outlive the account it names.
+  audit trail should outlive the account it names — this is also the full
+  extent of "retained data after deletion."
 - **Disable/delete revocation is enforced live, not just at next login**
   (round 73): a per-session background watcher polls every 5 seconds and
   forcibly disconnects a session the moment its account goes inactive,
   regardless of which screen/loop it's currently in — plus zero-latency
   in-loop checks at the main menu and chat's send loop as defense in
   depth.
-- **Username mutability, migration, and retained data after deletion**
-  remain as documented at their point of use (§13 for moderation-log
-  retention; round 76 for self-registration specifics) rather than
-  duplicated here.
+- **Username mutability:** usernames are immutable post-creation — no
+  rename path exists anywhere in the codebase. **Node/account migration**
+  (moving an existing account's identity to a different node) is
+  undesigned; it's Phase-3-or-later work, entangled with #51's
+  cryptographic key-lifecycle question rather than a plain account-level
+  concern.
 
 ## 6. Trust & reputation (the core fix for what broke last time)
 
@@ -620,20 +637,34 @@ user-facing async services**, even though this is one phase number, not
 two — see the dependency gates below (also tracked, in more detail, on
 each named issue rather than duplicated here):
 
-- *Protocol-foundation gate — settle before any wire-visible Link-core
-  implementation begins:* the deterministic multi-node test harness
-  (issue #59); the non-blocking DB/background-work execution model
-  (issue #57); the semantic portion of the canonical event spec — event
+**Dependency matrix (refined round 88, per follow-up review of round
+87's gate wording — issue #61), replacing an earlier, coarser
+"settle before any wire-visible implementation" formulation that bundled
+tiers which don't actually depend on each other:**
+- *Before wire schemas, IDs, signatures, or durable authority are
+  frozen:* the semantic portion of the canonical event spec — event
   taxonomy, projection rules, replay/compatibility semantics (issue #11);
-  and the node/user key-lifecycle model, before any durable authority or
-  signature identity gets frozen against real data (issue #51).
+  and the node/user key-lifecycle model (issue #51).
+- *Before continuous sync, ingestion, retry queues, or other background
+  Link work is implemented:* the non-blocking DB/background-work
+  execution model (issue #57), plus a *minimal* deterministic test
+  harness and the fault-injection seams it needs (issue #59) — not the
+  harness's full end state; that grows in lockstep with later features,
+  per the next bullet, rather than needing to be complete up front.
+- *Before the first end-to-end Linked feature is treated as complete:*
+  issue #59's harness expanded to cover at least 3 nodes, duplicate/
+  reordered delivery, restart, partition, and convergence.
+- *Before deployment beyond a controlled local/private harness:*
+  WAN/NAT/seed trust boundaries (issue #58) **and** the operational
+  model — quotas, retry/dead-letter visibility, crash recovery, backup/
+  restore (issue #60). A prototype need not wait for every dashboard or
+  disaster-recovery detail, but an externally operated persistent Link
+  node should not precede these.
 - *Feature-specific gates — settle before the specific Phase 3 feature
   they block, not before Phase 3 as a whole:* local async mail is a
   prerequisite before **Link messages** specifically (issue #52); the
   minimum signed lifecycle/succession model before **Linked resource
-  creation, carry, and closure** specifically (issue #53); WAN/NAT/seed
-  trust boundaries before any **real deployment** beyond a local harness
-  (issue #58).
+  creation, carry, and closure** specifically (issue #53).
 - Seed-node bootstrapping
 - Node-to-node transport: **HTTP+JSON with keypair signatures** (§11) —
   *not* Noise, which is reserved for Phase 5's real-time chat only
@@ -4921,4 +4952,79 @@ execution model — the document already self-diagnosed this in round 30;
 still no chosen design), #58 (WAN/NAT/seed-trust — still four lines in
 §12, no design work done), #59 (deterministic multi-node test harness —
 doesn't exist, correctly gated before Phase 3 substance).
+
+## Sign-off notes, round 88 (follow-up review of round 87 — two factual corrections, one gate-wording refinement)
+
+Thiesi reviewed commit `9edbd1d` against the actual codebase and posted
+follow-up replies on #11, #61, and #62. Two were genuine factual errors
+in round 87's new text, caught by checking the claims against
+`netbbs.auth.users` rather than taking the sign-off note's own wording at
+face value — exactly the kind of check this project's sign-off notes are
+supposed to survive. Both are fixed directly in §5 this round, not left
+as known errors.
+
+1. **§5's registration bullet was wrong — confirmed against
+   `netbbs/auth/users.py` and `netbbs/net/login_flow.py` (#62).** The
+   original text said self-registration was "an opt-in path a SysOp can
+   enable/disable per node." No such switch exists: self-registration is
+   always reachable on Telnet/web/SSH. The actual node-wide setting,
+   `require_registration_approval` (round 76, default off), only
+   controls whether a self-registered account activates immediately or
+   is created `pending_approval` and locked out of every auth path until
+   a SysOp approves it. §5 now describes this precisely instead of
+   conflating "gate approval" with "gate registration itself."
+2. **§5's "active SysOp" lockout description was incomplete — confirmed
+   against `count_sysops`/`_refuse_if_last_sysop` in
+   `netbbs/auth/users.py` (#62).** Round 87's text said only disabled
+   accounts don't count. The real invariant, fixed under issue #44 and
+   restated verbatim in `count_sysops`'s own docstring, is **usable**:
+   level ≥ `SYSOP_LEVEL`, not disabled, *and* not `pending_approval`. A
+   pending level-255 row can't authenticate on any path, so it must not
+   count toward the lockout guard any more than a disabled one does —
+   §5 now states all three conditions, plus the promote-while-pending
+   refusal that enforces it.
+3. **§5's closing bullet on username/migration/retention was a
+   deflection back to history, not a normative answer (#62) — replaced
+   with the actual current behavior stated directly:** usernames are
+   immutable (no rename code path exists anywhere in the codebase);
+   account/node migration is undesigned, deferred to Phase 3-or-later
+   work entangled with #51's key-lifecycle question; retained data after
+   deletion is fully covered by the preceding `ON DELETE` bullet, so the
+   new text points there instead of adding a third, redundant claim.
+4. **§15's Phase 3 gate wording was too coarse — refined per #61's
+   follow-up, not changed in substance.** The single "settle before any
+   wire-visible Link-core implementation" bucket bundled together
+   dependencies that don't actually block each other: a pure envelope
+   type or handshake prototype doesn't create the same risk as
+   continuous background sync/ingestion, which doesn't carry the same
+   stakes as a deployed, externally-reachable node. Replaced with an
+   explicit four-tier matrix (before wire schemas/signatures are frozen;
+   before continuous background Link work; before the first end-to-end
+   Linked feature is called complete; before deployment beyond a
+   controlled local/private harness), with #59's test harness now
+   explicitly understood to grow in lockstep with later features rather
+   than needing to be fully built before anything else starts, and #60
+   added alongside #58 in the deployment-readiness tier (it was missing
+   from round 87's version).
+5. **#11 — no doc change; confirmed the round 87 gate framing already
+   matches Thiesi's intent.** Thiesi's reply reaffirmed the three-stage
+   split (semantic model before wire-visible persistence; exact
+   canonicalization before real IDs/signatures; golden vectors run
+   through at least two independent serializers before claiming
+   interoperability) and confirmed it doesn't need to block #57/#58.
+   Recorded here only because the reply asked for the ordering to be
+   preserved going forward, not because anything needed correcting.
+6. **#62 disposition — Thiesi is comfortable closing it once these two
+   corrections land**, since the direct-cleanup scope (not the original
+   five-document restructuring, which was already dropped in round 87)
+   is what's left of its acceptance criteria. Left open one more round
+   rather than closed in the same breath as the fix, so Thiesi can
+   confirm the corrected §5 text reads right before the issue is marked
+   done.
+
+No round 87 text was found wrong beyond the three §5 points and the
+Phase 3 gate granularity above — the origination-authority rewrite,
+terminology correction, "same content" wording, file-chunk clarification,
+and Communities "thin" wording all held up against this follow-up
+review.
 
