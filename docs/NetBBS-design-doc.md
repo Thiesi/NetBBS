@@ -1,4 +1,4 @@
-# NetBBS — Design Document (v0.1, draft for review)
+# NetBBS — Design Document (v0.2, current architecture)
 
 Second attempt at a modern, TCP/IP-native BBS system. First attempt got far
 (multi-user chat, file areas, message boards) but required a rewrite once
@@ -88,6 +88,44 @@ implementation and bugfix history, see
 - **User login/auth:** both supported — traditional password auth as a
   simple/fallback option, and keypair-based (passwordless) auth available
   for those who want it.
+
+**Account lifecycle (normative section, added round 87 — consolidates
+standing behavior that was previously only recoverable by reading
+sign-off notes in order; resolves issue #62's point on this).** This
+section covers *account*-level lifecycle only. Rotation, revocation,
+recovery, and subordinate-key semantics for the underlying **cryptographic
+keys** are a separate, still-open concern tracked in issue #51 — see the
+round 87 sign-off note for why those two are deliberately kept apart
+(account state is settled; key-lifecycle semantics are not).
+
+- **Creation:** SysOp-created by default. Self-service registration is a
+  separate, later-added opt-in path (round 76) a SysOp can enable/disable
+  per node.
+- **Levels:** a single `level` integer drives all gating (§13), with
+  `SYSOP_LEVEL = 255` reserved as the unambiguous top of the range —
+  not a separate role flag/table, so it composes with the same
+  `meets_level`/`require_level` checks used everywhere else.
+- **Promote/demote, soft-disable/enable, hard delete:** all SysOp
+  actions (round 57), sharing one lockout guard that refuses any action
+  which would leave the node with zero *active* SysOps (disabled
+  accounts don't count as active). Self-delete/self-disable is allowed,
+  gated by the same guard.
+- **Hard delete's `ON DELETE` behavior** is explicit per table (round 57):
+  authorship/uploader columns `SET NULL` (denormalized display labels
+  already survive account removal); administrative data (moderator
+  grants, channel membership/invitations, preferences, blocklist entries)
+  `CASCADE`s; `moderation_log`'s actor/target columns `SET NULL`, since an
+  audit trail should outlive the account it names.
+- **Disable/delete revocation is enforced live, not just at next login**
+  (round 73): a per-session background watcher polls every 5 seconds and
+  forcibly disconnects a session the moment its account goes inactive,
+  regardless of which screen/loop it's currently in — plus zero-latency
+  in-loop checks at the main menu and chat's send loop as defense in
+  depth.
+- **Username mutability, migration, and retained data after deletion**
+  remain as documented at their point of use (§13 for moderation-log
+  retention; round 76 for self-registration specifics) rather than
+  duplicated here.
 
 ## 6. Trust & reputation (the core fix for what broke last time)
 
@@ -246,16 +284,29 @@ Phase 5 carries typed chat events (`message`, `action`, `private`, presence and 
 
 **Confirmed: split by traffic shape, not one protocol for everything.**
 
-- **Store-and-forward Link traffic** (boards, Link messages, file chunk
-  transfer — everything in §7's DAG/gossip system): **HTTP+JSON**, carrying
-  payloads authenticated via signatures from the existing keypair identity
-  system (§5) rather than a shared-secret HMAC model. The first attempt's
+- **Store-and-forward Link traffic** (boards, Link messages, file-area
+  catalogue/descriptor events): **HTTP+JSON**, carrying payloads
+  authenticated via signatures from the existing keypair identity system
+  (§5) rather than a shared-secret HMAC model. The first attempt's
   experience showed HTTP+JSON causes essentially no firewall/NAT friction
   on modern infrastructure, and it's a natural fit for async, queued,
   request/response-shaped traffic. Signatures replace their bootstrap-
   secret/per-peer-HMAC scheme, removing the shared-secret handshake
   entirely — the thing you authenticate is the identity you already have,
   same reasoning as originally applied to Noise.
+  **Transport family vs. propagation policy, clarified round 87 (see
+  round 87 sign-off note):** file *chunks/contents* use this same
+  HTTP+JSON-signed service family for transport, but are **not** part of
+  §7's DAG/gossip flood-fill — they're fetched on demand from a source
+  node and are deduplicated/resumable, matching §9's "node-local,
+  discoverable and downloadable on-demand" model. Only the file-area
+  *catalogue/descriptor* events (what exists, where, roughly how big)
+  participate in ordinary Link discovery/gossip the way board posts do;
+  the bytes themselves do not. Sharing a transport family does not imply
+  sharing a gossip/replication policy. (The eventual chunk-transfer wire
+  format may reasonably use signed JSON metadata plus a raw bounded HTTP
+  body rather than base64-encoding large chunks into JSON — left for
+  Phase 3 protocol work, per #11.)
 - **Real-time chat** (§8): **Noise Protocol Framework**, using the same
   keypairs as Noise static keys for mutual authentication. A persistent,
   low-latency encrypted stream is the right shape here, unlike the
@@ -374,14 +425,31 @@ corresponding need, and it violates the same "no automatic power grants"
 principle already applied in §6. A SysOp wanting one person to hold both
 grants both explicitly.
 
-**Privilege separation, SysOp vs. global moderator:** SysOp remains root —
-the only role that can grant/revoke *any* moderator tier, change node
-configuration, and originate boards/channels (which is itself what creates
-the ability to grant Link-board moderator status — see below). A global
-moderator's authority is strictly content-scoped: they can moderate content
-but cannot appoint other moderators or touch node configuration. This
-prevents a compromised or bad-acting moderator identity from escalating or
-self-perpetuating — directly informed by the Master Node lesson in §2/§6.
+**Privilege separation, SysOp vs. global moderator (revised round 87 to
+resolve a standing self-contradiction — see round 87 sign-off note):**
+SysOp remains root — the only role that can grant/revoke *any* moderator
+tier or change node configuration. **Originating** a Linked board/channel
+(below) is deliberately carved out as a narrower capability: a global
+board/channel moderator may also initiate creation, but this is
+**initiating creation, not the same thing as being the signed origin
+authority.** The distinction that matters:
+- The **node identity** (§5) signs the genesis/announcement event and is
+  the cryptographic *origin authority* of record — same identity either
+  way, whether a SysOp or a global moderator triggered the creation.
+- The **initiating human actor** is recorded separately, for audit —
+  who actually asked for this board/channel to be created is knowable
+  without conflating it with node-level origin authority.
+- Creating a Linked board/channel gives the initiator ordinary/per-object
+  moderation rights over the new object (matching the grant-authority
+  model below), but explicitly **not** the ability to appoint further
+  blanket moderators, alter node configuration, or govern pre-existing
+  resources they didn't create. Those remain SysOp-only, full stop.
+
+This prevents a compromised or bad-acting moderator identity from
+escalating or self-perpetuating — directly informed by the Master Node
+lesson in §2/§6 — while still letting a global moderator do the narrow,
+useful thing (spin up a new Linked board/channel for their area) without
+waiting on the SysOp for every one.
 
 **Moderation authority on Linked boards/channels — deferred, scoped for
 later.** Ships **local-only first** (Phase 2, alongside local moderator
@@ -401,14 +469,15 @@ already being made for every post on it, not a new category of trust.
 **Board/channel lifecycle — creation, deletion, and maintenance
 (confirmed):**
 
-- **Creation:** global board/channel moderators and the SysOp can create
-  new Linked boards/channels. Creating a board makes you its *origin* —
-  matching the grant-authority model already defined above — which is a
-  narrow, self-contained power, not a blanket administrative one. Creation
-  propagates as a **signed announcement**, not a forced action: other
-  nodes decide whether to carry the new board (see default-carry policy,
-  below), rather than having it appear on their system without their
-  node's consent.
+- **Creation:** global board/channel moderators and the SysOp can
+  *initiate* creation of new Linked boards/channels — the node identity
+  becomes the signed *origin* (see the privilege-separation note above
+  for why "who initiated it" and "what the origin authority is" are kept
+  distinct), which is a narrow, self-contained power, not a blanket
+  administrative one. Creation propagates as a **signed announcement**,
+  not a forced action: other nodes decide whether to carry the new board
+  (see default-carry policy, below), rather than having it appear on
+  their system without their node's consent.
 - **Deletion:** a board/channel's origin can mark it **closed/archived**
   (a signed event; no new posts accepted) — but this cannot force other
   nodes to purge data they've already stored. Real deletion of stored
@@ -418,10 +487,10 @@ already being made for every post on it, not a new category of trust.
   privileged users able to act on infrastructure they don't own — even
   though the stakes here are lower than that original failure.
 - **Default-carry policy for Link participation:** joining NetBBS Link
-  **carries every Linked board/channel by default** — this gives the
-  "same content available on any node" guarantee automatically, with zero
-  configuration, for the overwhelming majority of SysOps who'll never want
-  to deviate from it. A SysOp retains the ability to **explicitly exclude**
+  **carries every Linked board/channel by default** — this gives "same
+  content available on any node" as the **default availability/behavior**,
+  with zero configuration, for the overwhelming majority of SysOps who'll
+  never want to deviate from it. A SysOp retains the ability to **explicitly exclude**
   a specific board/channel on their own node (local legal exposure, topic
   preference, irrelevance to their community, etc.) — and that exclusion
   is **visible**, shown as "not carried on this node" rather than silently
@@ -542,15 +611,46 @@ any Link work begins, matching Thiesi's actual primary deployment target.
   heavy-screen consumer to validate its API against is more likely to
   need reworking than one built alongside its first real use case.
 
-**Phase 3 — Link connectivity & sync core**
+**Phase 3 — Link connectivity & sync core.** Explicitly
+**private/experimental federation** (round 87, resolving issue #61) —
+Phase 4's trust/reputation/quarantine system is the public-readiness gate;
+nothing in Phase 3 is meant to be exposed to untrusted/public peers before
+Phase 4 exists. Internally sequenced as **protocol foundation first, then
+user-facing async services**, even though this is one phase number, not
+two — see the dependency gates below (also tracked, in more detail, on
+each named issue rather than duplicated here):
+
+- *Protocol-foundation gate — settle before any wire-visible Link-core
+  implementation begins:* the deterministic multi-node test harness
+  (issue #59); the non-blocking DB/background-work execution model
+  (issue #57); the semantic portion of the canonical event spec — event
+  taxonomy, projection rules, replay/compatibility semantics (issue #11);
+  and the node/user key-lifecycle model, before any durable authority or
+  signature identity gets frozen against real data (issue #51).
+- *Feature-specific gates — settle before the specific Phase 3 feature
+  they block, not before Phase 3 as a whole:* local async mail is a
+  prerequisite before **Link messages** specifically (issue #52); the
+  minimum signed lifecycle/succession model before **Linked resource
+  creation, carry, and closure** specifically (issue #53); WAN/NAT/seed
+  trust boundaries before any **real deployment** beyond a local harness
+  (issue #58).
 - Seed-node bootstrapping
 - Node-to-node transport: **HTTP+JSON with keypair signatures** (§11) —
   *not* Noise, which is reserved for Phase 5's real-time chat only
 - Content-addressed DAG message format + flood-fill gossip sync
 - Persistent seen-event dedup table + file-chunk transfer ID scheme (§7)
 - Store-and-forward for offline nodes
-- Linked boards (distribution across NetBBS Link)
+- Linked boards (distribution across NetBBS Link) — any **structural**
+  message-threading/revision semantics that affect event IDs or
+  propagation must be settled here, before Linked boards ship, not left
+  for Phase 7 (see Phase 7's note, below)
 - Link messages (cross-Link PMs)
+- Remote file-area catalogue discovery and on-demand chunk transfer
+  (moved forward from Phase 5, round 87 resolving issue #61 — this is
+  asynchronous HTTP-service traffic like the rest of Phase 3, not
+  real-time-chat-transport traffic, so it belongs with its actual
+  transport family rather than waiting on Phase 5's Noise work it
+  doesn't depend on)
 - Interim abuse defense: the local blocklist mechanism from Phase 1,
   extended to remote nodes/traffic — acceptable given near-term testing is
   single/VM-node scale (§14), not a live public rollout. Full reputation
@@ -561,7 +661,15 @@ any Link work begins, matching Thiesi's actual primary deployment target.
 Isolated as its own phase specifically because it's the hardest,
 least-precedented part of the whole design — built and tested against
 already-working Phase 3 sync mechanics rather than developed alongside
-them.
+them. **Explicitly the public-federation-readiness gate** (round 87,
+resolving issue #61): Phase 3 is private/experimental by design (see
+that phase's note), and this phase — not any point within Phase 3 — is
+what makes exposing a node to untrusted/public peers a reasonable thing
+to do. The precise definitions this needs (what "established,"
+"independent," and "reputation weight" mean; the objective-abuse-vs-
+subjective-moderation split; quarantine as a local, explainable
+circuit-breaker rather than an authoritative network-wide state) remain
+open design work, tracked in issue #55.
 - Full trust/reputation system: local web-of-trust, dual-layer
   (node + user) reputation, hybrid time+vouching probation
 - Emergency quarantine mechanism (§6)
@@ -580,7 +688,10 @@ risk profile.
 - Who's-online (local + Link-wide)
 - Link-wide extension of `/msg` over the real-time Noise transport for currently-online recipients only; asynchronous Link messages remain a separate store-and-forward mechanism.
 - Link-wide propagation of `/me`, `/away`, and transparent display aliases as typed presence/chat events.
-- On-demand cross-node file area discovery/download
+- (Remote file-area discovery/download **moved to Phase 3**, round 87 —
+  see that phase's entry; it's asynchronous HTTP-service traffic, not
+  real-time chat, so it doesn't actually depend on this phase's Noise
+  transport.)
 - **Open question, deliberately deferred to whenever this phase actually
   starts:** should a newly-joining Link node be fed recent scrollback
   from peers (e.g. the last 50–200 messages per channel) so Link-wide
@@ -595,6 +706,14 @@ risk profile.
 The most structurally novel part of the whole design — nothing like it
 existed in the first attempt. Isolated here specifically because everything
 it depends on (trust system, chat) is already proven by this point.
+**Scope boundary vs. Phase 3, clarified round 87 (issue #53):** the
+*minimum* signed genesis/carry/closure machinery needed for a Linked
+resource to exist without inventing temporary authority rules is a
+Phase 3 gate (see that phase's note) — what stays here is the *advanced*
+delegated governance below (Link-blanket moderator grants, membership
+governance, the governance log/activity feed), plus origin succession/
+fork policy, which is still open design work regardless of which phase
+it lands in (issue #53, built on issue #51's key-transition primitives).
 - **Link-blanket ("global") moderator tier and Linked board/channel
   moderation** (§13): signed grant/edit events, verified against the
   granting event
@@ -635,9 +754,19 @@ it depends on (trust system, chat) is already proven by this point.
     decidable without real Link traffic to calibrate against.
 
 **Phase 7 — Door games & legacy compatibility**
-- Door game native API
-- Message board threading refinements
-- Classic DOS door compatibility (legacy game support)
+- Door game native API — trust boundary/sandbox and API versioning are
+  still fully open design questions, tracked in issue #63; must be
+  designed and proven before this phase's implementation begins
+- Message board threading refinements — **UI-only by this point**
+  (round 87, resolving issue #61): any *structural* threading/revision
+  semantics that would affect event IDs or propagation were required to
+  land back in Phase 3, before Linked boards shipped, specifically so
+  nothing structural was left this late
+- Classic DOS door compatibility (legacy game support) — per issue #63's
+  recommended direction, this should be a later adapter that receives the
+  same constrained session-capability set as the native API, not direct
+  node access; sequenced after the native API/sandbox has been proven,
+  not developed alongside it
 
 **Editor implementation notes (relevant for Phase 2's fullscreen editor):**
 first attempt's dual-editor approach (robust line editor as universal
@@ -701,18 +830,27 @@ files), Vintage Computing might have all three.
 file-area package remain exactly what they are today — independent,
 separately-packaged resource types with their own behavior (boards
 stay asynchronous, chat stays live, file areas stay repositories).
-Communities do not replace or absorb them. A Community is a new, thin
-object above them: a shared parent for navigation, and an optional
-inheritance point for permissions/moderation defaults and presentation
-(branding, visibility) that individual boards/channels/areas can still
-override.
+Communities do not replace or absorb them. A Community is a new
+**coordination/container object above the resource packages**: a shared
+parent for navigation, and an optional inheritance point for permissions/
+moderation defaults and presentation (branding, visibility) that
+individual boards/channels/areas can still override. (**Wording fix,
+round 87:** earlier drafts called this "thin," which undersold it once it
+started carrying real moderator-grant scope and Link carry-decision
+authority, below — it's intentionally not a unified content type, but it
+was never actually thin.)
 
 **Naming:** local ones are **Communities**; ones distributed across
-NetBBS Link are **Link Communities** — not "Linked Communities" — for
-consistency with the project's existing naming convention of
-prefixing anything distributed over the mesh with "Link" rather than
-"Linked" (Link messages, Link boards, Link chat; see §7, §15 Phase
-3/5/6).
+NetBBS Link are **Link Communities** — not "Linked Communities." **Correction,
+round 87:** this was previously (mis)described as evidence of a blanket
+"Link X" convention applying to every noun — it doesn't. The actual,
+now-confirmed convention (round 87 sign-off note, resolving issue #62):
+"Link" prefixes *named features* (**Link message**, **Link Community**,
+**NetBBS Link** itself, Link-wide chat/presence as a scope description),
+while an ordinary resource merely *participating* in the Link keeps the
+adjective form — **linked board**, **linked channel**, **linked file
+area** (§1) — which is deliberately not renamed despite the superficial
+inconsistency this reads as at first glance.
 
 **Why this fits NetBBS specifically, beyond the general UX argument:**
 it lines up with the node-operator autonomy principle already
@@ -4588,4 +4726,199 @@ Communities, self-update, and identity attestation.
    announcements are just another event kind in Phase 6's already-
    designed governance log/activity feed (§15 Phase 6) — this was
    already general enough to cover it without modification.
+
+## Sign-off notes, round 87 (independent design-doc review, GitHub issues #11/#51-63 — resolutions and direct doc fixes)
+
+An external reviewer audited a pre-round-82 snapshot of this document and
+opened/reopened 14 GitHub issues (#11, #51–63). Claude assessed each
+against the *current* document (post round-86), posted a per-issue status
+comment distinguishing "already resolved," "partially resolved," and
+"still fully open," and Thiesi replied on each with binding decisions.
+This round records those decisions and makes the direct text fixes they
+called for. Full comment threads are on the issues themselves; this note
+is the durable summary.
+
+**1. Canonical event format (#11) — staged-gate resolution, not full
+resolution.** Round 27's placeholder deferral was confirmed reasonable
+for Phases 1–2, not an undiscovered gap. Going forward, a three-stage
+gate applies rather than an all-or-nothing freeze: (a) work that doesn't
+depend on final event shape — most of #57's DB-execution-model design,
+most of #58's WAN/NAT design — may proceed now; (b) the **semantic**
+protocol model (event taxonomy, envelope fields, identity references,
+immutable-object-vs-mutable-projection rules, replay/tombstone
+semantics, version/capability negotiation) must be settled before any
+wire-visible persistence or endpoint is implemented; (c) **exact**
+canonicalization and signed golden vectors must be settled before any
+real Phase 3 code emits an ID or signature. Three additional protocol-
+state concerns surfaced during the reopened review and are now folded
+into #11's scope for whenever that semantic-specification work happens:
+deterministic effective-state/projection rules distinct from immutable
+content-object identity; replay-safety after local dedup-table/retention
+cleanup, distinguished from moderation tombstones and storage pruning;
+and peer capability/version negotiation with defined unknown-event/
+downgrade behavior. #11 stays open as a gate before wire-visible
+implementation; it does not block the orthogonal Phase 3 prep in #57/#58.
+
+**2. Identity/authority/operations cluster (#51, #53, #60) — one
+coherent design item, explicit dependency order.** Confirmed: #51 is the
+normative root (stable identity, which operational keys it authorizes,
+rotation/revocation/recovery, historical-signature verification survives
+rotation); #53 applies those primitives to Link-resource authority
+(ownership transfer, succession, orphaning, forks — must not invent a
+second key-transition model); #60 operationalizes the result (backup,
+restore, disaster recovery preserving the identity model rather than
+defining it accidentally through whichever files happen to get copied).
+Concretely: a root/recovery key normally kept offline, replaceable
+online signing/transport keys, transition records living in event
+history, and a restore procedure that cannot clone one identity into two
+simultaneously-active nodes. To be designed together (one round or a
+tightly cross-referenced set), not as three independent passes. None of
+#51/#53/#60 is resolved by this round — the ordering and shared
+constraints are.
+
+**3. Link resource lifecycle scope (#53) — narrowed, not closed.**
+Agreed §13 already supplies a defensible conceptual answer for genesis/
+origin/carry/closure (see round 5 onward) — the issue was overclaiming
+"undesigned" for that part. #53's real remaining scope: which minimum
+signed lifecycle machinery moves from Phase 6 into Phase 3 so a Linked
+resource can exist without inventing temporary authority rules (now
+stated directly in §15's Phase 3 and Phase 6 entries); origin succession/
+voluntary-transfer/total-loss/compromise/orphan/fork policy, built on
+#51's key-transition primitives once those exist; reconciling the
+original carry-every-Linked-resource default with the newer Link-
+Community carry model (§16 round 86 already establishes Link-Community
+carry as additive, not a replacement — cross-referenced from #53 rather
+than re-litigated); and explicitly deferring exact event-envelope/
+projection mechanics to #11 rather than duplicating them. Suggested
+retitle, not yet applied to the tracker: "Place minimum Link resource
+lifecycle in Phase 3 and define origin succession/forks."
+
+**4. Communities domain model (#54) — superseded, recommend closing.**
+Rounds 83/84/86 resolved cardinality (zero-or-one), permission/
+moderation inheritance (nullable-scalar-defaults-plus-Community-blanket-
+tier), personal/system surfaces staying outside Communities, migration-
+by-nullability, and phase placement (local before Phase 3, Link wire
+details in Phase 6). One deliberate divergence from the issue's original
+recommendation, confirmed as intentional rather than an oversight: a
+child resource may explicitly *loosen* a Community default rather than
+the Community acting as a mandatory floor — coherent for a node-
+sovereign system where the carrying SysOp remains final policy
+authority, and already described in §16 as an intentional override, not
+silently. The one genuinely live point — a per-user follow/favourite
+relationship distinct from resource membership and node carry — is
+folded into #56 rather than kept open here.
+
+**5. Unread/follow/activity state (#56) — kept open, absorbs #54's
+remaining point, four concepts kept explicitly distinct.** None of the
+following may silently imply another: **follow/favourite** (a user
+preference about what gets surfaced prominently), **read marker**
+(consumption state for a specific ordered stream/resource), **membership/
+access** (authorization), **node carry** (SysOp-level federation/storage
+policy). Following a Community must not grant access; membership must
+not force follow/notification state; a user following something must not
+cause the node to carry a Link Community. Phase 6's Link activity feed
+may remain deliberately non-unread-tracked (a live "tail -f," not every
+surface needs the same UX) — #56's job is to define which surfaces
+participate in the new-activity model and which explicitly opt out, not
+to force uniformity.
+
+**6. Roadmap dependency gates (#61) — addendum-slot pattern kept, three
+gate classes adopted, doc updated directly.** Confirmed the existing
+"after Phase 2, before Phase 3" addendum-slot pattern (already used for
+Communities/self-update/identity-attestation) is a fine mechanism —
+Thiesi does not want the established phase numbering fought over for its
+own sake; the actual concern was dependency *order*, not the `3A`/`3B`
+labels. §15 now states directly: Phase 3 is explicitly
+**private/experimental federation**, Phase 4 is the explicit **public-
+federation-readiness gate**; Phase 3's protocol-foundation gate (#59, #57,
+#11's semantic portion, #51) is distinguished from its feature-specific
+gates (#52 before Link messages, #53 before Linked-resource lifecycle,
+#58 before real deployment); remote file-area discovery/download moved
+from Phase 5 into Phase 3 (it's async HTTP-service traffic, not
+real-time-chat traffic, so it never actually depended on Phase 5's Noise
+transport); Phase 7's threading-refinement bullet is now marked
+explicitly UI-only, with the structural requirement (any ID/propagation-
+affecting threading semantics must land in Phase 3, before Linked boards
+ship) stated in Phase 3's own entry instead. #56 (unread/follow/
+activity) is confirmed as important product work that does *not* block
+starting DAG/transport implementation, provided event ordering gives it
+stable markers to build on later — it may proceed in parallel rather
+than gating Phase 3 entry.
+
+**7. Document-normalization fixes (#62) — six confirmed contradictions
+fixed directly in this round; the multi-document split proposal
+deferred, not adopted.** Fixed in place this round:
+- Title no longer claims "draft for review" while the status line calls
+  the architecture confirmed and substantially built (now "v0.2, current
+  architecture").
+- §13's SysOp-vs-global-moderator origination contradiction resolved by
+  distinguishing **initiating creation** (global moderators and the
+  SysOp) from being the **signed origin authority** (always the node
+  identity) — see §13's revised privilege-separation note. The initiating
+  human actor is recorded for audit; initiating creation does not grant
+  the ability to appoint further blanket moderators, alter node
+  configuration, or govern pre-existing resources.
+- "Linked boards/channels" vs. "Link boards/chat" terminology drift
+  resolved in favor of the document's actual, overwhelming usage (15+
+  occurrences), not the round-71/§16 claim: "Link" prefixes *named
+  features* (Link message, Link Community, NetBBS Link itself, Link-wide
+  chat/presence as a scope description); an ordinary resource merely
+  *participating* in the Link keeps the adjective form (linked board,
+  linked channel, linked file area, §1). Round 71's original text is left
+  as historical record per this project's sign-off-note convention
+  (corrected forward, not rewritten); §16 now carries an explicit
+  correction note pointing here.
+- "Same content available on any node" reworded from "guarantee
+  automatically" to "default availability/behavior" in §13 — agreed not
+  a substantive contradiction (the opt-out was already explained in the
+  same breath) but a needlessly absolute word for something with a
+  documented exception.
+- File-chunk transport clarified in §11: chunks/contents share the
+  HTTP+JSON-signed transport family with boards/messages but are **not**
+  part of §7's DAG/gossip flood-fill — only file-area catalogue/
+  descriptor events participate in Link gossip, matching §9's on-demand
+  model. Sharing a transport family does not imply sharing a gossip
+  policy; the exact chunk wire format remains #11/Phase 3 scope.
+- §16's "thin" wording replaced with "coordination/container object above
+  the resource packages" — the behavior was already correct (not a
+  unified content type), "thin" was simply the wrong adjective once
+  Community-blanket moderator scope and Link carry-decision authority
+  existed.
+- Account lifecycle promoted from scattered sign-off-note-only status
+  into a new normative §5 subsection, cross-referencing #51 for the
+  cryptographic-key lifecycle that remains genuinely open (deliberately
+  kept separate: account state is settled, key-lifecycle semantics are
+  not).
+
+**Deferred, not adopted:** the five-way document split (architecture /
+ADRs / worklog / open-decisions register / protocol spec) proposed
+alongside #62. Thiesi's stance: reassess after the direct fixes above,
+since the worklog split already happened once for a similar reason and a
+five-document shape may be finer-grained than a solo-maintained project
+needs. If a split does happen later, the one piece Thiesi already expects
+to want regardless: a standalone **normative Link protocol specification**
+once Phase 3 begins — exact wire/state-machine rules don't belong mixed
+into chronological sign-off prose the way they currently would. Until
+then: current architecture doc (this file, with its existing sign-off-
+note history), worklog, and issues/comments as the interim open-
+decisions register.
+
+**8. Door-game isolation (#63) — confirmed still fully open, no
+objection.** §15's Phase 7 entry now states directly that the native
+API's trust boundary/sandbox and versioning must be designed and proven
+before Phase 7 implementation begins, and that DOS-door compatibility
+should be a later adapter receiving the same constrained session-
+capability set as the native API, not direct node access — matching
+#63's recommended direction. No design work landed this round; this is a
+sequencing note only.
+
+**Not touched by this round, confirmed still fully open with no
+disagreement registered:** #52 (local async mail / Link message
+delivery — a real gap, the existing `/msg` feature is a different,
+deliberately ephemeral thing), #55 (Link trust/quarantine threat model —
+correctly sequenced to Phase 4, still undefined), #57 (non-blocking DB
+execution model — the document already self-diagnosed this in round 30;
+still no chosen design), #58 (WAN/NAT/seed-trust — still four lines in
+§12, no design work done), #59 (deterministic multi-node test harness —
+doesn't exist, correctly gated before Phase 3 substance).
 
