@@ -207,11 +207,12 @@ def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, a
 # -- scroll region setup/teardown, via the real _chat_loop --------------
 
 
-def test_chat_loop_sets_a_scroll_region_reserving_the_last_row(db, hub, presence, mailbox, channel, alice):
+def test_chat_loop_sets_a_scroll_region_reserving_the_last_two_rows(db, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
     # Default FakeSession terminal is 80x24 (netbbs.net.session.Session's
-    # own class defaults) -- rows 1-23 scroll, row 24 is reserved.
-    assert "\x1b[1;23r" in _written_text(session)
+    # own class defaults) -- rows 1-22 scroll, row 23 is the pinned
+    # input row, row 24 is the status row (design doc round 79).
+    assert "\x1b[1;22r" in _written_text(session)
 
 
 def test_chat_loop_clears_the_screen_on_entry(db, hub, presence, mailbox, channel, alice):
@@ -237,9 +238,9 @@ def test_chat_loop_clears_the_screen_on_exit(db, hub, presence, mailbox, channel
     assert _written_text(session).endswith("\x1b[r\x1b[2J\x1b[H")
 
 
-def test_chat_loop_skips_the_status_line_on_a_too_short_terminal(db, hub, presence, mailbox, channel, alice):
+def test_chat_loop_skips_the_pinned_ui_on_a_too_short_terminal(db, hub, presence, mailbox, channel, alice):
     session = FakeSession(["/quit"])
-    session.terminal_height = 1  # below _STATUS_LINE_MIN_HEIGHT (2)
+    session.terminal_height = 1  # below _PINNED_UI_MIN_HEIGHT (3)
     history = InputHistory()
     asyncio.run(
         asyncio.wait_for(

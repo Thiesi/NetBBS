@@ -3569,3 +3569,97 @@ the deliberate, permanent boundary, not a placeholder pending Phase 3.
 No per-channel opt-out/config toggle was requested or added; every
 channel with a participant present gets the announcement unconditionally.
 
+## Sign-off notes, round 79 (pinned chat input row)
+
+Thiesi asked to build round 77's other discussed-not-decided item: a
+fixed input row near the status line, mirroring a Claude-Code-style
+layout. Scoped in detail before implementation (per this project's own
+"design before code" convention) because a real investigation surfaced
+that the valuable version of this feature is materially bigger than it
+looks — confirmed with Thiesi via `AskUserQuestion` before writing any
+code, same as rounds 75/77's own UX forks.
+
+**1. The real problem, found before scoping could even start.**
+`_chat_loop` has always been the *only* screen in this codebase with
+two concurrent tasks (`send_loop`/`receive_loop`) reading and writing
+one session at once — confirmed by checking every other `asyncio.
+create_task` call site in `src/netbbs/net`. That concurrency already
+had an accepted, documented gap: an incoming message arriving mid-
+keystroke could visually corrupt a user's in-progress typing, because
+`netbbs.net.char_input._read_line_editable`'s `line`/`cursor` state is
+a private local variable with no visibility outside that one call
+frame, and nothing serializes `send_loop`'s per-keystroke writes
+against `receive_loop`'s. Pinning the input row to a fixed screen
+position *without* fixing this would just move the corruption to a
+spot the eye expects to stay stable — worse, not better. So this round
+is really "make concurrent chat I/O safe" with "give input a fixed
+row" as the visible result, not the other way around.
+
+**2. Chosen mechanism: a shared `live_buffer` + `lock`, not a full
+merge of `send_loop`/`receive_loop` into one task.** Considered and
+rejected the architecturally "purest" fix (one unified loop
+multiplexing keystrokes and incoming broadcasts via `asyncio.wait`) as
+the more invasive option. Instead: `netbbs.net.char_input.
+LiveInputBuffer` is a small dataclass (`text`, `cursor`) that `read_line`
+now keeps refreshed once per keystroke (in a `finally`, so it happens
+regardless of which of several `continue`/`break` branches fired) —
+readable from outside without exposing the whole edit loop. An
+`asyncio.Lock`, threaded through the same `read_line`/`_read_line_editable`
+call as a new keyword-only `lock` parameter, wraps each keystroke's
+own writes as one atomic critical section; `receive_loop` (and
+`send_loop`'s own post-command redraw) acquire the *same* lock before
+touching the screen, so the two tasks' writes can never interleave.
+Both parameters default to `None` — a complete no-op for every one of
+the 40+ other `read_line()` call sites in the codebase, none of which
+need this. `netbbs.net.web.WebSession`'s own separate `_read_line_editable`
+reimplementation (round 25: a browser delivers decoded characters, not
+raw bytes, so it can't share `char_input`'s byte-oriented reading)
+needed the identical mirrored change, to keep the pinned row behaving
+the same way over web as over Telnet/SSH.
+
+**3. Layout, confirmed via `AskUserQuestion` mockups before
+implementing:** input row *above* the status line (the status row's
+own fixed target, `session.terminal_height`, is completely unchanged —
+only the scroll region's upper boundary and the new input row are
+additions), with a visible `"> "` prompt marker now that a full redraw
+happens on every update anyway. Reserved rows went from 1 to 2;
+`_STATUS_LINE_MIN_HEIGHT` (round 75) is renamed `_PINNED_UI_MIN_HEIGHT`
+and raised from 2 to 3 — one combined gate for both pinned rows, not
+two independent minimums, since there's no sensible state where one
+exists without the other.
+
+**4. Positioning is unconditional, not incrementally tracked.** Every
+write into the scrolling content region (an incoming broadcast, or this
+session's own command/message output) jumps straight to the scroll
+region's bottom row before printing, rather than tracking how "full"
+the region currently is — no such row-position bookkeeping exists
+anywhere else in this codebase, and DECSTBM's own auto-scroll-at-the-
+bottom-margin behavior makes it unnecessary: newest content always
+lands adjacent to the pinned input box, which is the actually-expected
+behavior once there's a fixed anchor to grow from (a deliberate,
+arguably-improved change from the old "fills from the top" behavior
+the status-line-only version had, not a regression — there was no
+fixed anchor to be adjacent *to* before this round).
+
+**5. A very long in-progress line is truncated, not horizontally
+scrolled.** `_repaint_input_row` uses the existing `truncate()` helper
+(same one the status line already uses) rather than building real
+horizontal-scroll logic — an accepted simplification for what's
+expected to be a rare case; the cursor is left at the end of the
+truncated view rather than at its true position when that happens.
+
+**6. Nested reads were checked for and confirmed absent.** Wrapping
+`send_loop`'s entire per-command dispatch in the shared lock (so
+`_repaint_status_line`, unchanged, correctly inherits that protection
+without needing its own lock parameter — nesting an `asyncio.Lock`
+acquire inside itself deadlocks, since it isn't reentrant) is only safe
+because no chat command handler ever calls `session.read_line`/
+`read_key` a second time from inside its own dispatch — verified
+directly by grepping the whole file for a second `read_line`/`read_key`
+call site before relying on it, not assumed.
+
+**Left as explicitly out of scope:** true horizontal scrolling for an
+oversized in-progress line (point 5); a fully merged single-task event
+loop (point 2) — worth revisiting only if the lock-based approach turns
+out to have some real problem in practice, none identified so far.
+

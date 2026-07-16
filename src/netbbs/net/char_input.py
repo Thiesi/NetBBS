@@ -36,6 +36,8 @@ two.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -247,6 +249,38 @@ class InputHistory:
         return self._entries[-index_from_most_recent]
 
 
+@dataclass
+class LiveInputBuffer:
+    """
+    A live, externally-observable snapshot of an in-progress `read_line`
+    edit — the text typed so far and the cursor position within it,
+    refreshed once per keystroke, right before the next blocking byte
+    read (design doc round 79). Exists specifically so a concurrently
+    running task (`netbbs.net.chat_flow`'s `receive_loop`) can redraw a
+    pinned input row from real state after printing new content above
+    it, instead of guessing or leaving stale/corrupted text on screen —
+    `read_line`'s `line`/`cursor` state is otherwise entirely private to
+    its own call frame (see `_read_line_editable`'s own docstring for
+    why this couldn't be solved any other way without exposing it).
+
+    A plain dataclass, not independently synchronized on its own — only
+    ever *written* by whichever task currently owns the read (chat's
+    `send_loop`, via `read_line`'s own internals) and *read* from
+    another task purely as a snapshot. Safe without a lock of its own
+    because CPython/asyncio's cooperative scheduling means an ordinary
+    attribute write is never torn by a concurrent reader; the actual
+    *terminal writes* representing this state are a separate concern,
+    guarded instead by the `lock` parameter `read_line` also accepts.
+    """
+
+    text: str = ""
+    cursor: int = 0
+
+    def update(self, line: list[str], cursor: int) -> None:
+        self.text = "".join(line)
+        self.cursor = cursor
+
+
 # -- tab completion (transport/byte agnostic, design doc round 49/Track 5g) -
 
 # `Completer` is deliberately generic: given the text of the current
@@ -374,6 +408,9 @@ async def read_line(
     echo: bool = True,
     history: InputHistory | None = None,
     completer: Completer | None = None,
+    *,
+    live_buffer: LiveInputBuffer | None = None,
+    lock: asyncio.Lock | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -391,10 +428,23 @@ async def read_line(
     meaningfully benefit from any of that, and it avoids needing a
     parallel masked-display buffer just to support cases nothing asks
     for.
+
+    `live_buffer`/`lock` (design doc round 79) are the pinned-chat-
+    input-row hooks `netbbs.net.chat_flow` needs and nothing else does
+    — both default to `None`, a complete no-op for every other call
+    site in the codebase. `live_buffer`, if given, is kept up to date
+    with the in-progress `line`/`cursor` state after every keystroke's
+    own edit; `lock`, if given, is held for the duration of handling
+    each keystroke's own writes, so a concurrently-running task holding
+    the same lock (to redraw a pinned row elsewhere on screen) can
+    never interleave with an in-progress echo/edit and corrupt it.
+    Silently ignored for `echo=False` masked reads — a password prompt
+    has no legitimate reason to be visible to a concurrently-redrawing
+    pinned row.
     """
     if not echo:
         return await _read_line_masked(source, write)
-    return await _read_line_editable(source, write, history, completer)
+    return await _read_line_editable(source, write, history, completer, live_buffer=live_buffer, lock=lock)
 
 
 async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
@@ -444,6 +494,9 @@ async def _read_line_editable(
     write: WriteFunc,
     history: InputHistory | None,
     completer: Completer | None = None,
+    *,
+    live_buffer: LiveInputBuffer | None = None,
+    lock: asyncio.Lock | None = None,
 ) -> str:
     line: list[str] = []
     cursor = 0
@@ -456,111 +509,134 @@ async def _read_line_editable(
         if b is None:
             continue  # pure transport-level action, no data produced
 
-        if b in (_CR, _LF):
-            if b == _CR:
-                await _consume_optional_lf_or_nul(source)
-            break
+        # The whole per-keystroke reaction (every write() call one byte
+        # can trigger) is one atomic critical section under `lock`, if
+        # given — design doc round 79. `live_buffer` is refreshed in the
+        # `finally` so it happens exactly once per keystroke regardless
+        # of which branch below was taken (several `continue`/`break`
+        # out of here, all of which still need the buffer updated
+        # before this iteration ends), and *while still holding the
+        # lock* — the buffer's own state and the writes that produced it
+        # must never be observed out of sync with each other by a
+        # concurrent redraw.
+        async with (lock if lock is not None else contextlib.nullcontext()):
+            try:
+                if b in (_CR, _LF):
+                    if b == _CR:
+                        await _consume_optional_lf_or_nul(source)
+                    break
 
-        if b in (_BS, _DEL):
-            if cursor > 0:
-                terminal_col = cursor
-                del line[cursor - 1]
-                cursor -= 1
-                await redraw_tail(
-                    write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
-                )
-            continue
+                if b in (_BS, _DEL):
+                    if cursor > 0:
+                        terminal_col = cursor
+                        del line[cursor - 1]
+                        cursor -= 1
+                        await redraw_tail(
+                            write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
+                        )
+                    continue
 
-        if b == _TAB:
-            if completer is not None:
-                cursor = await apply_tab_completion(write, completer, line, cursor)
-            continue
+                if b == _TAB:
+                    if completer is not None:
+                        cursor = await apply_tab_completion(write, completer, line, cursor)
+                    continue
 
-        if b == _ESC:
-            key = await _read_escape_sequence(source)
-            if key == "LEFT":
-                if cursor > 0:
-                    cursor -= 1
-                    await write(move_cursor(1, forward=False))
-            elif key == "RIGHT":
-                if cursor < len(line):
+                if b == _ESC:
+                    key = await _read_escape_sequence(source)
+                    if key == "LEFT":
+                        if cursor > 0:
+                            cursor -= 1
+                            await write(move_cursor(1, forward=False))
+                    elif key == "RIGHT":
+                        if cursor < len(line):
+                            cursor += 1
+                            await write(move_cursor(1, forward=True))
+                    elif key == "HOME":
+                        if cursor > 0:
+                            await write(move_cursor(cursor, forward=False))
+                            cursor = 0
+                    elif key == "END":
+                        if cursor < len(line):
+                            await write(move_cursor(len(line) - cursor, forward=True))
+                            cursor = len(line)
+                    elif key == "DELETE":
+                        if cursor < len(line):
+                            terminal_col = cursor
+                            del line[cursor]
+                            await redraw_tail(
+                                write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
+                            )
+                    elif key == "INSERT":
+                        overwrite = not overwrite
+                    elif key in ("UP", "DOWN") and history is not None:
+                        recalled = None
+                        if key == "UP" and history_index < len(history):
+                            if history_index == 0:
+                                saved_in_progress = list(line)
+                            history_index += 1
+                            recalled = list(history.entry(history_index))
+                        elif key == "DOWN" and history_index > 0:
+                            history_index -= 1
+                            recalled = list(saved_in_progress) if history_index == 0 else list(
+                                history.entry(history_index)
+                            )
+                        if recalled is not None:
+                            terminal_col = cursor
+                            line = recalled
+                            cursor = len(line)
+                            await redraw_tail(
+                                write, terminal_col=terminal_col, edit_pos=0, line=line, new_cursor=cursor
+                            )
+                    continue
+
+                if b < 0x20:
+                    # Any other control byte (Tab, Ctrl+C, Ctrl+D, etc.) —
+                    # not supported in this pass; discard rather than
+                    # corrupt the line or echo something meaningless.
+                    continue
+
+                if b < 0x80:
+                    char = chr(b)
+                else:
+                    char = await _read_utf8_continuation(source, b)
+                    if char is None:
+                        continue  # malformed/interrupted multi-byte sequence
+
+                if overwrite and cursor < len(line):
+                    line[cursor] = char
                     cursor += 1
-                    await write(move_cursor(1, forward=True))
-            elif key == "HOME":
-                if cursor > 0:
-                    await write(move_cursor(cursor, forward=False))
-                    cursor = 0
-            elif key == "END":
-                if cursor < len(line):
-                    await write(move_cursor(len(line) - cursor, forward=True))
-                    cursor = len(line)
-            elif key == "DELETE":
-                if cursor < len(line):
-                    terminal_col = cursor
-                    del line[cursor]
+                    await write(char)
+                    continue
+
+                if len(line) >= _MAX_LINE_LENGTH:
+                    # silently drop the character but keep reading —
+                    # Backspace, movement, and Enter still work normally
+                    # past the cap.
+                    continue
+
+                terminal_col = cursor
+                line.insert(cursor, char)
+                cursor += 1
+                if cursor == len(line):
+                    # Appending at the end -- the common case while
+                    # typing normally -- needs only the one character
+                    # written, not a full (empty) tail reprint.
+                    await write(char)
+                else:
                     await redraw_tail(
-                        write, terminal_col=terminal_col, edit_pos=cursor, line=line, new_cursor=cursor
+                        write, terminal_col=terminal_col, edit_pos=terminal_col, line=line, new_cursor=cursor
                     )
-            elif key == "INSERT":
-                overwrite = not overwrite
-            elif key in ("UP", "DOWN") and history is not None:
-                recalled = None
-                if key == "UP" and history_index < len(history):
-                    if history_index == 0:
-                        saved_in_progress = list(line)
-                    history_index += 1
-                    recalled = list(history.entry(history_index))
-                elif key == "DOWN" and history_index > 0:
-                    history_index -= 1
-                    recalled = list(saved_in_progress) if history_index == 0 else list(
-                        history.entry(history_index)
-                    )
-                if recalled is not None:
-                    terminal_col = cursor
-                    line = recalled
-                    cursor = len(line)
-                    await redraw_tail(
-                        write, terminal_col=terminal_col, edit_pos=0, line=line, new_cursor=cursor
-                    )
-            continue
+            finally:
+                if live_buffer is not None:
+                    live_buffer.update(line, cursor)
 
-        if b < 0x20:
-            # Any other control byte (Tab, Ctrl+C, Ctrl+D, etc.) — not
-            # supported in this pass; discard rather than corrupt the
-            # line or echo something meaningless.
-            continue
-
-        if b < 0x80:
-            char = chr(b)
-        else:
-            char = await _read_utf8_continuation(source, b)
-            if char is None:
-                continue  # malformed/interrupted multi-byte sequence
-
-        if overwrite and cursor < len(line):
-            line[cursor] = char
-            cursor += 1
-            await write(char)
-            continue
-
-        if len(line) >= _MAX_LINE_LENGTH:
-            # silently drop the character but keep reading — Backspace,
-            # movement, and Enter still work normally past the cap.
-            continue
-
-        terminal_col = cursor
-        line.insert(cursor, char)
-        cursor += 1
-        if cursor == len(line):
-            # Appending at the end -- the common case while typing
-            # normally -- needs only the one character written, not a
-            # full (empty) tail reprint.
-            await write(char)
-        else:
-            await redraw_tail(
-                write, terminal_col=terminal_col, edit_pos=terminal_col, line=line, new_cursor=cursor
-            )
-
+    if live_buffer is not None:
+        # The line was just submitted (Enter) -- a fresh, empty buffer
+        # is what the pinned input row should show from here, not
+        # whatever was last typed (the caller, netbbs.net.chat_flow's
+        # send_loop, redraws from this immediately after read_line
+        # returns).
+        live_buffer.update([], 0)
     await write("\r\n")
     result = "".join(line)
     if history is not None:

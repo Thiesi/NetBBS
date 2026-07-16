@@ -26,7 +26,7 @@ import sys
 from typing import Callable
 
 from netbbs.net import char_input, local_terminal
-from netbbs.net.char_input import Completer, InputHistory
+from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer
 from netbbs.net.session import Session, SessionClosedError
 
 
@@ -67,8 +67,18 @@ class LocalCLISession(Session):
         echo: bool = True,
         history: InputHistory | None = None,
         completer: Completer | None = None,
+        *,
+        live_buffer: LiveInputBuffer | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> str:
-        return await char_input.read_line(self, self.write, echo, history, completer)
+        # live_buffer/lock (design doc round 79) are never actually
+        # passed by this session's one caller (the standalone `python -m
+        # netbbs.admin` CLI has no chat feature) -- accepted anyway
+        # purely for signature consistency with the rest of the Session
+        # implementations.
+        return await char_input.read_line(
+            self, self.write, echo, history, completer, live_buffer=live_buffer, lock=lock
+        )
 
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)

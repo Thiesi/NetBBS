@@ -46,15 +46,21 @@ class FakeSession(Session):
     async def write(self, text: str) -> None:
         self.written.append(text)
 
-    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
-        # `history`/`completer` accepted only to satisfy the Session ABC
-        # signature (design doc rounds 47/49, Tracks 5f/5g) -- this fake
-        # works from a pre-scripted list of whole logical lines, not raw
-        # terminal bytes/characters, so there's no escape-sequence
-        # recognition here for Up/Down or Tab to hook into; real recall/
-        # completion behavior is covered directly in
+    async def read_line(
+        self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None
+    ) -> str:
+        # `history`/`completer`/`live_buffer`/`lock` accepted only to
+        # satisfy the Session ABC signature (design doc rounds 47/49/79,
+        # Tracks 5f/5g) -- this fake works from a pre-scripted list of
+        # whole logical lines, not raw terminal bytes/characters, so
+        # there's no escape-sequence recognition here for Up/Down or Tab
+        # to hook into, and no per-keystroke live_buffer updates either
+        # (an idle/empty live_buffer is the accurate state for a fake
+        # that never has anything genuinely "mid-typed"). Real recall/
+        # completion/pinned-input behavior is covered directly in
         # tests/test_char_input_history.py, tests/test_web_line_editing.py,
-        # and tests/test_chat_completion.py instead.
+        # tests/test_chat_completion.py, and tests/test_chat_pinned_input.py
+        # instead.
         if self._lines:
             return self._lines.pop(0)
         await asyncio.Event().wait()  # blocks forever, like unread real input

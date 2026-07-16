@@ -10,6 +10,7 @@ a given user connected through.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     # already makes every annotation in this file a lazily-evaluated
     # string at runtime; this block exists only so type checkers/IDEs
     # can resolve `InputHistory` by name.
-    from netbbs.net.char_input import Completer, EditorKey, InputHistory
+    from netbbs.net.char_input import Completer, EditorKey, InputHistory, LiveInputBuffer
 
 
 # Same numbers as netbbs.rendering.screen_buffer.ScreenBuffer's own
@@ -115,6 +116,9 @@ class Session(ABC):
         echo: bool = True,
         history: InputHistory | None = None,
         completer: Completer | None = None,
+        *,
+        live_buffer: LiveInputBuffer | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> str:
         """
         Read one line of input from the client.
@@ -148,6 +152,12 @@ class Session(ABC):
         object the way `history` is — a completer's candidate set
         depends on exactly where it's called from, so there's nothing
         to persist between calls the way recalled history lines are.
+
+        `live_buffer`/`lock` (design doc round 79) are pinned-input-row
+        hooks that only `netbbs.net.chat_flow`'s chat loop uses — every
+        other caller leaves both at their default `None`, a complete
+        no-op. See `netbbs.net.char_input.read_line`'s docstring for
+        what each does.
         """
 
     @abstractmethod

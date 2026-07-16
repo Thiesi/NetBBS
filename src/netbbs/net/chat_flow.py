@@ -8,6 +8,7 @@ matches the project's modular-package approach (design doc §3).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -66,7 +67,8 @@ from netbbs.chat import (
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.directory import VCard, get_vcard
 from netbbs.moderation import ChannelPermission, has_permission
-from netbbs.net.char_input import Completer, InputHistory
+from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer
+from netbbs.net.char_input import move_cursor as relative_move_cursor
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
@@ -1709,17 +1711,30 @@ def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel,
     return completer
 
 
-# -- chat status line (design doc round 75) ---------------------------------
+# -- chat status line (design doc round 75) + pinned input row (round 79) ---
 
-# The scroll region reserves the terminal's last row for the status line
-# (rows 1..height-1 scroll normally; the status row never does) -- at
-# least 2 rows are needed for that split to mean anything at all. Below
-# this, the status line is skipped entirely and chat behaves exactly as
-# it did before this feature: plain, unconfined scrolling. A client can
+# The scroll region reserves the terminal's last two rows -- the pinned
+# input row, then the status row below it -- for the duration of the
+# session (rows 1..height-2 scroll normally; neither reserved row ever
+# does). At least 3 rows are needed for that split to mean anything at
+# all: >=1 row of actual scrolling content, plus the two reserved ones.
+# Below this, both pinned rows are skipped entirely and chat behaves
+# exactly as it did before either feature existed: plain, unconfined
+# scrolling, no pinned input either. One combined gate, not two
+# independent minimums -- there's no sensible state where one pinned
+# row exists without the other (design doc round 79). A client can
 # report an arbitrarily small height (`netbbs.net.session.
 # clamp_terminal_size`'s own floor is 1, not a sane minimum), so this
 # has to be a real runtime check, not an assumption.
-_STATUS_LINE_MIN_HEIGHT = 2
+_PINNED_UI_MIN_HEIGHT = 3
+
+# Design doc round 79: shown before the pinned input row's in-progress
+# text, now that a full redraw happens on every update anyway -- makes
+# it immediately clear "this row is for typing," distinct from the
+# scrolling chat content above it. There was no equivalent before the
+# input row was pinned (a bare cursor wherever output last left it was
+# enough when input and output shared one stream).
+_INPUT_PROMPT = "> "
 
 
 def _own_channel_privileges(db: Database, channel: Channel, user: User) -> str | None:
@@ -1827,8 +1842,8 @@ async def _repaint_status_line(
     event this function could otherwise hook) without a dedicated
     resize-notification mechanism, which doesn't exist anywhere in this
     codebase yet. Re-sending an unchanged region is harmless. Falls
-    back to doing nothing if the terminal is too short for a status
-    line to make sense (`_STATUS_LINE_MIN_HEIGHT`) -- matches whatever
+    back to doing nothing if the terminal is too short for the pinned
+    UI to make sense (`_PINNED_UI_MIN_HEIGHT`) -- matches whatever
     `_chat_loop` itself decided at entry, recomputed fresh here in case
     a resize crossed that threshold mid-session.
 
@@ -1838,10 +1853,17 @@ async def _repaint_status_line(
     server-side code has no visibility into) — asking the terminal
     itself to remember and restore it is the only way to guarantee this
     doesn't disturb in-progress typing, regardless of what transport or
-    client is on the other end.
+    client is on the other end. Every call site (design doc round 79)
+    already holds `_chat_loop`'s shared write lock before calling this
+    -- this function doesn't acquire it itself, the same way it never
+    needed to before that lock existed, since `save_cursor`/
+    `restore_cursor` alone was already sufficient in isolation; the
+    lock's job is only to stop this call's own sequence of writes from
+    interleaving with some *other* concurrent write, not to protect
+    this function against itself.
     """
     height = session.terminal_height
-    if height < _STATUS_LINE_MIN_HEIGHT:
+    if height < _PINNED_UI_MIN_HEIGHT:
         return
     text = truncate(_render_chat_status_line(db, hub, presence, channel, user), session.terminal_width)
     # Padded to the full row width, not just the text's own length --
@@ -1851,12 +1873,94 @@ async def _repaint_status_line(
     line = colored(text.ljust(session.terminal_width), reverse=True)
     await session.write(
         save_cursor()
-        + set_scroll_region(1, height - 1)
+        + set_scroll_region(1, height - 2)
         + move_cursor(height, 1)
         + clear_line()
         + line
         + restore_cursor()
     )
+
+
+async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, height: int) -> None:
+    """
+    Redraws the pinned input row in place from `live_buffer`'s current
+    text/cursor (design doc round 79). Unlike `_repaint_status_line`
+    (which jumps away and back via save/restore-cursor), this leaves
+    the cursor sitting exactly here afterward -- the input row *is*
+    its destination, not somewhere to return from, so there's nothing
+    to restore. The next keystroke's own relative-movement echo
+    (`netbbs.net.char_input`) builds on exactly this resting position.
+
+    Re-issues `set_scroll_region` on every call, matching
+    `_repaint_status_line`'s own resize-robustness reasoning. Caller is
+    responsible for holding `_chat_loop`'s shared write lock, same as
+    every other pinned-row write in this module (see
+    `_repaint_status_line`'s own docstring).
+
+    A very long in-progress line is truncated (not horizontally
+    scrolled) to fit the terminal width -- an accepted simplification
+    for what's expected to be a rare case (design doc round 79); the
+    cursor is left at the end of the truncated view rather than at its
+    true, possibly-invisible position when that happens.
+    """
+    scroll_bottom = height - 2
+    input_row = height - 1
+    full_text = _INPUT_PROMPT + live_buffer.text
+    displayed = truncate(full_text, session.terminal_width)
+    await session.write(
+        set_scroll_region(1, scroll_bottom) + move_cursor(input_row, 1) + clear_line() + displayed
+    )
+    if displayed == full_text:
+        trailing = len(live_buffer.text) - live_buffer.cursor
+        if trailing > 0:
+            await session.write(relative_move_cursor(trailing, forward=False))
+
+
+async def _print_and_redraw_input(
+    session: Session, text: str, live_buffer: LiveInputBuffer, height: int
+) -> None:
+    """
+    Print `text` as a new line into the scrolling content region, then
+    redraw the pinned input row immediately below it (design doc round
+    79). Used by every write that happens while a pinned input row
+    exists: an incoming broadcast (`receive_loop`'s `deliver` closure),
+    and this session's own command/message output (`send_loop`, via
+    `_enter_content_region` beforehand, right after each `read_line()`
+    call returns). Caller is responsible for holding `_chat_loop`'s
+    shared write lock.
+
+    Positioning is unconditional -- always jump to the scroll region's
+    bottom row before printing, rather than tracking incrementally how
+    "full" the region currently is (no such tracking exists anywhere
+    else in this codebase either, and none is needed: DECSTBM's own
+    auto-scroll-at-the-bottom-margin behavior handles it). This
+    produces newest-content-adjacent-to-the-input-box behavior, which
+    is what's actually expected once the input row is a fixed anchor
+    (design doc round 79's own note on why this isn't a regression from
+    the old grows-from-the-top behavior, just a different, arguably
+    more correct one now that there's a fixed anchor to grow from).
+    """
+    scroll_bottom = height - 2
+    await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) + text + "\r\n")
+    await _repaint_input_row(session, live_buffer, height)
+
+
+async def _enter_content_region(session: Session, height: int) -> None:
+    """
+    Repositions the cursor into the scrolling content region's bottom
+    row, ready for ordinary `write_line` calls (every existing chat
+    command handler's own output, unchanged by this round) to print and
+    auto-scroll correctly (design doc round 79). Needed because the
+    cursor is otherwise sitting on the pinned input row -- outside the
+    scroll region -- immediately after `read_line()` returns; without
+    this, the first line a command handler writes would land in the
+    wrong place (potentially right on top of the pinned input or status
+    row, since the *cursor's* position, not the scroll region alone,
+    is what an ordinary newline-driven write respects). Caller is
+    responsible for holding `_chat_loop`'s shared write lock.
+    """
+    scroll_bottom = height - 2
+    await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1))
 
 
 async def _chat_loop(
@@ -1924,18 +2028,28 @@ async def _chat_loop(
     the loop at all. Mute has no equivalent join-time check — a muted
     user can still read, just not send (enforced in `send_loop`).
 
-    A pinned status row occupies the terminal's last line for the
-    duration of the session, via a VT100 scroll region (design doc
-    round 75; see `_repaint_status_line`) — everything above it,
-    including the scrollback replay and "Joined" line below, scrolls
-    normally within the shrunk region. Setting that region moves the
-    real terminal cursor to its home position as an unavoidable side
-    effect of the escape sequence itself, so entry clears the screen
-    first — a deliberate, visible transition into chat, not previously
-    true (chat used to just continue printing inline below whatever
-    screen preceded it). Skipped entirely on a too-short terminal
-    (`_STATUS_LINE_MIN_HEIGHT`), which degrades to exactly the old,
-    unconfined scrolling behavior.
+    A pinned status row, and a pinned input row just above it (design
+    doc round 75, expanded round 79; see `_repaint_status_line`/
+    `_repaint_input_row`), occupy the terminal's last two lines for the
+    duration of the session, via a VT100 scroll region — everything
+    above them, including the scrollback replay and "Joined" line
+    below, scrolls normally within the shrunk region. Setting that
+    region moves the real terminal cursor to its home position as an
+    unavoidable side effect of the escape sequence itself, so entry
+    clears the screen first — a deliberate, visible transition into
+    chat, not previously true (chat used to just continue printing
+    inline below whatever screen preceded it). Skipped entirely on a
+    too-short terminal (`_PINNED_UI_MIN_HEIGHT`), which degrades to
+    exactly the old, unconfined scrolling behavior with no pinned input
+    row either.
+
+    `live_buffer`/`lock` (design doc round 79) are constructed
+    unconditionally, even when the pinned UI itself is disabled for
+    this session -- passed to every `read_line()` call regardless, so
+    `receive_loop`'s own conditional logic doesn't need a second,
+    parallel "were these even created" check. When the pinned UI is
+    off, `lock` is simply never contended (`receive_loop` never
+    acquires it either in that case), so this costs nothing.
     """
     restriction = is_banned(db, channel, user)
     if restriction is not None:
@@ -1952,9 +2066,11 @@ async def _chat_loop(
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
 
-    status_line_enabled = session.terminal_height >= _STATUS_LINE_MIN_HEIGHT
-    if status_line_enabled:
-        await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 1))
+    pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
+    live_buffer = LiveInputBuffer()
+    lock = asyncio.Lock()
+    if pinned_ui_enabled:
+        await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
 
     channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
     quit_hint = menu_key("/quit", " to leave")
@@ -1992,28 +2108,50 @@ async def _chat_loop(
         ),
         exclude={participant_id},
     )
-    if status_line_enabled:
+    if pinned_ui_enabled:
         await _repaint_status_line(session, db, hub, presence, channel, user)
+        # Neither task is running yet (both are created below, after
+        # this initial setup completes) -- no concurrent writer exists
+        # at this exact point, so this first paint needs no lock.
+        await _repaint_input_row(session, live_buffer, session.terminal_height)
 
     async def receive_loop() -> None:
+        async def deliver(text: str, *, repaint_status: bool = False) -> None:
+            """
+            The one place `receive_loop` actually writes to the screen
+            (design doc round 79) -- routes through the pinned-row-
+            aware print-and-redraw path when the pinned UI is active
+            (under `lock`, so this can never interleave with `send_loop`
+            mid-keystroke or mid-dispatch -- see `_repaint_status_line`'s
+            docstring), or falls straight back to a plain `write_line`
+            when it isn't (a too-short terminal, exactly the old,
+            unconfined-scrolling behavior).
+            """
+            if not pinned_ui_enabled:
+                await session.write_line(text)
+                return
+            async with lock:
+                await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
+                if repaint_status:
+                    await _repaint_status_line(session, db, hub, presence, channel, user)
+
         while True:
             message = await queue.get()
             if isinstance(message, _KickNotice):
-                await session.write_line(
+                await deliver(
                     colored(f"\r\n*** You have been {message.reason} from this channel.", fg_color=MUTED_COLOR)
                 )
                 return
             if isinstance(message, _TimestampedNotice):
-                await session.write_line(
-                    format_with_preference(db, user, message.text, message.created_at)
+                # repaint_status=True covers every reason this notice
+                # type exists -- joins/leaves (participant count), topic
+                # changes, and moderation notices alike -- with one call
+                # rather than enumerating which specific notices are
+                # "count-relevant" (design doc round 75).
+                await deliver(
+                    format_with_preference(db, user, message.text, message.created_at),
+                    repaint_status=True,
                 )
-                # Covers every reason this notice type exists -- joins/
-                # leaves (participant count), topic changes, and
-                # moderation notices alike -- with one call rather than
-                # enumerating which specific notices are "count-
-                # relevant" (design doc round 75).
-                if status_line_enabled:
-                    await _repaint_status_line(session, db, hub, presence, channel, user)
                 continue
             if isinstance(message, QueueOverflowNotice):
                 # GitHub issue #31: this session's own queue overflowed
@@ -2021,14 +2159,14 @@ async def _chat_loop(
                 # message was dropped to make room for this notice --
                 # an honest signal that something was missed, rather
                 # than silently losing it.
-                await session.write_line(
+                await deliver(
                     colored(
                         "\r\n*** You're falling behind -- a message was dropped.",
                         fg_color=MUTED_COLOR,
                     )
                 )
                 continue
-            await session.write_line(message)
+            await deliver(message)
 
     async def send_loop() -> ChatAction | None:
         # Per-session private-conversation state (design doc round 33
@@ -2045,161 +2183,190 @@ async def _chat_loop(
 
         while True:
             completer = _build_completer(db, presence, channel, user)
-            line = (await session.read_line(history=history, completer=completer)).strip()
-
-            if not account_still_active(db, user):
-                # GitHub issue #29 (reopened): the same cross-process
-                # revalidation netbbs.net.login_flow._main_menu already
-                # does at its own boundary -- a session that stays in
-                # chat (or any other long-running submenu) never
-                # returns to that menu to pick up a disable/delete made
-                # through a separate `python -m netbbs.admin`
-                # invocation, so this loop needs the identical check at
-                # its own equivalent boundary: every attempted message
-                # or command, before any of it is actually processed.
-                await session.write_line(
-                    colored("\r\nYour account is no longer active. Disconnecting.", fg_color=MUTED_COLOR)
+            line = (
+                await session.read_line(
+                    history=history, completer=completer, live_buffer=live_buffer, lock=lock
                 )
-                return _Quit()
+            ).strip()
 
-            if not line:
-                continue
-            if line.startswith("/"):
-                ctx = ChatCommandContext(
-                    session=session,
-                    db=db,
-                    hub=hub,
-                    presence=presence,
-                    mailbox=mailbox,
-                    channel=channel,
-                    user=user,
-                    participant_id=participant_id,
-                    session_registry=session_registry,
-                )
-                action = await _dispatch_command(ctx, line)
-                if isinstance(action, _EnterPrivate):
-                    private_target = action.target
-                    continue
-                if isinstance(action, _ExitPrivate):
-                    if private_target is None:
-                        await session.write_line(
-                            colored("You are not in a private conversation.", fg_color=MUTED_COLOR)
-                        )
-                    else:
-                        private_target = None
+            # Everything from here to the next read_line() call is one
+            # atomic critical section under `lock` (design doc round 79)
+            # -- entering the scroll region's content row up front, so
+            # every existing write_line() call below (unchanged) prints
+            # and auto-scrolls in the right place instead of landing on
+            # the pinned input row it was just echoed on. `finally`
+            # guarantees the input row gets redrawn (now-empty, ready
+            # for the next line) before this iteration ends, regardless
+            # of which of the several continue/return paths below fires
+            # -- same reasoning as netbbs.net.char_input's own per-
+            # keystroke `finally`, one level up: per *submitted line*
+            # here, rather than per keystroke.
+            guard = lock if pinned_ui_enabled else contextlib.nullcontext()
+            try:
+                async with guard:
+                    if pinned_ui_enabled:
+                        await _enter_content_region(session, session.terminal_height)
+
+                    if not account_still_active(db, user):
+                        # GitHub issue #29 (reopened): the same cross-process
+                        # revalidation netbbs.net.login_flow._main_menu already
+                        # does at its own boundary -- a session that stays in
+                        # chat (or any other long-running submenu) never
+                        # returns to that menu to pick up a disable/delete made
+                        # through a separate `python -m netbbs.admin`
+                        # invocation, so this loop needs the identical check at
+                        # its own equivalent boundary: every attempted message
+                        # or command, before any of it is actually processed.
                         await session.write_line(
                             colored(
-                                f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR
+                                "\r\nYour account is no longer active. Disconnecting.",
+                                fg_color=MUTED_COLOR,
                             )
                         )
-                    continue
-                if action is not None:
-                    return action
-                # A dispatched command may have changed status-line-
-                # relevant state of this user's own (/away, /nick) --
-                # repainting after every command, not just those two,
-                # is simpler than enumerating which ones matter and no
-                # more expensive (design doc round 75).
-                if status_line_enabled:
-                    await _repaint_status_line(session, db, hub, presence, channel, user)
-                continue
+                        return _Quit()
 
-            if private_target is not None:
-                ctx = ChatCommandContext(
-                    session=session,
-                    db=db,
-                    hub=hub,
-                    presence=presence,
-                    mailbox=mailbox,
-                    channel=channel,
-                    user=user,
-                    participant_id=participant_id,
-                    session_registry=session_registry,
-                )
-                if not presence.is_online(private_target.username):
+                    if not line:
+                        continue
+                    if line.startswith("/"):
+                        ctx = ChatCommandContext(
+                            session=session,
+                            db=db,
+                            hub=hub,
+                            presence=presence,
+                            mailbox=mailbox,
+                            channel=channel,
+                            user=user,
+                            participant_id=participant_id,
+                            session_registry=session_registry,
+                        )
+                        action = await _dispatch_command(ctx, line)
+                        if isinstance(action, _EnterPrivate):
+                            private_target = action.target
+                            continue
+                        if isinstance(action, _ExitPrivate):
+                            if private_target is None:
+                                await session.write_line(
+                                    colored("You are not in a private conversation.", fg_color=MUTED_COLOR)
+                                )
+                            else:
+                                private_target = None
+                                await session.write_line(
+                                    colored(
+                                        f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR
+                                    )
+                                )
+                            continue
+                        if action is not None:
+                            return action
+                        # A dispatched command may have changed status-line-
+                        # relevant state of this user's own (/away, /nick) --
+                        # repainting after every command, not just those two,
+                        # is simpler than enumerating which ones matter and no
+                        # more expensive (design doc round 75).
+                        if pinned_ui_enabled:
+                            await _repaint_status_line(session, db, hub, presence, channel, user)
+                        continue
+
+                    if private_target is not None:
+                        ctx = ChatCommandContext(
+                            session=session,
+                            db=db,
+                            hub=hub,
+                            presence=presence,
+                            mailbox=mailbox,
+                            channel=channel,
+                            user=user,
+                            participant_id=participant_id,
+                            session_registry=session_registry,
+                        )
+                        if not presence.is_online(private_target.username):
+                            await session.write_line(
+                                colored(
+                                    f"{sanitize_text(private_target.username)} is no longer online.",
+                                    fg_color=MUTED_COLOR,
+                                )
+                            )
+                            private_target = None
+                            continue
+                        await _deliver_private_message(ctx, private_target, line)
+                        continue
+
+                    restriction = is_muted(db, channel, user)
+                    if restriction is not None:
+                        until = (
+                            "indefinitely"
+                            if restriction.expires_at is None
+                            else f"until {format_for_display(restriction.expires_at, db)}"
+                        )
+                        await session.write_line(
+                            colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
+                        )
+                        # The user may be learning they're muted right now, for
+                        # the first time -- there's no live-push notice for a
+                        # new mute the way kick/ban get one, so this rejection
+                        # is the first opportunity to reflect it.
+                        if pinned_ui_enabled:
+                            await _repaint_status_line(session, db, hub, presence, channel, user)
+                        continue
+
+                    # Two differently-colored copies of the same message, not
+                    # one broadcast to everyone: the sender gets a direct write
+                    # using SELF_COLOR so their own messages visually stand out
+                    # from the rest of the conversation, while everyone else
+                    # receives the normal ACCENT_COLOR-formatted version via the
+                    # broadcast (sender excluded this time, unlike before —
+                    # they're getting their own copy directly instead). This
+                    # can't be done as a single shared broadcast string the way
+                    # join/leave notices are, since it's genuinely different
+                    # text per recipient.
+                    # Looked up fresh on every message, not cached from join
+                    # time -- an alias set via /nick mid-session must show up
+                    # immediately, not just after the next rejoin. Nick-only-
+                    # plus-marker, not both forms (design doc round 53) --
+                    # chat_stream_label already sanitizes internally, unlike
+                    # display_label, so no separate sanitize_text wrap here.
+                    current_label = chat_stream_label(db, user)
+                    self_label = colored(f"<{current_label}>", fg_color=SELF_COLOR, bold=True)
+                    others_label = colored(f"<{current_label}>", fg_color=ACCENT_COLOR)
+                    # Sanitized once here, used for both the direct self-write
+                    # and the broadcast -- receive_loop (above) writes whatever
+                    # arrives from the hub queue as-is, with no sanitization of
+                    # its own, so the broadcast payload must already be safe by
+                    # the time it's queued. record_message below stores the raw
+                    # `line`, not this sanitized copy -- sanitize on output, not
+                    # on storage.
+                    displayed_line = sanitize_text(line)
+                    recorded_message = record_message(
+                        db,
+                        channel,
+                        kind="message",
+                        author_label=user.username,
+                        author_fingerprint=user.fingerprint,
+                        body=line,
+                    )
                     await session.write_line(
-                        colored(
-                            f"{sanitize_text(private_target.username)} is no longer online.",
-                            fg_color=MUTED_COLOR,
+                        format_with_preference(
+                            db, user, f"{self_label} {displayed_line}", recorded_message.created_at
                         )
                     )
-                    private_target = None
-                    continue
-                await _deliver_private_message(ctx, private_target, line)
-                continue
-
-            restriction = is_muted(db, channel, user)
-            if restriction is not None:
-                until = (
-                    "indefinitely"
-                    if restriction.expires_at is None
-                    else f"until {format_for_display(restriction.expires_at, db)}"
-                )
-                await session.write_line(
-                    colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
-                )
-                # The user may be learning they're muted right now, for
-                # the first time -- there's no live-push notice for a
-                # new mute the way kick/ban get one, so this rejection
-                # is the first opportunity to reflect it.
-                if status_line_enabled:
-                    await _repaint_status_line(session, db, hub, presence, channel, user)
-                continue
-
-            # Two differently-colored copies of the same message, not
-            # one broadcast to everyone: the sender gets a direct write
-            # using SELF_COLOR so their own messages visually stand out
-            # from the rest of the conversation, while everyone else
-            # receives the normal ACCENT_COLOR-formatted version via the
-            # broadcast (sender excluded this time, unlike before —
-            # they're getting their own copy directly instead). This
-            # can't be done as a single shared broadcast string the way
-            # join/leave notices are, since it's genuinely different
-            # text per recipient.
-            # Looked up fresh on every message, not cached from join
-            # time -- an alias set via /nick mid-session must show up
-            # immediately, not just after the next rejoin. Nick-only-
-            # plus-marker, not both forms (design doc round 53) --
-            # chat_stream_label already sanitizes internally, unlike
-            # display_label, so no separate sanitize_text wrap here.
-            current_label = chat_stream_label(db, user)
-            self_label = colored(f"<{current_label}>", fg_color=SELF_COLOR, bold=True)
-            others_label = colored(f"<{current_label}>", fg_color=ACCENT_COLOR)
-            # Sanitized once here, used for both the direct self-write
-            # and the broadcast -- receive_loop (above) writes whatever
-            # arrives from the hub queue as-is, with no sanitization of
-            # its own, so the broadcast payload must already be safe by
-            # the time it's queued. record_message below stores the raw
-            # `line`, not this sanitized copy -- sanitize on output, not
-            # on storage.
-            displayed_line = sanitize_text(line)
-            recorded_message = record_message(
-                db,
-                channel,
-                kind="message",
-                author_label=user.username,
-                author_fingerprint=user.fingerprint,
-                body=line,
-            )
-            await session.write_line(
-                format_with_preference(
-                    db, user, f"{self_label} {displayed_line}", recorded_message.created_at
-                )
-            )
-            await hub.broadcast(
-                channel.name,
-                _TimestampedNotice(f"{others_label} {displayed_line}", recorded_message.created_at),
-                exclude={participant_id},
-            )
-            # Design doc round 32, point 6: sending a message does not
-            # clear away state -- a user may intentionally remain away
-            # while briefly responding. Reminded, not silently changed.
-            if presence.is_away(user.username):
-                await session.write_line(
-                    colored("(You are still marked away.)", fg_color=MUTED_COLOR)
-                )
-            if status_line_enabled:
-                await _repaint_status_line(session, db, hub, presence, channel, user)
+                    await hub.broadcast(
+                        channel.name,
+                        _TimestampedNotice(f"{others_label} {displayed_line}", recorded_message.created_at),
+                        exclude={participant_id},
+                    )
+                    # Design doc round 32, point 6: sending a message does not
+                    # clear away state -- a user may intentionally remain away
+                    # while briefly responding. Reminded, not silently changed.
+                    if presence.is_away(user.username):
+                        await session.write_line(
+                            colored("(You are still marked away.)", fg_color=MUTED_COLOR)
+                        )
+                    if pinned_ui_enabled:
+                        await _repaint_status_line(session, db, hub, presence, channel, user)
+            finally:
+                if pinned_ui_enabled:
+                    async with lock:
+                        await _repaint_input_row(session, live_buffer, session.terminal_height)
 
     receive_task = asyncio.create_task(receive_loop())
     send_task = asyncio.create_task(send_loop())
@@ -2242,7 +2409,7 @@ async def _chat_loop(
         # own -- it always means "exit entirely," same as /quit.
         return outcome or _Quit()
     finally:
-        if status_line_enabled:
+        if pinned_ui_enabled:
             # Best-effort: a session that's already gone (the common
             # reason this whole function is unwinding in the first
             # place) makes this write raise SessionClosedError, which

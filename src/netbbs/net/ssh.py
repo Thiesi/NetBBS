@@ -140,8 +140,16 @@ class SSHSession(Session):
         echo: bool = True,
         history: char_input.InputHistory | None = None,
         completer: char_input.Completer | None = None,
+        *,
+        live_buffer: char_input.LiveInputBuffer | None = None,
+        lock: asyncio.Lock | None = None,
     ) -> str:
-        return await char_input.read_line(self, self.write, echo, history, completer)
+        # live_buffer/lock (design doc round 79) pass straight through
+        # to char_input.read_line unchanged -- see that function's
+        # docstring.
+        return await char_input.read_line(
+            self, self.write, echo, history, completer, live_buffer=live_buffer, lock=lock
+        )
 
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)

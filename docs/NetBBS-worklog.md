@@ -5627,3 +5627,105 @@ node at some point, though the scheduling math itself was verified
 directly (DST-safe construction, exact boundary behavior at 23:59:00
 and 00:00:01 and exactly 00:00:00).
 
+## Sign-off notes, round 79 (pinned chat input row — implemented)
+
+Implementation narrative for design doc round 79's decisions.
+
+1. **`netbbs.net.char_input`**: new `LiveInputBuffer` dataclass
+   (`text`, `cursor`, `update(line, cursor)`). `read_line`/
+   `_read_line_editable` gained keyword-only `live_buffer`/`lock`
+   parameters, both defaulting to `None`. The per-keystroke dispatch
+   body is now wrapped in `async with (lock or contextlib.nullcontext()):
+   try: ... finally: live_buffer.update(...)` — the `finally` guarantees
+   the buffer refreshes exactly once per keystroke regardless of which
+   `continue`/`break` branch fired, and runs *while still holding the
+   lock*, so the buffer's state and the writes that produced it are
+   never observed out of sync by a concurrent reader. After Enter, the
+   buffer is explicitly reset to empty before `read_line` returns.
+   `netbbs.net.web.WebSession._read_line_editable` (a separate
+   reimplementation, round 25) got the identical mirrored treatment.
+2. **`netbbs.net.session.Session`**: abstract `read_line` signature
+   gained the same two keyword-only parameters; `TelnetSession`,
+   `SSHSession`, `LocalCLISession` all thread them straight through to
+   `char_input.read_line` unchanged (`LocalCLISession`'s one caller,
+   the standalone admin CLI, never actually passes them — added purely
+   for signature consistency).
+3. **`netbbs.net.chat_flow`**: `_STATUS_LINE_MIN_HEIGHT` (2) renamed
+   `_PINNED_UI_MIN_HEIGHT` (3); new `_INPUT_PROMPT = "> "`. New
+   `_repaint_input_row` (redraws the pinned row from `live_buffer`,
+   truncating an oversized line rather than horizontally scrolling it),
+   `_print_and_redraw_input` (prints new content into the scroll
+   region's bottom row, then calls `_repaint_input_row`), and
+   `_enter_content_region` (repositions into the content region before
+   `send_loop`'s own existing `write_line` calls run, unchanged). Entry
+   now constructs `live_buffer`/`lock` unconditionally and paints both
+   pinned rows once before either task starts (no lock needed yet,
+   since neither task is running). `receive_loop` gained a local
+   `deliver(text, *, repaint_status=False)` closure that every one of
+   its four message branches now calls instead of `session.write_line`
+   directly — routes through the lock-guarded print-and-redraw path
+   when the pinned UI is active, or falls straight back to plain
+   `write_line` when it isn't (a too-short terminal). `send_loop`'s
+   entire per-line dispatch body (unchanged internally, just re-
+   indented) is now wrapped in `try: async with guard: ... finally:
+   <redraw the now-empty input row>`, with `_enter_content_region`
+   called once at the top of the `async with` block — `guard` is the
+   shared lock when the pinned UI is enabled, `contextlib.nullcontext()`
+   otherwise, avoiding a duplicated dispatch body for the two cases.
+   `_repaint_status_line`'s own scroll-region bound updated from
+   `height - 1` to `height - 2`; its docstring now explicitly notes it
+   relies on the caller already holding the lock rather than acquiring
+   one itself (nesting would deadlock — confirmed no chat command
+   handler ever calls `read_line`/`read_key` a second time, so the
+   "caller already holds it" invariant actually holds everywhere it
+   matters).
+4. **Testing**: `tests/test_chat_pinned_input.py` (new), covering the
+   initial paint, redraw-after-command, the truncation path (a direct
+   `_repaint_input_row` call against a narrow fake, no `_chat_loop`
+   needed), and the minimum-height gate. The one that actually matters
+   most: `test_in_progress_typing_survives_an_incoming_message`, using
+   a new `_LiveTypingSession` that drives the *real* `char_input.
+   read_line` character-by-character via a live, externally-feedable
+   byte queue (`FakeSession`'s whole-line scripting bypasses
+   `char_input` entirely, so it can't exercise `live_buffer`/`lock` at
+   all) — alice types "hel", bob's message arrives and scrolls in
+   correctly, alice's input row redraws still showing "hel" intact, she
+   resumes and submits, and her own echoed-back message confirms the
+   *underlying buffer* (not just the screen) survived the interruption
+   uncorrupted. Existing tests broke in two distinct, informative ways
+   found by actually running the suite rather than assumed: (a) ~165
+   failures from every chat-test-file's own `FakeSession.read_line`
+   override not accepting the two new keyword arguments at all (a
+   mechanical fix, applied to the three files that define one:
+   `test_chat_flow_moderation.py`, `test_chat_flow_picker_authorization.py`,
+   `test_terminal_sanitization.py`, plus one bespoke subclass in
+   `test_chat_flow_private.py`); (b) two real behavioral updates needed
+   — the scroll-region-bound assertion (`\x1b[1;23r` → `\x1b[1;22r` for
+   the default 80×24 terminal) and the too-short-terminal minimum-height
+   test (2 → 3). Full suite re-run: **1653 passed, 4 skipped** (up from
+   round 78's 1648 — 5 net new tests, since most of round 79's own
+   coverage lives inside the single new concurrency test plus a handful
+   of smaller ones, while ~165 pre-existing tests needed only their
+   `FakeSession` fixed, not new assertions).
+5. **Real-transport smoke test**: run manually (not part of the
+   automated suite) against a genuine `TelnetServer` over a real TCP
+   loopback socket, typing "hel" then "lo\r\n" then "/quit\r\n" with
+   real inter-keystroke delays — confirmed the exact expected escape-
+   sequence transcript: scroll region set to rows 1–22, status row
+   painted at row 24, input row at row 23 with the "> " prompt, live
+   per-keystroke echo during typing, then the content-region entry +
+   self-colored message + status repaint + empty-input-row repaint
+   sequence firing correctly after Enter, and clean teardown on /quit.
+   Confirms the real `TelnetSession`/`char_input` wiring end-to-end, not
+   just the fakes.
+
+Not verified from this sandboxed environment (same standing caveat as
+every terminal-rendering round): how this actually *looks* in a real
+terminal emulator — right escape sequences confirmed mechanically and
+over a real socket, but not eyeballed. Worth a direct check from
+Thiesi's own machine, particularly around SSH and the web/xterm.js
+transport specifically (only Telnet got the real-socket smoke test
+above; SSH/web share the exact same `char_input`/`chat_flow` code paths
+and passed their own transport-level unit tests, but haven't been
+smoke-tested end-to-end the same way).
+
