@@ -21,8 +21,8 @@ import asyncio
 import asyncssh
 import pytest
 
-from netbbs.auth.users import approve_pending_user, create_user, get_user_by_username
-from netbbs.config import set_require_registration_approval
+from netbbs.auth.users import AuthError, approve_pending_user, create_user, get_user_by_username
+from netbbs.config import RegistrationMode, set_registration_mode
 from netbbs.net.session import Session
 from netbbs.net.ssh import SSHServer
 from netbbs.net.throttle import LoginThrottle
@@ -159,7 +159,7 @@ def test_registered_account_can_log_in_on_a_fresh_connection(db):
 
 
 def test_registration_with_approval_required_leaves_account_unable_to_log_in(db):
-    set_require_registration_approval(db, True)
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
 
     async def scenario():
@@ -204,6 +204,29 @@ def test_registration_with_approval_required_leaves_account_unable_to_log_in(db)
 
     asyncio.run(scenario2())
     assert calls == ["in"]
+
+
+def test_closed_mode_never_offers_the_kbdint_registration_challenge(db):
+    # Round 96: `closed` mode hides registration entirely -- the server
+    # never offers the kbdint challenge at all, so a client requesting
+    # only kbdint auth fails immediately with no registration prompt
+    # ever shown, the SSH-side equivalent of Telnet/web's hidden prompt
+    # option.
+    set_registration_mode(db, RegistrationMode.CLOSED)
+
+    async def scenario():
+        server = await _run_server(db, _noop_handler, throttle=_throttle())
+        try:
+            return await _attempt_kbdint_registration(
+                server.port, responses=["carol", "hunter2pw", "hunter2pw"]
+            )
+        finally:
+            await server.stop()
+
+    client = asyncio.run(scenario())
+    assert client.messages == []
+    with pytest.raises(AuthError):
+        get_user_by_username(db, "carol")
 
 
 def test_registration_refuses_the_reserved_sentinel_as_a_desired_username(db):

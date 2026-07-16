@@ -18,6 +18,8 @@ for where that resolution order already lives.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from netbbs.storage.database import Database
 
 
@@ -108,19 +110,59 @@ def set_invitation_expiry_days(db: Database, days: int | None) -> None:
     set_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY, "" if days is None else str(days))
 
 
-# Config key for whether self-service registration (design doc round
-# 76) requires SysOp approval before a new account can log in -- a
-# single node-wide toggle, same shape as the settings above. Default is
-# off (instant activation): Thiesi's own explicit call, keeping the
-# common case (a small, low-risk community node) frictionless, with the
-# stricter behavior an opt-in for a node that wants it (design doc
-# round 76 sign-off note).
-REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY = "require_registration_approval"
+class RegistrationMode(str, Enum):
+    """
+    A node's registration posture (design doc round 96) -- three real
+    BBS operating postures, not a binary:
+
+    - `OPEN` -- self-registration active immediately (the default,
+      preserving this setting's original boolean behavior).
+    - `APPROVAL_REQUIRED` -- self-registration creates a
+      `pending_approval` account a SysOp must approve before it can log
+      in (design doc round 76's original behavior, unchanged).
+    - `CLOSED` -- no public registration surface at all; every account
+      is SysOp-created. New in round 96 -- round 87 had already
+      correctly noted no such switch previously existed.
+
+    A single tri-state field rather than two independent booleans,
+    since one combination of the old shape (registration disabled +
+    still requiring approval) would have been a representable-but-
+    meaningless state -- same reasoning as round 84's nullable-vs-
+    explicit-zero fix for Community inheritance.
+    """
+
+    OPEN = "open"
+    APPROVAL_REQUIRED = "approval_required"
+    CLOSED = "closed"
 
 
-def get_require_registration_approval(db: Database) -> bool:
-    return get_config(db, REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY) == "1"
+REGISTRATION_MODE_CONFIG_KEY = "registration_mode"
+
+# Superseded by REGISTRATION_MODE_CONFIG_KEY (round 96) -- kept only so
+# get_registration_mode can read a pre-round-96 database's stored value
+# without a batch migration. Never written by current code.
+_LEGACY_REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY = "require_registration_approval"
 
 
-def set_require_registration_approval(db: Database, required: bool) -> None:
-    set_config(db, REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY, "1" if required else "0")
+def get_registration_mode(db: Database) -> RegistrationMode:
+    """
+    The node's current registration posture.
+
+    Checks the current key first; if it's never been set, falls back to
+    translating a pre-round-96 database's legacy boolean (`"1"` ->
+    `APPROVAL_REQUIRED`, anything else -> `OPEN`) rather than requiring
+    an explicit migration step -- the same computed-at-read-time
+    philosophy round 8/9 already established for other node_config
+    values. Once a SysOp sets a mode via `set_registration_mode`, the
+    new key takes over and the legacy one is never consulted again for
+    this node.
+    """
+    value = get_config(db, REGISTRATION_MODE_CONFIG_KEY)
+    if value is not None:
+        return RegistrationMode(value)
+    legacy = get_config(db, _LEGACY_REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY)
+    return RegistrationMode.APPROVAL_REQUIRED if legacy == "1" else RegistrationMode.OPEN
+
+
+def set_registration_mode(db: Database, mode: RegistrationMode) -> None:
+    set_config(db, REGISTRATION_MODE_CONFIG_KEY, mode.value)

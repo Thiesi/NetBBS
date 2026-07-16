@@ -6075,3 +6075,65 @@ rollback-on-failed-start wired into `netbbs.__main__`), and real-world
 verification against GitHub's actual API and a real process restart —
 tracked as follow-up work, not silently dropped.
 
+## Sign-off notes, round 100 (three-way registration mode — implemented)
+
+Second implementation round for the addendum backlog, following round
+96's self-update slice. Design doc round 96 (`registration_mode`:
+`open`/`approval_required`/`closed`, replacing the boolean
+`require_registration_approval`).
+
+**`netbbs/config.py`**: new `RegistrationMode(str, Enum)` and
+`get_registration_mode`/`set_registration_mode`, storing under a new
+`registration_mode` key. No batch migration: `get_registration_mode`
+checks the new key first, and only if it's never been set falls back to
+translating the legacy boolean key (`"1"` -> `APPROVAL_REQUIRED`, else
+`OPEN`) -- the same computed-at-read-time philosophy round 8/9 already
+established elsewhere. The old `get_require_registration_approval`/
+`set_require_registration_approval` functions are removed outright, not
+kept as a compatibility shim -- every caller was updated in the same
+pass, and this is internal implementation, not a public API other code
+outside this repo depends on.
+
+**`netbbs/net/login_flow.py`**: `_login` resolves `registration_mode`
+once per connection attempt and adjusts its own username prompt --
+`closed` mode drops "or 'new' to create an account" from the prompt
+text entirely. Typing `new` anyway (a documented, memorable convention
+someone might use from muscle memory even when it's not advertised)
+gets a clear, honest rejection ("This system does not accept public
+registrations...") rather than silently falling through to an ordinary,
+always-failing username lookup -- consistent with this project's
+general fail-clearly-not-silently precedent. `_register_new_account`
+now takes `registration_mode` as an explicit parameter rather than
+re-querying it, since `_login` already resolved it once.
+
+**`netbbs/net/ssh.py`**: `get_kbdint_challenge` returns `False` (no
+challenge offered at all) when the mode is `closed`, checked right after
+confirming the connecting username is the reserved sentinel -- the
+SSH-side equivalent of hiding the prompt option, since SSH has no
+separate "prompt text" to edit the way Telnet/web does.
+
+**`netbbs/net/admin_flow.py`**: `_registration_settings_screen`
+rewritten from a `y`/`N` toggle to an `[O]pen`/`[A]pproval required`/
+`[C]losed`/`[B]ack` menu, each mode labeled with a one-line plain-
+English description. Choosing the mode already in effect is a no-op
+("Already set to that mode."), not silently re-applying it.
+
+**Tests**: `tests/test_registration.py` -- 4 new `registration_mode`
+config tests (default, round-trip through all three states, legacy-
+key fallback, new-key-takes-precedence-over-legacy) plus 2 new
+closed-mode flow tests (prompt hides the option; typing `new` anyway
+gets the rejection message and creates no account), replacing the 2
+old boolean tests. `tests/test_ssh_registration.py` -- 1 new test
+confirming the kbdint challenge is never offered in `closed` mode (`
+client.messages == []`, no account created), alongside the existing
+approval-required test updated to the new setter.
+`tests/test_admin_flow.py` -- the 3 old toggle tests replaced with 6
+covering all three mode transitions, declining (choosing back leaves
+the mode unchanged), and the no-op-on-same-mode case.
+
+**Testing**: `pytest tests/test_registration.py tests/test_ssh_registration.py
+tests/test_admin_flow.py tests/test_config.py -q` -- 112 passed. Full
+suite re-run: **1721 passed, 4 skipped** (up from round 96's 1713 -- 8
+net new tests, matching the net test-count change across all four
+files exactly, no regressions elsewhere).
+

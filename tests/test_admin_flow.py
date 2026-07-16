@@ -998,29 +998,54 @@ def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, sysop):
     assert "Approve this account" not in _written_text(session)
 
 
-def test_registration_settings_screen_toggles_require_approval(db, sysop):
-    from netbbs.config import get_require_registration_approval
+def test_registration_settings_screen_defaults_to_open(db, sysop):
+    from netbbs.config import RegistrationMode, get_registration_mode
 
-    assert get_require_registration_approval(db) is False
-    session = FakeSession(["r", "y", "b"])
+    assert get_registration_mode(db) is RegistrationMode.OPEN
+    session = FakeSession(["r", "b", "b"])
     _run(session, db, sysop)
-    assert get_require_registration_approval(db) is True
-    assert "ON" in _written_text(session)
+    assert get_registration_mode(db) is RegistrationMode.OPEN
+    assert "open" in _written_text(session).lower()
 
 
-def test_registration_settings_screen_declining_leaves_setting_unchanged(db, sysop):
-    from netbbs.config import get_require_registration_approval
+def test_registration_settings_screen_can_switch_to_approval_required(db, sysop):
+    from netbbs.config import RegistrationMode, get_registration_mode
 
-    session = FakeSession(["r", "n", "b"])
+    session = FakeSession(["r", "a", "b"])
     _run(session, db, sysop)
-    assert get_require_registration_approval(db) is False
+    assert get_registration_mode(db) is RegistrationMode.APPROVAL_REQUIRED
+    assert "approval required" in _written_text(session).lower()
+
+
+def test_registration_settings_screen_can_switch_to_closed(db, sysop):
+    from netbbs.config import RegistrationMode, get_registration_mode
+
+    session = FakeSession(["r", "c", "b"])
+    _run(session, db, sysop)
+    assert get_registration_mode(db) is RegistrationMode.CLOSED
+    assert "closed" in _written_text(session).lower()
+
+
+def test_registration_settings_screen_choosing_back_leaves_mode_unchanged(db, sysop):
+    from netbbs.config import RegistrationMode, get_registration_mode, set_registration_mode
+
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
+    session = FakeSession(["r", "b", "b"])
+    _run(session, db, sysop)
+    assert get_registration_mode(db) is RegistrationMode.APPROVAL_REQUIRED
+
+
+def test_registration_settings_screen_choosing_current_mode_is_a_no_op(db, sysop):
+    session = FakeSession(["r", "o", "b"])
+    _run(session, db, sysop)
+    assert "Already set to that mode." in _written_text(session)
 
 
 def test_registration_settings_screen_shows_pending_count(db, sysop):
     from netbbs.auth.users import create_user
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["r", "n", "b"])
+    session = FakeSession(["r", "b", "b"])
     _run(session, db, sysop)
     assert "1 account(s) awaiting approval" in _written_text(session)
 

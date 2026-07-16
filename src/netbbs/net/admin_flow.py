@@ -55,7 +55,7 @@ from netbbs.chat.categories import delete_category as delete_channel_category
 from netbbs.chat.categories import list_subcategories as list_channel_subcategories
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
-from netbbs.config import get_require_registration_approval, set_require_registration_approval
+from netbbs.config import RegistrationMode, get_registration_mode, set_registration_mode
 from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
@@ -329,24 +329,30 @@ async def _show_user_detail(session: Session, db: Database, actor: User, target:
 # -- self-service registration settings (design doc round 76) -----------
 
 
+_REGISTRATION_MODE_LABELS = {
+    RegistrationMode.OPEN: "open (new accounts active immediately)",
+    RegistrationMode.APPROVAL_REQUIRED: "approval required (SysOp must approve new accounts)",
+    RegistrationMode.CLOSED: "closed (no public registration; SysOp-created accounts only)",
+}
+
+
 async def _registration_settings_screen(session: Session, db: Database, actor: User) -> None:
     """
-    Toggles the node-wide `require_registration_approval` setting
-    (`netbbs.config`) and surfaces how many self-registered accounts are
-    currently waiting on it -- approving/rejecting any of them
-    individually still happens via `[L]ist users` -> a pending account's
-    own detail screen (`_show_user_detail`'s approve prompt), reusing
-    the existing user-management flow rather than building a second,
-    parallel pending-accounts queue UI.
+    Sets the node's `registration_mode` (design doc round 96) --
+    open/approval_required/closed, replacing the earlier plain
+    require-approval toggle -- and surfaces how many self-registered
+    accounts are currently waiting on approval. Approving/rejecting any
+    of them individually still happens via `[L]ist users` -> a pending
+    account's own detail screen (`_show_user_detail`'s approve prompt),
+    reusing the existing user-management flow rather than building a
+    second, parallel pending-accounts queue UI.
     """
-    current = get_require_registration_approval(db)
+    current = get_registration_mode(db)
     pending_count = sum(1 for u in list_users(db) if u.pending_approval)
 
     header = colored("\r\nSelf-service registration:", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(header)
-    await session.write_line(
-        f"Require SysOp approval before new accounts can log in: {'ON' if current else 'off'}"
-    )
+    await session.write_line(f"Current mode: {_REGISTRATION_MODE_LABELS[current]}")
     if pending_count:
         await session.write_line(
             colored(
@@ -355,20 +361,32 @@ async def _registration_settings_screen(session: Session, db: Database, actor: U
             )
         )
 
-    new_state = "off" if current else "ON"
-    await session.write(f"Turn approval requirement {new_state}? [y/N]: ")
-    answer = (await session.read_key()).lower()
+    await session.write_line(
+        "\r\n"
+        + menu_key("O", "pen")
+        + "  "
+        + menu_key("A", "pproval required")
+        + "  "
+        + menu_key("C", "losed")
+        + "  "
+        + menu_key("B", "ack (leave unchanged)")
+    )
+    await session.write("Choice: ")
+    choice = (await session.read_key()).lower()
     await session.write_line("")
-    if answer != "y":
+
+    new_mode = {"o": RegistrationMode.OPEN, "a": RegistrationMode.APPROVAL_REQUIRED, "c": RegistrationMode.CLOSED}.get(
+        choice
+    )
+    if new_mode is None:
+        return
+    if new_mode == current:
+        await session.write_line(colored("Already set to that mode.", fg_color=MUTED_COLOR))
         return
 
-    set_require_registration_approval(db, not current)
-    record_action(
-        db, actor=actor, action="set_registration_approval", detail=f"require_approval={not current}"
-    )
-    await session.write_line(
-        f"Approval requirement is now {'ON' if not current else 'off'}."
-    )
+    set_registration_mode(db, new_mode)
+    record_action(db, actor=actor, action="set_registration_mode", detail=f"mode={new_mode.value}")
+    await session.write_line(f"Registration mode is now: {_REGISTRATION_MODE_LABELS[new_mode]}")
 
 
 # -- self-update (design doc §17, round 82; round 95/96 implementation) --

@@ -177,8 +177,8 @@ what remains genuinely open there is the exact wire format (#11) and the
 deferred refinements just listed.
 
 - **Creation — a single tri-state `registration_mode` (round 96,
-  superseding round 87's binary description): `open` | `approval_required`
-  | `closed`.** Matches three real, common BBS operating postures rather
+  superseding round 87's binary description; implemented round 100):
+  `open` | `approval_required` | `closed`.** Matches three real, common BBS operating postures rather
   than an arbitrary flag: **(a) public** — self-registration active
   immediately (`open`, the default, preserving today's behavior); **(b)
   closed-but-open-to-signups** — self-registration creates a
@@ -6247,9 +6247,9 @@ axes were kept from being conflated on purpose.
 
 **Phase placement:** Phase 2 scope, extending round 76's existing
 self-registration feature — not a Phase 3 gate, no dependency on
-anything in rounds 89–95. Implementation (the config migration, the
-admin-menu control, the login-prompt visibility change) is still
-pending.
+anything in rounds 89–95. **Implemented round 100** — see the worklog's
+round 100 entry for the full writeup; §5's normative bullet above is
+updated to point here.
 
 ## Sign-off notes, round 97 (live seed-list refresh, reusing the self-update channel — resolves a gap in issue #58's seed-bootstrap model)
 

@@ -181,9 +181,9 @@ def create_user(
 
     `pending_approval` (design doc round 76) is set by self-service
     registration (`netbbs.net.login_flow._register_new_account`,
-    `netbbs.net.ssh._NetBBSSSHServer`) when the node-wide
-    `require_registration_approval` setting is on -- always `False` for
-    every other caller (the admin screen, the standalone CLI, dev
+    `netbbs.net.ssh._NetBBSSSHServer`) when the node's `registration_mode`
+    (`netbbs.config`, round 96) is `APPROVAL_REQUIRED` -- always `False`
+    for every other caller (the admin screen, the standalone CLI, dev
     bootstrap scripts), which is exactly the default.
     """
     if password is None and verify_key is None:
@@ -648,9 +648,9 @@ def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by:
 def approve_pending_user(db: Database, target: User, *, approved_by: User) -> User:
     """
     Clear a self-registered account's pending-approval gate (design doc
-    round 76), letting it log in -- the SysOp-side counterpart to
-    `require_registration_approval` (`netbbs.config`) being turned on.
-    A no-op returning `target` unchanged if it isn't actually pending
+    round 76), letting it log in -- the SysOp-side counterpart to the
+    node's `registration_mode` (`netbbs.config`, round 96) being set to
+    `APPROVAL_REQUIRED`. A no-op returning `target` unchanged if it isn't actually pending
     (e.g. a double-click on the approve action), mirroring
     `set_user_level`'s own no-op-if-unchanged shape rather than logging
     a meaningless audit row.

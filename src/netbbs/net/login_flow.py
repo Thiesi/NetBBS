@@ -52,7 +52,7 @@ from netbbs.chat import (
     format_with_preference,
     list_pending_invitations_for_user,
 )
-from netbbs.config import get_require_registration_approval
+from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.directory import (
     MAX_BIO_BYTES,
     MAX_BIO_LINES,
@@ -784,9 +784,16 @@ async def _login(
     need to know *who* successfully authenticated before we can check
     whether they're blocked.
     """
+    registration_mode = get_registration_mode(db)
+    prompt = (
+        "\r\nUsername: "
+        if registration_mode == RegistrationMode.CLOSED
+        else "\r\nUsername (or 'new' to create an account): "
+    )
+
     for attempt in range(max_attempts):
         try:
-            await session.write("\r\nUsername (or 'new' to create an account): ")
+            await session.write(prompt)
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
         except asyncio.TimeoutError:
             return LoginOutcome.IDLE_TIMEOUT
@@ -794,7 +801,20 @@ async def _login(
             continue
 
         if username.lower() == NEW_ACCOUNT_SENTINEL:
-            new_user = await _register_new_account(session, db, throttle, idle_timeout=idle_timeout)
+            # Round 96: `closed` mode hides the registration option from
+            # the prompt above, but 'new' is a documented, memorable
+            # convention -- someone who already knows it and types it
+            # anyway gets a clear, honest rejection rather than the
+            # sentinel silently falling through to an ordinary (and
+            # therefore always-failing) username lookup.
+            if registration_mode == RegistrationMode.CLOSED:
+                await session.write_line(
+                    "This system does not accept public registrations. Contact the SysOp for an account."
+                )
+                continue
+            new_user = await _register_new_account(
+                session, db, throttle, idle_timeout=idle_timeout, registration_mode=registration_mode
+            )
             if new_user is not None:
                 return new_user
             continue
@@ -843,7 +863,12 @@ async def _login(
 
 
 async def _register_new_account(
-    session: Session, db: Database, throttle: LoginThrottle, *, idle_timeout: float
+    session: Session,
+    db: Database,
+    throttle: LoginThrottle,
+    *,
+    idle_timeout: float,
+    registration_mode: RegistrationMode,
 ) -> User | None:
     """
     Self-service account registration (design doc round 76), entered by
@@ -851,11 +876,13 @@ async def _register_new_account(
     NEW_ACCOUNT_SENTINEL`) at `_login`'s ordinary username prompt -- the
     same sentinel SSH's keyboard-interactive registration
     (`netbbs.net.ssh._NetBBSSSHServer`) triggers, so every transport
-    shares one discoverable "how do I sign up" answer.
+    shares one discoverable "how do I sign up" answer. `_login` never
+    calls this at all when `registration_mode` is `CLOSED` (round 96) --
+    this function only ever runs for `OPEN`/`APPROVAL_REQUIRED`.
 
     Returns the freshly created `User` only when the account can log in
-    immediately (the node-wide `require_registration_approval` setting
-    is off); `None` for every other outcome -- cancelled, a validation
+    immediately (`registration_mode` is `OPEN`); `None` for every other
+    outcome -- cancelled, a validation
     failure, throttled, or created-but-pending-approval. `_login`
     treats `None` as "go back to the username prompt", consuming one of
     the connection's `max_attempts` the same way a failed login would.
@@ -914,7 +941,7 @@ async def _register_new_account(
         )
         return None
 
-    require_approval = get_require_registration_approval(db)
+    require_approval = registration_mode == RegistrationMode.APPROVAL_REQUIRED
     try:
         new_user = await create_user_async(db, username, password=password, pending_approval=require_approval)
     except AuthError as exc:

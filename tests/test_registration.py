@@ -3,7 +3,8 @@ Tests for self-service account registration (design doc round 76):
 
 - `netbbs.auth.users`: the reserved `new` sentinel, `pending_approval`
   gating login, and `approve_pending_user`.
-- `netbbs.config`: the node-wide `require_registration_approval` toggle.
+- `netbbs.config`: the node-wide `registration_mode` setting (design doc
+  round 96) -- open/approval_required/closed.
 - `netbbs.net.login_flow`'s Telnet/web registration entry point
   (`_register_new_account`, triggered from `_login` by typing `new` at
   the username prompt), driven end to end via `handle_session` with a
@@ -33,7 +34,7 @@ from netbbs.auth.users import (
     get_user_by_username,
 )
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
-from netbbs.config import get_require_registration_approval, set_require_registration_approval
+from netbbs.config import RegistrationMode, get_registration_mode, set_registration_mode
 from netbbs.moderation.log import list_actions_for_target_user
 from netbbs.net import login_flow
 from netbbs.net.maintenance import MaintenanceMode
@@ -168,24 +169,45 @@ def test_approve_pending_user_is_a_no_op_when_not_pending(db):
     assert list_actions_for_target_user(db, alice.id) == []
 
 
-# -- netbbs.config: require_registration_approval ---------------------------
+# -- netbbs.config: registration_mode (design doc round 96) -----------------
 
 
-def test_require_registration_approval_defaults_off(db):
-    assert get_require_registration_approval(db) is False
+def test_registration_mode_defaults_open(db):
+    assert get_registration_mode(db) is RegistrationMode.OPEN
 
 
-def test_require_registration_approval_round_trips(db):
-    set_require_registration_approval(db, True)
-    assert get_require_registration_approval(db) is True
-    set_require_registration_approval(db, False)
-    assert get_require_registration_approval(db) is False
+def test_registration_mode_round_trips(db):
+    for mode in RegistrationMode:
+        set_registration_mode(db, mode)
+        assert get_registration_mode(db) is mode
+
+
+def test_registration_mode_falls_back_to_legacy_boolean_key(db):
+    # A pre-round-96 database that only ever wrote the old boolean key
+    # (never migrated) must still resolve correctly -- no explicit
+    # migration step, per round 96's own "migration is a non-event"
+    # framing.
+    from netbbs.config import set_config
+
+    set_config(db, "require_registration_approval", "1")
+    assert get_registration_mode(db) is RegistrationMode.APPROVAL_REQUIRED
+
+    set_config(db, "require_registration_approval", "0")
+    assert get_registration_mode(db) is RegistrationMode.OPEN
+
+
+def test_registration_mode_new_key_takes_precedence_over_legacy(db):
+    from netbbs.config import set_config
+
+    set_config(db, "require_registration_approval", "1")
+    set_registration_mode(db, RegistrationMode.OPEN)
+    assert get_registration_mode(db) is RegistrationMode.OPEN
 
 
 # -- Telnet/web interactive registration (_login -> _register_new_account) --
 
 
-def test_typing_new_registers_and_logs_straight_in_when_approval_is_off(db):
+def test_typing_new_registers_and_logs_straight_in_when_mode_is_open(db):
     session = FakeSession(["new", "alice", "hunter2pw", "hunter2pw"], keys=["l"])
 
     asyncio.run(_run_login(session, db))
@@ -195,7 +217,7 @@ def test_typing_new_registers_and_logs_straight_in_when_approval_is_off(db):
 
 
 def test_registration_with_approval_required_does_not_log_in(db):
-    set_require_registration_approval(db, True)
+    set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
     # First attempt registers (consumed); the remaining scripted lines
     # let the outer _login loop exhaust its attempts cleanly rather than
     # raising StopIteration once registration correctly declines to log
@@ -210,6 +232,27 @@ def test_registration_with_approval_required_does_not_log_in(db):
     assert "must be approved" in session.output.lower() or "must approve" in session.output.lower()
     created = get_user_by_username(db, "alice")
     assert created.pending_approval is True
+
+
+def test_closed_mode_hides_the_new_account_prompt_option(db):
+    set_registration_mode(db, RegistrationMode.CLOSED)
+    session = FakeSession(["", "", "", ""])
+
+    asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=1)))
+
+    assert "'new'" not in session.output
+    assert "create an account" not in session.output.lower()
+
+
+def test_closed_mode_rejects_typing_new_with_a_clear_message_and_no_account(db):
+    set_registration_mode(db, RegistrationMode.CLOSED)
+    session = FakeSession(["new", "", ""])
+
+    asyncio.run(_run_login(session, db, _throttle_config(max_attempts_per_connection=1)))
+
+    assert "does not accept public registrations" in session.output
+    with pytest.raises(AuthError):
+        get_user_by_username(db, "alice")
 
 
 def test_registration_rejects_a_too_short_password(db):

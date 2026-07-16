@@ -47,7 +47,7 @@ from netbbs.auth.users import (
     authorize_public_key,
     create_user_async,
 )
-from netbbs.config import get_require_registration_approval
+from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 from netbbs.net.throttle import LoginThrottle
@@ -354,6 +354,13 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._registration_attempted = True
         if username.strip().lower() != NEW_ACCOUNT_SENTINEL:
             return False
+        if get_registration_mode(self._db) == RegistrationMode.CLOSED:
+            # Round 96: `closed` mode hides registration entirely --
+            # simply never offering the keyboard-interactive challenge
+            # means an asyncssh client sees 'new' fail like any other
+            # nonexistent username, the SSH-side equivalent of Telnet/
+            # web's hidden prompt option.
+            return False
         self._registration_step = "username"
         return (
             "NetBBS Registration",
@@ -409,7 +416,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
                 "Too many registration attempts. Please try again later."
             )
 
-        require_approval = get_require_registration_approval(self._db)
+        require_approval = get_registration_mode(self._db) == RegistrationMode.APPROVAL_REQUIRED
         try:
             await create_user_async(self._db, username, password=password, pending_approval=require_approval)
         except AuthError as exc:
