@@ -679,12 +679,13 @@ past that, gated on Phase 4 (trust/reputation) rather than Phase 3. See
 
 ## 16. Communities (topic-oriented navigation layer)
 
-Status: **local Communities confirmed and fully specced.** Link
-Communities (the federated variant) remain Phase 6 scope — naming and
-the carry model are settled below, but the rest waits on that phase's
-signed-event governance machinery. See round 71 sign-off note for the
-original directional discussion and round 83 for this round's full
-alternatives-considered writeup.
+Status: **local Communities confirmed and fully specced; Link
+Communities directionally specced (round 86)** — behavior and reuse of
+existing patterns are settled, exact wire/signed-event schema deferred
+until Phase 3's DAG substrate actually exists, matching how §13 already
+treats Linked-board moderation. See round 71 for the original
+directional discussion, round 83 for local Communities' full spec, and
+round 86 for Link Communities.
 
 **The idea:** users navigate NetBBS by topic first, not by resource
 type first. Instead of a main menu offering "[M]essage Boards /
@@ -883,19 +884,74 @@ categorization pass and no data loss risk. "Create Community" and
 "assign resource to Community" are new SysOp admin actions (extending
 Phase 2's existing admin tooling), not a migration wizard.
 
+**Link Communities — directional design, round 86 (behavior settled;
+exact wire/event schema deferred to Phase 3, matching §13's existing
+treatment of Linked-board moderation).**
+- **Not a separate object type.** A Community becomes Link-participating
+  the moment its origin node announces it via a signed event — the same
+  mechanism §13 already specifies for Linked board/channel creation,
+  applied unchanged. No separate `link_communities` table; Link-
+  participation is a property layered onto the same `communities` row,
+  exactly how a board doesn't become a structurally different thing by
+  being carried on the Link.
+- **Identity: content-addressed and origin-scoped, same as §7's
+  existing scheme** — no new naming/collision concept needed. Two nodes
+  independently creating a Community both named "Vintage Computing"
+  simply coexist as two distinct Link Communities that happen to share
+  a display name, the same non-collision property boards and messages
+  already have under content-addressing.
+- **Promotion, not just from-scratch creation.** An existing local
+  Community gets a new admin action (`[L]ink`, alongside `[E]dit
+  [D]elete`) that triggers the signed announcement, turning an
+  already-built local Community Link-participating without migrating it
+  to a different object — handles the realistic case (a local Community
+  grows, the SysOp later decides to open it to the Link) rather than
+  only supporting ground-up Link Community creation.
+- **Carry decisions compose with the existing per-resource opt-out,
+  plus a new bulk convenience.** Carrying a Link Community carries its
+  current and future boards/channels/areas by default (§15's existing
+  default-carry-with-visible-opt-out shape); a SysOp keeps the same
+  per-board exclusion ability already available today, plus a new
+  Community-level bulk exclude ("don't carry this whole Link
+  Community") as a single action — a convenient grouping unit is the
+  whole point of a Community.
+- **Moderator grants need no new design.** Community-blanket→Link-
+  blanket is §13's existing Linked-board-moderator-grant mechanism
+  (signed DAG event from the origin node, verified against the granting
+  event by receivers), applied to a Community instead of a board —
+  already specified, not new.
+- **Cascading scalar defaults: origin sets the recommendation, carrying
+  node's local override always wins** — same node-sovereignty principle
+  already governing every other piece of Linked content (expiry,
+  exclusion, moderation boundaries; §6, §13). A Link Community's
+  `default_min_age` etc. propagates as a suggested starting point; a
+  carrying SysOp can override it locally on their own carried copy
+  without the origin node's permission.
+- **The Phase 4 dependency for age/name-gating is narrower than §18
+  originally implied.** A carrying node enforcing its *own* local
+  attestation data against its *own* local users accessing a carried
+  Link Community's age/name-gated content works from Phase 3 onward —
+  no Phase 4 needed. Phase 4 (trust/reputation) is only required for the
+  narrower case of one node trusting *another* node's attestation about
+  a shared/roaming identity, not the common case for a locally-hosted
+  user base. §18 corrected accordingly.
+- **Discovery needs no new mechanism.** Link Community announcements are
+  just another event kind in Phase 6's already-designed governance log
+  (curated audit trail) and activity feed (live tail), per §15 Phase 6.
+
 **Phase placement: local Communities land after Phase 2, before Phase
 3 — confirmed, no renumbering.** Same treatment as §17's self-update
 mechanism: an addendum pointer in §15 rather than inserting a new
 numbered phase, since the existing 7-phase numbering is referenced by
-number throughout this document. **Link Communities are explicitly
-Phase 6 scope**, not this round's — federated Community creation,
-default-carry-with-visible-opt-out, and cross-node discovery all depend
-on the same signed-event/DAG governance machinery Linked board/channel
-creation already uses (§13, §15 Phase 6), which doesn't exist before
-then. The Community-blanket moderator tier above is specced and built
-now for local Communities only; extending it to Link Communities is
-Phase 6's problem to wire up against real signed grants, the same way
-Link-blanket authority already is for Linked boards/channels today.
+number throughout this document. **Link Communities remain Phase 6
+scope for actual implementation** — the signed-event/DAG governance
+machinery Linked board/channel creation already needs doesn't exist
+before then — but their behavior is now directionally specced (round
+86, above), not just named. The Community-blanket moderator tier is
+specced and built now for local Communities only; extending it to Link
+Communities needs no new design, only Phase 6's real signed grants to
+run against — the mechanism itself (§13's Linked-board-moderator-grant
+model) already covers it.
 
 ---
 
@@ -1142,6 +1198,15 @@ propagation additionally requires the *subject user's* own separate
 opt-in consent — it's their sensitive data, and the existing profile-
 privacy philosophy (§13) already gives users that kind of control over
 everything else.
+
+**Clarified round 86, narrower than the paragraph above originally
+read:** this Phase 4 gate is specifically about a remote node trusting
+*another* node's attestation of a user it doesn't manage. It does not
+block a carrying node from enforcing a Link Community's cascaded
+age/name-gating default (§16) against its *own* local users using its
+*own* local attestation data — that works the moment Phase 3's carry/
+sync exists, no trust/reputation system required, since no cross-node
+attestation trust decision is involved.
 
 ---
 
@@ -4459,4 +4524,68 @@ age-gating alongside the already-designed level-gating.
     fields forcing city/region/country precision, on the same
     minimal-disclosure reasoning applied to attestation Link-visibility
     in point 10.
+
+## Sign-off notes, round 86 (Link Communities — directional design)
+
+Prompted by Thiesi wanting Link Communities designed properly, following
+the same "before Phase 3, but scoped to what can actually be settled
+without Phase 3's real substrate" pattern already applied to local
+Communities, self-update, and identity attestation.
+
+1. **Design depth: directional only, confirmed with Thiesi over two
+   deeper alternatives** (a full implementation-ready spec including
+   signed-event wire format; widening scope to design Phase 3's general
+   signed-event substrate first). Chosen because no Phase 3 code exists
+   at all (verified directly — no Link/DAG/gossip modules anywhere in
+   the tree) and §7's DAG/gossip description remains conceptual, with no
+   concrete event schema anywhere in the doc yet to build Community-
+   specific mechanics on top of. Matches the exact level of detail §13
+   already gives Linked-board moderation ("design direction already
+   settled... actual implementation Phase 3 scope") rather than
+   introducing a new, deeper standard just for Communities.
+2. **Not a separate object type from local Communities — confirmed.** A
+   Community becomes Link-participating via the same signed-announcement
+   mechanism §13 already specifies for Linked board/channel creation,
+   applied unchanged rather than designing a parallel mechanism. Direct
+   consequence of round 83's decision to model Community's own
+   origin/grant authority identically to a board's from the start.
+3. **Identity: content-addressed and origin-scoped (§7's existing
+   scheme), not a new naming system.** Avoids a global-namespace
+   collision problem without inventing anything — two independently-
+   created same-named Link Communities simply coexist, the same
+   non-collision property boards and messages already have.
+4. **New: promotion of an existing local Community, not just
+   from-scratch creation.** A gap in the original framing — round 83's
+   admin design only covered creating a Community, silent on an
+   existing one later going Link-participating. New `[L]ink` admin
+   action added to the Community detail screen, reusing the same
+   signed-announcement mechanism as creation.
+5. **Carry decisions: composes with the existing per-resource opt-out;
+   adds a Community-level bulk exclude as a new convenience.** No
+   change to the existing board/channel-level default-carry-with-
+   visible-opt-out mechanism (§15) — a Link Community's carry decision
+   is additive on top of it, not a replacement.
+6. **Moderator grants: zero new design, confirmed.** Community-blanket→
+   Link-blanket is §13's existing Linked-board-moderator-grant mechanism
+   applied to a Community instead of a board — the mechanism was already
+   fully specified in round 4/5, before Communities existed as a concept
+   at all.
+7. **Cascading scalar defaults: carrying node's local override always
+   wins over the origin's default — confirmed, consistent with every
+   other Linked-content sovereignty decision already made** (expiry
+   remains local even for Linked boards, §13; a SysOp can exclude any
+   specific board, §15). A Link Community's own cascaded defaults are a
+   suggestion carried across the Link, never a mandate.
+8. **Correction to round 85's own framing: the Phase 4 dependency for
+   age/name-gating is narrower than originally stated.** §18 previously
+   read as if any Link-Community-wide age/name-gating needed Phase 4.
+   Actually only the cross-node case does (node A trusting node B's
+   attestation about a user A doesn't manage) — a carrying node
+   enforcing its own local attestation data against its own local users
+   works from Phase 3 onward. §18's Phase placement section corrected to
+   state this precisely rather than the broader, less accurate version.
+9. **Discovery: no new mechanism, confirmed.** Link Community
+   announcements are just another event kind in Phase 6's already-
+   designed governance log/activity feed (§15 Phase 6) — this was
+   already general enough to cover it without modification.
 
