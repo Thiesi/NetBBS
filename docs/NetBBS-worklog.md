@@ -5858,3 +5858,85 @@ code (each reproduced the exact failure described) and closed:
    relevant source file(s) and re-running the new tests, then restoring.
    Full suite re-run: **1673 passed, 4 skipped**.
 
+## Sign-off notes, round 81 (reviewer's follow-up on round 80 — 2 issues: #49, #50 — fixed)
+
+The same reviewer audited round 80's own fixes (commit `4aee800`) and
+filed two more issues — one a real concurrency gap in the #44 fix
+itself, one a pair of miswired tests from #45/#46's own regression
+coverage. Both verified and closed:
+
+1. **#49: the last-SysOp check was still a non-atomic check-then-act
+   sequence across *independent* SQLite connections** — safe within
+   one process (every coroutine there shares one synchronous
+   connection with no `await` between the count and the mutation), not
+   safe between this node's own process and `python -m netbbs.admin`,
+   or two admin CLI invocations, against the same database file. Two
+   such connections could each read "2 usable SysOps," each remove a
+   different one, and both legally commit, leaving zero. Verified with
+   a standalone script that patches `count_sysops` to pause mid-check
+   and forces the exact interleaving the issue describes: against the
+   pre-fix code, both operations genuinely succeeded and left
+   `count_sysops() == 0`.
+
+   Fixed in `netbbs.auth.users`: `set_user_level`, `set_user_disabled`,
+   and `delete_user` now open a `BEGIN IMMEDIATE` transaction *before*
+   re-fetching the target row fresh and running every check (the no-op
+   short-circuit, the pending-approval promotion refusal, and the
+   last-SysOp count) against that fresh row — not the possibly-stale
+   `target` the function was called with. `BEGIN IMMEDIATE` acquires
+   SQLite's write lock immediately, so a second connection's own
+   attempt blocks (up to `busy_timeout`) until the first transaction
+   resolves, rather than each independently deciding it's safe to
+   proceed. `netbbs.moderation.log.record_action` was split into a new
+   non-committing `record_action_without_commit` plus a thin
+   auto-committing wrapper, so the audit-log insert can join the same
+   explicit transaction as the row mutation instead of committing
+   separately (a second, smaller atomicity gap the issue's own test
+   list implicitly called out: "the successful operation and only that
+   operation has a matching audit entry"). Every rollback path is a
+   plain `except BaseException: db.connection.rollback(); raise`.
+
+   New `tests/test_user_management_concurrency.py`: three tests (one
+   per mutating function) each open two independent `Database`
+   connections to the same file from two real OS threads (`sqlite3`
+   connections are thread-affine and block synchronously — there's no
+   `await` point to interleave around the way this codebase's other
+   concurrency tests, e.g. `test_password_work.py`, do), with
+   `record_action_without_commit` monkeypatched to pause the winning
+   thread mid-transaction so the test can *prove* the losing thread's
+   own `BEGIN IMMEDIATE` is genuinely blocked (not just incidentally
+   scheduled after), then confirm exactly one side succeeds, one raises
+   `UserManagementError`, the final `count_sysops() == 1`, and exactly
+   one matching audit-log entry exists.
+
+   One process note: while investigating, an errant `git checkout
+   HEAD~1 -- ...` briefly overwrote both the round-80 committed #44 fix
+   and this round's in-progress #49 work in the working tree before
+   being caught — recovered via `git checkout HEAD` (restoring the
+   committed state) and re-applying the uncommitted #49 changes from
+   scratch, with no data actually lost since nothing had been committed
+   yet. Verification of the fix afterward deliberately avoided any
+   further `git checkout` of tracked files — a temporary on-disk backup
+   copy plus `git show HEAD:path > path` (read-only against git state)
+   was used instead to revert-then-restore the two files for the
+   before/after race demonstration above.
+
+2. **#50: two of #45/#46's own regression tests were miswired.**
+   `test_web_session_enter_completion_is_atomic_with_concurrent_lock_
+   holder` defined its `scenario()` coroutine and assertions but never
+   called `asyncio.run(scenario())` — pytest executed only the outer
+   function and passed trivially, meaning the web transport's Enter-
+   atomicity fix (#45) had no actual independent test coverage despite
+   appearances. `test_repeated_threshold_crossings_track_the_current_
+   height_each_time` called `asyncio.run(scenario())` a second time at
+   the end with no assertions against that result, adding needless
+   side effects and runtime. Both fixed exactly as the issue
+   recommended: added the missing `asyncio.run(scenario())` call;
+   removed the trailing duplicate. Confirmed the now-actually-running
+   web test fails against a temporarily-reverted `web.py` (matching the
+   validation already done for the byte-oriented `char_input` path)
+   before confirming it passes against the real fix.
+3. **Testing**: full suite re-run: **1676 passed, 4 skipped** (up from
+   round 80's 1673 — 3 net new tests, since #50 added no new test
+   functions, only fixed two existing ones).
+

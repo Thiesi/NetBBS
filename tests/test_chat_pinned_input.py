@@ -446,6 +446,8 @@ def test_web_session_enter_completion_is_atomic_with_concurrent_lock_holder():
         assert live_buffer.cursor == 0
         assert written[-1] == "\r\n"
 
+    asyncio.run(scenario())
+
 
 # -- GitHub issue #46: pinned UI must track resize dynamically, not once --
 
@@ -588,5 +590,3 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
     # Exit cleanup actually ran (ended "active" -- must reset before
     # handing control to whatever screen comes after /quit).
     assert text.endswith("\x1b[r" + "\x1b[2J\x1b[H")
-
-    asyncio.run(scenario())

@@ -549,50 +549,99 @@ def _refuse_if_last_sysop(db: Database, target: User, *, removes_active_sysop: b
 
 
 def set_user_level(db: Database, target: User, new_level: int, *, changed_by: User) -> User:
-    """Promote or demote `target` to `new_level`, refusing a demotion
-    that would leave the node with no active SysOp."""
+    """
+    Promote or demote `target` to `new_level`, refusing a demotion
+    that would leave the node with no active SysOp.
+
+    GitHub issue #49: the no-op short-circuit, the pending-approval
+    promotion refusal, the last-SysOp count, the row update, and the
+    audit-log insert all run against a freshly re-fetched `current` row,
+    inside one `BEGIN IMMEDIATE` transaction — not against the possibly
+    stale `target` this function was called with, and not as a plain
+    `SELECT` followed by a separately-committed `UPDATE`. `BEGIN
+    IMMEDIATE` acquires SQLite's write lock *before* the count is even
+    read, so a second independent connection (this node's own process
+    plus `python -m netbbs.admin`, or two admin CLI invocations against
+    the same database file) attempting the same kind of change blocks
+    (up to `busy_timeout`) until this transaction resolves, rather than
+    each independently reading "2 usable SysOps" and both legally
+    committing a removal.
+    """
     # Deferred import: netbbs.moderation.log imports User from this
     # module for record_action's own type hint, so a module-level import
     # here would be circular.
-    from netbbs.moderation.log import record_action
+    from netbbs.moderation.log import record_action_without_commit
 
     if new_level == target.user_level:
         return target
-    if new_level >= SYSOP_LEVEL and target.pending_approval:
-        # GitHub issue #44: a pending account promoted straight to
-        # SysOp level would satisfy the "last SysOp" check below (it's
-        # a second level-255 row) while remaining unable to log in at
-        # all, letting the node get talked into disabling/demoting/
-        # deleting its one actually-usable SysOp. Approve first.
-        raise UserManagementError(
-            f"cannot promote {target.username!r} to SysOp level while its "
-            "registration is still pending approval -- approve the account first"
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        if new_level == current.user_level:
+            db.connection.rollback()
+            return current
+        if new_level >= SYSOP_LEVEL and current.pending_approval:
+            # GitHub issue #44: a pending account promoted straight to
+            # SysOp level would satisfy the "last SysOp" check below
+            # (it's a second level-255 row) while remaining unable to
+            # log in at all, letting the node get talked into
+            # disabling/demoting/deleting its one actually-usable
+            # SysOp. Approve first.
+            raise UserManagementError(
+                f"cannot promote {current.username!r} to SysOp level while its "
+                "registration is still pending approval -- approve the account first"
+            )
+        _refuse_if_last_sysop(db, current, removes_active_sysop=new_level < SYSOP_LEVEL)
+        db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, current.id))
+        record_action_without_commit(
+            db, actor=changed_by,
+            action="promote" if new_level > current.user_level else "demote",
+            target_user_id=current.id,
+            detail=f"user_level {current.user_level} -> {new_level}",
         )
-    _refuse_if_last_sysop(db, target, removes_active_sysop=new_level < SYSOP_LEVEL)
-    db.connection.execute("UPDATE users SET user_level = ? WHERE id = ?", (new_level, target.id))
-    db.connection.commit()
-    record_action(
-        db, actor=changed_by,
-        action="promote" if new_level > target.user_level else "demote",
-        target_user_id=target.id,
-        detail=f"user_level {target.user_level} -> {new_level}",
-    )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
 def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by: User) -> User:
-    """Disable or re-enable login for `target`, refusing a disable that
-    would leave the node with no active SysOp."""
-    from netbbs.moderation.log import record_action
+    """
+    Disable or re-enable login for `target`, refusing a disable that
+    would leave the node with no active SysOp.
+
+    See `set_user_level`'s docstring (GitHub issue #49) for why this
+    re-fetches `current` and does the count-check/mutation/audit-log
+    insert inside one `BEGIN IMMEDIATE` transaction rather than as a
+    plain check-then-act sequence.
+    """
+    from netbbs.moderation.log import record_action_without_commit
 
     currently_disabled = target.disabled_at is not None
     if disabled == currently_disabled:
         return target
-    _refuse_if_last_sysop(db, target, removes_active_sysop=disabled)
-    new_value = utc_now_iso() if disabled else None
-    db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, target.id))
-    db.connection.commit()
-    record_action(db, actor=changed_by, action="disable" if disabled else "enable", target_user_id=target.id)
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        currently_disabled = current.disabled_at is not None
+        if disabled == currently_disabled:
+            db.connection.rollback()
+            return current
+        _refuse_if_last_sysop(db, current, removes_active_sysop=disabled)
+        new_value = utc_now_iso() if disabled else None
+        db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, current.id))
+        record_action_without_commit(
+            db, actor=changed_by, action="disable" if disabled else "enable", target_user_id=current.id
+        )
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 
@@ -628,19 +677,31 @@ def delete_user(db: Database, target: User, *, deleted_by: User) -> None:
     their actor/target references set to NULL (see the migration that
     adds these ON DELETE behaviors for the full table-by-table
     reasoning) -- all as a single atomic DELETE.
-    """
-    from netbbs.moderation.log import record_action
 
-    _refuse_if_last_sysop(db, target, removes_active_sysop=True)
-    # Logged *before* deleting, not after: on a self-delete
-    # (deleted_by == target), record_action's own actor_user_id FK would
-    # otherwise reference a row that's already gone. Logging first also
-    # means target_user_id naturally goes NULL via the same ON DELETE SET
-    # NULL once the row disappears, with detail keeping the username on
-    # record either way.
-    record_action(
-        db, actor=deleted_by, action="delete_user", target_user_id=target.id,
-        detail=f"deleted user {target.username!r} (id {target.id}, was level {target.user_level})",
-    )
-    db.connection.execute("DELETE FROM users WHERE id = ?", (target.id,))
-    db.connection.commit()
+    See `set_user_level`'s docstring (GitHub issue #49) for why this
+    re-fetches `current` and does the count-check/log/delete inside one
+    `BEGIN IMMEDIATE` transaction rather than as a plain check-then-act
+    sequence.
+    """
+    from netbbs.moderation.log import record_action_without_commit
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _get_user_by_id(db, target.id)
+        _refuse_if_last_sysop(db, current, removes_active_sysop=True)
+        # Logged *before* deleting, not after: on a self-delete
+        # (deleted_by == target), record_action's own actor_user_id FK
+        # would otherwise reference a row that's already gone. Logging
+        # first also means target_user_id naturally goes NULL via the
+        # same ON DELETE SET NULL once the row disappears, with detail
+        # keeping the username on record either way.
+        record_action_without_commit(
+            db, actor=deleted_by, action="delete_user", target_user_id=current.id,
+            detail=f"deleted user {current.username!r} (id {current.id}, was level {current.user_level})",
+        )
+        db.connection.execute("DELETE FROM users WHERE id = ?", (current.id,))
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()

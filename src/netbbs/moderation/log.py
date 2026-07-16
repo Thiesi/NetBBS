@@ -52,9 +52,43 @@ def record_action(
     target_user_id: int | None = None,
     detail: str | None = None,
 ) -> ModerationLogEntry:
-    """Append one entry. Log entries are append-only — there is
-    deliberately no update/delete API; an audit trail that can be
-    edited after the fact isn't one."""
+    """Append one entry and commit immediately. Log entries are
+    append-only — there is deliberately no update/delete API; an audit
+    trail that can be edited after the fact isn't one."""
+    entry = record_action_without_commit(
+        db,
+        actor=actor,
+        action=action,
+        object_type=object_type,
+        object_id=object_id,
+        target_user_id=target_user_id,
+        detail=detail,
+    )
+    db.connection.commit()
+    return entry
+
+
+def record_action_without_commit(
+    db: Database,
+    *,
+    actor: User,
+    action: str,
+    object_type: str | None = None,
+    object_id: int | None = None,
+    target_user_id: int | None = None,
+    detail: str | None = None,
+) -> ModerationLogEntry:
+    """
+    Append one entry without committing (GitHub issue #49) — for a
+    caller that needs this insert to be part of a larger, already-open
+    explicit transaction (e.g. `netbbs.auth.users.set_user_level`'s own
+    `BEGIN IMMEDIATE` block, atomic with the SysOp-count check and the
+    row mutation it guards), rather than committing this insert on its
+    own the instant it runs. The caller is responsible for eventually
+    committing (or rolling back) the transaction this participates in;
+    `record_action` above is the auto-committing convenience wrapper
+    every caller that doesn't need that should keep using.
+    """
     created_at = utc_now_iso()
     cursor = db.connection.execute(
         """
@@ -64,7 +98,6 @@ def record_action(
         """,
         (actor.id, action, object_type, object_id, target_user_id, detail, created_at),
     )
-    db.connection.commit()
     row = db.connection.execute(
         "SELECT * FROM moderation_log WHERE id = ?", (cursor.lastrowid,)
     ).fetchone()
