@@ -106,3 +106,21 @@ def set_invitation_expiry_days(db: Database, days: int | None) -> None:
     if days is not None and days <= 0:
         raise ValueError(f"invitation expiry must be positive or None (indefinite), got {days!r}")
     set_config(db, INVITATION_EXPIRY_DAYS_CONFIG_KEY, "" if days is None else str(days))
+
+
+# Config key for whether self-service registration (design doc round
+# 76) requires SysOp approval before a new account can log in -- a
+# single node-wide toggle, same shape as the settings above. Default is
+# off (instant activation): Thiesi's own explicit call, keeping the
+# common case (a small, low-risk community node) frictionless, with the
+# stricter behavior an opt-in for a node that wants it (design doc
+# round 76 sign-off note).
+REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY = "require_registration_approval"
+
+
+def get_require_registration_approval(db: Database) -> bool:
+    return get_config(db, REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY) == "1"
+
+
+def set_require_registration_approval(db: Database, required: bool) -> None:
+    set_config(db, REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY, "1" if required else "0")

@@ -5346,3 +5346,120 @@ other terminal-rendering work already carries, not a new one specific
 to this feature. The self-service registration workflow is next, per
 Thiesi's own explicit ordering (see this round's design-doc note).
 
+## Sign-off notes, round 76 (self-service registration — implemented)
+
+Implementation narrative for design doc round 76's decisions (reserved
+`new` sentinel, SSH kbdint, `pending_approval` column, the node-wide
+approval toggle) — see that design-doc note for the *why*; this is the
+*what got built*.
+
+1. **Schema**: one new migration, `ALTER TABLE users ADD COLUMN
+   pending_approval INTEGER NOT NULL DEFAULT 0` — plain `ADD COLUMN`,
+   not a rebuild (round 46 precedent). `netbbs.auth.users.User` gained
+   a matching `pending_approval: bool = False` trailing field;
+   `_row_to_user` populates it from the new column.
+2. **`netbbs.auth.users`**: `NEW_ACCOUNT_SENTINEL = "new"` and
+   `RESERVED_USERNAMES = {NEW_ACCOUNT_SENTINEL}`, checked
+   case-insensitively in `_validate_username` (the existing single
+   choke point every account-creation path already funnels through).
+   `MIN_REGISTRATION_PASSWORD_LENGTH = 8`, stricter than admin-created
+   accounts' no-minimum (different trust boundary — a SysOp vetting
+   each account by hand vs. anyone on the network choosing their own).
+   `create_user`/`create_user_async` gained a `pending_approval: bool =
+   False` keyword, threaded down to the INSERT. `_finish_password_login`,
+   `authenticate_keypair`, and `authorize_public_key` all now also
+   raise the same generic `AuthError("login failed")` when
+   `pending_approval` is set, identical anti-enumeration treatment to
+   the existing `disabled_at` check right beside each — the one place a
+   freshly self-registered account *is* told explicitly that it's
+   pending is the registration flow itself, immediately after creating
+   it, which is safe precisely because the caller has just proven the
+   account is theirs by creating it. New `approve_pending_user(db,
+   target, *, approved_by)` clears the flag and records a
+   `moderation_log` row (`approve_registration`), no-op-and-no-log if
+   the target wasn't actually pending (mirrors `set_user_level`'s own
+   no-op-if-unchanged shape).
+3. **`netbbs.config`**: `require_registration_approval` node-wide
+   key, same `get_config`/`set_config` shape as every other setting in
+   this module, default off.
+4. **Telnet/web (`netbbs.net.login_flow`)**: `_login`'s username
+   prompt text now reads "Username (or 'new' to create an account): ".
+   Typing `new` (case-insensitive) branches into
+   `_register_new_account` — prompts desired username, password,
+   confirm; validates length/match; checks the shared `LoginThrottle`
+   (keyed by the desired username) before the Argon2 hash runs; calls
+   `create_user_async` with `pending_approval` set from the node config;
+   returns the new `User` directly (letting `_login` hand it straight to
+   `run_authenticated_session`, no second credential exchange) when
+   approval isn't required, or `None` (with an explanatory message) in
+   every other case — cancelled, validation failure, throttled, or
+   created-but-pending. A `None` result makes `_login`'s existing
+   attempt loop just `continue`, consuming one of `max_attempts` the
+   same way a failed login already does — no new counter.
+5. **SSH (`netbbs.net.ssh._NetBBSSSHServer`)**: implements
+   `kbdint_auth_supported`/`get_kbdint_challenge`/
+   `validate_kbdint_response` for a three-round exchange (username,
+   password, confirm) triggered only when the connecting username is
+   the reserved sentinel. Registration always ends by *failing* the
+   auth attempt on purpose (SSH's authenticated identity is fixed to
+   the connecting username for the whole attempt — see the design-doc
+   note) — a final message-only kbdint round (`_finish_registration`)
+   shows "account created, reconnect as X" (or the specific validation/
+   throttle/pending-approval failure) before the connection is refused.
+   Found by running a real `asyncssh` client against a real server, not
+   by reasoning about the protocol in the abstract: asyncssh's client
+   auth loop re-offers a still-advertised kbdint method after every
+   failed round, so without an explicit per-connection cap
+   (`_registration_attempted`, consulted by both
+   `kbdint_auth_supported` and `get_kbdint_challenge`, set the moment
+   *any* kbdint challenge is requested regardless of username or
+   outcome) a registration-only client would retry the whole exchange
+   forever within one connection. `validate_password`/
+   `validate_public_key` are unaffected — `new` simply has no
+   password/key registered, so those paths fail exactly as they would
+   for any other nonexistent account; kbdint is the only path that
+   treats the sentinel specially.
+6. **Admin side (`netbbs.net.admin_flow`)**: `_user_description`/
+   `_show_user_detail` now show "pending approval" as a third status
+   alongside "active"/"disabled"; a pending account's detail screen
+   offers an `[y/N]` approve prompt calling `approve_pending_user`. New
+   top-level `[R]egistration` admin-menu screen
+   (`_registration_settings_screen`) shows and toggles the node-wide
+   setting and surfaces a pending-account count, pointing back at
+   `[L]ist users` to actually approve/inspect individual accounts
+   rather than duplicating a second queue UI.
+7. **Testing**: three new files. `tests/test_registration.py` covers
+   `netbbs.auth.users`/`netbbs.config` directly (reserved-username
+   rejection case-insensitively, `pending_approval` gating every login
+   path, `approve_pending_user`'s effect and its no-op-if-not-pending
+   case, the config round-trip) plus the Telnet/web flow driven end to
+   end through the real `handle_session`/`_login` with a scripted
+   `FakeSession` (immediate login when approval is off, pending when
+   it's on, short/mismatched passwords, the reserved sentinel refused
+   as a *desired* username too, duplicate-username refusal, shared-
+   throttle rejection, case-insensitive sentinel matching).
+   `tests/test_ssh_registration.py` drives a real `asyncssh` client
+   against a real `SSHServer` with a scripted `asyncssh.SSHClient`
+   subclass answering each kbdint round in turn — every scenario
+   above the Telnet/web ones already cover, plus the specific
+   client-retry-loop regression (`test_kbdint_is_not_offered_for_an_
+   ordinary_username`) and confirming a registered account can log in
+   on a genuinely separate follow-up connection (both immediately, and
+   after an explicit approval when the setting is on). `tests/
+   test_admin_flow.py` gained cases for the pending-status display, the
+   approve/decline prompt, and the registration-settings screen
+   (toggle on, decline leaves it unchanged, pending-count display).
+   Full suite: **1612 passed, 4 skipped** (up from round 75's 1579 —
+   33 new tests).
+
+Real third-party-client verification (an actual OpenSSH client running
+`ssh new@host` interactively, not just `asyncssh`-against-`asyncssh`)
+remains unverified from this sandboxed dev environment, same standing
+caveat as every other terminal/SSH-facing round — worth a direct check
+from Thiesi's own machine before considering this fully verified
+end-to-end, particularly the "most clients try kbdint before password
+by default" claim the design-doc note makes about real-world client
+behavior. Deferred final-polish items 1–2 from round 75 (online help,
+menu prettification) remain exactly where round 75 left them — not
+started, not reordered by this round.
+

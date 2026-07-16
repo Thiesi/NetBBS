@@ -26,6 +26,7 @@ from netbbs.auth.users import (
     AuthError,
     User,
     UserManagementError,
+    approve_pending_user,
     create_user_async,
     delete_user,
     get_user_by_username,
@@ -54,6 +55,7 @@ from netbbs.chat.categories import delete_category as delete_channel_category
 from netbbs.chat.categories import list_subcategories as list_channel_subcategories
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
+from netbbs.config import get_require_registration_approval, set_require_registration_approval
 from netbbs.files.areas import FileArea, FileAreaError, create_file_area, delete_file_area, list_file_areas, update_file_area
 from netbbs.files.categories import FileAreaCategory
 from netbbs.files.categories import FileAreaCategoryError as FileCategoryError
@@ -126,7 +128,11 @@ async def admin_menu(
             await _draw_admin_menu(session, node_controls)
         elif choice == "l":
             await session.write_line("")
-            await _list_users_screen(session, db)
+            await _list_users_screen(session, db, user)
+            await _draw_admin_menu(session, node_controls)
+        elif choice == "r":
+            await session.write_line("")
+            await _registration_settings_screen(session, db, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "p":
             await session.write_line("")
@@ -161,6 +167,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
     option_list = [
         menu_key("C", "reate user"),
         menu_key("L", "ist users"),
+        menu_key("R", "egistration"),
         menu_key("P", "romote/demote"),
         menu_key("E", "nable/disable"),
         menu_key("D", "elete user"),
@@ -253,7 +260,7 @@ async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | 
 # -- list / detail -------------------------------------------------------
 
 
-async def _list_users_screen(session: Session, db: Database) -> None:
+async def _list_users_screen(session: Session, db: Database, actor: User) -> None:
     users = list_users(db)
     selected = await pick_item(
         session, users,
@@ -264,30 +271,90 @@ async def _list_users_screen(session: Session, db: Database) -> None:
         empty_message="No registered users yet.",
     )
     if selected is not None:
-        await _show_user_detail(session, db, selected)
+        await _show_user_detail(session, db, actor, selected)
+
+
+def _status_label(user: User) -> str:
+    if user.disabled_at is not None:
+        return "disabled"
+    if user.pending_approval:
+        return "pending approval"
+    return "active"
 
 
 def _user_description(user: User) -> str:
-    status = "disabled" if user.disabled_at is not None else "active"
-    return f"level {user.user_level}, {status}"
+    return f"level {user.user_level}, {_status_label(user)}"
 
 
-async def _show_user_detail(session: Session, db: Database, target: User) -> None:
+async def _show_user_detail(session: Session, db: Database, actor: User, target: User) -> None:
     header = colored(sanitize_text(target.username), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Level: {target.user_level}")
-    await session.write_line(f"Status: {'disabled' if target.disabled_at is not None else 'active'}")
+    await session.write_line(f"Status: {_status_label(target)}")
     await session.write_line(f"Member since: {format_for_display(target.created_at, db)}")
 
     entries = list_actions_for_target_user(db, target.id)
     if not entries:
         await session.write_line(colored("No recorded admin actions.", fg_color=MUTED_COLOR))
+    else:
+        await session.write_line(colored("Recent admin actions:", fg_color=MUTED_COLOR))
+        for entry in entries[-10:]:
+            when = format_for_display(entry.created_at, db)
+            detail = f" -- {sanitize_text(entry.detail)}" if entry.detail else ""
+            await session.write_line(f"  {when}: {sanitize_text(entry.action)}{detail}")
+
+    if target.pending_approval:
+        await session.write("\r\nApprove this account so it can log in? [y/N]: ")
+        answer = (await session.read_key()).lower()
+        await session.write_line("")
+        if answer == "y":
+            updated = approve_pending_user(db, target, approved_by=actor)
+            await session.write_line(f"{updated.username!r} approved.")
+
+
+# -- self-service registration settings (design doc round 76) -----------
+
+
+async def _registration_settings_screen(session: Session, db: Database, actor: User) -> None:
+    """
+    Toggles the node-wide `require_registration_approval` setting
+    (`netbbs.config`) and surfaces how many self-registered accounts are
+    currently waiting on it -- approving/rejecting any of them
+    individually still happens via `[L]ist users` -> a pending account's
+    own detail screen (`_show_user_detail`'s approve prompt), reusing
+    the existing user-management flow rather than building a second,
+    parallel pending-accounts queue UI.
+    """
+    current = get_require_registration_approval(db)
+    pending_count = sum(1 for u in list_users(db) if u.pending_approval)
+
+    header = colored("\r\nSelf-service registration:", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(header)
+    await session.write_line(
+        f"Require SysOp approval before new accounts can log in: {'ON' if current else 'off'}"
+    )
+    if pending_count:
+        await session.write_line(
+            colored(
+                f"{pending_count} account(s) awaiting approval -- see [L]ist users.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+
+    new_state = "off" if current else "ON"
+    await session.write(f"Turn approval requirement {new_state}? [y/N]: ")
+    answer = (await session.read_key()).lower()
+    await session.write_line("")
+    if answer != "y":
         return
-    await session.write_line(colored("Recent admin actions:", fg_color=MUTED_COLOR))
-    for entry in entries[-10:]:
-        when = format_for_display(entry.created_at, db)
-        detail = f" -- {sanitize_text(entry.detail)}" if entry.detail else ""
-        await session.write_line(f"  {when}: {sanitize_text(entry.action)}{detail}")
+
+    set_require_registration_approval(db, not current)
+    record_action(
+        db, actor=actor, action="set_registration_approval", detail=f"require_approval={not current}"
+    )
+    await session.write_line(
+        f"Approval requirement is now {'ON' if not current else 'off'}."
+    )
 
 
 # -- promote/demote, enable/disable ---------------------------------------

@@ -58,6 +58,23 @@ _T = TypeVar("_T")
 # "the top of the range" rather than just another elevated tier.
 SYSOP_LEVEL = 255
 
+# The reserved username self-service registration is triggered by
+# (design doc round 76) -- typed at Telnet/web's ordinary username
+# prompt, or connected as directly over SSH to trigger keyboard-
+# interactive registration (see netbbs.net.ssh._NetBBSSSHServer). Kept
+# here, not in netbbs.net.login_flow, so _validate_username can refuse
+# it as a real account name (below) without an import cycle -- this is
+# the one module every registration/login call site already imports.
+NEW_ACCOUNT_SENTINEL = "new"
+RESERVED_USERNAMES = {NEW_ACCOUNT_SENTINEL}
+
+# Self-service registration's own minimum, deliberately stricter than
+# admin-created accounts (netbbs.net.admin_flow._prompt_optional_password
+# enforces no minimum at all) -- a SysOp vetting each account by hand is
+# a different trust boundary than anyone on the network choosing their
+# own password, so the extra floor only applies to the self-service path.
+MIN_REGISTRATION_PASSWORD_LENGTH = 8
+
 
 class AuthError(Exception):
     """
@@ -100,6 +117,11 @@ class User:
     # unmodified. NULL/None = not disabled (design doc -- SysOp
     # foundation round).
     disabled_at: str | None = None
+    # True while a self-registered account is still awaiting SysOp
+    # approval (design doc round 76) -- always False for accounts
+    # created via the admin screen/CLI, and for every account that
+    # existed before this column was added (migration default 0).
+    pending_approval: bool = False
 
 
 def _password_work_semaphore() -> asyncio.Semaphore:
@@ -147,6 +169,7 @@ def create_user(
     password: str | None = None,
     verify_key: nacl.signing.VerifyKey | None = None,
     user_level: int = 0,
+    pending_approval: bool = False,
 ) -> User:
     """
     Register a new local user account synchronously.
@@ -155,6 +178,13 @@ def create_user(
     must use `create_user_async`, which performs the expensive password hash in
     the bounded worker path before returning to the event-loop thread for all
     SQLite work.
+
+    `pending_approval` (design doc round 76) is set by self-service
+    registration (`netbbs.net.login_flow._register_new_account`,
+    `netbbs.net.ssh._NetBBSSSHServer`) when the node-wide
+    `require_registration_approval` setting is on -- always `False` for
+    every other caller (the admin screen, the standalone CLI, dev
+    bootstrap scripts), which is exactly the default.
     """
     if password is None and verify_key is None:
         raise AuthError("a new account needs a password, a keypair, or both")
@@ -166,6 +196,7 @@ def create_user(
         password_hash=password_hash,
         verify_key=verify_key,
         user_level=user_level,
+        pending_approval=pending_approval,
     )
 
 
@@ -176,8 +207,10 @@ async def create_user_async(
     password: str | None = None,
     verify_key: nacl.signing.VerifyKey | None = None,
     user_level: int = 0,
+    pending_approval: bool = False,
 ) -> User:
-    """Async account creation with bounded off-loop Argon2 hashing."""
+    """Async account creation with bounded off-loop Argon2 hashing. See
+    `create_user`'s docstring for `pending_approval`."""
     if password is None and verify_key is None:
         raise AuthError("a new account needs a password, a keypair, or both")
 
@@ -192,6 +225,7 @@ async def create_user_async(
         password_hash=password_hash,
         verify_key=verify_key,
         user_level=user_level,
+        pending_approval=pending_approval,
     )
 
 
@@ -223,6 +257,12 @@ def _validate_username(username: str) -> None:
         )
     if len(username) > _MAX_USERNAME_LENGTH:
         raise AuthError(f"username too long: max {_MAX_USERNAME_LENGTH} characters, got {len(username)}")
+    # Case-insensitive, matching the NOCASE uniqueness index below --
+    # "New" must be refused exactly as "new" is, or self-service
+    # registration's sentinel (design doc round 76) could be shadowed by
+    # a real account a case away from the trigger word.
+    if username.lower() in RESERVED_USERNAMES:
+        raise AuthError(f"{username!r} is a reserved username and cannot be registered")
 
 
 def _create_user_with_password_hash(
@@ -232,6 +272,7 @@ def _create_user_with_password_hash(
     password_hash: str | None,
     verify_key: nacl.signing.VerifyKey | None,
     user_level: int,
+    pending_approval: bool = False,
 ) -> User:
     """Persist an account after any expensive password hashing is complete."""
     _validate_username(username)
@@ -248,10 +289,10 @@ def _create_user_with_password_hash(
         db.connection.execute(
             """
             INSERT INTO users
-                (username, password_hash, public_key, fingerprint, user_level, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (username, password_hash, public_key, fingerprint, user_level, created_at, pending_approval)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (username, password_hash, public_key_b64, fingerprint, user_level, created_at),
+            (username, password_hash, public_key_b64, fingerprint, user_level, created_at, int(pending_approval)),
         )
         db.connection.commit()
     except sqlite3.IntegrityError as exc:
@@ -341,10 +382,15 @@ def _finish_password_login(
 ) -> User:
     if row is None or row["password_hash"] is None or not password_matches:
         raise AuthError("login failed")
-    # Same generic failure a wrong password produces -- a disabled
-    # account shouldn't be distinguishable from a wrong credential (see
-    # AuthError's own anti-enumeration docstring).
-    if row["disabled_at"] is not None:
+    # Same generic failure a wrong password produces -- a disabled or
+    # still-pending-approval account shouldn't be distinguishable from a
+    # wrong credential (see AuthError's own anti-enumeration docstring).
+    # The one place a freshly self-registered account *does* get told
+    # explicitly that it's pending is the registration flow itself,
+    # right after creating it (netbbs.net.login_flow._register_new_
+    # account) -- safe there because the caller has just proven the
+    # account is theirs by creating it, unlike a login attempt here.
+    if row["disabled_at"] is not None or row["pending_approval"]:
         raise AuthError("login failed")
     return _touch_last_login(db, row)
 
@@ -392,7 +438,7 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     if not verify_signature(stored_key, challenge, signature):
         raise AuthError("login failed")
 
-    if row["disabled_at"] is not None:
+    if row["disabled_at"] is not None or row["pending_approval"]:
         raise AuthError("login failed")
 
     return _touch_last_login(db, row)
@@ -427,7 +473,7 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     if stored_key != bytes(verify_key):
         raise AuthError("login failed")
 
-    if row["disabled_at"] is not None:
+    if row["disabled_at"] is not None or row["pending_approval"]:
         raise AuthError("login failed")
 
     return _touch_last_login(db, row)
@@ -457,6 +503,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         created_at=row["created_at"],
         last_login_at=row["last_login_at"],
         disabled_at=row["disabled_at"],
+        pending_approval=bool(row["pending_approval"]),
     )
 
 
@@ -529,6 +576,26 @@ def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by:
     db.connection.execute("UPDATE users SET disabled_at = ? WHERE id = ?", (new_value, target.id))
     db.connection.commit()
     record_action(db, actor=changed_by, action="disable" if disabled else "enable", target_user_id=target.id)
+    return _get_user_by_id(db, target.id)
+
+
+def approve_pending_user(db: Database, target: User, *, approved_by: User) -> User:
+    """
+    Clear a self-registered account's pending-approval gate (design doc
+    round 76), letting it log in -- the SysOp-side counterpart to
+    `require_registration_approval` (`netbbs.config`) being turned on.
+    A no-op returning `target` unchanged if it isn't actually pending
+    (e.g. a double-click on the approve action), mirroring
+    `set_user_level`'s own no-op-if-unchanged shape rather than logging
+    a meaningless audit row.
+    """
+    from netbbs.moderation.log import record_action
+
+    if not target.pending_approval:
+        return target
+    db.connection.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (target.id,))
+    db.connection.commit()
+    record_action(db, actor=approved_by, action="approve_registration", target_user_id=target.id)
     return _get_user_by_id(db, target.id)
 
 

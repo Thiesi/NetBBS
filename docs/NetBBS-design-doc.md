@@ -3221,3 +3221,165 @@ before starting; see its own worklog entry once done), then
 self-service registration, ASAP. Items 1–2 above sit at the very end
 of the list, after everything else, including registration.
 
+## Sign-off notes, round 76 (self-service registration: design decisions)
+
+Implements round 75 item 3 (the identified self-registration gap) —
+Telnet, web, and SSH all gain a way for a new, unauthenticated
+connection to create its own account. Confirmed directly with Thiesi
+before implementing: SSH support is required (not optional/deferred),
+and whether a newly created account needs SysOp approval before it can
+log in is a system-wide SysOp setting, defaulting to off (instant
+activation), toggleable on for a stricter/private node. This note
+records the design decisions made while implementing that; the
+implementation narrative itself (files touched, tests written, final
+suite count) lives in the worklog per this project's usual split.
+
+**1. One reserved sentinel username (`new`) across all three
+transports, not a separate command/menu option.** Telnet/web: typing
+`new` at the ordinary `_login` username prompt (instead of a real
+username) enters registration. SSH has no username prompt to hook —
+its identity is proven during the protocol-level handshake itself —
+so it reuses the exact same sentinel as the username the SSH client
+connects with (`ssh new@host`), triggering a keyboard-interactive
+(kbdint) exchange instead. One discoverable answer to "how do I sign
+up" regardless of which transport a person reaches the node through,
+rather than three different answers. `new` is rejected as a real,
+registerable account name at the single username-grammar choke point
+(`netbbs.auth.users._validate_username`), case-insensitively (matching
+the existing `COLLATE NOCASE` uniqueness the rest of the username
+system already uses) — so it can never be shadowed by a real account
+and can't collide with the trigger.
+
+**2. SSH's mechanism: keyboard-interactive (kbdint) auth, verified
+against the actually-installed `asyncssh` package before committing to
+the design, not assumed from memory.** `asyncssh.SSHServer` exposes
+`kbdint_auth_supported()`/`get_kbdint_challenge()`/
+`validate_kbdint_response()` — a genuine, standard SSH protocol
+feature (RFC 4256; commonly used for OTP/2FA in real deployments), not
+a workaround. It allows a multi-round, server-driven prompt sequence
+(desired username, then password, then confirm password) entirely
+within the SSH *authentication* phase, before any shell/session
+exists. **Inherent SSH constraint, confirmed against the real
+library, not a limitation of this implementation:** the "authenticated
+identity" for an SSH connection is fixed to whatever username the
+whole auth attempt used
+(`SSHSession.__init__`'s `authenticated_username`, sourced from
+asyncssh's own `get_extra_info("username")`) — so a connection that
+authenticated *as* `new` cannot seamlessly become the freshly created
+account within that same connection. Registration over SSH therefore
+always ends by deliberately *failing* the auth attempt (after showing
+a final "account created, reconnect as X" message) rather than
+succeeding into a session — the client must reconnect using the new
+username. This is presented to the user as an inherent property of the
+SSH protocol, not a shortcoming of this feature.
+
+A second, non-obvious SSH-specific fix, found only by actually running
+a real `asyncssh` client/server pair against each other rather than
+reasoning about the protocol in the abstract: asyncssh's client-side
+auth loop re-offers a still-`kbdint_auth_supported()`-advertised method
+again after every failed round, since nothing about that method's
+availability changes between attempts by default — a client configured
+to offer keyboard-interactive only (no password/public key, as a
+registration-only connection naturally is) would otherwise retry the
+entire username/password/confirm exchange forever within one
+connection once the first attempt's deliberate final failure came
+back, rather than cleanly disconnecting. Fixed by capping registration
+to exactly one kbdint challenge per connection
+(`_NetBBSSSHServer._registration_attempted`, consulted by both
+`kbdint_auth_supported` and `get_kbdint_challenge`) — set the first
+time *any* kbdint challenge is requested on a connection, regardless of
+which username triggered it or whether it was ultimately the reserved
+sentinel, so the same fix also protects an ordinary account's own
+(normally password/pubkey) connection from the identical retry loop if
+a client ever restricted itself to kbdint only against it.
+
+Which auth methods a connecting client actually tries, and in what
+order, is the client's own choice — kbdint is simply *offered*
+alongside password/public-key whenever the connecting username is
+`new`. Most OpenSSH clients try keyboard-interactive before password by
+default, so `ssh new@host` reaches this flow with no extra flags; a
+client explicitly configured to skip kbdint (e.g. `-o
+PreferredAuthentications=password`) instead just sees an ordinary
+failed login for that reserved name. Documented as a known,
+client-negotiation-dependent caveat, not something the server side can
+force — same "flagged, not blocking further work" treatment this
+project already gives other real-client-behavior unknowns (see the
+Phase 2 completion notes on unverified third-party SSH/Zmodem/browser
+interop).
+
+**3. `pending_approval`: a dedicated new `users` column, not a reuse of
+`disabled_at`/`set_user_disabled`.** Considered reusing the existing
+SysOp soft-disable mechanism (`disabled_at`) for "awaiting approval"
+too, since both ultimately gate login the same way. Rejected:
+`set_user_disabled` requires a `changed_by: User` actor and records a
+moderation-log row with "who disabled this and why" semantics that
+don't fit a system-generated "brand new, no human has looked at this
+yet" state — there is no actor at account-creation time. Just as
+importantly, a SysOp scanning the user-management screen needs to
+tell "awaiting my first review" apart from "banned troublemaker" at a
+glance; collapsing both into one `disabled_at` timestamp would erase
+that distinction. A plain `ALTER TABLE ADD COLUMN` (not the
+table-rebuild pattern several earlier migrations used), matching round
+46's `posts.root_post_id` precedent — `users` is itself a live parent
+of many other tables' foreign keys, and SQLite's `DROP TABLE`
+(the rebuild pattern's first step) applies its own cascade/SET-NULL
+side effects to every row still referencing the table regardless of
+that row's own `ON DELETE` clause, a hazard already documented and
+deliberately avoided the same way there.
+
+**4. Approval policy: a `netbbs.config` node-wide toggle
+(`require_registration_approval`), default off.** Directly per
+Thiesi's own instruction — instant activation is the common case for a
+small, low-risk community node; the stricter behavior is an explicit
+opt-in for an operator running a private/invite-adjacent node. Same
+shape as every other node-wide setting already in `netbbs.config`
+(expiry grace period, max upload size, invitation expiry) — a single
+key-value row, not a new mechanism.
+
+**5. Self-registration is password-only, never keypair, on every
+transport.** Telnet/web already had this limitation for ordinary login
+(`_login`'s own docstring: a plain client has no way to sign a
+challenge), so registration doesn't introduce anything new there. SSH
+public-key auth proves possession of a private key as part of the SSH
+protocol itself — but a client connecting *as* `new` to register is,
+by definition, not yet authenticating as any real account, so there's
+no natural place in the kbdint exchange to also capture and register a
+public key without meaningfully complicating the flow for a benefit
+nothing has asked for. An account can still gain a public key later,
+added by a SysOp through the existing admin screen. Kept explicitly
+minimal rather than speculatively supporting a keypair-registration
+path no one requested.
+
+**6. Registration attempts reuse the existing `LoginThrottle`
+directly, not a new mechanism.** Telnet/web: `_register_new_account`
+calls the same node-wide `LoginThrottle.allow_attempt`, keyed by the
+*desired* username instead of an authenticating one, before the
+expensive `create_user_async` (Argon2 hash) work runs — identical
+reasoning to why `_login` checks it before
+`authenticate_password_async`. SSH's kbdint flow does the same via
+`_NetBBSSSHServer`'s own already-shared `throttle` reference. This is
+literally the same `LoginThrottle` instance every login attempt on the
+node already shares (one per node, constructed in `netbbs.__main__`),
+not a second parallel budget — registration traffic is exactly the
+kind of authentication-adjacent, hash-triggering load issue #3's
+throttle already exists to bound.
+
+**7. A failed/cancelled registration consumes one of `_login`'s
+per-connection `max_attempts`, on Telnet/web.** Considered and
+rejected a separate registration-attempt counter threaded through
+`_login`'s return type — simpler to let `_register_new_account`
+returning `None` just `continue` the existing attempt loop, the same
+outcome a failed password attempt already produces. Deliberately not
+over-engineered for a case with no reported real-world pressure yet.
+
+**Left as explicitly out of scope for this round:** self-registered
+accounts are always created at `user_level=0` (the existing
+`create_user`/`create_user_async` default) — there is no path for
+self-registration to request or receive an elevated level; that
+remains exclusively a SysOp action via the admin screen, unchanged.
+Approving a pending account (`netbbs.auth.users.approve_pending_user`)
+reuses the existing `[L]ist users` → user-detail screen rather than a
+second, parallel pending-accounts queue UI, matching how pending
+posts/files are already reviewed through their own existing
+board/area-detail screens rather than a dedicated inbox.
+

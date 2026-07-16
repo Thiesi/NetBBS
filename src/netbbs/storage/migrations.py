@@ -998,4 +998,30 @@ MIGRATIONS = [
             ON posts(root_post_id, board_id, status, created_at);
         """,
     ),
+    Migration(
+        description=(
+            "Self-service registration + node-wide approval gate (design "
+            "doc round 76): users.pending_approval marks an account "
+            "created via self-service Telnet/SSH/web registration as not "
+            "yet allowed to log in, when the node-wide "
+            "'require_registration_approval' SysOp setting (netbbs.config) "
+            "is turned on -- default off, instant activation. A dedicated "
+            "column rather than reusing disabled_at/set_user_disabled: "
+            "that mechanism's changed_by/moderation-log semantics assume "
+            "a human SysOp actively disabled an existing account for a "
+            "reason worth recording, which doesn't fit a system-generated "
+            "'brand new, awaiting first review' state with no actor yet -- "
+            "and a SysOp reviewing the user list needs to tell 'awaiting "
+            "approval' apart from 'disabled/banned' at a glance, not see "
+            "them collapsed into one status. Plain ADD COLUMN, not a "
+            "table rebuild -- same reasoning as round 46's "
+            "posts.root_post_id migration (users is itself a live parent "
+            "of many other tables' foreign keys, and SQLite's DROP TABLE "
+            "cascade side effect during a rebuild is exactly what that "
+            "round's migration comment already warns against)."
+        ),
+        sql="""
+        ALTER TABLE users ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]

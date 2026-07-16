@@ -22,11 +22,14 @@ from enum import Enum, auto
 from pathlib import Path
 
 from netbbs.auth.users import (
+    MIN_REGISTRATION_PASSWORD_LENGTH,
+    NEW_ACCOUNT_SENTINEL,
     SYSOP_LEVEL,
     AuthError,
     User,
     account_still_active,
     authenticate_password_async,
+    create_user_async,
     get_user_by_username,
     list_users,
 )
@@ -49,6 +52,7 @@ from netbbs.chat import (
     format_with_preference,
     list_pending_invitations_for_user,
 )
+from netbbs.config import get_require_registration_approval
 from netbbs.directory import (
     MAX_BIO_BYTES,
     MAX_BIO_LINES,
@@ -782,11 +786,17 @@ async def _login(
     """
     for attempt in range(max_attempts):
         try:
-            await session.write("\r\nUsername: ")
+            await session.write("\r\nUsername (or 'new' to create an account): ")
             username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
         except asyncio.TimeoutError:
             return LoginOutcome.IDLE_TIMEOUT
         if not username:
+            continue
+
+        if username.lower() == NEW_ACCOUNT_SENTINEL:
+            new_user = await _register_new_account(session, db, throttle, idle_timeout=idle_timeout)
+            if new_user is not None:
+                return new_user
             continue
 
         try:
@@ -830,6 +840,95 @@ async def _login(
         return user
 
     return LoginOutcome.ATTEMPTS_EXHAUSTED
+
+
+async def _register_new_account(
+    session: Session, db: Database, throttle: LoginThrottle, *, idle_timeout: float
+) -> User | None:
+    """
+    Self-service account registration (design doc round 76), entered by
+    typing the reserved username `new` (`netbbs.auth.users.
+    NEW_ACCOUNT_SENTINEL`) at `_login`'s ordinary username prompt -- the
+    same sentinel SSH's keyboard-interactive registration
+    (`netbbs.net.ssh._NetBBSSSHServer`) triggers, so every transport
+    shares one discoverable "how do I sign up" answer.
+
+    Returns the freshly created `User` only when the account can log in
+    immediately (the node-wide `require_registration_approval` setting
+    is off); `None` for every other outcome -- cancelled, a validation
+    failure, throttled, or created-but-pending-approval. `_login`
+    treats `None` as "go back to the username prompt", consuming one of
+    the connection's `max_attempts` the same way a failed login would.
+    That's a deliberate simplification rather than plumbing a separate
+    registration-attempt budget through `_login`'s return type -- a
+    failed/cancelled registration attempt is throttled the same way a
+    failed login attempt already is (both per-connection here, and
+    cross-connection via `throttle` below).
+
+    Password-only, like `_login` itself -- a plain Telnet/web client has
+    the same "no way to sign a keypair challenge" limitation `_login`'s
+    own docstring already explains, so self-registration never offers a
+    keypair option here (an account can still gain one later via the
+    admin screen, if a SysOp adds it by hand).
+    """
+    await session.write_line(
+        colored(
+            "\r\nCreating a new account. Press Enter with a blank username to cancel.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    try:
+        await session.write("Desired username: ")
+        username = (await asyncio.wait_for(session.read_line(), timeout=idle_timeout)).strip()
+        if not username:
+            return None
+
+        await session.write(f"Password (min {MIN_REGISTRATION_PASSWORD_LENGTH} characters): ")
+        password = await asyncio.wait_for(session.read_line(echo=False), timeout=idle_timeout)
+        await session.write("Confirm password: ")
+        confirm = await asyncio.wait_for(session.read_line(echo=False), timeout=idle_timeout)
+    except asyncio.TimeoutError:
+        return None
+
+    if len(password) < MIN_REGISTRATION_PASSWORD_LENGTH:
+        await session.write_line(
+            colored(
+                f"Password must be at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return None
+    if password != confirm:
+        await session.write_line(colored("Passwords did not match.", fg_color=MUTED_COLOR))
+        return None
+
+    # Same node-wide budget _login's own password attempts consume
+    # (issue #3) -- keyed by the *desired* username rather than an
+    # authenticating one, but the same per-source/per-username/global
+    # token buckets, checked before the expensive Argon2 hash below runs
+    # (create_user_async), for the identical reason _login checks it
+    # before authenticate_password_async.
+    if not throttle.allow_attempt(source=session.peer_address, username=username):
+        await session.write_line(
+            colored("Too many registration attempts. Please try again later.", fg_color=MUTED_COLOR)
+        )
+        return None
+
+    require_approval = get_require_registration_approval(db)
+    try:
+        new_user = await create_user_async(db, username, password=password, pending_approval=require_approval)
+    except AuthError as exc:
+        await session.write_line(colored(f"Could not create account: {exc}", fg_color=MUTED_COLOR))
+        return None
+
+    if require_approval:
+        await session.write_line(
+            f"Account {new_user.username!r} created. A SysOp must approve it before you can log in."
+        )
+        return None
+
+    await session.write_line(f"Account {new_user.username!r} created.")
+    return new_user
 
 
 async def _browse_boards(session: Session, db: Database, user: User) -> None:

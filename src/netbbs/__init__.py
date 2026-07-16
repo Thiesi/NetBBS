@@ -1,3 +1,3 @@
 """NetBBS — a modern, TCP/IP-native BBS with an ad-hoc mesh network."""
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"

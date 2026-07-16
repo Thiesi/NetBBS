@@ -954,3 +954,72 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, sysop):
     _run(session, db, sysop)
     assert "No changes saved" in _written_text(session)
     assert banner_path(db).read_bytes() == b"ORIGINAL"
+
+
+# -- self-service registration (design doc round 76) -----------------------
+
+
+def test_list_users_shows_pending_approval_status(db, sysop):
+    from netbbs.auth.users import create_user
+
+    create_user(db, "carol", password="hunter2pw", pending_approval=True)
+    # carol sorts before sysop alphabetically -- item 01.
+    session = FakeSession(["l", "0", "1", "n", "b"])
+    _run(session, db, sysop)
+    assert "pending approval" in _written_text(session)
+
+
+def test_approving_a_pending_user_clears_the_gate(db, sysop):
+    from netbbs.auth.users import create_user, list_users
+
+    create_user(db, "carol", password="hunter2pw", pending_approval=True)
+    session = FakeSession(["l", "0", "1", "y", "b"])
+    _run(session, db, sysop)
+    updated = next(u for u in list_users(db) if u.username == "carol")
+    assert updated.pending_approval is False
+    assert "approved" in _written_text(session)
+
+
+def test_declining_the_approve_prompt_leaves_it_pending(db, sysop):
+    from netbbs.auth.users import create_user, list_users
+
+    create_user(db, "carol", password="hunter2pw", pending_approval=True)
+    session = FakeSession(["l", "0", "1", "n", "b"])
+    _run(session, db, sysop)
+    updated = next(u for u in list_users(db) if u.username == "carol")
+    assert updated.pending_approval is True
+
+
+def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, sysop):
+    # sysop themselves is the sole (non-pending) user -- picking their
+    # own entry must not prompt for approval at all.
+    session = FakeSession(["l", "0", "1", "b"])
+    _run(session, db, sysop)
+    assert "Approve this account" not in _written_text(session)
+
+
+def test_registration_settings_screen_toggles_require_approval(db, sysop):
+    from netbbs.config import get_require_registration_approval
+
+    assert get_require_registration_approval(db) is False
+    session = FakeSession(["r", "y", "b"])
+    _run(session, db, sysop)
+    assert get_require_registration_approval(db) is True
+    assert "ON" in _written_text(session)
+
+
+def test_registration_settings_screen_declining_leaves_setting_unchanged(db, sysop):
+    from netbbs.config import get_require_registration_approval
+
+    session = FakeSession(["r", "n", "b"])
+    _run(session, db, sysop)
+    assert get_require_registration_approval(db) is False
+
+
+def test_registration_settings_screen_shows_pending_count(db, sysop):
+    from netbbs.auth.users import create_user
+
+    create_user(db, "carol", password="hunter2pw", pending_approval=True)
+    session = FakeSession(["r", "n", "b"])
+    _run(session, db, sysop)
+    assert "1 account(s) awaiting approval" in _written_text(session)

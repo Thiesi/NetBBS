@@ -39,7 +39,15 @@ from typing import Awaitable, Callable
 import asyncssh
 import nacl.signing
 
-from netbbs.auth.users import AuthError, authenticate_password_async, authorize_public_key
+from netbbs.auth.users import (
+    MIN_REGISTRATION_PASSWORD_LENGTH,
+    NEW_ACCOUNT_SENTINEL,
+    AuthError,
+    authenticate_password_async,
+    authorize_public_key,
+    create_user_async,
+)
+from netbbs.config import get_require_registration_approval
 from netbbs.net import char_input
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 from netbbs.net.throttle import LoginThrottle
@@ -207,6 +215,24 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._db = db
         self._throttle = throttle
         self._peer_address: str | None = None
+        # Multi-round keyboard-interactive registration state (design
+        # doc round 76) -- see get_kbdint_challenge/validate_kbdint_
+        # response below. None whenever no registration attempt (a kbdint
+        # auth try against the reserved NEW_ACCOUNT_SENTINEL username) is
+        # currently in progress on this connection.
+        self._registration_step: str | None = None
+        self._registration_username: str = ""
+        self._registration_password: str = ""
+        # Caps registration to exactly one attempt per connection (see
+        # get_kbdint_challenge below). Without this, asyncssh's client-
+        # side auth loop re-offers keyboard-interactive again after
+        # every failed round -- kbdint_auth_supported/get_kbdint_
+        # challenge are stateless from asyncssh's own point of view, so
+        # nothing else stops a client from immediately retrying the
+        # whole username/password/confirm exchange in a loop within the
+        # same connection, defeating the "one attempt, then reconnect"
+        # design this class's own docstring above describes.
+        self._registration_attempted = False
 
     def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
         peer = conn.get_extra_info("peername")
@@ -252,6 +278,152 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         except AuthError:
             return False
         return True
+
+    # -- self-service registration via keyboard-interactive auth
+    # (design doc round 76) --------------------------------------------
+    #
+    # SSH has no notion of "create an account, then continue as it" --
+    # the authenticated identity for a connection is fixed to whatever
+    # username the whole auth attempt used (asyncssh records it once,
+    # at the moment validate_password/validate_public_key/this succeeds
+    # -- see SSHSession.authenticated_username's docstring), and a
+    # registration exchange happens *during* auth, before any of those
+    # succeed. So registration here always ends by *failing* the auth
+    # attempt on purpose, after showing a final message -- the client
+    # must reconnect using the new username to actually log in. This is
+    # an inherent SSH protocol property, not a workaround limitation
+    # (see the design doc round 76 sign-off note for the full reasoning,
+    # and netbbs.net.login_flow._register_new_account for Telnet/web's
+    # equivalent, which *can* hand the connection straight into a live
+    # session since it has no such constraint).
+    #
+    # Only ever engages for the reserved NEW_ACCOUNT_SENTINEL username
+    # (get_kbdint_challenge returns False for anything else, meaning
+    # kbdint simply isn't offered for that attempt) -- never conditioned
+    # on whether some *other* specific username exists, so this can't
+    # become a new username-enumeration oracle the way validate_password/
+    # validate_public_key's existing anti-enumeration discipline already
+    # guards against (see netbbs.auth.users.AuthError's docstring).
+    #
+    # Which auth methods a client actually tries, and in what order, is
+    # the *client's* choice, not something this server controls --
+    # kbdint is simply offered alongside password/public-key whenever
+    # NEW_ACCOUNT_SENTINEL is the connecting username. Most OpenSSH
+    # clients try keyboard-interactive before password by default, so
+    # `ssh new@host` reaches this flow with no extra flags; a client
+    # configured to skip kbdint (e.g. `-o PreferredAuthentications=
+    # password`) instead just sees an ordinary failed login for that
+    # reserved name -- documented, not fixable from the server side.
+
+    def kbdint_auth_supported(self) -> bool:
+        # False once a registration attempt has already run on this
+        # connection (see _registration_attempted's own comment) --
+        # asyncssh's server re-consults this every time it rebuilds the
+        # list of auth methods a client may still continue with (e.g.
+        # after each failed attempt), so this is what actually stops
+        # the client from being offered keyboard-interactive again and
+        # retrying the whole exchange in a loop. get_kbdint_challenge's
+        # own matching check is a second, redundant guard for the same
+        # invariant, not the only one -- a client could otherwise still
+        # send a fresh MSG_USERAUTH_REQUEST for kbdint directly (Method
+        # availability and per-request handling are separate asyncssh
+        # hooks; both need to agree).
+        return not self._registration_attempted
+
+    async def get_kbdint_challenge(
+        self, username: str, lang: str, submethods: str
+    ) -> bool | tuple[str, str, str, list[tuple[str, bool]]]:
+        if self._registration_attempted:
+            return False
+        # Set unconditionally, even for a non-sentinel username that's
+        # about to be refused below -- without this, a client stuck
+        # offering only keyboard-interactive (no password/public key)
+        # would see kbdint_auth_supported keep advertising the method
+        # after every refusal and simply resend the same request
+        # forever, since nothing else here changes between attempts.
+        # One kbdint challenge per connection, successful or not, is
+        # the actual invariant this whole class enforces.
+        self._registration_attempted = True
+        if username.strip().lower() != NEW_ACCOUNT_SENTINEL:
+            return False
+        self._registration_step = "username"
+        return (
+            "NetBBS Registration",
+            "Create a new NetBBS account. This SSH connection ends after "
+            "registration -- reconnect with your new username to log in.",
+            "",
+            [("Desired username: ", True)],
+        )
+
+    async def validate_kbdint_response(
+        self, username: str, responses: list[str]
+    ) -> bool | tuple[str, str, str, list[tuple[str, bool]]]:
+        step = self._registration_step
+        if step == "username":
+            candidate = responses[0].strip()
+            if not candidate:
+                return await self._finish_registration("Cancelled: no username given.")
+            self._registration_username = candidate
+            self._registration_step = "password"
+            return (
+                "", "", "",
+                [(f"Password (min {MIN_REGISTRATION_PASSWORD_LENGTH} characters): ", False)],
+            )
+        if step == "password":
+            self._registration_password = responses[0]
+            self._registration_step = "confirm"
+            return ("", "", "", [("Confirm password: ", False)])
+        if step == "confirm":
+            return await self._complete_registration(responses[0])
+        # step in (None, "done"): no registration in progress, or the
+        # message-only round from _finish_registration already ran --
+        # either way, fail the auth attempt outright.
+        return False
+
+    async def _complete_registration(
+        self, confirm: str
+    ) -> bool | tuple[str, str, str, list[tuple[str, bool]]]:
+        username = self._registration_username
+        password = self._registration_password
+        self._registration_step = None
+
+        if len(password) < MIN_REGISTRATION_PASSWORD_LENGTH:
+            return await self._finish_registration(
+                f"Password must be at least {MIN_REGISTRATION_PASSWORD_LENGTH} characters. "
+                "Reconnect to try again."
+            )
+        if password != confirm:
+            return await self._finish_registration("Passwords did not match. Reconnect to try again.")
+        if self._throttle is not None and not self._throttle.allow_attempt(
+            source=self._peer_address, username=username
+        ):
+            return await self._finish_registration(
+                "Too many registration attempts. Please try again later."
+            )
+
+        require_approval = get_require_registration_approval(self._db)
+        try:
+            await create_user_async(self._db, username, password=password, pending_approval=require_approval)
+        except AuthError as exc:
+            return await self._finish_registration(f"Could not create account: {exc}")
+
+        if require_approval:
+            return await self._finish_registration(
+                f"Account {username!r} created. A SysOp must approve it before you can log "
+                "in. Reconnect once approved."
+            )
+        return await self._finish_registration(f"Account {username!r} created. Reconnect as {username!r} to log in.")
+
+    async def _finish_registration(self, message: str) -> tuple[str, str, str, list[tuple[str, bool]]]:
+        """
+        A message-only kbdint round (empty prompt list) -- asyncssh
+        displays `message` to the client, then calls
+        `validate_kbdint_response` once more with empty responses to
+        continue (see this class's own docstring block above on why
+        that next call must fail the attempt rather than succeed).
+        """
+        self._registration_step = "done"
+        return ("", message, "", [])
 
 
 SessionHandler = Callable[[Session], Awaitable[None]]
