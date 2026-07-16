@@ -617,6 +617,87 @@ New nodes bootstrap onto NetBBS Link via a **fixed/hardcoded seed node list**
 at the bootstrap stage only; once connected, a node operates as a full
 peer).
 
+### WAN reachability, NAT, and seed trust boundaries (round 95 — resolves issue #58)
+
+**Two deployment modes**, matching what's actually achievable for the
+declared audience (§14: hobbyist/residential self-hosters, not
+datacenter operators): **full peers** (stable address+port, accept
+inbound connections) and **outgoing-only nodes** (never accept inbound —
+the common NAT/residential case — only ever connect out).
+
+- **Endpoint advertisement**: every node signs and periodically
+  re-advertises its own reachability — a list of (protocol, address,
+  port) tuples for a full peer, or an explicit "outgoing-only" marker —
+  self-authenticated by its own key (§5), so nothing else needs to vouch
+  for it. Multiple simultaneous addresses (including IPv4/IPv6) are
+  supported; peers try them in order.
+- **Seed compromise cannot impersonate peers** — not a new mechanism,
+  just a property already true by construction: identity is keypair-
+  based and independent of network location, so a malicious seed can lie
+  about *where* to find a node, but connecting to the wrong address just
+  fails the handshake (an impostor can't produce the real signing key).
+- **Seed introduction does not imply trust.** A seed only ever supplies
+  reachability information; it grants no trust/reputation standing under
+  §6, regardless of how a peer was discovered.
+- **Multiple independent seeds, operator-overridable.** Once connected, a
+  node learns and remembers further peers directly via signed peer-list
+  exchange, so it isn't perpetually dependent on the seed list — the
+  resilience path when every configured seed is unavailable.
+- **Duplicate simultaneous connections** (both sides dial each other at
+  once): resolved by a deterministic tiebreak comparing fingerprints —
+  the lower one stays the dialer, the other accepts inbound and drops its
+  own outbound attempt.
+
+**Automatic relay selection for outgoing-only nodes (round 95).** A
+sender can never dial an outgoing-only recipient directly, which round
+93 explicitly left for this section to resolve. Rather than requiring
+any manual configuration, an outgoing-only node selects its own relays
+automatically, reusing mechanisms this document already has rather than
+inventing new ones:
+
+- **Reliability scoring reuses §6's existing local-reputation
+  mechanism, not a new metric.** An outgoing-only node is already dialing
+  its peers on a schedule; every attempt is a free direct-observation
+  sample of that peer's reliability. True hop-count/shortest-path
+  topology awareness was considered and rejected as disproportionate
+  complexity for this project's declared scale (§14) — "is this
+  candidate a reachable full peer, and how reliable have I personally
+  found it" is a cheap, sufficient proxy. Second-hand reliability claims
+  learned via peer-list exchange are treated as a weak prior worth
+  *trying*, not trusting outright, matching §6's own "direct observation
+  first, relayed signals second" shape — a new node has no trusted peers
+  yet to weight relayed signals from, so it leans on direct observation,
+  which it starts accumulating immediately upon joining.
+- **Selection and consent**: a node picks a small redundant set (3) of
+  candidate relays — reachable full peers, ranked by observed
+  reliability — and requests relay consent from each, itself a signed
+  exchange over the existing transport. A candidate accepts or declines
+  per its own local relay-acceptance policy (below).
+- **Publication**: accepted relays are named in the requesting node's own
+  signed endpoint descriptor, so any sender resolving that address
+  automatically learns where to deliver — no sender-side configuration
+  either.
+- **Self-healing**: the same reliability-observation loop that selected a
+  relay keeps watching it; a relay whose reliability drops (including one
+  silently dropping traffic instead of relaying) is automatically
+  replaced and the descriptor republished. No human interaction required
+  after initial bootstrap, matching Thiesi's stated goal that a new
+  SysOp can bring a node online and have it eventually use every Link
+  feature unassisted.
+- **A relay only ever custodies opaque, already-encrypted envelopes**
+  (round 93's confidentiality tiers apply unchanged) — it can observe
+  who's talking to whom and roughly how much, never content. Stated
+  plainly as an honest limitation, not hidden.
+- **Relay-serving defaults to *on*, with a conservative resource cap
+  (bounded storage/bandwidth, bounded number of nodes relayed for at
+  once) and an easy opt-out — confirmed with Thiesi over defaulting
+  off.** An opt-in-only default would leave a young or small Link without
+  enough relays for outgoing-only nodes to reliably reach anyone,
+  defeating the zero-touch goal; a SysOp who doesn't want to spend any
+  resources on it can switch it off in node config, the same shape as
+  the existing ANSI welcome-banner toggle (round 63) — autonomy
+  preserved via opt-out, automation preserved via the default.
+
 ## 13. Permissions & Moderation
 
 Covers intra-node user/board/channel permissions — a distinct layer from
@@ -960,6 +1041,65 @@ the actual cost, not assumed cheap without checking:
 - Cheap to add a third+ lane later, using the exact same mechanism, if a
   specific hot path is ever shown to need it.
 
+### Operational model for a Phase 3 Link node (round 95 — resolves issue #60)
+
+Mostly consolidates precedent already set elsewhere in this document
+rather than inventing new ground.
+
+- **Backup ordering, made safe by construction**: always snapshot the
+  database — via SQLite's own online-backup API, not a raw file copy
+  against WAL — *before* copying the blob directory. That ordering can
+  only ever produce "blobs slightly ahead of what the DB references"
+  (harmless: an unreferenced extra file), never the reverse (a DB
+  pointing at a missing blob). The root identity key backup is already
+  folded into this same set, per round 89.
+- **Restoration is the same identity resuming, not migration** — it
+  recreates the same node from an earlier point in time, not a new one;
+  node/account migration (a *different* node taking over an identity)
+  remains #51's separately-tracked open question. The real operational
+  risk is running two instances of the same identity simultaneously
+  (old and restored); documented as an operator responsibility rather
+  than built-in detection for now — a cheap future addition would be
+  noticing Link traffic signed by your own key that you didn't send, as
+  a diagnostic signal, but nothing requires it yet.
+- **A concrete gap this round closes in round 82's self-update**: round
+  82 scoped its rollback-on-failed-start as "protocol-agnostic plumbing
+  only," before Phase 3 schema concerns existed. If an update bundles a
+  schema migration and then fails, rolling back to the old binary
+  without also rolling back the schema would leave code that can't read
+  its own database. **Fixed here**: self-update must snapshot the
+  database (this round's backup mechanism) *before* applying any
+  migration, so a failed upgrade restores binary and schema together —
+  not assumed already covered by round 82, which predates this.
+- **Quotas and retry/dead-letter share one generic abstraction**: a
+  single "outbound work item" shape (pending → retrying → delivered |
+  dead-lettered) covers gossip retries, round 93's Link-message
+  delivery, and round 95's own relay/reconnection attempts uniformly —
+  inspectable and manually replayable/cancelable by a SysOp, extending
+  existing admin tooling rather than a new subsystem. The same
+  reject-with-a-clear-signal-not-silent-drop principle already used for
+  round 93's mailbox quota applies consistently to peer/bandwidth/disk
+  quotas too.
+- **Crash recovery**: an explicit `PRAGMA integrity_check` gate at
+  startup, failing loudly — matching round 56's "refuses to start with
+  zero SysOps" precedent — rather than silently running against a
+  corrupt database.
+- **Graceful shutdown** extends round 51's SIGTERM/SIGINT precedent to
+  the background Link lane (round 91): stop accepting new work, let
+  in-flight operations finish up to a bounded timeout, then force-close
+  what remains.
+- **Log retention/privacy**: Link-specific operational logs (sync
+  attempts, peer/relay connection events) get their own bounded
+  retention policy, separate from `moderation_log`'s permanent audit
+  trail, since they're diagnostic rather than accountability records —
+  and log metadata only (peer fingerprint, event ID, outcome), never
+  message content, matching round 93's own minimum-metadata principle.
+- **Peer/relay health observability** extends existing SysOp admin
+  tooling (round 59's node admin menu) rather than introducing a new
+  surface: per-peer last-successful-sync time, backoff state, aggregate
+  queue depths from the work-item abstraction above, and blob-storage
+  growth trend.
+
 ## 15. Feature scope & phasing
 
 Thiesi has delegated release-scope decisions — all listed features are
@@ -1052,11 +1192,14 @@ tiers which don't actually depend on each other:**
   issue #59's harness expanded to cover at least 3 nodes, duplicate/
   reordered delivery, restart, partition, and convergence.
 - *Before deployment beyond a controlled local/private harness:*
-  WAN/NAT/seed trust boundaries (issue #58) **and** the operational
-  model — quotas, retry/dead-letter visibility, crash recovery, backup/
-  restore (issue #60). A prototype need not wait for every dashboard or
-  disaster-recovery detail, but an externally operated persistent Link
-  node should not precede these.
+  WAN/NAT/seed trust boundaries (issue #58 — design chosen round 95,
+  §12's new subsection, including automatic relay selection for
+  outgoing-only nodes) **and** the operational model — quotas,
+  retry/dead-letter visibility, crash recovery, backup/restore
+  (issue #60 — design chosen round 95, §14's new subsection).
+  Implementation of both still pending. A prototype need not wait for
+  every dashboard or disaster-recovery detail, but an externally
+  operated persistent Link node should not precede these.
 - *Feature-specific gates — settle before the specific Phase 3 feature
   they block, not before Phase 3 as a whole:* local async mail is a
   prerequisite before **Link messages** specifically (issue #52 — design
@@ -5837,4 +5980,68 @@ orphan/fork half that remained). What's still open is the actual
 implementation of both halves, and the general event-chain/transition-
 record mechanics remain #11's exact-wire-format territory, not
 duplicated here.
+
+## Sign-off notes, round 95 (WAN reachability/relay selection + operational model — resolves #58 and #60, the deployment-readiness gate)
+
+Seventh and eighth pieces of Phase 3 design work, closing out round 88's
+deployment-readiness gate. Full designs live in §12's new subsection
+(#58) and §14's new subsection (#60); this note records the reasoning
+and what was confirmed with Thiesi.
+
+**#58's central problem, prompted directly by Thiesi's question about
+automatic relay selection:** round 93 modeled Link messages as direct
+point-to-point delivery, but a sender can never dial an outgoing-only
+recipient — round 93 explicitly left "does a relay exist" for this
+round. The design that emerged reuses three mechanisms this document
+already has, rather than inventing a fourth:
+
+1. **§6's local reputation model, repurposed as a reliability score.**
+   An outgoing-only node is already dialing its peers on a schedule for
+   ordinary Link participation; every attempt is a free direct-
+   observation sample. True hop-count/topology-graph awareness was
+   considered and explicitly rejected — disproportionate complexity for
+   this project's declared scale (§14), a cheap reliability proxy does
+   the real job.
+2. **§12's own signed peer-list exchange and endpoint descriptors**,
+   extended so an outgoing-only node's descriptor names its accepted
+   relay(s) — making relay location automatically discoverable by any
+   sender resolving that address, no separate discovery mechanism
+   needed.
+3. **Round 93's opaque-envelope confidentiality tiers**, unchanged — a
+   relay only ever custodies ciphertext it can't read, bounding the
+   damage a bad-actor relay can do to traffic analysis (who's talking to
+   whom, roughly how much) rather than content exposure, stated
+   plainly as an honest limitation rather than hidden.
+
+The result is a fully automatic loop — select candidates, request
+consent, publish, and self-heal by replacing an underperforming relay
+using the same observation loop that chose it — matching Thiesi's
+stated goal: a new SysOp brings a node online and it eventually uses
+every Link feature without required human interaction, aside from the
+already-accepted seed-list bootstrap step.
+
+**Confirmed with Thiesi: relay-serving defaults to *on*, not opt-in**,
+with a conservative resource cap and an easy opt-out — same shape as the
+existing ANSI welcome-banner toggle (round 63). The alternative
+(opt-in-only) was rejected specifically because it would leave a young
+or small Link without enough relays for outgoing-only nodes to reliably
+reach anyone, defeating the zero-touch goal that motivated designing
+automatic selection in the first place. Autonomy is preserved via the
+opt-out; automation is preserved via the default.
+
+**#60 is mostly consolidation of precedent already set** (rounds 51, 56,
+59, 82, 89, 91, 93) rather than new ground, with one genuine gap closed:
+round 82's self-update rollback was scoped as "protocol-agnostic
+plumbing only," before Phase 3 schema concerns existed — if an update
+bundles a schema migration and then fails, rolling back the binary
+without also rolling back the schema would leave code unable to read its
+own database. Fixed by requiring self-update to snapshot the database
+(this round's backup mechanism, itself ordered DB-before-blobs so a
+partial backup can only ever be missing-a-blob, never
+referencing-a-missing-one) before applying any migration.
+
+**Both gates now closed.** What's still open on both issues is the
+actual implementation — this round is a design decision, not code,
+matching every Phase 3 round except 92 (the harness, which had no
+feature to defer building).
 
