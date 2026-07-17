@@ -21,6 +21,7 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -272,6 +273,22 @@ async def run(
 
     servers: list = []
     try:
+        # Design doc round 89/111: a node's Link identity (root key +
+        # signing/transport operational keys) auto-generates silently on
+        # first-ever startup and just loads on every one after that -- no
+        # separate "init" step. Nothing downstream actually consumes
+        # node_identity yet (no Link transport/sync code exists -- design
+        # doc §15's Phase 3 dependency matrix), but it must exist and be
+        # verified sound before anything that will eventually sign with it
+        # does. Checked inside this try/finally, not before it, so a
+        # failure here still goes through the same db.close()/daybreak_
+        # task cleanup as every other startup failure below.
+        try:
+            node_identity = load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
+        except NodeIdentityError as exc:
+            raise StartupError(f"could not load or bootstrap this node's Link identity: {exc}") from exc
+        _logger.info("node Link identity %r: fingerprint %s", config.node_name, node_identity.fingerprint)
+
         if count_sysops(db) == 0:
             raise StartupError(
                 "no SysOp-level account exists on this node -- run "

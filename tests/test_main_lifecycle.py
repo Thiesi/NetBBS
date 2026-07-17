@@ -40,6 +40,7 @@ def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
     """
     defaults = dict(
         db_path=tmp_path / "node.db",
+        identity_dir=tmp_path / "netbbs_identity",
         telnet=TransportConfig(True, "127.0.0.1", 0),
         ssh=TransportConfig(False, "127.0.0.1", 0),
         web=TransportConfig(False, "127.0.0.1", 0),
@@ -87,6 +88,57 @@ async def _open_connection_when_ready(host: str, port: int, *, timeout: float = 
             if asyncio.get_event_loop().time() >= deadline:
                 raise
             await asyncio.sleep(0.02)
+
+
+# -- node Link identity bootstrap (design doc round 89/111) ------------------
+
+
+def test_run_bootstraps_node_identity_on_first_startup(tmp_path):
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12401))
+    assert not config.identity_dir.exists()
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+    assert (config.identity_dir / "root.identity").exists()
+    assert (config.identity_dir / "signing.identity").exists()
+    assert (config.identity_dir / "transport.identity").exists()
+    assert (config.identity_dir / "transitions.json").exists()
+
+
+def test_run_reuses_existing_node_identity_on_second_startup(tmp_path):
+    from netbbs.link.node_identity import NodeIdentity
+
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12402))
+    asyncio.run(_run_until_ready_then_shut_down(config))
+    first_fingerprint = NodeIdentity.load(config.identity_dir).fingerprint
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+    second_fingerprint = NodeIdentity.load(config.identity_dir).fingerprint
+
+    assert first_fingerprint == second_fingerprint
+
+
+def test_run_logs_node_identity_fingerprint(tmp_path, caplog):
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12403))
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert any("node Link identity" in record.message for record in caplog.records)
+
+
+def test_startup_fails_cleanly_on_corrupted_node_identity(tmp_path):
+    from netbbs.link.node_identity import load_or_bootstrap_node_identity
+
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12404))
+    load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
+    # Corrupt the transition history so loading it fails on next startup.
+    (config.identity_dir / "transitions.json").write_text("not valid json")
+
+    async def scenario():
+        shutdown_event = asyncio.Event()
+        with pytest.raises(StartupError, match="Link identity"):
+            await run(config, shutdown_event=shutdown_event)
+
+    asyncio.run(scenario())
 
 
 # -- listeners actually start and are reachable ------------------------------

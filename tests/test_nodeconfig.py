@@ -135,6 +135,20 @@ def test_cli_db_path_override():
     assert config.db_path == Path("custom.db")
 
 
+def test_cli_identity_dir_and_node_name_override():
+    config = load_config(
+        ["--identity-dir", "custom-identity", "--node-name", "roanoke", "--enable-telnet"]
+    )
+    assert config.identity_dir == Path("custom-identity")
+    assert config.node_name == "roanoke"
+
+
+def test_default_identity_dir_and_node_name():
+    config = load_config(["--enable-telnet"])
+    assert config.identity_dir == Path("netbbs_identity")
+    assert config.node_name == "netbbs-node"
+
+
 def test_cli_missing_config_file_raises_config_error(tmp_path):
     missing = tmp_path / "does-not-exist.toml"
     with pytest.raises(ConfigError, match="not found"):
@@ -179,6 +193,27 @@ def test_cli_overrides_toml_file(tmp_path):
     config = load_config(["--config", str(config_file), "--telnet-port", "2222"])
     assert config.telnet.port == 2222
     assert config.telnet.host == "127.0.0.1"  # untouched by CLI, still from file
+
+
+def test_toml_node_table_overrides_defaults(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [node]
+        identity_dir = "custom-identity"
+        name = "roanoke"
+        """
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.identity_dir == Path("custom-identity")
+    assert config.node_name == "roanoke"
+
+
+def test_toml_unknown_node_key_raises_config_error(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text("[node]\nbogus = 1\n")
+    with pytest.raises(ConfigError, match="unknown setting"):
+        load_config(["--config", str(config_file)])
 
 
 def test_toml_unknown_section_raises_config_error(tmp_path):

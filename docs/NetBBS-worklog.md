@@ -7015,3 +7015,120 @@ scrollback).
 **Testing**: full suite re-run: **1895 passed, 4 skipped** (up from
 round 108's 1880 -- 15 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 111 (Phase 3 begins -- node key-lifecycle model implemented)
+
+First real Phase 3 code in the tree, per §15's dependency matrix
+(round 88): the node/user key-lifecycle model (issue #51, designed
+round 89) and the canonical event envelope's byte-level rule (issue #11
+stage 2, narrowly settled round 110) had to exist before anything
+wire-visible could be built. This round implements round 89's node tier
+using round 110's `key_transition` event shape. Design reasoning for
+both is in `docs/NetBBS-design-doc.md`, rounds 89/110; this entry is the
+implementation narrative only.
+
+**`netbbs/boards/content_id.py`**: `compute_content_id` gained round
+110's canonicalization rule -- string values are now recursively
+Unicode-NFC-normalized, and any `float` anywhere in the input raises the
+new `ContentIdError` rather than serializing. The canonicalization step
+itself is now exposed separately as `canonical_json_bytes(fields) ->
+bytes`, so `netbbs.link.events` can sign the exact same canonical bytes
+`compute_content_id` hashes, rather than maintaining a second
+implementation. Checked every existing caller (board/post/channel/
+file-area/entry ID construction, 8 call sites) before making this
+change -- all pass only strings, so the new float rejection is pure
+addition, and NFC normalization of already-NFC text (the overwhelming
+common case for real input) is a no-op, so no existing Phase 1/2
+content-ID's value changes.
+
+**New `netbbs/link/` package** -- the first Link protocol code in the
+tree (confirmed nothing existed yet: no `link`/`dag`/`gossip` package,
+no node-to-node transport, no event-chain code anywhere in `src/`,
+beyond the minimal `tests/link_harness.py` scaffolding from round 92):
+
+- `netbbs/link/events.py`: `build_envelope`/`canonical_bytes`/
+  `event_content_id` (round 27's envelope shape plus round 110's
+  canonicalization, reusing `content_id.canonical_json_bytes` directly)
+  and `KeyTransition`/`build_key_transition`/`verify_key_transition` for
+  round 110's `key_transition` event specifically -- always signed by a
+  node's root key, never an operational key.
+- `netbbs/link/node_identity.py`: `NodeIdentity` (root + signing/
+  transport operational `Identity` + full transition history),
+  `bootstrap_node_identity` (fresh root + two initial authorize
+  transitions), `rotate_operational_key` (one call producing a
+  chained revoke+authorize pair for one purpose, per round 89's "single
+  guided admin action"), `resolve_current_operational_key` (verifies
+  every relevant transition's root signature, walks the chain by
+  `previous_transition_id` linkage rather than trusting list order,
+  rejects forks and disconnected chains, then replays authorize/revoke
+  in verified order to find the current key), and `save`/`load`/
+  `load_or_bootstrap_node_identity` for on-disk persistence (three
+  `Identity` files plus a `transitions.json`, unencrypted by default --
+  `Identity.save`'s own documented headless-unlock limitation, not
+  solved here).
+- `NodeIdentity.load` cross-checks the on-disk operational-key files
+  against what the verified chain says is current, raising
+  `NodeIdentityError` on any mismatch -- catches both tampering and a
+  `save()` that crashed mid-write between the key files and
+  `transitions.json`, the same "fail loudly rather than operate under
+  the wrong key" stance `Identity.load`'s existing fingerprint check
+  already takes.
+
+**Wired into real node startup**, not just available for future callers
+to opt into: `netbbs.net.nodeconfig.NodeConfig` gained `identity_dir`
+(default `netbbs_identity/`) and `node_name` (default `netbbs-node`),
+both TOML-configurable (`[node]` table: `identity_dir`, `name`) and
+CLI-overridable (`--identity-dir`, `--node-name`), mirroring `db_path`/
+`--db`'s existing precedent. `netbbs.__main__.run()` calls
+`load_or_bootstrap_node_identity` right alongside the existing
+`count_sysops` check, inside the same `try/finally` so a bootstrap/load
+failure gets the same `db.close()`/daybreak-task cleanup as any other
+startup failure, and logs the resulting fingerprint at INFO level.
+Nothing downstream actually consumes `node_identity` yet -- no Link
+transport/sync code exists (§15's dependency matrix places that later)
+-- but it now exists, is verified sound, and is loaded before any code
+that will eventually sign with it.
+
+**Tests**: 46 new -- `tests/test_content_id.py` (+7: NFC-equivalence
+across nested dicts/lists, float rejection at top level and nested,
+`bool` not mistaken for `float`, `canonical_json_bytes`/
+`compute_content_id` agreement), `tests/test_link_events.py` (11: new
+file -- envelope shape, canonicalization determinism, signature
+validity/invalidity, purpose/action validation, `previous_transition_id`
+omitted-vs-present, to_dict/from_dict round-trip),
+`tests/test_link_node_identity.py` (20: new file -- bootstrap producing
+three distinct keys and two authorize transitions, rotation producing a
+chained revoke+authorize pair without disturbing the other purpose's
+chain, double rotation, fork detection via two transitions claiming the
+same predecessor, disconnected-chain detection, a transition forging the
+real node's `subject_fingerprint` while signed by an impostor root
+correctly rejected on signature rather than the claimed field,
+save/load round-trip including after rotation, and on-disk tamper
+detection), `tests/test_nodeconfig.py` (+4: CLI/TOML for
+`identity_dir`/`node_name`, unknown-`[node]`-key rejection), and
+`tests/test_main_lifecycle.py` (+4: `run()` actually bootstraps a node
+identity on first startup and reuses it on the second, logs the
+fingerprint, and fails startup cleanly -- via the existing
+`StartupError` path, with normal cleanup -- on a corrupted transition
+history). Also fixed: `tests/test_main_lifecycle.py`'s shared `_config`
+test helper didn't set `identity_dir`, which would have left every test
+in that file (and `tests/test_shutdown.py`, which reuses it) writing a
+real `netbbs_identity/` directory into the repository's working
+directory instead of `tmp_path` -- caught before it happened by
+checking for stray output after the first full-file test run, not
+after it landed in a commit.
+
+**Testing**: full suite re-run: **1941 passed, 4 skipped** (up from
+round 110's 1895 -- 46 net new tests, no regressions elsewhere).
+
+**What's still open for Phase 3**: everything else in §15's dependency
+matrix -- the two-lane DB execution model (issue #57, designed round
+91), succession/orphan/fork policy implementation (issue #53, designed
+round 94), WAN/relay and operational-model implementation (issues
+#58/#60, designed round 95), local-mail-then-Link-messages (issue #52,
+local half already implemented round 104), and every event type other
+than `key_transition` (board posts, moderator grants, etc. -- each gets
+its own payload-shape decision when actually built, round 110's own
+scope note). No node-to-node transport exists yet either -- `node_identity`
+is real and verified, but nothing yet uses it to sign or send anything
+over a wire, since there is no wire yet.
+

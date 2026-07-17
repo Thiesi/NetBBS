@@ -107,6 +107,15 @@ class ShutdownConfig:
 @dataclass(frozen=True)
 class NodeConfig:
     db_path: Path = Path("netbbs.db")
+    # Design doc round 89/111: the node's own key-lifecycle state (root
+    # key + signing/transport operational keys + transition history,
+    # see netbbs.link.node_identity) — a directory, not a single file,
+    # since it holds three key files plus a transition-history file.
+    # `node_name` is purely the human-readable label attached to the
+    # generated keys (Identity.label) -- it has no effect on the
+    # fingerprint, which is derived from the key material alone.
+    identity_dir: Path = Path("netbbs_identity")
+    node_name: str = "netbbs-node"
     # SSH defaults enabled -- issue #1's "make SSH the secure default
     # interactive transport". Telnet and the plain-HTTP web transport
     # default disabled and, when explicitly enabled without an operator-
@@ -200,6 +209,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="netbbs", description="Run a NetBBS node.")
     parser.add_argument("--config", type=Path, default=None, help="path to a TOML config file")
     parser.add_argument("--db", type=Path, default=None, help="path to the node's SQLite database")
+    parser.add_argument(
+        "--identity-dir", type=Path, default=None, help="directory holding the node's Link key-lifecycle state"
+    )
+    parser.add_argument("--node-name", type=str, default=None, help="human-readable label for this node's keys")
     for transport in _TRANSPORTS:
         group = parser.add_mutually_exclusive_group()
         group.add_argument(
@@ -256,8 +269,20 @@ def _shutdown_from_toml(data: dict, current: ShutdownConfig) -> ShutdownConfig:
     return replace(current, **overrides)
 
 
+def _node_from_toml(data: dict, config: NodeConfig) -> tuple[Path, str]:
+    table = data.get("node", {})
+    if not isinstance(table, dict):
+        raise ConfigError("[node] in the config file must be a table")
+    unknown = set(table) - {"identity_dir", "name"}
+    if unknown:
+        raise ConfigError(f"[node] has unknown setting(s): {', '.join(sorted(unknown))}")
+    identity_dir = Path(table["identity_dir"]) if "identity_dir" in table else config.identity_dir
+    node_name = str(table["name"]) if "name" in table else config.node_name
+    return identity_dir, node_name
+
+
 def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
-    known_tables = {"database", "telnet", "ssh", "web", "throttle", "shutdown"}
+    known_tables = {"database", "node", "telnet", "ssh", "web", "throttle", "shutdown"}
     unknown = set(data) - known_tables
     if unknown:
         raise ConfigError(f"config file has unknown section(s): {', '.join(sorted(unknown))}")
@@ -267,8 +292,12 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
         raise ConfigError("[database] in the config file must be a table")
     db_path = Path(db_table["path"]) if "path" in db_table else config.db_path
 
+    identity_dir, node_name = _node_from_toml(data, config)
+
     return NodeConfig(
         db_path=db_path,
+        identity_dir=identity_dir,
+        node_name=node_name,
         telnet=_transport_from_toml(data, "telnet", config.telnet),
         ssh=_transport_from_toml(data, "ssh", config.ssh),
         web=_transport_from_toml(data, "web", config.web),
@@ -280,6 +309,10 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
 def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeConfig:
     if args.db is not None:
         config = replace(config, db_path=args.db)
+    if args.identity_dir is not None:
+        config = replace(config, identity_dir=args.identity_dir)
+    if args.node_name is not None:
+        config = replace(config, node_name=args.node_name)
     for transport in _TRANSPORTS:
         current: TransportConfig = getattr(config, transport)
         enabled = getattr(args, f"{transport}_enabled")

@@ -6642,3 +6642,150 @@ a real fingerprint-lookup need arises elsewhere.
 decisions and their reasoning only, per this doc's split from the
 worklog.
 
+## Sign-off notes, round 110 (issue #11 stage 2, narrowly scoped: canonical byte encoding + the key_transition event)
+
+Phase 3 implementation work begins with round 89's node key-lifecycle
+model (§5) — but round 89 itself left the exact transition-record wire/
+signature format as "#11 owns this, once Phase 3's semantic model is
+being written" (round 89), and round 90 (stage 1 of #11) left the
+matching byte-level questions as stage 2, unresolved: "Unicode
+normalization form, numeric type/range rules, duplicate-key and
+absent-vs-null field handling, and signed golden test vectors" (round
+90's own closing list, unchanged from round 27's original one).
+Starting real Phase 3 code meant actually hitting that boundary, not
+just noting it.
+
+**Deliberately scoped narrower than "all of stage 2."** Settling
+byte-level rules for every future event type this project hasn't built
+yet would be exactly the kind of ahead-of-a-real-consumer over-design
+round 27 and round 90 both already declined (round 27 point 4: golden
+vectors are premature "since there is no second implementation yet for
+them to protect interop against" — still true, there is still exactly
+one NetBBS implementation). This round settles two things only: the
+**general canonicalization rule** (applies uniformly to every event
+type, present and future, so it's a one-time decision, not a per-type
+one) and the **specific shape of the one event type actually needed
+right now**, `key_transition`. Per-field numeric-range rules and
+wire-parsing edge cases for event types that don't exist yet remain
+deferred to when those types are actually built, matching this
+project's established pattern throughout §15.
+
+**Canonicalization rule (issue #11 stage 2, general):**
+
+1. JSON, sorted keys, compact separators, no inserted whitespace — the
+   same rule `netbbs.boards.content_id.compute_content_id` already
+   applies locally (round 7); formalized here as the Link-wide rule
+   rather than replaced with an unrelated external standard, since
+   nothing about it has caused a problem and a large, unrelated body of
+   Phase-1/2 local content-IDs already depend on this exact shape.
+2. UTF-8 encoding of the resulting text.
+3. **Every string field value normalized to Unicode NFC before
+   serialization** (confirmed with Thiesi). Chosen over rejecting
+   non-NFC input outright: NFC is the most common web/JSON-signing
+   normalization convention, and normalizing silently means a sender
+   whose client happens to produce NFD (or unnormalized) text never
+   hits a confusing rejection over an invisible difference a human
+   can't see or debug from the terminal.
+4. **Floats are forbidden entirely in anything hashed or signed**
+   (confirmed with Thiesi) — only integers and strings are permitted as
+   scalar values; constructing a payload containing a `float` is a
+   hard, immediate error, never silently coerced or rounded. Timestamps
+   stay ISO 8601 strings (already the convention everywhere in this
+   codebase); anything numeric that might otherwise be a float becomes
+   an integer at whatever fixed precision it actually needs (e.g. an
+   amount in minor units, a count). Same reasoning Git and IPFS's
+   dag-json apply to the identical problem: float serialization is not
+   reliably deterministic across platforms/languages, and no Phase 3
+   event type designed so far has a genuine need for one.
+5. **Duplicate keys are a hard parse error, not last-value-wins.**
+   Unreachable when constructing an event locally (a Python `dict`
+   cannot hold a duplicate key), but real once something else's JSON
+   parser is receiving bytes over the wire (Phase 3 transport, not yet
+   built) — decided directly rather than forked to Thiesi, the same
+   "cheap, low-regret structural choice" round 27 point 2 already used
+   for `netbbs_protocol`/`object_type`: permissive duplicate-key
+   handling is exactly the kind of parser-differential surface
+   content-addressing exists to close, not leave open.
+6. **An optional field is omitted entirely when unset; explicit `null`
+   is never emitted, and receiving `null` on a field that doesn't
+   itself declare a nullable type is a validation error.** Also decided
+   directly, same reasoning as duplicate-key handling — removes an
+   entire "does absent mean the same as null" ambiguity class before
+   any code depends on either answer.
+7. **Golden test vectors remain deferred, unchanged from round 27
+   point 4.** Still exactly one NetBBS implementation; nothing exists
+   yet for signed vectors to protect interop against. Revisit once a
+   second encode/decode path (a second implementation, or even a
+   from-scratch reference decoder) actually exists.
+
+**The `key_transition` event — round 89's node-key transition record,
+now with a concrete shape:**
+
+```json
+{
+  "netbbs_protocol": 1,
+  "object_type": "key_transition",
+  "payload": {
+    "subject_fingerprint": "<the node's root-key fingerprint>",
+    "purpose": "signing",
+    "action": "authorize",
+    "operational_key": "<base64 Ed25519 public key>",
+    "previous_transition_id": "<content-ID of the prior transition for this (subject_fingerprint, purpose) pair>",
+    "created_at": "<ISO 8601 UTC>"
+  }
+}
+```
+
+- `subject_fingerprint`: which node's key lifecycle this transition
+  belongs to — otherwise only implicit in "whoever signed this," and a
+  transition record's whole point is to be independently walkable/
+  verifiable.
+- `purpose`: `"signing"` or `"transport"` — round 89's two
+  independently-rotatable operational-key chains. Each `(subject,
+  purpose)` pair has its own head pointer; rotating one never touches
+  the other.
+- `action`: `"authorize"` introduces a new operational key (covers both
+  a node's initial bootstrap and a planned rotation — there's no
+  separate "bootstrap" event kind); `"revoke"` marks a specific
+  operational key invalid without necessarily authorizing a replacement
+  in the same record, matching round 89's "compromise response" case —
+  an emergency revoke issued before a replacement key is ready.
+- `operational_key`: the key the action names.
+- `previous_transition_id`: **round 90's general "event chains with
+  head pointers" mechanical rule, applied to this specific object
+  type** — not a bespoke chaining scheme invented for keys. Omitted
+  entirely (never `null`, per the canonicalization rule above) for the
+  first transition of a given `(subject, purpose)` pair.
+- **Always signed by the node's root key, never by an operational
+  key.** Directly what round 89 requires ("any node can verify a
+  signature by walking the transition chain back to the root") and
+  deliberately simpler than a PKI-style multi-hop delegation chain —
+  every transition record for a node is a flat, direct root signature,
+  matching round 89's explicit "ceremony stripped out" goal for this
+  tier. A transition record's content-ID (the same
+  `compute_content_id`-shaped hash, over these canonical bytes) is what
+  the *next* transition in the same chain references as its own
+  `previous_transition_id`; the signature itself is carried as a
+  sibling field alongside the envelope when stored/transmitted, not
+  embedded inside `payload` — the same separation
+  `netbbs.identity.keys.Identity.sign` already uses elsewhere (sign the
+  canonical bytes; content-ID and signed message are the same bytes).
+
+A purpose's **current** operational key is the most recently authorized
+one for that `(subject, purpose)` chain with no later `revoke` record
+naming it — a walk backward through the chain from the head, not a
+separately stored "current key" pointer, so the current key is always a
+direct consequence of the verifiable chain rather than a second source
+of truth that could drift from it.
+
+**What this leaves open:** every event type other than `key_transition`
+(board posts, moderator grants, etc.) still gets its own payload-shape
+decision when it's actually built, following this same envelope/
+head-pointer pattern; golden test vectors, per point 7 above; and
+whatever round 89 itself already deferred (multi-device support for the
+opt-in user tier, social/M-of-N root-key recovery) — none of that
+changes because of this round.
+
+**Implementation of round 89's node key-lifecycle model, using this
+format, is round 111** — see `docs/NetBBS-worklog.md`.
+
