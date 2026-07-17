@@ -526,6 +526,27 @@ recipient node — not "everyone carrying this board."**
   exposure that already exists for all their other local data. Which
   tier applies to a given recipient should be surfaced to the sender at
   compose time where knowable, not silently assumed.
+- **Tier 2 is reserved, not implemented, in this slice — a real gap
+  found while building it, not a hypothetical.** "Unreadable even by
+  their own home node," taken at face value, means the *server* must
+  never hold the decryption key — but `netbbs.auth.users.
+  authenticate_keypair` (round 89's personal-keypair login) is
+  challenge-response specifically so the server never sees, stores, or
+  needs a user's private key, and nothing in this codebase performs
+  client-side decryption (no rich client, no local key storage
+  anywhere). `netbbs.net.mail_flow`'s read screen runs entirely
+  server-side. Put those two facts together and a tier-2 message, built
+  exactly as designed, is **permanently unreadable through this BBS's
+  own UI** — the party that has to render it is precisely the party the
+  design says must never be able to. **Confirmed with Thiesi: this
+  implementation slice builds tier 1 (`tier1_home_node_key`) only** —
+  full send/receive/read, since the node's own key already lives
+  server-side with no contradiction. `tier2_personal_key` stays a
+  reserved, named value in `netbbs.link.events` (round 93's original
+  intent, not abandoned) but is not offered as a compose option and has
+  no read path, until a genuine client-side decryption story exists (a
+  future rich client, or a raw-ciphertext download escape hatch) to
+  actually honor what "true E2E" promises.
 - **Metadata visible to any future transport intermediary** (should #58
   ever introduce one) is limited to what's needed for routing: recipient
   node fingerprint, coarse expiry, size — never subject/body, which stay
