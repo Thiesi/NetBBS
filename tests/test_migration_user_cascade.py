@@ -86,6 +86,24 @@ def test_delete_user_cascades_and_nulls_correctly_across_every_table(tmp_path):
 
     conn.execute("INSERT INTO user_preferences (user_id, key, value) VALUES (?, 'k', 'v')", (alice.id,))
 
+    # alice as sender (content survives via the denormalized label, only
+    # the live FK goes NULL) and alice as recipient (CASCADEs -- unlike a
+    # post, a message has no meaning independent of its one recipient).
+    conn.execute(
+        """
+        INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
+        VALUES (?, 'alice', ?, 'from alice', 'body', ?)
+        """,
+        (alice.id, sysop.id, _now()),
+    )
+    conn.execute(
+        """
+        INSERT INTO mail_messages (sender_user_id, sender_label, recipient_user_id, subject, body, created_at)
+        VALUES (?, 'sysop', ?, 'to alice', 'body', ?)
+        """,
+        (sysop.id, alice.id, _now()),
+    )
+
     conn.execute(
         "INSERT INTO blocklist (local_user_id, blocked_by_user_id, created_at) VALUES (?, ?, ?)",
         (alice.id, sysop.id, _now()),
@@ -115,6 +133,15 @@ def test_delete_user_cascades_and_nulls_correctly_across_every_table(tmp_path):
     file_row = conn.execute("SELECT uploader_user_id, uploader_label FROM files WHERE file_id = 'f1'").fetchone()
     assert file_row["uploader_user_id"] is None
     assert file_row["uploader_label"] == "alice"
+
+    sent = conn.execute(
+        "SELECT sender_user_id, sender_label FROM mail_messages WHERE subject = 'from alice'"
+    ).fetchone()
+    assert sent["sender_user_id"] is None
+    assert sent["sender_label"] == "alice"
+    assert (
+        conn.execute("SELECT COUNT(*) FROM mail_messages WHERE subject = 'to alice'").fetchone()[0] == 0
+    )
 
     # Administrative rows tied to the account are cascade-removed.
     assert conn.execute("SELECT COUNT(*) FROM moderator_grants WHERE user_id = ?", (alice.id,)).fetchone()[0] == 0

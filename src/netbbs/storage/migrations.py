@@ -1342,4 +1342,100 @@ MIGRATIONS = [
         ALTER TABLE posts ADD COLUMN link_event_json TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Link messages (design doc round 93): mail_messages rebuilt so one "
+            "row can also represent an outbound message addressed to a remote "
+            "Link user, or a message actually received via Link -- confirmed "
+            "with Thiesi to unify into this table rather than a separate "
+            "outbox, so Sent-folder listing stays one query regardless of "
+            "destination, at the cost of a rebuild rather than a plain ADD "
+            "COLUMN (SQLite has no ALTER TABLE to relax an existing NOT NULL "
+            "in place; same table-rebuild technique as the 'Hard-delete "
+            "support for user accounts' migration above). "
+            "recipient_user_id becomes nullable; recipient_remote_address is "
+            "populated instead for an outbound Link-addressed row -- the new "
+            "CHECK constraint enforces exactly one of the two is ever set, "
+            "for every row including every pre-existing local-mail one. "
+            "link_event_json is this node's own signed LinkMessage for an "
+            "outbound row, re-pushed every sync pass until link_delivery_"
+            "status leaves 'pending' (same 'push everything, dedup handles "
+            "idempotency' model board_post/board_post_edit already use); "
+            "'expired' is included in that CHECK now even though nothing "
+            "produces it yet (link_message_expired isn't built this round) "
+            "since round 93 already names it and widening this CHECK later "
+            "would mean yet another rebuild for one enum value. "
+            "link_source_event_id marks a row as arrived via Link (the "
+            "original message's own content_id) -- an explicit marker, not "
+            "inferred from sender_user_id IS NULL, since that already means "
+            "something else on this table (the local sender's account was "
+            "deleted) and the two must never be confused. Tier 1 "
+            "(tier1_home_node_key) only this round (design doc round 93's "
+            "tier-2 finding: the server can never hold a tier-2 user's "
+            "decryption key, so nothing here assumes or names a tier at all). "
+            "The new link_mail_acknowledgements table holds pending outbound "
+            "accepted/bounced acknowledgements -- deliberately not columns on "
+            "mail_messages, since a bounced incoming message never gets a "
+            "mail_messages row at all (nothing was actually delivered), so "
+            "the two concerns can't share one row's lifecycle. "
+            "link_event_content_id is an outbound row's own link_event_json's "
+            "content_id, stored redundantly (content_id is otherwise only a "
+            "computed hash of the envelope) so an incoming acknowledgement can "
+            "find the row it's about with an indexed lookup, not by "
+            "recomputing that hash for every pending row."
+        ),
+        sql="""
+        CREATE TABLE mail_messages_new (
+            id                        INTEGER PRIMARY KEY,
+            sender_user_id            INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            sender_label              TEXT NOT NULL,
+            recipient_user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            recipient_remote_address  TEXT,
+            subject                   TEXT NOT NULL,
+            body                      TEXT NOT NULL,
+            created_at                TEXT NOT NULL,
+            read_at                   TEXT,
+            sender_deleted_at         TEXT,
+            recipient_deleted_at      TEXT,
+            link_event_json           TEXT,
+            link_event_content_id     TEXT,
+            link_delivery_status      TEXT CHECK (
+                link_delivery_status IN ('pending', 'delivered', 'bounced', 'expired')
+                OR link_delivery_status IS NULL
+            ),
+            link_source_event_id      TEXT,
+            CHECK ((recipient_user_id IS NOT NULL) <> (recipient_remote_address IS NOT NULL))
+        );
+        INSERT INTO mail_messages_new
+            (id, sender_user_id, sender_label, recipient_user_id, subject, body,
+             created_at, read_at, sender_deleted_at, recipient_deleted_at)
+            SELECT id, sender_user_id, sender_label, recipient_user_id, subject, body,
+                created_at, read_at, sender_deleted_at, recipient_deleted_at
+            FROM mail_messages;
+        DROP TABLE mail_messages;
+        ALTER TABLE mail_messages_new RENAME TO mail_messages;
+        CREATE INDEX idx_mail_messages_recipient
+            ON mail_messages(recipient_user_id, recipient_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_sender
+            ON mail_messages(sender_user_id, sender_deleted_at, created_at);
+        CREATE INDEX idx_mail_messages_link_event_content_id
+            ON mail_messages(link_event_content_id)
+            WHERE link_event_content_id IS NOT NULL;
+        CREATE INDEX idx_mail_messages_link_pending
+            ON mail_messages(link_delivery_status)
+            WHERE link_delivery_status = 'pending';
+
+        CREATE TABLE link_mail_acknowledgements (
+            id                       INTEGER PRIMARY KEY,
+            message_content_id       TEXT NOT NULL,
+            target_node_fingerprint  TEXT NOT NULL,
+            ack_event_json           TEXT NOT NULL,
+            created_at               TEXT NOT NULL,
+            sent_at                  TEXT
+        );
+        CREATE INDEX idx_link_mail_acknowledgements_pending
+            ON link_mail_acknowledgements(target_node_fingerprint)
+            WHERE sent_at IS NULL;
+        """,
+    ),
 ]
