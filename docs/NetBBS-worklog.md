@@ -7630,3 +7630,65 @@ handling). Next round's natural continuation is the `aiohttp` adapter,
 since the protocol logic it needs to drive already exists and is
 tested.
 
+## Sign-off notes, round 117 (real aiohttp transport adapter for `netbbs.link.protocol`)
+
+Builds the piece round 116 explicitly deferred: an actual `aiohttp`
+client/server translating `LinkNode`'s messages into real HTTP+JSON
+traffic over a real socket. See `docs/NetBBS-design-doc.md` round 117
+for the design decisions (mutual-hello-in-one-round-trip and why it
+doesn't contradict round 116's message-passing framing, the sender-
+in-the-URL-path choice for gossip push, the `LinkProtocolError`/
+`LinkTransportError` split) — this entry is implementation/testing
+narrative.
+
+**`netbbs/link/transport.py`** (new): `LinkServer` (the inbound side —
+`AppRunner`/`TCPSite` lifecycle, mirroring `netbbs.net.web.WebServer`
+exactly) with two routes, `POST /link/v1/hello` and `POST /link/v1/
+events/{fingerprint}`; `dial_hello`/`push_events` (the outbound side —
+plain async functions taking a caller-supplied `aiohttp.ClientSession`,
+matching how every other outbound HTTP call in this codebase is
+expected to share a session rather than each call opening its own).
+`LinkServer` takes an `own_hello_provider` callable rather than
+computing its own hello — same "node config/deployment concern, not
+this layer's job" reasoning `LinkNode.build_hello` already applies one
+level down.
+
+**A small implementation detail worth recording rather than leaving
+implicit**: `dial_hello`/`push_events` pass `timeout=ClientTimeout(total=timeout)`
+explicitly to `session.post(...)`, rather than a bare float — checked
+the installed `aiohttp` version (`3.14.1`) directly before writing this
+code rather than assuming the request-method timeout parameter's
+accepted type.
+
+**Tests**: `tests/test_link_transport.py` (new, 7 tests), following
+`tests/test_web.py`'s own real-server/real-client convention exactly —
+no mocking, no `ScriptedTransport` reuse (that harness proved the
+*logic*; this suite proves the same logic survives an actual wire).
+Covers: a full mutual handshake over real HTTP: a forged returned
+hello correctly propagating `LinkProtocolError` unwrapped; a server-
+side rejection (mismatched-subject descriptor) correctly surfacing as
+`LinkTransportError`; a dead connection (port 1, nothing listening)
+correctly surfacing as `LinkTransportError`; a real end-to-end
+key-rotation gossip push (both halves of a rotation, same "revoke
+before authorize" ordering round 116 already established); a
+stranger's events refused by the server; and `LinkServer.port` raising
+before `start()`. All 7 passed on the first real run — the careful
+by-hand re-tracing of round 116's own rotation-ordering bug (caught
+before real execution came back online that round) evidently
+generalized correctly to this round's new code, rather than round 117
+needing its own separate round of hand-tracing to catch something
+equivalent.
+
+**Testing**: full suite: **1975 passed, 4 skipped** (7 net new —
+`test_link_transport.py` — up from round 116's 1968/4).
+
+**What's still open, unchanged from round 116's list minus the
+transport adapter itself**: node startup/config wiring (no running
+`netbbs` node listens on a Link port yet — `netbbs.net.nodeconfig`/
+`netbbs.__main__` untouched), persistent on-disk event/dedup storage,
+and accepting events relayed from a peer with no direct hello. The
+natural next round is node integration: a `TransportConfig`-style
+config knob, `netbbs.__main__` standing up a `LinkServer` alongside
+telnet/SSH/web, and a real `own_hello_provider` sourced from actual
+node network configuration rather than a test-supplied lambda.
+

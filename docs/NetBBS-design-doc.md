@@ -6986,3 +6986,80 @@ stranger's events, and a stale repeated hello. See
 `docs/NetBBS-worklog.md` round 116 for the full test count and suite
 re-run result.
 
+## Sign-off notes, round 117 (real aiohttp transport adapter for `netbbs.link.protocol`)
+
+Round 116 explicitly deferred "does this work over a real wire" —
+`LinkNode` was proven correct only against `ScriptedTransport`, a
+fully synthetic in-memory double. This round builds the actual
+transport: `netbbs.link.transport`, an `aiohttp`-based client/server
+pair that's the *only* module importing both `aiohttp` and
+`netbbs.link.protocol` together, keeping `protocol.py` itself
+untouched — the separation round 116 was specifically built to make
+possible.
+
+**Server lifecycle mirrors `netbbs.net.web.WebServer` exactly** —
+`AppRunner`/`TCPSite`, a `port` property that raises before `start()`,
+`stop()` calling `runner.cleanup()` — the shape this codebase already
+uses for every server it stands up, not a new one invented for Link.
+
+**Route shape, confirmed by working through what each side actually
+needs, not assumed from the earlier sketch:** `POST /link/v1/hello`
+and `POST /link/v1/events/{fingerprint}`. Two decisions worth
+recording:
+
+- **Hello is mutual in one HTTP round trip** — a dialer's POST body
+  carries its own hello; the response body carries the *receiver's*
+  hello back, so a single call introduces both sides, not just one.
+  This looked initially in tension with round 116's "message-passing,
+  not request/response" framing, but isn't actually a contradiction:
+  that framing is about the *protocol layer* never depending on a
+  synchronous reply (an offline peer simply never receives the
+  dial at all, and nothing above this layer blocks waiting for one) —
+  it says nothing about whether a *transport* implementation is allowed
+  to opportunistically carry a reply in the same response when the peer
+  happens to be online and answers immediately. `netbbs.link.protocol`
+  itself still has no expectation of this; `dial_hello` here is simply
+  making good use of it when it's available. §12's own "duplicate
+  simultaneous dial" tiebreak scenario is a genuinely separate case —
+  both sides *independently* initiating unprompted — not affected by
+  this choice.
+- **Gossip push identifies the sender in the URL path
+  (`/events/{fingerprint}`), not inside the JSON body** — every event
+  gossiped this round is a node's own `key_transition`, so the sender
+  and the events' own `subject_fingerprint` are always the same value;
+  putting it in the path keeps routing/logging able to see who's
+  talking without parsing the body first, and costs nothing extra
+  since `handle_events` already cross-checks the body against it.
+
+**Error-handling split, decided rather than left implicit:**
+`LinkProtocolError` (a message that arrived fine but failed
+verification) propagates *unwrapped* from `dial_hello` when it's
+*this node's own* `handle_hello` call rejecting a peer's returned
+hello — callers already know how to catch that exception from round
+116. Every other failure — a peer's HTTP 400 rejecting *this node's*
+outgoing request, a dead connection, a timeout, a malformed body —
+becomes `LinkTransportError`, a new, distinct exception. The asymmetry
+is deliberate, not an oversight: only the first case is this node
+re-running verification it already has the machinery for; the rest
+are transport-level facts (or a *remote* rejection whose original
+`LinkProtocolError` never existed on this side to re-raise).
+
+**Deliberately not built this round, named explicitly (unchanged from
+round 116's own list, now one item shorter):** node startup/config
+wiring (`netbbs.net.nodeconfig`/`netbbs.__main__` untouched — no
+running node listens on a Link port yet), persistent event/dedup
+storage, and accepting events relayed from a peer with no direct
+hello. The transport adapter itself — this round's own scope — is
+done.
+
+**Tests**: `tests/test_link_transport.py` (new), following `tests/
+test_web.py`'s own established convention exactly: real `LinkServer`
+on an OS-assigned loopback port, a real `aiohttp.ClientSession`
+talking to it, no mocking. Covers the full mutual-hello round trip,
+a forged returned-hello rejection (`LinkProtocolError`, unwrapped), a
+server-rejected outgoing hello (`LinkTransportError`), a dead
+connection (`LinkTransportError`), a real end-to-end key-rotation
+gossip push, and a stranger's events refused by the server. See
+`docs/NetBBS-worklog.md` round 117 for the full test count and suite
+re-run result.
+
