@@ -6,6 +6,13 @@ pagination_ui.py's structure and coverage, plus a test specific to
 file areas: /download working for a file that isn't on the currently
 displayed page (get_file_by_name, the fix that pagination itself made
 necessary).
+
+`netbbs.net.file_flow` is the second module migrated onto design doc
+round 91's two-lane database execution model (issue #57/round 112) --
+`_show_area` now takes a `DatabaseLane` instead of a `Database`. Setup
+calls (`create_user`, `create_file_area`, `upload_file`, `attest_name`,
+etc.) still use a plain `Database` directly, same as every other test
+file's style -- only the call *into* file_flow.py needs a lane.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.net.file_flow import _show_area
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 _PAGE_SIZE = entries_module._DEFAULT_PAGE_SIZE
 
@@ -66,12 +74,14 @@ def _make_area_with_files(db, count: int, monkeypatch):
 
 
 def test_opening_a_multi_page_area_shows_only_the_newest_page(tmp_path, monkeypatch):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     total = _PAGE_SIZE * 3 + 2
     area, user = _make_area_with_files(db, total, monkeypatch)
     session = FakeSession(lines=["b"])  # view the newest page, then back out
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     shown = sum(1 for i in range(total) if f"file{i}.txt " in session.output)
     assert shown == _PAGE_SIZE
@@ -81,48 +91,58 @@ def test_opening_a_multi_page_area_shows_only_the_newest_page(tmp_path, monkeypa
         assert f"file{i}.txt " not in session.output
     assert "lder" in session.output
     assert "ewer" not in session.output
+    lane.close()
     db.close()
 
 
 def test_older_command_navigates_to_the_previous_page(tmp_path, monkeypatch):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     total = _PAGE_SIZE * 2
     area, user = _make_area_with_files(db, total, monkeypatch)
     session = FakeSession(lines=["o", "b"])  # newest page, then older, then back out
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     for i in range(0, _PAGE_SIZE):
         assert f"file{i}.txt " in session.output
+    lane.close()
     db.close()
 
 
 def test_recent_command_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     total = _PAGE_SIZE * 3
     area, user = _make_area_with_files(db, total, monkeypatch)
     session = FakeSession(lines=["o", "o", "r", "b"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     output = session.output
     newest_index = output.rfind(f"file{total - 1}.txt ")
     older_index = output.rfind("file0.txt ")
     assert newest_index > older_index
+    lane.close()
     db.close()
 
 
 def test_single_page_area_offers_no_older_newer_recent_options(tmp_path, monkeypatch):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     area, user = _make_area_with_files(db, count=2, monkeypatch=monkeypatch)
     session = FakeSession(lines=["b"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     assert "lder" not in session.output
     assert "ewer" not in session.output
     assert "ecent" not in session.output
     assert "ack" in session.output
+    lane.close()
     db.close()
 
 
@@ -130,14 +150,16 @@ def test_download_works_for_a_file_not_on_the_currently_displayed_page(tmp_path,
     """The specific regression pagination would otherwise introduce:
     /download must still find a file from deep history, not just
     whatever happens to be on the newest page currently in memory."""
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     total = _PAGE_SIZE * 3
     area, user = _make_area_with_files(db, total, monkeypatch)
     # Never navigate to an older page -- straight from the newest page,
     # /download the very first (oldest) uploaded file by name.
     session = FakeSession(lines=["/download file0.txt"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     # _handle_download already catches the FakeSession's NotImplementedError
     # (real transports don't raise it -- see FakeSession.write_raw) and
@@ -146,17 +168,21 @@ def test_download_works_for_a_file_not_on_the_currently_displayed_page(tmp_path,
     # *found* by name (no "No file named" error) before that point.
     assert "No file named" not in session.output
     assert "Starting Zmodem send of 'file0.txt'" in session.output
+    lane.close()
     db.close()
 
 
 def test_download_reports_a_clear_error_for_a_truly_nonexistent_file(tmp_path, monkeypatch):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     area, user = _make_area_with_files(db, count=2, monkeypatch=monkeypatch)
     session = FakeSession(lines=["/download does-not-exist.txt"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, user))
+    asyncio.run(_show_area(session, lane, area, user))
 
     assert "No file named 'does-not-exist.txt' in this area." in session.output
+    lane.close()
     db.close()
 
 
@@ -167,7 +193,8 @@ def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):
     from netbbs.attestation import attest_name
     from netbbs.auth.users import SYSOP_LEVEL
 
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "docs", creator=alice, name_requirement="verified_and_displayed")
@@ -175,39 +202,47 @@ def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
 
     session = FakeSession(lines=["b"])
-    asyncio.run(_show_area(session, db, area, alice))
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, alice))
 
     assert "(=Alice Smith=)" in session.output
+    lane.close()
     db.close()
 
 
 def test_file_listing_does_not_leak_current_display_name_for_ungated_area(tmp_path):
     from netbbs.attestation import set_display_name
 
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "docs", creator=alice)  # no name_requirement
     upload_file(db, area, alice, "file.txt", b"hello")
     set_display_name(db, alice, "New Display Name")
 
     session = FakeSession(lines=["b"])
-    asyncio.run(_show_area(session, db, area, alice))
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, alice))
 
     assert "New Display Name" not in session.output
     assert "alice" in session.output
+    lane.close()
     db.close()
 
 
 def test_min_age_gate_hides_the_upload_hint_when_unmet(tmp_path):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "adults", creator=alice, min_age=18)
     upload_file(db, area, alice, "file.txt", b"hello")
     session = FakeSession(lines=["b"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, alice))
+    asyncio.run(_show_area(session, lane, area, alice))
 
     assert "/upload" not in session.output
+    lane.close()
     db.close()
 
 
@@ -216,27 +251,33 @@ def test_min_age_gate_allows_upload_hint_once_met(tmp_path):
 
     from netbbs.attestation import set_birthdate
 
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     set_birthdate(db, alice, date(1990, 1, 1))
     area = create_file_area(db, "adults", creator=alice, min_age=18)
     upload_file(db, area, alice, "file.txt", b"hello")
     session = FakeSession(lines=["b"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, alice))
+    asyncio.run(_show_area(session, lane, area, alice))
 
     assert "/upload" in session.output
+    lane.close()
     db.close()
 
 
 def test_name_requirement_hides_the_upload_hint_when_unmet(tmp_path):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "verified-only", creator=alice, name_requirement="verified")
     upload_file(db, area, alice, "file.txt", b"hello")
     session = FakeSession(lines=["b"])
+    lane = DatabaseLane(db_path)
 
-    asyncio.run(_show_area(session, db, area, alice))
+    asyncio.run(_show_area(session, lane, area, alice))
 
     assert "/upload" not in session.output
+    lane.close()
     db.close()

@@ -798,18 +798,20 @@ async def _main_menu(
         elif choice == "c" and _has_visible_communities(db, user):
             await session.write_line("")
             await _enter_communities(
-                session, db, hub, presence, mailbox, history, user, node_controls=node_controls
+                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
             )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "u" and _has_uncategorized_resources(db, user):
             await session.write_line("")
             await _enter_uncategorized(
-                session, db, hub, presence, mailbox, history, user, node_controls=node_controls
+                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
             )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "j":
             await session.write_line("")
-            await _jump_to(session, db, hub, presence, mailbox, history, user, node_controls=node_controls)
+            await _jump_to(
+                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+            )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
             await session.write_line("")
@@ -1124,6 +1126,7 @@ async def _resource_type_menu(
     community_scoped: bool,
     menu_header: str,
     title_prefix: str | None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """
     Shared sub-menu for `[C]ommunities`/`[U]ncategorized`/`[J]ump to...`
@@ -1189,10 +1192,19 @@ async def _resource_type_menu(
             )
         elif choice == "f" and show_areas:
             await session.write_line("")
-            await browse_file_areas(
-                session, db, user,
-                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            )
+            # design doc round 91/112: file areas are the second feature
+            # migrated onto the two-lane database execution model -- see
+            # the "e" (mail) branch above for the identical lane-is-None
+            # degrade-gracefully reasoning.
+            if lane is not None:
+                await browse_file_areas(
+                    session, lane, user,
+                    community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                )
+            else:
+                await session.write_line(
+                    colored("File areas are not available in this context.", fg_color=MUTED_COLOR)
+                )
         else:
             await session.write(reject_keystroke())
 
@@ -1207,6 +1219,7 @@ async def _enter_communities(
     user: User,
     *,
     node_controls: NodeControls | None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """`[C]ommunities` entry point -- pick one via the shared picker,
     then the shared resource-type sub-menu scoped to it."""
@@ -1224,7 +1237,7 @@ async def _enter_communities(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=selected.id, community_scoped=True,
-        menu_header=selected.name, title_prefix=selected.name,
+        menu_header=selected.name, title_prefix=selected.name, lane=lane,
     )
 
 
@@ -1238,6 +1251,7 @@ async def _enter_uncategorized(
     user: User,
     *,
     node_controls: NodeControls | None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """`[U]ncategorized` entry point -- straight into the shared
     resource-type sub-menu, no picker needed (there's only one
@@ -1245,7 +1259,7 @@ async def _enter_uncategorized(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=None, community_scoped=True,
-        menu_header="Uncategorized", title_prefix="Uncategorized",
+        menu_header="Uncategorized", title_prefix="Uncategorized", lane=lane,
     )
 
 
@@ -1259,6 +1273,7 @@ async def _jump_to(
     user: User,
     *,
     node_controls: NodeControls | None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """`[J]ump to...` entry point -- the shared resource-type sub-menu
     with no Community filter at all (`community_scoped=False`), reusing
@@ -1270,7 +1285,7 @@ async def _jump_to(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=None, community_scoped=False,
-        menu_header="Jump to...", title_prefix=None,
+        menu_header="Jump to...", title_prefix=None, lane=lane,
     )
 
 

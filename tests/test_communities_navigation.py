@@ -24,6 +24,7 @@ from netbbs.files.areas import create_file_area
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _main_menu
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 
 class FakeSession:
@@ -56,9 +57,19 @@ def _written_text(session: FakeSession) -> str:
 
 
 def _run_main_menu(session, db, user):
-    asyncio.run(
-        _main_menu(session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user)
-    )
+    # design doc round 91/112: file areas (like mail) are reachable
+    # through _main_menu only with a real lane -- constructed here, once,
+    # so every existing call site in this file exercises the real
+    # lane-is-present path rather than the lane=None degrade.
+    lane = DatabaseLane(db.path)
+    try:
+        asyncio.run(
+            _main_menu(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), user, lane=lane
+            )
+        )
+    finally:
+        lane.close()
 
 
 # -- main-menu conditional visibility ----------------------------------------

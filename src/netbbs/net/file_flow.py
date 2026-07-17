@@ -14,6 +14,37 @@ then hand control back to normal character-mode text I/O once it
 finishes (or aborts — see `netbbs.net.zmodem`'s module docstring on
 error handling: a failed transfer doesn't crash the session, it reports
 the error and returns to browsing).
+
+**Second module migrated onto design doc round 91's two-lane database
+execution model (issue #57/round 112)**, following `netbbs.net.
+mail_flow`'s proof-of-pattern exactly: every function reachable from
+`browse_file_areas` takes `lane: DatabaseLane` instead of `db:
+Database`. Two exceptions, deliberately unmigrated:
+
+- `has_visible_areas` stays on `db: Database`, synchronous — it's a
+  menu-*gating* check called from `netbbs.net.login_flow`'s still-
+  unmigrated menu-drawing code (`_resource_type_menu`'s `show_areas`),
+  not part of the file-areas feature itself.
+- `_uploader_display_name` keeps `db: Database` as its own first
+  parameter, unchanged — it's dispatched *through* the lane
+  (`lane.run(_uploader_display_name, entry, ...)`) exactly like any
+  imported business-logic function, rather than being rewritten to take
+  `lane` itself; nothing about it needs to be a *caller* of the lane,
+  only a *callee*.
+
+Unlike `mail_flow`, this module's own `pick_item` call
+(`_browse_areas_in_category`) needed no eager-pre-fetch restructuring —
+its `name_of`/`description_of` callbacks only ever read fields already
+present on the `FileArea`/`FileAreaCategory` objects handed to
+`pick_item` (`a.description`, etc.), never a fresh DB read, so there was
+nothing to move off the callback in the first place. `_render_file_page`
+*does* need it, the same shape `mail_flow._show_inbox`/`_show_sent` used:
+`netbbs.timeutil.resolve_display_preferences` fetched once via the lane,
+reused for every entry's `format_for_display` call — but this one isn't
+a `pick_item` callback at all, just an ordinary loop in an `async`
+function, so it's really just the general "fetch once per lane call,
+not once per item" efficiency `resolve_display_preferences` was built
+for, not a structural requirement the way the picker case was.
 """
 
 from __future__ import annotations
@@ -48,12 +79,13 @@ from netbbs.net.session import Session
 from netbbs.permissions import meets_level
 from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
-from netbbs.timeutil import format_for_display
+from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import format_for_display, resolve_display_preferences
 
 
 async def browse_file_areas(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     user: User,
     *,
     community_id: int | None = None,
@@ -62,7 +94,7 @@ async def browse_file_areas(
 ) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
     await _browse_areas_in_category(
-        session, db, user, category_id=None,
+        session, lane, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
     )
 
@@ -74,7 +106,8 @@ def has_visible_areas(
     Community filter -- backs `netbbs.net.login_flow`'s shared
     resource-type sub-menu, same convention as `_has_visible_boards`/
     `netbbs.net.chat_flow.has_visible_channels` (design doc §16, round
-    84)."""
+    84). Deliberately still `db`-based, not `lane`-based -- see this
+    module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
         if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
@@ -86,7 +119,7 @@ def has_visible_areas(
 
 async def _browse_areas_in_category(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     user: User,
     *,
     category_id: int | None,
@@ -103,29 +136,43 @@ async def _browse_areas_in_category(
     threading (design doc §16, round 84). See that function's docstring
     for the full rationale.
     """
-    # name_requirement deliberately does not gate reading here -- same
-    # participation-vs-content-restriction split as
-    # netbbs.net.login_flow._browse_boards_in_category (design doc §18);
-    # see the upload check below for where it actually applies.
-    all_areas = [
-        a for a in list_file_areas(db)
-        if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
-    ]
+
+    def _visible_areas(db: Database) -> list[FileArea]:
+        # name_requirement deliberately does not gate reading here --
+        # same participation-vs-content-restriction split as
+        # netbbs.net.login_flow._browse_boards_in_category (design doc
+        # §18); see the upload check in _show_area for where it
+        # actually applies. Bundled into one function so a single
+        # lane.run() call does the filtering on the worker thread,
+        # rather than fetching the raw list and filtering back on the
+        # event loop.
+        return [
+            a for a in list_file_areas(db)
+            if meets_level(user, get_effective_min_read_level(db, a))
+            and meets_age(db, user, get_effective_min_age(db, a))
+        ]
+
+    all_areas = await lane.run(_visible_areas)
     if community_scoped:
         all_areas = [a for a in all_areas if a.community_id == community_id]
     areas_here = [a for a in all_areas if a.category_id == category_id]
 
-    categories_here = (
-        list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
-    )
+    if category_id is None:
+        categories_here = await lane.run(list_top_level_categories)
+    else:
+        categories_here = await lane.run(list_subcategories, category_id)
     if community_scoped:
         used_category_ids = {a.category_id for a in all_areas if a.category_id is not None}
         if category_id is None:
-            categories_here = [
-                c for c in categories_here
-                if c.id in used_category_ids
-                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
-            ]
+
+            def _used_top_level(db: Database) -> list[FileAreaCategory]:
+                return [
+                    c for c in categories_here
+                    if c.id in used_category_ids
+                    or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+                ]
+
+            categories_here = await lane.run(_used_top_level)
         else:
             categories_here = [c for c in categories_here if c.id in used_category_ids]
 
@@ -142,7 +189,7 @@ async def _browse_areas_in_category(
             empty_message="No file areas are available to you yet.",
         )
         if area is not None:
-            await _show_area(session, db, area, user)
+            await _show_area(session, lane, area, user)
         return
 
     mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
@@ -172,11 +219,11 @@ async def _browse_areas_in_category(
 
     if isinstance(selected, FileAreaCategory):
         await _browse_areas_in_category(
-            session, db, user, category_id=selected.id,
+            session, lane, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
         )
     else:
-        await _show_area(session, db, selected, user)
+        await _show_area(session, lane, selected, user)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -196,7 +243,7 @@ def _format_size(size_bytes: int) -> str:
 
 async def _render_area_page(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     area_name: str,
     page: FileEntryPage,
     *,
@@ -207,7 +254,7 @@ async def _render_area_page(
     hints — the unit that should be redrawn on an actual page change
     (initial entry, Older/Newer/Recent), not on every loop iteration
     regardless of whether anything changed."""
-    await _render_file_page(session, db, area_name, page, name_requirement=name_requirement)
+    await _render_file_page(session, lane, area_name, page, name_requirement=name_requirement)
     options = []
     if page.has_older:
         options.append(menu_key("O", "lder"))
@@ -223,7 +270,7 @@ async def _render_area_page(
     await session.write_line("  ".join(hints))
 
 
-async def _show_area(session: Session, db: Database, area: FileArea, user: User) -> None:
+async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
     """
     Show `area`, one bounded page of files at a time (design doc round
     31, issue #10's file-area follow-up to round 30's board-post
@@ -251,18 +298,28 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     earlier page, or from outside this session entirely).
     """
     area_name = sanitize_text(area.name)
-    page = list_files_page(db, area, user)
-    effective_name_requirement = get_effective_name_requirement(db, area)
-    can_write = (
-        meets_level(user, get_effective_min_write_level(db, area))
-        and meets_age(db, user, get_effective_min_age(db, area))
-        and meets_name_requirement(db, user, effective_name_requirement)
-    )
+
+    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool]:
+        # Bundled into one lane call: the page, the effective
+        # name_requirement, and the can_write gate all come from the
+        # same worker-thread pass rather than three round trips.
+        page = list_files_page(db, area, user)
+        effective_name_requirement = get_effective_name_requirement(db, area)
+        can_write = (
+            meets_level(user, get_effective_min_write_level(db, area))
+            and meets_age(db, user, get_effective_min_age(db, area))
+            and meets_name_requirement(db, user, effective_name_requirement)
+        )
+        return page, effective_name_requirement, can_write
+
+    page, effective_name_requirement, can_write = await lane.run(_load)
 
     if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
+        await _render_area_page(
+            session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
+        )
         while True:
             await session.write("Choice or command: ")
             choice = (await session.read_line()).strip()
@@ -271,21 +328,31 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
                 break
             elif choice.lower() == "o" and page.has_older:
                 oldest = page.entries[0]
-                page = list_files_page(db, area, user, before=(oldest.created_at, oldest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
+                page = await lane.run(
+                    list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
+                )
+                await _render_area_page(
+                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
+                )
             elif choice.lower() == "n" and page.has_newer:
                 newest = page.entries[-1]
-                page = list_files_page(db, area, user, after=(newest.created_at, newest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
+                page = await lane.run(
+                    list_files_page, area, user, after=(newest.created_at, newest.file_id)
+                )
+                await _render_area_page(
+                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
+                )
             elif choice.lower() == "r" and page.has_newer:
-                page = list_files_page(db, area, user)
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
+                page = await lane.run(list_files_page, area, user)
+                await _render_area_page(
+                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
+                )
             elif choice.lower() == "/upload" and can_write:
-                await _handle_upload(session, db, area, user)
+                await _handle_upload(session, lane, area, user)
                 return
             elif choice.lower().startswith("/download "):
                 filename = choice[len("/download ") :].strip()
-                await _handle_download(session, db, area, filename, user)
+                await _handle_download(session, lane, area, filename, user)
                 return
             else:
                 await session.write("\a")
@@ -302,7 +369,7 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     if not command:
         return
     elif command.lower() == "/upload":
-        await _handle_upload(session, db, area, user)
+        await _handle_upload(session, lane, area, user)
     else:
         await session.write_line("Unknown command.")
 
@@ -314,7 +381,8 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
     requires `verified_and_displayed` names, otherwise renders the
     plain historical `uploader_label` unchanged, for the identical
     reason (a mutable `display_name` must not retroactively rewrite an
-    already-uploaded entry's attribution)."""
+    already-uploaded entry's attribution). Still `db`-first, unchanged
+    by round 112 -- see this module's own docstring for why."""
     if name_requirement == "verified_and_displayed":
         uploader = get_user_by_id(db, entry.uploader_user_id)
         if uploader is not None:
@@ -323,22 +391,23 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
 
 
 async def _render_file_page(
-    session: Session, db: Database, area_name: str, page: FileEntryPage, *, name_requirement: str | None
+    session: Session, lane: DatabaseLane, area_name: str, page: FileEntryPage, *, name_requirement: str | None
 ) -> None:
     header = colored(f"[{area_name}]", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
     for entry in page.entries:
-        when = format_for_display(entry.created_at, db)
+        when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
         size = _format_size(entry.size_bytes)
         name_line = colored(f"{sanitize_text(entry.filename)} ({size})", fg_color=ACCENT_COLOR)
         await session.write_line(f"\r\n{name_line}")
-        uploader_display = _uploader_display_name(db, entry, name_requirement=name_requirement)
+        uploader_display = await lane.run(_uploader_display_name, entry, name_requirement=name_requirement)
         await session.write_line(f"  uploaded by {uploader_display} ({when})")
         if entry.description:
             await session.write_line(f"  {sanitize_text(entry.description)}")
 
 
-async def _handle_upload(session: Session, db: Database, area: FileArea, user: User) -> None:
+async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
     """
     `receive_file` (GitHub issue #34, reopened a second time) now
     streams straight to a temp file under `netbbs.files.storage`'s own
@@ -352,11 +421,12 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
     await session.write_line(
         "\r\nStart your terminal's Zmodem send (sz) now. Waiting for the transfer to begin..."
     )
-    temp_path = new_incoming_temp_path(db)
+    temp_path = await lane.run(new_incoming_temp_path)
+    max_upload_bytes = await lane.run(get_max_upload_bytes)
     try:
-        received = await zmodem.receive_file(session, max_bytes=get_max_upload_bytes(db), dest_path=temp_path)
-        entry = upload_file_from_temp(
-            db, area, user, received.filename,
+        received = await zmodem.receive_file(session, max_bytes=max_upload_bytes, dest_path=temp_path)
+        entry = await lane.run(
+            upload_file_from_temp, area, user, received.filename,
             temp_path=temp_path, sha256=received.sha256, size_bytes=received.size_bytes,
         )
     except (zmodem.ZmodemError, NotImplementedError) as exc:
@@ -374,7 +444,7 @@ async def _handle_upload(session: Session, db: Database, area: FileArea, user: U
     )
 
 
-async def _handle_download(session: Session, db: Database, area: FileArea, filename: str, user: User) -> None:
+async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea, filename: str, user: User) -> None:
     # Looked up by exact name across the whole area (get_file_by_name),
     # not just the currently displayed page -- see _show_area's
     # docstring. Matched against the raw, unsanitized `filename` the
@@ -385,7 +455,7 @@ async def _handle_download(session: Session, db: Database, area: FileArea, filen
     # area, design doc sign-off round 36) isn't downloadable by name
     # before it's been approved, unless this user is its own uploader
     # or holds approve permission on the area.
-    entry = get_file_by_name(db, area, filename, requesting_user=user)
+    entry = await lane.run(get_file_by_name, area, filename, requesting_user=user)
     if entry is None:
         await session.write_line(f"\r\nNo file named {sanitize_text(filename)!r} in this area.")
         return
@@ -395,6 +465,10 @@ async def _handle_download(session: Session, db: Database, area: FileArea, filen
         f"\r\nStarting Zmodem send of {entry_filename!r} — accept the transfer in your terminal."
     )
     try:
+        # download_file reads content-addressed storage directly from
+        # disk by hash/path -- it never took a `db` parameter, so
+        # nothing here changes: real file I/O, not database I/O, is
+        # outside round 91's scope regardless of which lane calls it.
         data = download_file(entry)
         await zmodem.send_file(session, entry.filename, data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:

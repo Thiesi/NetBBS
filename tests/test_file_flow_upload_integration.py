@@ -32,6 +32,7 @@ from netbbs.net import file_flow
 from netbbs.net import zmodem
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 
 class _BytePipe:
@@ -141,11 +142,22 @@ def db(tmp_path):
 
 
 @pytest.fixture
+def lane(tmp_path):
+    # netbbs.net.file_flow is migrated onto design doc round 91's
+    # two-lane database execution model (issue #57/round 112) -- a
+    # second, independent connection to the same file the `db` fixture
+    # above opens, matching real node startup.
+    database_lane = DatabaseLane(tmp_path / "node.db")
+    yield database_lane
+    database_lane.close()
+
+
+@pytest.fixture
 def alice(db):
     return create_user(db, "alice", password="hunter2", user_level=10)
 
 
-def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, alice):
+def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, lane, alice):
     area = create_file_area(db, "docs", creator=alice)
     payload = b"hello from a real zmodem upload" * 100  # spans multiple subpackets
 
@@ -154,7 +166,7 @@ def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, 
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
-        server_task = asyncio.create_task(file_flow._show_area(server_session, db, area, alice))
+        server_task = asyncio.create_task(file_flow._show_area(server_session, lane, area, alice))
         client_task = asyncio.create_task(zmodem.send_file(client_session, "upload.bin", payload))
         await asyncio.wait_for(server_task, timeout=5)
         try:
@@ -178,7 +190,7 @@ def test_upload_via_show_area_streams_to_storage_with_no_leftover_temp_file(db, 
     assert not incoming_dir.exists() or list(incoming_dir.iterdir()) == []
 
 
-def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, alice, monkeypatch):
+def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, lane, alice, monkeypatch):
     monkeypatch.setattr(file_flow, "get_max_upload_bytes", lambda db: 10)
 
     area = create_file_area(db, "docs", creator=alice)
@@ -189,7 +201,7 @@ def test_upload_exceeding_the_node_limit_leaves_no_temp_file_and_no_entry(db, al
     client_session = _ClientSession(read_pipe=server_to_client, write_pipe=client_to_server)
 
     async def scenario():
-        server_task = asyncio.create_task(file_flow._show_area(server_session, db, area, alice))
+        server_task = asyncio.create_task(file_flow._show_area(server_session, lane, area, alice))
         client_task = asyncio.create_task(zmodem.send_file(client_session, "toobig.bin", payload))
         await asyncio.wait_for(server_task, timeout=5)
         try:

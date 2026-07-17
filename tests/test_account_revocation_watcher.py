@@ -33,6 +33,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.directory import get_bio
 from netbbs.files.areas import create_file_area
 from netbbs.net import login_flow
+from netbbs.storage.execution import DatabaseLane
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls
@@ -121,14 +122,23 @@ async def _drive(db, hub, presence, mailbox, registry, user, session):
     around run_authenticated_session -- registering/deregistering the
     session with the registry from the same task that runs it, exactly
     as the watcher's own cancel_one() call requires (it looks the
-    session up by identity in that registry)."""
+    session up by identity in that registry).
+
+    Constructs a real `DatabaseLane` (design doc round 91/112) so a
+    session that reaches the file-area branch actually enters it,
+    rather than hitting the lane-is-None degrade and blocking one level
+    up at the main menu instead -- `test_watcher_disconnects_a_session_
+    stuck_inside_a_file_area` specifically needs the former to test what
+    its own name says it tests."""
+    lane = DatabaseLane(db.path)
     registry.enter(session)
     try:
         await login_flow.run_authenticated_session(
-            session, db, hub, presence, mailbox, user, node_controls=_node_controls(registry)
+            session, db, hub, presence, mailbox, user, node_controls=_node_controls(registry), lane=lane
         )
     finally:
         registry.leave(session)
+        lane.close()
 
 
 async def _wait_until_done(task: asyncio.Task, *, timeout: float = 2.0) -> None:

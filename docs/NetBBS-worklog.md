@@ -7230,3 +7230,81 @@ apply the same recipe file by file. The background lane
 `netbbs.storage.execution` but nothing constructs or uses one yet --
 there is no background Link work to run on it.
 
+## Sign-off notes, round 113 (issue #57 implementation continues -- file_flow.py migrated, second file)
+
+Second file migrated onto round 91's two-lane model, following round
+112's now-established recipe directly -- no new design decisions this
+round, this entry is implementation narrative plus one methodology
+finding worth recording for whoever migrates the next file.
+
+**`netbbs/net/file_flow.py` fully migrated** onto `lane: DatabaseLane`,
+reachable from `browse_file_areas`. Two functions deliberately stay
+unmigrated, both for reasons round 112 already established: `has_visible_areas`
+(a menu-gating check called from still-unmigrated `login_flow.py` code,
+same category as round 112's `unread_mail_count` in `_draw_main_menu`)
+and `_uploader_display_name` (stays `db`-first, dispatched *through*
+the lane like any other business-logic callable, rather than rewritten
+to take `lane` itself -- it's a callee, never a caller, of the lane).
+Unlike `mail_flow`, this file's own `pick_item` call needed *no* eager-
+pre-fetch restructuring -- its callbacks only read fields already
+present on the objects handed to `pick_item`, never a fresh DB call, so
+there was nothing to move off the callback. `_render_file_page` still
+uses `resolve_display_preferences` once per page, the same efficiency
+gain as `mail_flow`, just not a structural requirement here.
+
+**`netbbs/net/login_flow.py`**: `lane: DatabaseLane | None = None` extended
+from `_main_menu` down through `_enter_communities`/`_enter_uncategorized`/
+`_jump_to` -> `_resource_type_menu` (the single shared sub-menu all three
+converge on, design doc §16 round 84) -> `browse_file_areas`. Same
+degrade-gracefully-to-"not available in this context" shape as mail's
+`"e"` branch, applied to the `"f"` branch.
+
+**A real, worth-flagging-explicitly finding: a test can keep passing
+while silently testing less than it did before, if a migration changes
+*which code path* a scripted key sequence actually reaches.**
+`tests/test_account_revocation_watcher.py::test_watcher_disconnects_a_session_stuck_inside_a_file_area`
+scripts `["f", "0", "1"]` expecting to block deep inside file-area
+browsing (proving the watcher catches a session stuck there, not just
+at the main menu). With `lane=None` (the shared `_drive` test helper's
+default, unchanged at first), `"f"` hit the new "File areas are not
+available in this context." branch instead -- a `write_line` and an
+immediate return, not a block -- and the *next* scripted keys ("0",
+"1") were consumed as ordinary invalid main-menu keystrokes, after
+which the session blocked on its *next* keystroke read... which is
+still inside `_main_menu`, still something the watcher successfully
+interrupts. The test kept passing. It was no longer testing what its
+own name and comment said it tested -- a session stuck *inside a file
+area* -- it was testing the exact same "stuck at the main menu"
+scenario another test in the same file already covers. Caught only by
+deliberately re-reading what the test claims to prove and checking
+whether the code path it now takes still proves it, not by the test
+suite itself (which had nothing to fail against). Fixed by giving
+`_drive` a real lane. **Flagged as a pattern to actively check for in
+every future file's migration**, not just file_flow.py's: any test
+scripting a key sequence through a `lane`-gated menu branch needs to
+actually reach that branch with a real lane, or it silently degrades to
+testing whatever the `lane=None` fallback path does instead, without
+the test author (or CI) ever being told.
+
+**Tests**: 0 new -- `tests/test_file_area_pagination_ui.py` (all 11
+existing tests updated in place to construct a `DatabaseLane` and call
+`_show_area(session, lane, area, user)`), `tests/
+test_file_flow_upload_integration.py` (both tests, +1 `lane` fixture),
+`tests/test_terminal_sanitization.py` (1 call site), `tests/
+test_communities_navigation.py` (`_run_main_menu` helper, all 15 call
+sites, now threads a real lane through every one -- this is what
+surfaced `test_community_scoped_channel_and_area_browsing_are_filtered_too`'s
+regression before it could hide), and `tests/
+test_account_revocation_watcher.py` (`_drive` helper, all 8 call sites --
+this is what fixed the silent-degrade finding above).
+
+**Testing**: full suite re-run: **1957 passed, 4 skipped** (unchanged
+from round 112's count -- no net new tests, existing coverage
+preserved and, via the two fixes above, made more honest than before
+this round started).
+
+**What's still open**: every other `net/` file (chat_flow.py,
+admin_flow.py, the rest of login_flow.py, and the rest) remains on `db`
+directly. Two files down, following the same recipe each time; the
+remaining scope is unchanged from round 112's own estimate.
+

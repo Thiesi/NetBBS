@@ -37,6 +37,7 @@ from netbbs.net.file_flow import _show_area
 from netbbs.net.login_flow import _show_board
 from netbbs.net.picker import pick_item
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
 
 # A representative hostile payload combining several attack classes
@@ -281,14 +282,17 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
 
 
 def test_file_area_listing_sanitizes_filename_description_and_uploader(tmp_path):
-    db = Database(tmp_path / "node.db")
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
     user = _create_user_with_unvalidated_username(db, HOSTILE, password="hunter2", user_level=10)
     area = create_file_area(db, "downloads", creator=user)
     upload_file(db, area, user, HOSTILE, b"file contents", description=HOSTILE)
 
     session = FakeSession(lines=["b"])  # back out of the one-page listing
 
-    asyncio.run(_show_area(session, db, area, user))
+    lane = DatabaseLane(db_path)
+    asyncio.run(_show_area(session, lane, area, user))
+    lane.close()
 
     _assert_hostile_payload_neutralized(session.output)
     db.close()
