@@ -847,7 +847,16 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "a" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
-            await admin_menu(session, db, user, node_controls=node_controls)
+            # design doc round 91/115: admin is the fourth feature
+            # migrated onto the two-lane database execution model -- see
+            # the "e" (mail) branch above for the identical lane-is-None
+            # degrade-gracefully reasoning.
+            if lane is not None:
+                await admin_menu(session, lane, user, node_controls=node_controls)
+            else:
+                await session.write_line(
+                    colored("Admin is not available in this context.", fg_color=MUTED_COLOR)
+                )
             await _draw_main_menu(session, db, mailbox, user)
         else:
             await session.write(reject_keystroke())

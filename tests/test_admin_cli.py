@@ -19,6 +19,7 @@ from netbbs.admin.__main__ import _bootstrap_first_sysop, _resolve_actor, run_ad
 from netbbs.auth.users import SYSOP_LEVEL, create_user, list_users
 from netbbs.moderation.log import list_actions_for_target_user
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_admin_flow import FakeSession, _written_text
 
 
@@ -29,28 +30,35 @@ def db(tmp_path):
     database.close()
 
 
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
+
+
 # -- bootstrap: zero SysOps exist -----------------------------------------
 
 
-def test_bootstrap_creates_the_first_sysop(db):
+def test_bootstrap_creates_the_first_sysop(db, lane):
     session = FakeSession(["sysop", "hunter2", "hunter2", ""])
-    user = asyncio.run(_bootstrap_first_sysop(session, db))
+    user = asyncio.run(_bootstrap_first_sysop(session, lane))
     assert user.username == "sysop"
     assert user.user_level == SYSOP_LEVEL
 
 
-def test_bootstrap_self_attributes_the_audit_entry(db):
+def test_bootstrap_self_attributes_the_audit_entry(db, lane):
     session = FakeSession(["sysop", "hunter2", "hunter2", ""])
-    user = asyncio.run(_bootstrap_first_sysop(session, db))
+    user = asyncio.run(_bootstrap_first_sysop(session, lane))
     entries = list_actions_for_target_user(db, user.id)
     bootstrap_entries = [e for e in entries if e.action == "bootstrap_create_sysop"]
     assert len(bootstrap_entries) == 1
     assert bootstrap_entries[0].actor_user_id == user.id
 
 
-def test_resolve_actor_bootstraps_when_no_sysop_exists(db):
+def test_resolve_actor_bootstraps_when_no_sysop_exists(db, lane):
     session = FakeSession(["sysop", "hunter2", "hunter2", ""])
-    actor = asyncio.run(_resolve_actor(session, db, None))
+    actor = asyncio.run(_resolve_actor(session, lane, None))
     assert actor.username == "sysop"
 
 
@@ -64,32 +72,32 @@ def test_run_admin_session_bootstraps_then_opens_the_menu(db):
 # -- resolution: exactly one active SysOp --------------------------------
 
 
-def test_resolve_actor_auto_selects_the_sole_sysop(db):
+def test_resolve_actor_auto_selects_the_sole_sysop(db, lane):
     create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     session = FakeSession([])  # no input needed -- auto-selected
-    actor = asyncio.run(_resolve_actor(session, db, None))
+    actor = asyncio.run(_resolve_actor(session, lane, None))
     assert actor.username == "sysop"
 
 
 # -- resolution: --as ---------------------------------------------------
 
 
-def test_resolve_actor_honors_as_flag(db):
+def test_resolve_actor_honors_as_flag(db, lane):
     create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     create_user(db, "root", password="hunter2", user_level=SYSOP_LEVEL)
     session = FakeSession([])
-    actor = asyncio.run(_resolve_actor(session, db, "root"))
+    actor = asyncio.run(_resolve_actor(session, lane, "root"))
     assert actor.username == "root"
 
 
-def test_resolve_actor_rejects_an_invalid_as_flag(db):
+def test_resolve_actor_rejects_an_invalid_as_flag(db, lane):
     create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     session = FakeSession([])
     with pytest.raises(SystemExit):
-        asyncio.run(_resolve_actor(session, db, "nosuchuser"))
+        asyncio.run(_resolve_actor(session, lane, "nosuchuser"))
 
 
-def test_resolve_actor_as_flag_excludes_disabled_sysops(db):
+def test_resolve_actor_as_flag_excludes_disabled_sysops(db, lane):
     from netbbs.auth.users import set_user_disabled
 
     sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
@@ -97,16 +105,16 @@ def test_resolve_actor_as_flag_excludes_disabled_sysops(db):
     set_user_disabled(db, root, True, changed_by=sysop)
     session = FakeSession([])
     with pytest.raises(SystemExit):
-        asyncio.run(_resolve_actor(session, db, "root"))
+        asyncio.run(_resolve_actor(session, lane, "root"))
 
 
 # -- resolution: multiple active SysOps, no --as -> picker -----------------
 
 
-def test_resolve_actor_shows_a_picker_with_multiple_sysops(db):
+def test_resolve_actor_shows_a_picker_with_multiple_sysops(db, lane):
     create_user(db, "root", password="hunter2", user_level=SYSOP_LEVEL)
     create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
     # "root" sorts before "sysop" alphabetically -- item 01.
     session = FakeSession(["0", "1"])
-    actor = asyncio.run(_resolve_actor(session, db, None))
+    actor = asyncio.run(_resolve_actor(session, lane, None))
     assert actor.username == "root"

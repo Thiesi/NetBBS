@@ -14,6 +14,36 @@ Follows the submenu shape already established by
 `netbbs.net.login_flow._edit_profile`: a redraw-on-real-change-only
 draw function, a bell-only-on-invalid-key dispatch loop (design doc
 round 52), and `netbbs.net.picker.pick_item` for target selection.
+
+Fourth and final file migrated onto design doc round 91's two-lane
+database execution model (issue #57/round 115) -- every screen/menu
+function here now takes `lane: DatabaseLane` instead of `db: Database`,
+and every direct domain-function call goes through `await lane.run(...)`.
+Almost entirely mechanical, unlike chat_flow.py's round 114 (no
+synchronous-callback contracts here the way the Tab completer was) --
+`pick_item`'s own `name_of`/`description_of` callbacks in this file only
+ever read attributes already present on the objects handed to
+`pick_item`, never a fresh DB call, so no eager-pre-fetch restructuring
+was needed for any of them except one: `_who_screen`'s
+`description_of` used to call `format_for_display(entry.connected_at,
+db)` directly inside its lambda, which cannot dispatch through a lane
+from inside a synchronous callback -- fixed the same way round 112
+fixed this same shape (`resolve_display_preferences`, fetched once via
+`lane.run` before the picker, then passed as `override_format`/
+`override_timezone` into a plain synchronous `format_for_display`
+call). `_community_label` stays `db`-first, dispatched *through* the
+lane like `netbbs.net.file_flow`'s `_uploader_display_name` before it
+-- it's a callee, never a caller, of the lane.
+
+Both entry points that share this module now need a real
+`DatabaseLane`: the in-BBS `[A]dmin` menu option
+(`netbbs.net.login_flow`, same `lane is None` degrade-gracefully guard
+as the mail/files/chat branches before it) and the standalone
+`python -m netbbs.admin` CLI (`netbbs.admin.__main__`), which
+constructs its own `DatabaseLane` around its own `Database` handle --
+there is no live-session/CLI distinction for admin functionality
+itself once inside `admin_menu` (that's `node_controls`' job, already
+established before this round).
 """
 
 from __future__ import annotations
@@ -27,7 +57,7 @@ from netbbs.auth.users import (
     User,
     UserManagementError,
     approve_pending_user,
-    create_user_async,
+    create_user,
     delete_user,
     get_user_by_username,
     list_users,
@@ -115,11 +145,12 @@ from netbbs.net.welcome_banner import (
 )
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, reject_keystroke, sanitize_text
 from netbbs.storage.database import Database
-from netbbs.timeutil import format_for_display
+from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import format_for_display, resolve_display_preferences
 
 
 async def admin_menu(
-    session: Session, db: Database, user: User, *, node_controls: NodeControls | None = None
+    session: Session, lane: DatabaseLane, user: User, *, node_controls: NodeControls | None = None
 ) -> None:
     """
     Top-level SysOp admin menu. Callers are responsible for their own
@@ -144,43 +175,43 @@ async def admin_menu(
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_user_screen(session, db, user)
+            await _create_user_screen(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "l":
             await session.write_line("")
-            await _list_users_screen(session, db, user)
+            await _list_users_screen(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "r":
             await session.write_line("")
-            await _registration_settings_screen(session, db, user)
+            await _registration_settings_screen(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "p":
             await session.write_line("")
-            await _change_level_screen(session, db, user)
+            await _change_level_screen(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "e":
             await session.write_line("")
-            await _disable_enable_screen(session, db, user, node_controls)
+            await _disable_enable_screen(session, lane, user, node_controls)
             await _draw_admin_menu(session, node_controls)
         elif choice == "d":
             await session.write_line("")
-            await _delete_user_screen(session, db, user, node_controls)
+            await _delete_user_screen(session, lane, user, node_controls)
             await _draw_admin_menu(session, node_controls)
         elif choice == "n" and node_controls is not None:
             await session.write_line("")
-            await _node_menu(session, db, user, node_controls)
+            await _node_menu(session, lane, user, node_controls)
             await _draw_admin_menu(session, node_controls)
         elif choice == "w":
             await session.write_line("")
-            await _welcome_banner_menu(session, db, user)
+            await _welcome_banner_menu(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "m":
             await session.write_line("")
-            await _content_menu(session, db, user)
+            await _content_menu(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         elif choice == "u":
             await session.write_line("")
-            await _update_settings_screen(session, db, user)
+            await _update_settings_screen(session, lane, user)
             await _draw_admin_menu(session, node_controls)
         else:
             await session.write(reject_keystroke())
@@ -210,7 +241,7 @@ async def _draw_admin_menu(session: Session, node_controls: NodeControls | None)
 # -- create ------------------------------------------------------------
 
 
-async def _create_user_screen(session: Session, db: Database, actor: User) -> None:
+async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     await session.write_line(colored("\r\nCreate user", fg_color=HEADER_COLOR, bold=True))
     await session.write("Username: ")
     username = (await session.read_line()).strip()
@@ -235,15 +266,21 @@ async def _create_user_screen(session: Session, db: Database, actor: User) -> No
         return
 
     try:
-        new_user = await create_user_async(
-            db, username, password=password, verify_key=verify_key, user_level=level
+        # round 115: create_user, not create_user_async -- the latter's
+        # off-loop hashing split existed specifically to keep Argon2
+        # hashing off the *raw* event loop; lane.run() already dispatches
+        # this whole call to a worker thread, so the plain synchronous
+        # create_user (per its own docstring, "for command-line/admin
+        # callers") does the hash and the write in one lane dispatch.
+        new_user = await lane.run(
+            create_user, username, password=password, verify_key=verify_key, user_level=level
         )
     except AuthError as exc:
         await session.write_line(colored(f"Could not create account: {exc}", fg_color=MUTED_COLOR))
         return
 
-    record_action(
-        db, actor=actor, action="create_user", target_user_id=new_user.id,
+    await lane.run(
+        record_action, actor=actor, action="create_user", target_user_id=new_user.id,
         detail=f"created user {new_user.username!r} at level {level}",
     )
     await session.write_line(f"Created {new_user.username!r} at level {level}.")
@@ -285,8 +322,8 @@ async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | 
 # -- list / detail -------------------------------------------------------
 
 
-async def _list_users_screen(session: Session, db: Database, actor: User) -> None:
-    users = list_users(db)
+async def _list_users_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    users = await lane.run(list_users)
     selected = await pick_item(
         session, users,
         name_of=lambda u: u.username,
@@ -296,7 +333,7 @@ async def _list_users_screen(session: Session, db: Database, actor: User) -> Non
         empty_message="No registered users yet.",
     )
     if selected is not None:
-        await _show_user_detail(session, db, actor, selected)
+        await _show_user_detail(session, lane, actor, selected)
 
 
 def _status_label(user: User) -> str:
@@ -311,20 +348,28 @@ def _user_description(user: User) -> str:
     return f"level {user.user_level}, {_status_label(user)}"
 
 
-async def _show_user_detail(session: Session, db: Database, actor: User, target: User) -> None:
+async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, target: User) -> None:
     header = colored(sanitize_text(target.username), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Level: {target.user_level}")
     await session.write_line(f"Status: {_status_label(target)}")
-    await session.write_line(f"Member since: {format_for_display(target.created_at, db)}")
+    # round 115: display prefs fetched once, reused for the loop below
+    # too (round 112's format_for_display-under-a-lane fix).
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    member_since = format_for_display(
+        target.created_at, override_format=display_format, override_timezone=display_timezone
+    )
+    await session.write_line(f"Member since: {member_since}")
 
-    entries = list_actions_for_target_user(db, target.id)
+    entries = await lane.run(list_actions_for_target_user, target.id)
     if not entries:
         await session.write_line(colored("No recorded admin actions.", fg_color=MUTED_COLOR))
     else:
         await session.write_line(colored("Recent admin actions:", fg_color=MUTED_COLOR))
         for entry in entries[-10:]:
-            when = format_for_display(entry.created_at, db)
+            when = format_for_display(
+                entry.created_at, override_format=display_format, override_timezone=display_timezone
+            )
             detail = f" -- {sanitize_text(entry.detail)}" if entry.detail else ""
             await session.write_line(f"  {when}: {sanitize_text(entry.action)}{detail}")
 
@@ -333,7 +378,7 @@ async def _show_user_detail(session: Session, db: Database, actor: User, target:
         answer = (await session.read_key()).lower()
         await session.write_line("")
         if answer == "y":
-            updated = approve_pending_user(db, target, approved_by=actor)
+            updated = await lane.run(approve_pending_user, target, approved_by=actor)
             await session.write_line(f"{updated.username!r} approved.")
 
     # Design doc §18, round 85 point 6 / round 101: a narrow, SysOp-
@@ -349,7 +394,7 @@ async def _show_user_detail(session: Session, db: Database, actor: User, target:
     answer = (await session.read_key()).lower()
     await session.write_line("")
     if answer == "y":
-        updated = set_can_verify_identity(db, target, not target.can_verify_identity, changed_by=actor)
+        updated = await lane.run(set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor)
         await session.write_line(
             f"{updated.username!r} can now verify identity: {'yes' if updated.can_verify_identity else 'no'}."
         )
@@ -365,7 +410,7 @@ _REGISTRATION_MODE_LABELS = {
 }
 
 
-async def _registration_settings_screen(session: Session, db: Database, actor: User) -> None:
+async def _registration_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
     Sets the node's `registration_mode` (design doc round 96) --
     open/approval_required/closed, replacing the earlier plain
@@ -376,8 +421,10 @@ async def _registration_settings_screen(session: Session, db: Database, actor: U
     reusing the existing user-management flow rather than building a
     second, parallel pending-accounts queue UI.
     """
-    current = get_registration_mode(db)
-    pending_count = sum(1 for u in list_users(db) if u.pending_approval)
+    def _load(db: Database) -> tuple[RegistrationMode, int]:
+        return get_registration_mode(db), sum(1 for u in list_users(db) if u.pending_approval)
+
+    current, pending_count = await lane.run(_load)
 
     header = colored("\r\nSelf-service registration:", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(header)
@@ -413,15 +460,18 @@ async def _registration_settings_screen(session: Session, db: Database, actor: U
         await session.write_line(colored("Already set to that mode.", fg_color=MUTED_COLOR))
         return
 
-    set_registration_mode(db, new_mode)
-    record_action(db, actor=actor, action="set_registration_mode", detail=f"mode={new_mode.value}")
+    def _apply(db: Database) -> None:
+        set_registration_mode(db, new_mode)
+        record_action(db, actor=actor, action="set_registration_mode", detail=f"mode={new_mode.value}")
+
+    await lane.run(_apply)
     await session.write_line(f"Registration mode is now: {_REGISTRATION_MODE_LABELS[new_mode]}")
 
 
 # -- self-update (design doc §17, round 82; round 95/96 implementation) --
 
 
-async def _update_settings_screen(session: Session, db: Database, actor: User) -> None:
+async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
     Check-for-updates and the daily-automatic-check off switch (§17's
     "off switch: ... disables the daily automatic background check").
@@ -437,15 +487,20 @@ async def _update_settings_screen(session: Session, db: Database, actor: User) -
     """
     from netbbs import __version__ as current_version
 
-    auto_enabled = get_auto_update_check_enabled(db)
-    checked_at, outcome = get_last_check_summary(db)
+    def _load(db: Database) -> tuple[bool, str | None, str | None]:
+        auto_enabled = get_auto_update_check_enabled(db)
+        checked_at, outcome = get_last_check_summary(db)
+        return auto_enabled, checked_at, outcome
+
+    auto_enabled, checked_at, outcome = await lane.run(_load)
 
     header = colored("\r\nSelf-update:", fg_color=HEADER_COLOR, bold=True)
     await session.write_line(header)
     await session.write_line(f"Running version: {current_version}")
     await session.write_line(f"Daily automatic check: {'ON' if auto_enabled else 'off'}")
     if checked_at is not None:
-        when = format_for_display(checked_at, db)
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
+        when = format_for_display(checked_at, override_format=display_format, override_timezone=display_timezone)
         await session.write_line(f"Last check: {when} -- {sanitize_text(outcome or '')}")
     else:
         await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
@@ -459,7 +514,7 @@ async def _update_settings_screen(session: Session, db: Database, actor: User) -
             await session.write_line(colored(f"Could not check for updates: {exc}", fg_color=MUTED_COLOR))
         else:
             if is_newer(current_version, release.tag_name):
-                record_check_outcome(db, f"newer release available: {release.tag_name}")
+                await lane.run(record_check_outcome, f"newer release available: {release.tag_name}")
                 await session.write_line(
                     f"A newer release is available: {release.tag_name} "
                     f"(published {release.published_at})."
@@ -472,7 +527,7 @@ async def _update_settings_screen(session: Session, db: Database, actor: User) -
                     )
                 )
             else:
-                record_check_outcome(db, f"up to date ({current_version})")
+                await lane.run(record_check_outcome, f"up to date ({current_version})")
                 await session.write_line(f"Already up to date ({current_version}).")
 
     new_state = "off" if auto_enabled else "ON"
@@ -481,18 +536,20 @@ async def _update_settings_screen(session: Session, db: Database, actor: User) -
     await session.write_line("")
     if answer != "y":
         return
-    set_auto_update_check_enabled(db, not auto_enabled)
-    record_action(
-        db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}"
-    )
+
+    def _apply(db: Database) -> None:
+        set_auto_update_check_enabled(db, not auto_enabled)
+        record_action(db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}")
+
+    await lane.run(_apply)
     await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
 
 
 # -- promote/demote, enable/disable ---------------------------------------
 
 
-async def _pick_target_user(session: Session, db: Database, *, title: str) -> User | None:
-    users = list_users(db)
+async def _pick_target_user(session: Session, lane: DatabaseLane, *, title: str) -> User | None:
+    users = await lane.run(list_users)
     return await pick_item(
         session, users,
         name_of=lambda u: u.username,
@@ -503,8 +560,8 @@ async def _pick_target_user(session: Session, db: Database, *, title: str) -> Us
     )
 
 
-async def _change_level_screen(session: Session, db: Database, actor: User) -> None:
-    target = await _pick_target_user(session, db, title="Promote/demote which user?")
+async def _change_level_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    target = await _pick_target_user(session, lane, title="Promote/demote which user?")
     if target is None:
         return
     await session.write(f"New level for {target.username!r} [{target.user_level}]: ")
@@ -517,7 +574,7 @@ async def _change_level_screen(session: Session, db: Database, actor: User) -> N
         await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
         return
     try:
-        updated = set_user_level(db, target, new_level, changed_by=actor)
+        updated = await lane.run(set_user_level, target, new_level, changed_by=actor)
     except UserManagementError as exc:
         await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         return
@@ -525,9 +582,9 @@ async def _change_level_screen(session: Session, db: Database, actor: User) -> N
 
 
 async def _disable_enable_screen(
-    session: Session, db: Database, actor: User, node_controls: NodeControls | None = None
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None = None
 ) -> None:
-    target = await _pick_target_user(session, db, title="Enable/disable which user?")
+    target = await _pick_target_user(session, lane, title="Enable/disable which user?")
     if target is None:
         return
     currently_disabled = target.disabled_at is not None
@@ -538,7 +595,7 @@ async def _disable_enable_screen(
     if answer != "y":
         return
     try:
-        updated = set_user_disabled(db, target, not currently_disabled, changed_by=actor)
+        updated = await lane.run(set_user_disabled, target, not currently_disabled, changed_by=actor)
     except UserManagementError as exc:
         await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         return
@@ -553,9 +610,9 @@ async def _disable_enable_screen(
 
 
 async def _delete_user_screen(
-    session: Session, db: Database, actor: User, node_controls: NodeControls | None = None
+    session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls | None = None
 ) -> None:
-    target = await _pick_target_user(session, db, title="Delete which user?")
+    target = await _pick_target_user(session, lane, title="Delete which user?")
     if target is None:
         return
     await session.write_line(
@@ -573,7 +630,7 @@ async def _delete_user_screen(
         await session.write_line("Cancelled.")
         return
     try:
-        delete_user(db, target, deleted_by=actor)
+        await lane.run(delete_user, target, deleted_by=actor)
     except UserManagementError as exc:
         await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         return
@@ -618,7 +675,7 @@ async def _revoke_live_sessions(
 # -- node management (design doc -- node management round) -----------------
 
 
-async def _node_menu(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     await _draw_node_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -628,11 +685,11 @@ async def _node_menu(session: Session, db: Database, actor: User, node_controls:
             return
         elif choice == "w":
             await session.write_line("")
-            await _who_screen(session, db, actor, node_controls)
+            await _who_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session)
         elif choice == "s":
             await session.write_line("")
-            await _shutdown_screen(session, db, actor, node_controls)
+            await _shutdown_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -651,17 +708,23 @@ def _session_name(entry: SessionSummary) -> str:
     return f"(unauthenticated) {entry.peer_address or 'unknown address'}"
 
 
-def _session_description(db: Database, entry: SessionSummary) -> str:
-    return f"connected since {format_for_display(entry.connected_at, db)}"
+def _session_description(entry: SessionSummary, display_format: str, display_timezone: str) -> str:
+    when = format_for_display(entry.connected_at, override_format=display_format, override_timezone=display_timezone)
+    return f"connected since {when}"
 
 
-async def _who_screen(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     entries = node_controls.session_registry.list_entries()
+    # round 115: description_of runs synchronously inside pick_item, so
+    # the display-preference lookup _session_description needs is
+    # resolved once via the lane *before* the picker, same shape round
+    # 112 established for format_for_display generally.
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
     selected = await pick_item(
         session, entries,
         name_of=_session_name,
         stable_id_of=lambda e: id(e.session),
-        description_of=lambda e: _session_description(db, e),
+        description_of=lambda e: _session_description(e, display_format, display_timezone),
         title="Active sessions",
         empty_message="No active sessions.",
     )
@@ -684,7 +747,7 @@ async def _who_screen(session: Session, db: Database, actor: User, node_controls
     detail = f"peer address {selected.peer_address or 'unknown'}"
     if selected.username is not None:
         try:
-            target_user_id = get_user_by_username(db, selected.username).id
+            target_user_id = (await lane.run(get_user_by_username, selected.username)).id
         except AuthError:
             pass  # account no longer exists -- log by peer address only
 
@@ -693,13 +756,13 @@ async def _who_screen(session: Session, db: Database, actor: User, node_controls
         await session.write_line(colored("That session is already gone.", fg_color=MUTED_COLOR))
         return
 
-    record_action(
-        db, actor=actor, action="disconnect_session", target_user_id=target_user_id, detail=detail
+    await lane.run(
+        record_action, actor=actor, action="disconnect_session", target_user_id=target_user_id, detail=detail
     )
     await session.write_line(f"{_session_name(selected)!r} disconnected.")
 
 
-async def _shutdown_screen(session: Session, db: Database, actor: User, node_controls: NodeControls) -> None:
+async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     await session.write_line(
         colored(
             "\r\nThis warns and disconnects every connected session (including this "
@@ -729,8 +792,8 @@ async def _shutdown_screen(session: Session, db: Database, actor: User, node_con
     # on why it's fired as a background task rather than awaited
     # inline), so there's no guarantee this session survives long
     # enough afterward to still be able to write an audit row.
-    record_action(
-        db, actor=actor, action="trigger_shutdown",
+    await lane.run(
+        record_action, actor=actor, action="trigger_shutdown",
         detail=f"graceful={graceful}, message={message!r}",
     )
     asyncio.create_task(
@@ -750,8 +813,8 @@ async def _shutdown_screen(session: Session, db: Database, actor: User, node_con
 # three-part skinning initiative) -------------------------------------
 
 
-async def _welcome_banner_menu(session: Session, db: Database, actor: User) -> None:
-    await _draw_welcome_banner_menu(session, db)
+async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+    await _draw_welcome_banner_menu(session, lane)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -760,26 +823,26 @@ async def _welcome_banner_menu(session: Session, db: Database, actor: User) -> N
             return
         elif choice == "p":
             await session.write_line("")
-            await _preview_welcome_banner_screen(session, db)
-            await _draw_welcome_banner_menu(session, db)
+            await _preview_welcome_banner_screen(session, lane)
+            await _draw_welcome_banner_menu(session, lane)
         elif choice == "e":
             await session.write_line("")
-            await _enable_welcome_banner_screen(session, db, actor)
-            await _draw_welcome_banner_menu(session, db)
+            await _enable_welcome_banner_screen(session, lane, actor)
+            await _draw_welcome_banner_menu(session, lane)
         elif choice == "d":
             await session.write_line("")
-            await _disable_welcome_banner_screen(session, db, actor)
-            await _draw_welcome_banner_menu(session, db)
+            await _disable_welcome_banner_screen(session, lane, actor)
+            await _draw_welcome_banner_menu(session, lane)
         elif choice == "x":
             await session.write_line("")
-            await _edit_welcome_banner_screen(session, db, actor)
-            await _draw_welcome_banner_menu(session, db)
+            await _edit_welcome_banner_screen(session, lane, actor)
+            await _draw_welcome_banner_menu(session, lane)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_welcome_banner_menu(session: Session, db: Database) -> None:
-    status = welcome_banner_status(db)
+async def _draw_welcome_banner_menu(session: Session, lane: DatabaseLane) -> None:
+    status = await lane.run(welcome_banner_status)
     state = "ENABLED" if status.enabled else "disabled"
     if status.exists:
         file_state = f"{status.size_bytes} bytes"
@@ -800,13 +863,17 @@ async def _draw_welcome_banner_menu(session: Session, db: Database) -> None:
     await session.write("Choice: ")
 
 
-async def _preview_welcome_banner_screen(session: Session, db: Database) -> None:
+async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane) -> None:
     """Renders the exact banner `netbbs.net.login_flow` would show at
     login right now -- the same `load_welcome_banner` call, used as a
     smoke test of the loading path itself, not a separate rendering."""
-    status = welcome_banner_status(db)
+
+    def _load(db: Database) -> tuple:
+        return welcome_banner_status(db), load_welcome_banner(db)
+
+    status, banner_text = await lane.run(_load)
     await session.write_line(colored("\r\nPreviewing welcome banner as shown at login:", fg_color=MUTED_COLOR))
-    await session.write_line(load_welcome_banner(db))
+    await session.write_line(banner_text)
     if status.enabled and status.exists and (status.size_bytes or 0) <= MAX_BANNER_SIZE_BYTES:
         await session.write_line(colored("(showing your custom file)", fg_color=MUTED_COLOR))
     else:
@@ -818,8 +885,8 @@ async def _preview_welcome_banner_screen(session: Session, db: Database) -> None
         )
 
 
-async def _enable_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
-    status = welcome_banner_status(db)
+async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    status = await lane.run(welcome_banner_status)
     if not status.exists:
         await session.write_line(
             colored(
@@ -838,27 +905,34 @@ async def _enable_welcome_banner_screen(session: Session, db: Database, actor: U
         )
         return
 
-    set_welcome_banner_enabled(db, True)
-    record_action(db, actor=actor, action="enable_welcome_banner", detail=str(status.path))
+    def _apply(db: Database) -> None:
+        set_welcome_banner_enabled(db, True)
+        record_action(db, actor=actor, action="enable_welcome_banner", detail=str(status.path))
+
+    await lane.run(_apply)
     await session.write_line("Welcome banner enabled. Use [P]review to verify it looks right.")
 
 
-async def _disable_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
-    status = welcome_banner_status(db)
-    set_welcome_banner_enabled(db, False)
-    record_action(db, actor=actor, action="disable_welcome_banner", detail=str(status.path))
+async def _disable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    def _apply(db: Database):
+        status = welcome_banner_status(db)
+        set_welcome_banner_enabled(db, False)
+        record_action(db, actor=actor, action="disable_welcome_banner", detail=str(status.path))
+        return status
+
+    status = await lane.run(_apply)
     await session.write_line(
         f"Reverted to the default banner. Your file at {status.path} was left in place."
     )
 
 
-async def _edit_welcome_banner_screen(session: Session, db: Database, actor: User) -> None:
+async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Opens the WYSIWYG ANSI art editor (design doc -- welcome banner
     round B1) against the current banner file, if any. `edit_ansi_art`
     itself knows nothing about "welcome banner" -- this screen is
     responsible for loading the existing file, computing the draft
     path, and writing a real save back to `banner_path(db)`."""
-    path = banner_path(db)
+    path = await lane.run(banner_path)
     initial_bytes = path.read_bytes() if path.exists() else None
     draft_path = path.parent / f"{path.name}.draft"
 
@@ -868,7 +942,7 @@ async def _edit_welcome_banner_screen(session: Session, db: Database, actor: Use
         return
 
     path.write_bytes(result)
-    record_action(db, actor=actor, action="edit_welcome_banner", detail=str(path))
+    await lane.run(record_action, actor=actor, action="edit_welcome_banner", detail=str(path))
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
@@ -883,7 +957,7 @@ async def _edit_welcome_banner_screen(session: Session, db: Database, actor: Use
 # building a shared abstraction for just two call sites.
 
 
-async def _content_menu(session: Session, db: Database, actor: User) -> None:
+async def _content_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_content_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -893,31 +967,31 @@ async def _content_menu(session: Session, db: Database, actor: User) -> None:
             return
         elif choice == "m":
             await session.write_line("")
-            await _board_menu(session, db, actor)
+            await _board_menu(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "a":
             await session.write_line("")
-            await _area_menu(session, db, actor)
+            await _area_menu(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "h":
             await session.write_line("")
-            await _channel_menu(session, db, actor)
+            await _channel_menu(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "c":
             await session.write_line("")
-            await _category_menu(session, db, actor)
+            await _category_menu(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "o":
             await session.write_line("")
-            await _community_menu(session, db, actor)
+            await _community_menu(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "g":
             await session.write_line("")
-            await _grant_moderator_screen(session, db, actor)
+            await _grant_moderator_screen(session, lane, actor)
             await _draw_content_menu(session)
         elif choice == "r":
             await session.write_line("")
-            await _revoke_moderator_screen(session, db, actor)
+            await _revoke_moderator_screen(session, lane, actor)
             await _draw_content_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -1028,7 +1102,7 @@ async def _prompt_name_requirement(session: Session, *, current: str | None) -> 
 
 async def _pick_optional_category(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     *,
     list_top_level,
     list_subcategories,
@@ -1068,13 +1142,17 @@ async def _pick_optional_category(
         in_community = [r for r in resources if r.community_id == community_id]
         used_category_ids = {r.category_id for r in in_community if r.category_id is not None}
 
-    top_level = list_top_level(db)
-    if used_category_ids is not None:
-        top_level = [
-            c for c in top_level
-            if c.id in used_category_ids
-            or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
-        ]
+    def _load_top_level(db: Database) -> list:
+        top_level = list_top_level(db)
+        if used_category_ids is not None:
+            top_level = [
+                c for c in top_level
+                if c.id in used_category_ids
+                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+            ]
+        return top_level
+
+    top_level = await lane.run(_load_top_level)
 
     selected = await pick_item(
         session, top_level,
@@ -1085,7 +1163,7 @@ async def _pick_optional_category(
     )
     if selected is None:
         return None
-    subs = list_subcategories(db, selected.id)
+    subs = await lane.run(list_subcategories, selected.id)
     if used_category_ids is not None:
         subs = [c for c in subs if c.id in used_category_ids]
     if not subs:
@@ -1105,7 +1183,7 @@ async def _pick_optional_category(
     return sub_selected.id if sub_selected is not None else selected.id
 
 
-async def _pick_optional_community(session: Session, db: Database) -> int | None:
+async def _pick_optional_community(session: Session, lane: DatabaseLane) -> int | None:
     """Optional Community picker shared by board/channel/area create+
     edit screens (design doc §16, round 84) -- mirrors
     `_pick_optional_category` exactly, but flat (a Community has no
@@ -1119,7 +1197,7 @@ async def _pick_optional_community(session: Session, db: Database) -> int | None
     if answer != "y":
         return None
     selected = await pick_item(
-        session, list_communities(db),
+        session, await lane.run(list_communities),
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         title="Community",
@@ -1139,7 +1217,7 @@ def _community_label(db: Database, community_id: int | None) -> str:
 # -- Communities (design doc §16, rounds 71/83/84/86) ------------------
 
 
-async def _community_menu(session: Session, db: Database, actor: User) -> None:
+async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_community_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -1149,11 +1227,11 @@ async def _community_menu(session: Session, db: Database, actor: User) -> None:
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_community_screen(session, db, actor)
+            await _create_community_screen(session, lane, actor)
             await _draw_community_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_communities_screen(session, db, actor)
+            await _list_communities_screen(session, lane, actor)
             await _draw_community_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -1166,7 +1244,7 @@ async def _draw_community_menu(session: Session) -> None:
     await session.write("Choice: ")
 
 
-async def _create_community_screen(session: Session, db: Database, actor: User) -> None:
+async def _create_community_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """Create stays lean, Edit carries the rest (design doc §16, round
     84) -- same split boards already use. Only name/description are
     prompted here; `hidden` and every `default_*` field start at their
@@ -1182,16 +1260,16 @@ async def _create_community_screen(session: Session, db: Database, actor: User) 
     description = (await session.read_line()).strip() or None
 
     try:
-        community = create_community(db, name, description=description, creator=actor)
+        community = await lane.run(create_community, name, description=description, creator=actor)
     except CommunityError as exc:
         await session.write_line(colored(f"Could not create Community: {exc}", fg_color=MUTED_COLOR))
         return
     await session.write_line(f"Created Community {community.name!r}.")
-    await _community_detail_screen(session, db, actor, community)
+    await _community_detail_screen(session, lane, actor, community)
 
 
-async def _list_communities_screen(session: Session, db: Database, actor: User) -> None:
-    communities = list_communities(db)
+async def _list_communities_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    communities = await lane.run(list_communities)
     selected = await pick_item(
         session, communities,
         name_of=lambda c: c.name,
@@ -1201,14 +1279,14 @@ async def _list_communities_screen(session: Session, db: Database, actor: User) 
         empty_message="No Communities yet.",
     )
     if selected is not None:
-        await _community_detail_screen(session, db, actor, selected)
+        await _community_detail_screen(session, lane, actor, selected)
 
 
 def _community_description(community: Community) -> str:
     return "hidden" if community.hidden else "listed"
 
 
-async def _community_detail_screen(session: Session, db: Database, actor: User, community: Community) -> None:
+async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
     """No "pending" equivalent here, unlike boards/areas -- a Community
     holds no content of its own (design doc §16, round 84)."""
     await _draw_community_detail(session, community)
@@ -1220,13 +1298,13 @@ async def _community_detail_screen(session: Session, db: Database, actor: User, 
             return
         elif choice == "e":
             await session.write_line("")
-            updated = await _edit_community_screen(session, db, actor, community)
+            updated = await _edit_community_screen(session, lane, actor, community)
             if updated is not None:
                 community = updated
             await _draw_community_detail(session, community)
         elif choice == "d":
             await session.write_line("")
-            deleted = await _delete_community_screen(session, db, actor, community)
+            deleted = await _delete_community_screen(session, lane, actor, community)
             if deleted:
                 return
             await _draw_community_detail(session, community)
@@ -1255,7 +1333,7 @@ async def _draw_community_detail(session: Session, community: Community) -> None
 
 
 async def _edit_community_screen(
-    session: Session, db: Database, actor: User, community: Community
+    session: Session, lane: DatabaseLane, actor: User, community: Community
 ) -> Community | None:
     await session.write(f"Name [{community.name}]: ")
     name = (await session.read_line()).strip() or community.name
@@ -1286,8 +1364,9 @@ async def _edit_community_screen(
         return None
 
     try:
-        updated = update_community(
-            db, community, name=name, description=description, hidden=hidden,
+        updated = await lane.run(
+            update_community,
+            community, name=name, description=description, hidden=hidden,
             default_min_read_level=default_min_read_level, default_min_write_level=default_min_write_level,
             default_min_age=default_min_age, default_name_requirement=default_name_requirement,
             changed_by=actor,
@@ -1299,15 +1378,20 @@ async def _edit_community_screen(
     return updated
 
 
-async def _delete_community_screen(session: Session, db: Database, actor: User, community: Community) -> bool:
+async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
     """Shows the blast radius before committing (design doc §16, round
     84's exact confirmation wording): how many boards/channels/areas
     will revert to Uncategorized, and how many Community-blanket
     moderator grants will be revoked outright."""
-    board_count = sum(1 for b in list_boards(db) if b.community_id == community.id)
-    channel_count = sum(1 for c in list_channels(db) if c.community_id == community.id)
-    area_count = sum(1 for a in list_file_areas(db) if a.community_id == community.id)
-    grant_count = len(list_grants_for_community(db, community.id))
+
+    def _counts(db: Database) -> tuple[int, int, int, int]:
+        board_count = sum(1 for b in list_boards(db) if b.community_id == community.id)
+        channel_count = sum(1 for c in list_channels(db) if c.community_id == community.id)
+        area_count = sum(1 for a in list_file_areas(db) if a.community_id == community.id)
+        grant_count = len(list_grants_for_community(db, community.id))
+        return board_count, channel_count, area_count, grant_count
+
+    board_count, channel_count, area_count, grant_count = await lane.run(_counts)
     await session.write_line(
         colored(
             f"\r\nThis Community has {board_count} board(s), {channel_count} channel(s), "
@@ -1321,7 +1405,7 @@ async def _delete_community_screen(session: Session, db: Database, actor: User, 
     if confirmation != community.name:
         await session.write_line("Cancelled.")
         return False
-    delete_community(db, community, deleted_by=actor)
+    await lane.run(delete_community, community, deleted_by=actor)
     await session.write_line(f"{community.name!r} deleted.")
     return True
 
@@ -1329,7 +1413,7 @@ async def _delete_community_screen(session: Session, db: Database, actor: User, 
 # -- message boards ----------------------------------------------------
 
 
-async def _board_menu(session: Session, db: Database, actor: User) -> None:
+async def _board_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_board_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -1339,11 +1423,11 @@ async def _board_menu(session: Session, db: Database, actor: User) -> None:
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_board_screen(session, db, actor)
+            await _create_board_screen(session, lane, actor)
             await _draw_board_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_boards_screen(session, db, actor)
+            await _list_boards_screen(session, lane, actor)
             await _draw_board_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -1356,7 +1440,7 @@ async def _draw_board_menu(session: Session) -> None:
     await session.write("Choice: ")
 
 
-async def _create_board_screen(session: Session, db: Database, actor: User) -> None:
+async def _create_board_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     await session.write_line(colored("\r\nCreate board", fg_color=HEADER_COLOR, bold=True))
     await session.write("Name: ")
     name = (await session.read_line()).strip()
@@ -1371,11 +1455,11 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
     min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=0)
     if not ok:
         return
-    community_id = await _pick_optional_community(session, db)
+    community_id = await _pick_optional_community(session, lane)
     category_id = await _pick_optional_category(
-        session, db, list_top_level=list_top_level_board_categories,
+        session, lane, list_top_level=list_top_level_board_categories,
         list_subcategories=list_board_subcategories, title="Board category",
-        community_id=community_id, resources=list_boards(db),
+        community_id=community_id, resources=await lane.run(list_boards),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -1400,8 +1484,9 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
         return
 
     try:
-        board = create_board(
-            db, name, description=description, min_read_level=min_read_level,
+        board = await lane.run(
+            create_board,
+            name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_post_age_days=max_post_age_days,
             min_age=min_age, name_requirement=name_requirement,
@@ -1413,8 +1498,8 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
     await session.write_line(f"Created board {board.name!r}.")
 
 
-async def _list_boards_screen(session: Session, db: Database, actor: User) -> None:
-    boards = list_boards(db, order_by="alphabetical")
+async def _list_boards_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    boards = await lane.run(list_boards, order_by="alphabetical")
     selected = await pick_item(
         session, boards,
         name_of=lambda b: b.name,
@@ -1424,7 +1509,7 @@ async def _list_boards_screen(session: Session, db: Database, actor: User) -> No
         empty_message="No boards yet.",
     )
     if selected is not None:
-        await _board_detail_screen(session, db, actor, selected)
+        await _board_detail_screen(session, lane, actor, selected)
 
 
 def _board_description(board: Board) -> str:
@@ -1434,8 +1519,8 @@ def _board_description(board: Board) -> str:
     return f"read {read_level}/write {write_level}, {status}"
 
 
-async def _board_detail_screen(session: Session, db: Database, actor: User, board: Board) -> None:
-    await _draw_board_detail(session, db, board)
+async def _board_detail_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> None:
+    await _draw_board_detail(session, lane, board)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1444,29 +1529,29 @@ async def _board_detail_screen(session: Session, db: Database, actor: User, boar
             return
         elif choice == "e":
             await session.write_line("")
-            updated = await _edit_board_screen(session, db, actor, board)
+            updated = await _edit_board_screen(session, lane, actor, board)
             if updated is not None:
                 board = updated
-            await _draw_board_detail(session, db, board)
+            await _draw_board_detail(session, lane, board)
         elif choice == "d":
             await session.write_line("")
-            deleted = await _delete_board_screen(session, db, actor, board)
+            deleted = await _delete_board_screen(session, lane, actor, board)
             if deleted:
                 return
-            await _draw_board_detail(session, db, board)
+            await _draw_board_detail(session, lane, board)
         elif choice == "p":
             await session.write_line("")
-            await _pending_posts_screen(session, db, actor, board)
-            await _draw_board_detail(session, db, board)
+            await _pending_posts_screen(session, lane, actor, board)
+            await _draw_board_detail(session, lane, board)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_board_detail(session: Session, db: Database, board: Board) -> None:
+async def _draw_board_detail(session: Session, lane: DatabaseLane, board: Board) -> None:
     header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
-    await session.write_line(f"Community: {_community_label(db, board.community_id)}")
+    await session.write_line(f"Community: {await lane.run(_community_label, board.community_id)}")
     read_level = board.min_read_level if board.min_read_level is not None else "inherit"
     write_level = board.min_write_level if board.min_write_level is not None else "inherit"
     await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
@@ -1486,7 +1571,7 @@ async def _draw_board_detail(session: Session, db: Database, board: Board) -> No
     await session.write("Choice: ")
 
 
-async def _edit_board_screen(session: Session, db: Database, actor: User, board: Board) -> Board | None:
+async def _edit_board_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> Board | None:
     await session.write(f"Name [{board.name}]: ")
     name = (await session.read_line()).strip() or board.name
     await session.write(f"Description [{board.description or '(none)'}]: ")
@@ -1502,16 +1587,16 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
     await session.write_line("")
     community_id = board.community_id
     if change_community:
-        community_id = await _pick_optional_community(session, db)
+        community_id = await _pick_optional_community(session, lane)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
     category_id = board.category_id
     if change_category:
         category_id = await _pick_optional_category(
-            session, db, list_top_level=list_top_level_board_categories,
+            session, lane, list_top_level=list_top_level_board_categories,
             list_subcategories=list_board_subcategories, title="Board category",
-            community_id=community_id, resources=list_boards(db),
+            community_id=community_id, resources=await lane.run(list_boards),
         )
     await session.write(f"Pinned? [{'y' if board.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()
@@ -1541,8 +1626,9 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
         return None
 
     try:
-        updated = update_board(
-            db, board, name=name, description=description, min_read_level=min_read_level,
+        updated = await lane.run(
+            update_board,
+            board, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_post_age_days=max_post_age_days,
             min_age=min_age, name_requirement=name_requirement,
@@ -1555,7 +1641,7 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
     return updated
 
 
-async def _delete_board_screen(session: Session, db: Database, actor: User, board: Board) -> bool:
+async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> bool:
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the board, all of its posts, and any "
@@ -1568,14 +1654,14 @@ async def _delete_board_screen(session: Session, db: Database, actor: User, boar
     if confirmation != board.name:
         await session.write_line("Cancelled.")
         return False
-    delete_board(db, board, deleted_by=actor)
+    await lane.run(delete_board, board, deleted_by=actor)
     await session.write_line(f"{board.name!r} deleted.")
     return True
 
 
-async def _pending_posts_screen(session: Session, db: Database, actor: User, board: Board) -> None:
+async def _pending_posts_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> None:
     while True:
-        posts = list_pending_posts(db, board, requesting_user=actor)
+        posts = await lane.run(list_pending_posts, board, requesting_user=actor)
         selected = await pick_item(
             session, posts,
             name_of=lambda p: p.subject,
@@ -1586,7 +1672,7 @@ async def _pending_posts_screen(session: Session, db: Database, actor: User, boa
         )
         if selected is None:
             return
-        await _post_action_screen(session, db, actor, selected)
+        await _post_action_screen(session, lane, actor, selected)
 
 
 async def _draw_post_action(session: Session, post: Post) -> None:
@@ -1607,7 +1693,7 @@ async def _draw_post_action(session: Session, post: Post) -> None:
     await session.write("Choice: ")
 
 
-async def _post_action_screen(session: Session, db: Database, actor: User, post: Post) -> None:
+async def _post_action_screen(session: Session, lane: DatabaseLane, actor: User, post: Post) -> None:
     await _draw_post_action(session, post)
     while True:
         choice = (await session.read_key()).lower()
@@ -1617,13 +1703,13 @@ async def _post_action_screen(session: Session, db: Database, actor: User, post:
             return
         elif choice == "a":
             await session.write_line("")
-            approve_post(db, post, approved_by=actor)
+            await lane.run(approve_post, post, approved_by=actor)
             await session.write_line("Approved.")
             return
         elif choice == "r":
             await session.write_line("")
             try:
-                delete_post(db, post, deleted_by=actor)
+                await lane.run(delete_post, post, deleted_by=actor)
             except PostError as exc:
                 await session.write_line(f"Error: {exc}")
                 await _draw_post_action(session, post)
@@ -1632,11 +1718,11 @@ async def _post_action_screen(session: Session, db: Database, actor: User, post:
             return
         elif choice == "p":
             await session.write_line("")
-            post = set_post_pinned(db, post, not post.pinned, changed_by=actor)
+            post = await lane.run(set_post_pinned, post, not post.pinned, changed_by=actor)
             await _draw_post_action(session, post)
         elif choice == "x":
             await session.write_line("")
-            post = set_post_exempt(db, post, not post.exempt_from_expiry, changed_by=actor)
+            post = await lane.run(set_post_exempt, post, not post.exempt_from_expiry, changed_by=actor)
             await _draw_post_action(session, post)
         else:
             await session.write(reject_keystroke())
@@ -1645,7 +1731,7 @@ async def _post_action_screen(session: Session, db: Database, actor: User, post:
 # -- file areas ----------------------------------------------------------
 
 
-async def _area_menu(session: Session, db: Database, actor: User) -> None:
+async def _area_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_area_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -1655,15 +1741,15 @@ async def _area_menu(session: Session, db: Database, actor: User) -> None:
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_area_screen(session, db, actor)
+            await _create_area_screen(session, lane, actor)
             await _draw_area_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_areas_screen(session, db, actor)
+            await _list_areas_screen(session, lane, actor)
             await _draw_area_menu(session)
         elif choice == "g":
             await session.write_line("")
-            await _gc_screen(session, db)
+            await _gc_screen(session, lane)
             await _draw_area_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -1678,7 +1764,7 @@ async def _draw_area_menu(session: Session) -> None:
     await session.write("Choice: ")
 
 
-async def _gc_screen(session: Session, db: Database) -> None:
+async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
     """
     Reference-aware blob garbage collection (GitHub issue #35): always
     shows a dry-run report first, then asks separately before actually
@@ -1687,7 +1773,7 @@ async def _gc_screen(session: Session, db: Database) -> None:
     here too since this is a one-way filesystem operation the database
     itself can't undo.
     """
-    preview = reclaim_orphaned_blobs(db, dry_run=True)
+    preview = await lane.run(reclaim_orphaned_blobs, dry_run=True)
     await _write_gc_report(session, preview)
     if preview.reclaimable_blobs == 0:
         return
@@ -1696,7 +1782,7 @@ async def _gc_screen(session: Session, db: Database) -> None:
     await session.write_line("")
     if answer != "y":
         return
-    result = reclaim_orphaned_blobs(db, dry_run=False)
+    result = await lane.run(reclaim_orphaned_blobs, dry_run=False)
     await _write_gc_report(session, result)
 
 
@@ -1733,7 +1819,7 @@ async def _write_gc_report(session: Session, report: GCReport) -> None:
         await session.write_line(colored(f"Error: {error}", fg_color=MUTED_COLOR))
 
 
-async def _create_area_screen(session: Session, db: Database, actor: User) -> None:
+async def _create_area_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     await session.write_line(colored("\r\nCreate file area", fg_color=HEADER_COLOR, bold=True))
     await session.write("Name: ")
     name = (await session.read_line()).strip()
@@ -1748,11 +1834,11 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
     min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=0)
     if not ok:
         return
-    community_id = await _pick_optional_community(session, db)
+    community_id = await _pick_optional_community(session, lane)
     category_id = await _pick_optional_category(
-        session, db, list_top_level=list_top_level_file_categories,
+        session, lane, list_top_level=list_top_level_file_categories,
         list_subcategories=list_file_subcategories, title="File-area category",
-        community_id=community_id, resources=list_file_areas(db),
+        community_id=community_id, resources=await lane.run(list_file_areas),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -1777,8 +1863,9 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
         return
 
     try:
-        area = create_file_area(
-            db, name, description=description, min_read_level=min_read_level,
+        area = await lane.run(
+            create_file_area,
+            name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_file_age_days=max_file_age_days,
             min_age=min_age, name_requirement=name_requirement,
@@ -1790,8 +1877,8 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
     await session.write_line(f"Created file area {area.name!r}.")
 
 
-async def _list_areas_screen(session: Session, db: Database, actor: User) -> None:
-    areas = list_file_areas(db, order_by="alphabetical")
+async def _list_areas_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    areas = await lane.run(list_file_areas, order_by="alphabetical")
     selected = await pick_item(
         session, areas,
         name_of=lambda a: a.name,
@@ -1801,7 +1888,7 @@ async def _list_areas_screen(session: Session, db: Database, actor: User) -> Non
         empty_message="No file areas yet.",
     )
     if selected is not None:
-        await _area_detail_screen(session, db, actor, selected)
+        await _area_detail_screen(session, lane, actor, selected)
 
 
 def _area_description(area: FileArea) -> str:
@@ -1811,8 +1898,8 @@ def _area_description(area: FileArea) -> str:
     return f"read {read_level}/write {write_level}, {status}"
 
 
-async def _area_detail_screen(session: Session, db: Database, actor: User, area: FileArea) -> None:
-    await _draw_area_detail(session, db, area)
+async def _area_detail_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> None:
+    await _draw_area_detail(session, lane, area)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1821,29 +1908,29 @@ async def _area_detail_screen(session: Session, db: Database, actor: User, area:
             return
         elif choice == "e":
             await session.write_line("")
-            updated = await _edit_area_screen(session, db, actor, area)
+            updated = await _edit_area_screen(session, lane, actor, area)
             if updated is not None:
                 area = updated
-            await _draw_area_detail(session, db, area)
+            await _draw_area_detail(session, lane, area)
         elif choice == "d":
             await session.write_line("")
-            deleted = await _delete_area_screen(session, db, actor, area)
+            deleted = await _delete_area_screen(session, lane, actor, area)
             if deleted:
                 return
-            await _draw_area_detail(session, db, area)
+            await _draw_area_detail(session, lane, area)
         elif choice == "p":
             await session.write_line("")
-            await _pending_files_screen(session, db, actor, area)
-            await _draw_area_detail(session, db, area)
+            await _pending_files_screen(session, lane, actor, area)
+            await _draw_area_detail(session, lane, area)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_area_detail(session: Session, db: Database, area: FileArea) -> None:
+async def _draw_area_detail(session: Session, lane: DatabaseLane, area: FileArea) -> None:
     header = colored(sanitize_text(area.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(area.description) if area.description else '(none)'}")
-    await session.write_line(f"Community: {_community_label(db, area.community_id)}")
+    await session.write_line(f"Community: {await lane.run(_community_label, area.community_id)}")
     read_level = area.min_read_level if area.min_read_level is not None else "inherit"
     write_level = area.min_write_level if area.min_write_level is not None else "inherit"
     await session.write_line(f"Read level: {read_level}  Write level: {write_level}")
@@ -1863,7 +1950,7 @@ async def _draw_area_detail(session: Session, db: Database, area: FileArea) -> N
     await session.write("Choice: ")
 
 
-async def _edit_area_screen(session: Session, db: Database, actor: User, area: FileArea) -> FileArea | None:
+async def _edit_area_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> FileArea | None:
     await session.write(f"Name [{area.name}]: ")
     name = (await session.read_line()).strip() or area.name
     await session.write(f"Description [{area.description or '(none)'}]: ")
@@ -1879,16 +1966,16 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
     await session.write_line("")
     community_id = area.community_id
     if change_community:
-        community_id = await _pick_optional_community(session, db)
+        community_id = await _pick_optional_community(session, lane)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
     category_id = area.category_id
     if change_category:
         category_id = await _pick_optional_category(
-            session, db, list_top_level=list_top_level_file_categories,
+            session, lane, list_top_level=list_top_level_file_categories,
             list_subcategories=list_file_subcategories, title="File-area category",
-            community_id=community_id, resources=list_file_areas(db),
+            community_id=community_id, resources=await lane.run(list_file_areas),
         )
     await session.write(f"Pinned? [{'y' if area.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()
@@ -1918,8 +2005,9 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
         return None
 
     try:
-        updated = update_file_area(
-            db, area, name=name, description=description, min_read_level=min_read_level,
+        updated = await lane.run(
+            update_file_area,
+            area, name=name, description=description, min_read_level=min_read_level,
             min_write_level=min_write_level, category_id=category_id, pinned=pinned,
             moderated=moderated, max_file_age_days=max_file_age_days,
             min_age=min_age, name_requirement=name_requirement,
@@ -1932,7 +2020,7 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
     return updated
 
 
-async def _delete_area_screen(session: Session, db: Database, actor: User, area: FileArea) -> bool:
+async def _delete_area_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> bool:
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the file area, all of its files, and any "
@@ -1945,14 +2033,14 @@ async def _delete_area_screen(session: Session, db: Database, actor: User, area:
     if confirmation != area.name:
         await session.write_line("Cancelled.")
         return False
-    delete_file_area(db, area, deleted_by=actor)
+    await lane.run(delete_file_area, area, deleted_by=actor)
     await session.write_line(f"{area.name!r} deleted.")
     return True
 
 
-async def _pending_files_screen(session: Session, db: Database, actor: User, area: FileArea) -> None:
+async def _pending_files_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> None:
     while True:
-        files = list_pending_files(db, area, requesting_user=actor)
+        files = await lane.run(list_pending_files, area, requesting_user=actor)
         selected = await pick_item(
             session, files,
             name_of=lambda f: f.filename,
@@ -1963,7 +2051,7 @@ async def _pending_files_screen(session: Session, db: Database, actor: User, are
         )
         if selected is None:
             return
-        await _file_action_screen(session, db, actor, selected)
+        await _file_action_screen(session, lane, actor, selected)
 
 
 async def _draw_file_action(session: Session, entry: FileEntry) -> None:
@@ -1986,7 +2074,7 @@ async def _draw_file_action(session: Session, entry: FileEntry) -> None:
     await session.write("Choice: ")
 
 
-async def _file_action_screen(session: Session, db: Database, actor: User, entry: FileEntry) -> None:
+async def _file_action_screen(session: Session, lane: DatabaseLane, actor: User, entry: FileEntry) -> None:
     await _draw_file_action(session, entry)
     while True:
         choice = (await session.read_key()).lower()
@@ -1996,21 +2084,21 @@ async def _file_action_screen(session: Session, db: Database, actor: User, entry
             return
         elif choice == "a":
             await session.write_line("")
-            approve_file(db, entry, approved_by=actor)
+            await lane.run(approve_file, entry, approved_by=actor)
             await session.write_line("Approved.")
             return
         elif choice == "r":
             await session.write_line("")
-            delete_file(db, entry, deleted_by=actor)
+            await lane.run(delete_file, entry, deleted_by=actor)
             await session.write_line("Rejected.")
             return
         elif choice == "p":
             await session.write_line("")
-            entry = set_file_pinned(db, entry, not entry.pinned, changed_by=actor)
+            entry = await lane.run(set_file_pinned, entry, not entry.pinned, changed_by=actor)
             await _draw_file_action(session, entry)
         elif choice == "x":
             await session.write_line("")
-            entry = set_file_exempt(db, entry, not entry.exempt_from_expiry, changed_by=actor)
+            entry = await lane.run(set_file_exempt, entry, not entry.exempt_from_expiry, changed_by=actor)
             await _draw_file_action(session, entry)
         else:
             await session.write(reject_keystroke())
@@ -2030,7 +2118,7 @@ async def _file_action_screen(session: Session, db: Database, actor: User, entry
 # approval.
 
 
-async def _channel_menu(session: Session, db: Database, actor: User) -> None:
+async def _channel_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_channel_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -2040,11 +2128,11 @@ async def _channel_menu(session: Session, db: Database, actor: User) -> None:
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_channel_screen(session, db, actor)
+            await _create_channel_screen(session, lane, actor)
             await _draw_channel_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_channels_screen(session, db, actor)
+            await _list_channels_screen(session, lane, actor)
             await _draw_channel_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -2057,7 +2145,7 @@ async def _draw_channel_menu(session: Session) -> None:
     await session.write("Choice: ")
 
 
-async def _create_channel_screen(session: Session, db: Database, actor: User) -> None:
+async def _create_channel_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     await session.write_line(colored("\r\nCreate channel", fg_color=HEADER_COLOR, bold=True))
     await session.write("Name: ")
     name = (await session.read_line()).strip()
@@ -2070,11 +2158,11 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
     min_level = await _read_int(session, default=0)
     if min_level is None:
         return
-    community_id = await _pick_optional_community(session, db)
+    community_id = await _pick_optional_community(session, lane)
     category_id = await _pick_optional_category(
-        session, db, list_top_level=list_top_level_channel_categories,
+        session, lane, list_top_level=list_top_level_channel_categories,
         list_subcategories=list_channel_subcategories, title="Channel category",
-        community_id=community_id, resources=list_channels(db),
+        community_id=community_id, resources=await lane.run(list_channels),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -2098,8 +2186,9 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
         return
 
     try:
-        channel = create_channel(
-            db, name, description=description, min_level=min_level, category_id=category_id,
+        channel = await lane.run(
+            create_channel,
+            name, description=description, min_level=min_level, category_id=category_id,
             pinned=pinned, hidden=hidden, members_only=members_only,
             allow_member_invites=allow_member_invites,
             min_age=min_age, name_requirement=name_requirement,
@@ -2111,8 +2200,8 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
     await session.write_line(f"Created channel {channel.name!r}.")
 
 
-async def _list_channels_screen(session: Session, db: Database, actor: User) -> None:
-    channels = list_channels(db)
+async def _list_channels_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    channels = await lane.run(list_channels)
     selected = await pick_item(
         session, channels,
         name_of=lambda c: c.name,
@@ -2122,7 +2211,7 @@ async def _list_channels_screen(session: Session, db: Database, actor: User) -> 
         empty_message="No channels yet.",
     )
     if selected is not None:
-        await _channel_detail_screen(session, db, actor, selected)
+        await _channel_detail_screen(session, lane, actor, selected)
 
 
 def _channel_description(channel: Channel) -> str:
@@ -2134,8 +2223,8 @@ def _channel_description(channel: Channel) -> str:
     return ", ".join(bits)
 
 
-async def _channel_detail_screen(session: Session, db: Database, actor: User, channel: Channel) -> None:
-    await _draw_channel_detail(session, db, channel)
+async def _channel_detail_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> None:
+    await _draw_channel_detail(session, lane, channel)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -2144,27 +2233,27 @@ async def _channel_detail_screen(session: Session, db: Database, actor: User, ch
             return
         elif choice == "e":
             await session.write_line("")
-            updated = await _edit_channel_screen(session, db, actor, channel)
+            updated = await _edit_channel_screen(session, lane, actor, channel)
             if updated is not None:
                 channel = updated
-            await _draw_channel_detail(session, db, channel)
+            await _draw_channel_detail(session, lane, channel)
         elif choice == "d":
             await session.write_line("")
-            deleted = await _delete_channel_screen(session, db, actor, channel)
+            deleted = await _delete_channel_screen(session, lane, actor, channel)
             if deleted:
                 return
-            await _draw_channel_detail(session, db, channel)
+            await _draw_channel_detail(session, lane, channel)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_channel_detail(session: Session, db: Database, channel: Channel) -> None:
+async def _draw_channel_detail(session: Session, lane: DatabaseLane, channel: Channel) -> None:
     header = colored(sanitize_text(channel.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(
         f"Description: {sanitize_text(channel.description) if channel.description else '(none)'}"
     )
-    await session.write_line(f"Community: {_community_label(db, channel.community_id)}")
+    await session.write_line(f"Community: {await lane.run(_community_label, channel.community_id)}")
     await session.write_line(f"Minimum level: {channel.min_level}")
     await session.write_line(
         f"Pinned: {'yes' if channel.pinned else 'no'}  Hidden: {'yes' if channel.hidden else 'no'}"
@@ -2182,7 +2271,7 @@ async def _draw_channel_detail(session: Session, db: Database, channel: Channel)
     await session.write("Choice: ")
 
 
-async def _edit_channel_screen(session: Session, db: Database, actor: User, channel: Channel) -> Channel | None:
+async def _edit_channel_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> Channel | None:
     await session.write(f"Name [{channel.name}]: ")
     name = (await session.read_line()).strip() or channel.name
     await session.write(f"Description [{channel.description or '(none)'}]: ")
@@ -2196,16 +2285,16 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
     await session.write_line("")
     community_id = channel.community_id
     if change_community:
-        community_id = await _pick_optional_community(session, db)
+        community_id = await _pick_optional_community(session, lane)
     await session.write("Change category? [y/N]: ")
     change_category = (await session.read_key()).lower() == "y"
     await session.write_line("")
     category_id = channel.category_id
     if change_category:
         category_id = await _pick_optional_category(
-            session, db, list_top_level=list_top_level_channel_categories,
+            session, lane, list_top_level=list_top_level_channel_categories,
             list_subcategories=list_channel_subcategories, title="Channel category",
-            community_id=community_id, resources=list_channels(db),
+            community_id=community_id, resources=await lane.run(list_channels),
         )
     await session.write(f"Pinned? [{'y' if channel.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()
@@ -2233,8 +2322,9 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
         return None
 
     try:
-        updated = update_channel(
-            db, channel, name=name, description=description, min_level=min_level,
+        updated = await lane.run(
+            update_channel,
+            channel, name=name, description=description, min_level=min_level,
             category_id=category_id, pinned=pinned, hidden=hidden, members_only=members_only,
             allow_member_invites=allow_member_invites,
             min_age=min_age, name_requirement=name_requirement,
@@ -2247,7 +2337,7 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
     return updated
 
 
-async def _delete_channel_screen(session: Session, db: Database, actor: User, channel: Channel) -> bool:
+async def _delete_channel_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> bool:
     await session.write_line(
         colored(
             "\r\nThis permanently deletes the channel, its scrollback, mute/ban "
@@ -2261,7 +2351,7 @@ async def _delete_channel_screen(session: Session, db: Database, actor: User, ch
     if confirmation != channel.name:
         await session.write_line("Cancelled.")
         return False
-    delete_channel(db, channel, deleted_by=actor)
+    await lane.run(delete_channel, channel, deleted_by=actor)
     await session.write_line(f"{channel.name!r} deleted.")
     return True
 
@@ -2269,7 +2359,7 @@ async def _delete_channel_screen(session: Session, db: Database, actor: User, ch
 # -- categories ----------------------------------------------------------
 
 
-async def _category_menu(session: Session, db: Database, actor: User) -> None:
+async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     await _draw_category_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -2280,7 +2370,7 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
         elif choice == "m":
             await session.write_line("")
             await _generic_category_screen(
-                session, db, actor,
+                session, lane, actor,
                 create=create_board_category, list_top_level=list_top_level_board_categories,
                 list_subcategories=list_board_subcategories, delete=delete_board_category,
                 error_type=CategoryError, title="Board categories",
@@ -2289,7 +2379,7 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
         elif choice == "f":
             await session.write_line("")
             await _generic_category_screen(
-                session, db, actor,
+                session, lane, actor,
                 create=create_file_category, list_top_level=list_top_level_file_categories,
                 list_subcategories=list_file_subcategories, delete=delete_file_category,
                 error_type=FileCategoryError, title="File-area categories",
@@ -2298,7 +2388,7 @@ async def _category_menu(session: Session, db: Database, actor: User) -> None:
         elif choice == "h":
             await session.write_line("")
             await _generic_category_screen(
-                session, db, actor,
+                session, lane, actor,
                 create=create_channel_category, list_top_level=list_top_level_channel_categories,
                 list_subcategories=list_channel_subcategories, delete=delete_channel_category,
                 error_type=ChannelCategoryError, title="Channel categories",
@@ -2323,7 +2413,7 @@ async def _draw_category_menu(session: Session) -> None:
 
 
 async def _generic_category_screen(
-    session: Session, db: Database, actor: User, *, create, list_top_level, list_subcategories, delete,
+    session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, list_subcategories, delete,
     error_type, title: str,
 ) -> None:
     await _draw_generic_category_menu(session, title)
@@ -2336,13 +2426,13 @@ async def _generic_category_screen(
         elif choice == "c":
             await session.write_line("")
             await _create_category_screen(
-                session, db, actor, create=create, list_top_level=list_top_level, error_type=error_type,
+                session, lane, actor, create=create, list_top_level=list_top_level, error_type=error_type,
             )
             await _draw_generic_category_menu(session, title)
         elif choice == "l":
             await session.write_line("")
             await _list_categories_screen(
-                session, db, actor, list_top_level=list_top_level,
+                session, lane, actor, list_top_level=list_top_level,
                 list_subcategories=list_subcategories, delete=delete,
             )
             await _draw_generic_category_menu(session, title)
@@ -2358,7 +2448,7 @@ async def _draw_generic_category_menu(session: Session, title: str) -> None:
 
 
 async def _create_category_screen(
-    session: Session, db: Database, actor: User, *, create, list_top_level, error_type
+    session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type
 ) -> None:
     await session.write("Name: ")
     name = (await session.read_line()).strip()
@@ -2373,14 +2463,14 @@ async def _create_category_screen(
     parent_category_id = None
     if answer == "y":
         parent = await pick_item(
-            session, list_top_level(db),
+            session, await lane.run(list_top_level),
             name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
             title="Parent category", empty_message="No top-level categories exist yet.",
         )
         parent_category_id = parent.id if parent is not None else None
     try:
-        category = create(
-            db, name, description=description, parent_category_id=parent_category_id, created_by=actor
+        category = await lane.run(
+            create, name, description=description, parent_category_id=parent_category_id, created_by=actor
         )
     except error_type as exc:
         await session.write_line(colored(f"Could not create category: {exc}", fg_color=MUTED_COLOR))
@@ -2389,12 +2479,16 @@ async def _create_category_screen(
 
 
 async def _list_categories_screen(
-    session: Session, db: Database, actor: User, *, list_top_level, list_subcategories, delete
+    session: Session, lane: DatabaseLane, actor: User, *, list_top_level, list_subcategories, delete
 ) -> None:
-    top_level = list_top_level(db)
-    all_categories = list(top_level)
-    for top in top_level:
-        all_categories.extend(list_subcategories(db, top.id))
+    def _load(db: Database) -> list:
+        top_level = list_top_level(db)
+        all_categories = list(top_level)
+        for top in top_level:
+            all_categories.extend(list_subcategories(db, top.id))
+        return all_categories
+
+    all_categories = await lane.run(_load)
     selected = await pick_item(
         session, all_categories,
         name_of=lambda c: c.name,
@@ -2417,14 +2511,14 @@ async def _list_categories_screen(
     if confirmation != selected.name:
         await session.write_line("Cancelled.")
         return
-    delete(db, selected, deleted_by=actor)
+    await lane.run(delete, selected, deleted_by=actor)
     await session.write_line(f"{selected.name!r} deleted.")
 
 
 # -- moderator grants -----------------------------------------------------
 
 
-async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, int | None, str, int | None] | None:
+async def _pick_moderator_scope(session: Session, lane: DatabaseLane) -> tuple[str, int | None, str, int | None] | None:
     """Returns `(object_type, object_id, human label, community_id)`,
     or `None` if cancelled. `object_id=None` means a blanket grant
     (design doc -- board/area management round; channel scope added in
@@ -2443,7 +2537,7 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
     await session.write_line("")
     if scope_key == "b":
         board = await pick_item(
-            session, list_boards(db, order_by="alphabetical"),
+            session, await lane.run(list_boards, order_by="alphabetical"),
             name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
             title="Which board?", empty_message="No boards yet.",
         )
@@ -2452,7 +2546,7 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         return "board", board.id, f"board {board.name!r}", None
     elif scope_key == "a":
         area = await pick_item(
-            session, list_file_areas(db, order_by="alphabetical"),
+            session, await lane.run(list_file_areas, order_by="alphabetical"),
             name_of=lambda a: a.name, stable_id_of=lambda a: a.id,
             title="Which file area?", empty_message="No file areas yet.",
         )
@@ -2461,7 +2555,7 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         return "file_area", area.id, f"file area {area.name!r}", None
     elif scope_key == "h":
         channel = await pick_item(
-            session, list_channels(db),
+            session, await lane.run(list_channels),
             name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
             title="Which channel?", empty_message="No channels yet.",
         )
@@ -2478,14 +2572,14 @@ async def _pick_moderator_scope(session: Session, db: Database) -> tuple[str, in
         await session.write_line(colored("Not a valid scope -- cancelled.", fg_color=MUTED_COLOR))
         return None
 
-    community_id = await _pick_optional_community_blanket_scope(session, db)
+    community_id = await _pick_optional_community_blanket_scope(session, lane)
     if community_id is not None:
-        community = get_community(db, community_id)
+        community = await lane.run(get_community, community_id)
         label = f"{label} scoped to Community {community.name!r}"
     return object_type, None, label, community_id
 
 
-async def _pick_optional_community_blanket_scope(session: Session, db: Database) -> int | None:
+async def _pick_optional_community_blanket_scope(session: Session, lane: DatabaseLane) -> int | None:
     """The blanket-grant-scoping follow-up (design doc §16, round 84):
     'Scope this blanket grant to one Community instead of the whole
     node?' -- extends the existing X/Y/Z blanket keys rather than
@@ -2498,7 +2592,7 @@ async def _pick_optional_community_blanket_scope(session: Session, db: Database)
     if answer != "y":
         return None
     selected = await pick_item(
-        session, list_communities(db),
+        session, await lane.run(list_communities),
         name_of=lambda c: c.name,
         stable_id_of=lambda c: c.id,
         title="Community",
@@ -2507,15 +2601,15 @@ async def _pick_optional_community_blanket_scope(session: Session, db: Database)
     return selected.id if selected is not None else None
 
 
-async def _grant_moderator_screen(session: Session, db: Database, actor: User) -> None:
+async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     target = await pick_item(
-        session, list_users(db),
+        session, await lane.run(list_users),
         name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
         title="Grant moderator to which user?", empty_message="No registered users yet.",
     )
     if target is None:
         return
-    scope = await _pick_moderator_scope(session, db)
+    scope = await _pick_moderator_scope(session, lane)
     if scope is None:
         return
     object_type, object_id, label, community_id = scope
@@ -2554,27 +2648,30 @@ async def _grant_moderator_screen(session: Session, db: Database, actor: User) -
         await session.write_line("Cancelled.")
         return
 
-    grant_permissions(
-        db, target, object_type=object_type, object_id=object_id, permissions=permissions,
+    await lane.run(
+        grant_permissions,
+        target, object_type=object_type, object_id=object_id, permissions=permissions,
         granted_by=actor, community_id=community_id,
     )
     await session.write_line(f"Granted {preset_label} on {label} to {target.username!r}.")
 
 
-async def _revoke_moderator_screen(session: Session, db: Database, actor: User) -> None:
+async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     target = await pick_item(
-        session, list_users(db),
+        session, await lane.run(list_users),
         name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
         title="Revoke moderator from which user?", empty_message="No registered users yet.",
     )
     if target is None:
         return
-    scope = await _pick_moderator_scope(session, db)
+    scope = await _pick_moderator_scope(session, lane)
     if scope is None:
         return
     object_type, object_id, label, community_id = scope
 
-    grant = get_grant(db, target, object_type=object_type, object_id=object_id, community_id=community_id)
+    grant = await lane.run(
+        get_grant, target, object_type=object_type, object_id=object_id, community_id=community_id
+    )
     if grant is None:
         await session.write_line(colored(f"{target.username!r} has no grant on {label}.", fg_color=MUTED_COLOR))
         return
@@ -2587,8 +2684,9 @@ async def _revoke_moderator_screen(session: Session, db: Database, actor: User) 
         return
 
     permission_enum = ChannelPermission if object_type == "channel" else BoardPermission
-    revoke_permissions(
-        db, target, object_type=object_type, object_id=object_id,
+    await lane.run(
+        revoke_permissions,
+        target, object_type=object_type, object_id=object_id,
         permissions=permission_enum(grant.permissions), revoked_by=actor, community_id=community_id,
     )
     await session.write_line(f"Revoked {target.username!r}'s grant on {label}.")

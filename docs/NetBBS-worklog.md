@@ -7427,3 +7427,117 @@ three highest-traffic interactive loops); admin and the remaining
 login_flow.py menu branches are the rest of round 91/issue #57's
 original scope.
 
+## Sign-off notes, round 115 (issue #57 implementation continues -- admin_flow.py migrated, fourth and final file)
+
+Fourth and final file migrated onto round 91's two-lane model. Largest
+file in the codebase by line count (~2600 lines, ~55 functions: every
+SysOp screen/menu — user management, node management, welcome banner,
+boards, file areas, channels, categories, moderator grants) but, unlike
+chat_flow.py's round 114, almost entirely mechanical: no synchronous-
+callback contracts here at all -- every `pick_item` `name_of`/
+`description_of` callback in this file only ever reads attributes
+already present on the objects handed to `pick_item`, never a fresh DB
+call, so no eager-pre-fetch restructuring was needed for the pickers
+themselves. Every screen/menu function now takes `lane: DatabaseLane`
+instead of `db: Database`; every direct domain-function call goes
+through `await lane.run(...)`; multi-call sequences (e.g. a delete
+confirmation's "how many boards/channels/areas would be affected"
+count, or a category listing's top-level-plus-every-subcategory fetch)
+are bundled into one local closure passed to a single `lane.run()`
+call, following round 112's established recipe.
+
+**One genuine exception needing the eager-pre-fetch treatment**:
+`_who_screen`'s `description_of` callback used to call
+`format_for_display(entry.connected_at, db)` directly inside its
+lambda -- the same shape round 112 already solved generically via
+`resolve_display_preferences`, applied here the same way (fetched once
+via `lane.run()` before the picker, passed into the callback as plain
+values, `format_for_display` called synchronously with
+`override_format`/`override_timezone`). The same fix applied to
+`_show_user_detail`'s two `format_for_display` call sites (the "member
+since" line and the admin-action-log loop) and `_update_settings_
+screen`'s one, none of which were inside a callback but all of which
+benefit from the same single-fetch-reused-multiple-times shape round
+112's own docstring recommends.
+
+**One small, deliberate design choice, not just a mechanical dispatch
+wrapper**: `_create_user_screen` and `netbbs.admin.__main__._bootstrap_
+first_sysop` both used to call `create_user_async` -- an async wrapper
+around `netbbs.auth.users.create_user` that exists specifically to
+perform Argon2 password hashing in a bounded off-loop worker *before*
+returning to the raw event-loop thread for the synchronous SQLite
+write, avoiding a multi-hundred-millisecond stall on the bare event
+loop. Now that both call sites dispatch through `lane.run()`, that
+whole call -- hash and write together -- already happens in the lane's
+own worker thread, off the event loop by construction; `create_user_
+async`'s own split no longer buys anything at these two call sites, so
+both were switched to the plain synchronous `create_user`, whose own
+docstring already says it "remains synchronous for command-line/admin
+callers" -- exactly what both of these are. `create_user_async` itself
+is untouched and still used correctly by the still-unmigrated parts of
+`login_flow.py`/`ssh.py` (self-registration and SSH auto-registration),
+which still run directly on the raw event loop and still need the
+off-loop split. Confirmed this reading against the function's own
+docstring rather than assuming; noted here since it's a real "which
+function do I call" decision, not just a `lane.run()` wrapper.
+
+**`netbbs/net/login_flow.py`**: the `"a"` (admin) branch in
+`_main_menu` gets the same `lane is not None` degrade-gracefully-to-
+"not available in this context" treatment as mail's `"e"` branch
+(round 112), file areas' `"f"` branch (round 113), and chat's `"c"`
+branch (round 114) -- checked specifically against
+`tests/test_account_revocation_watcher.py::test_watcher_disconnects_a_
+disabled_sysop_stuck_inside_the_admin_menu`, which scripts `["a"]`
+expecting to block deep inside `admin_menu` itself (the exact round-113
+silent-degrade shape) -- already safe, since that file's shared
+`_drive` helper was fixed in round 113 to always construct and thread a
+real lane for every one of its 8 call sites, this one included.
+
+**`netbbs/admin/__main__.py`**: `run_admin_session` (the standalone
+`python -m netbbs.admin` CLI's own tested entry point) now opens its
+own `DatabaseLane` around the `Database` handle it's given, scoped to
+that function's own lifetime (opened and closed there, not owned by
+`main()`) -- kept this way specifically so tests calling
+`run_admin_session` directly still only need to hand it a plain `db`,
+matching that module's own stated reason for keeping this function
+separate from `main()`. `_resolve_actor`/`_bootstrap_first_sysop` both
+now take `lane` instead of `db`.
+
+**No cancellation-window-shaped bug this time** (round 114's chat_flow.py
+finding, an actual regression the lane migration introduced) — this
+file has no long-lived concurrent-task structure the way `_chat_loop`
+does (no `send_loop`/`receive_loop` pair, no `try`/`finally` cleanup
+contract whose window widened under the migration); every screen here
+is a straight-line sequence of prompt/dispatch/prompt, so there was no
+equivalent gap to find.
+
+**Tests**: 0 new — `tests/test_admin_flow.py` (76 tests: `lane` fixture
+added, its own `_run`/`_run_admin_session_as_its_own_task` helpers and
+every one of their ~76 call sites converted) and `tests/test_admin_
+cli.py` (9 tests: `_resolve_actor`/`_bootstrap_first_sysop` call sites
+converted to `lane`; `run_admin_session` call sites left on `db`,
+unchanged, since that function's own signature didn't change). Every
+test in both files passed on the first run after conversion -- no
+timing-race fixes needed here (`FakeSession`'s reads never suspend, and
+every `lane.run()` dispatch in this file is already awaited in strict
+sequence, unlike chat_flow.py's concurrent send/receive tasks).
+
+**Testing**: full suite re-run: **1957 passed, 4 skipped** (unchanged
+from round 112/113/114's count — no net new tests, existing coverage
+preserved).
+
+**Issue #57 status**: all four `net/` files identified in round 91's
+original scope (mail_flow.py, file_flow.py, chat_flow.py, admin_flow.py)
+are now fully migrated onto the two-lane database execution model,
+along with every `login_flow.py` menu branch that reaches them
+(`"e"`/`"f"`/`"c"`/`"a"`). The remaining, deliberately-unmigrated
+`db`-first leaf functions (`_uploader_display_name`, `_community_label`,
+`has_visible_areas`, and similar) are callees dispatched *through* a
+lane by every caller, per the pattern established starting round 112 —
+not remaining migration scope, but the intended final shape. What's
+left of `login_flow.py` itself (login, registration, profile editing,
+and other menu branches that never reach a `net/` submodule needing a
+lane) was never in scope for this issue and stays on `db` directly, the
+same synchronous-connection model the whole codebase used before round
+91.
+
