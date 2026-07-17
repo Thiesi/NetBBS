@@ -120,6 +120,47 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
         seed.close()
 
 
+def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
+    """Round 95: _sync_one_seed also asks the seed who else it knows,
+    right after the hello -- the seed here already has carol as a
+    completed peer of its own; one sync pass should leave the dialer
+    with carol as a recorded (unverified) candidate, on disk too."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    carol_identity = bootstrap_node_identity("carol")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    carol_hello = _hello_for(LinkNode(identity=carol_identity))
+    seed_node.handle_hello(carol_hello)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert carol_identity.fingerprint in dialer_node.candidate_descriptors
+        assert carol_identity.fingerprint not in dialer_node.peers
+        row = dialer.db.connection.execute("SELECT fingerprint FROM link_peer_candidates").fetchone()
+        assert row["fingerprint"] == carol_identity.fingerprint
+    finally:
+        dialer.close()
+        seed.close()
+
+
 def test_sync_pushes_own_linked_board_genesis_and_post_to_a_real_seed(tmp_path):
     """Round 128: `_sync_one_seed` also pushes this node's own `board_
     genesis`/`board_post` events, read fresh off the `boards`/`posts`

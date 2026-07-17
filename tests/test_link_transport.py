@@ -32,7 +32,7 @@ from netbbs.link.events import KeyTransition, build_endpoint_descriptor
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node
-from netbbs.link.transport import LinkServer, LinkTransportError, dial_hello, push_events
+from netbbs.link.transport import LinkServer, LinkTransportError, dial_hello, push_events, request_peer_list
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -408,3 +408,46 @@ def test_link_server_port_raises_before_start(tmp_path):
             _ = server.port
     finally:
         alice.close()
+
+
+def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
+    """Round 95's peer-list exchange over a real socket: bob already
+    knows carol (a completed hello); alice requests bob's peer list and
+    records carol as an unverified candidate."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    carol_hello = _hello_for(LinkNode(identity=carol_identity))
+    bob_node.handle_hello(carol_hello)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                return await request_peer_list(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", bob_identity.fingerprint, alice.lane
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        recorded = asyncio.run(scenario())
+        assert recorded == [carol_identity.fingerprint]
+        assert carol_identity.fingerprint in alice_node.candidate_descriptors
+        assert carol_identity.fingerprint not in alice_node.peers  # not promoted, just a candidate
+
+        row = alice.db.connection.execute(
+            "SELECT fingerprint FROM link_peer_candidates"
+        ).fetchone()
+        assert row["fingerprint"] == carol_identity.fingerprint
+    finally:
+        alice.close()
+        bob.close()

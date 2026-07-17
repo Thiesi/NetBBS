@@ -1438,4 +1438,23 @@ MIGRATIONS = [
             WHERE sent_at IS NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Peer-list exchange (design doc round 95): unverified candidate "
+            "endpoint descriptors learned secondhand from an already-verified "
+            "peer -- deliberately a separate table from link_peers, never "
+            "promoted into it until a real hello with that fingerprint "
+            "actually completes (netbbs.link.protocol.LinkNode.handle_hello "
+            "already deletes the matching row here when that happens, in "
+            "memory; the corresponding on-disk delete is this round's own "
+            "netbbs.link.store function's job, not a trigger)."
+        ),
+        sql="""
+        CREATE TABLE link_peer_candidates (
+            fingerprint      TEXT PRIMARY KEY,
+            descriptor_json  TEXT NOT NULL,
+            updated_at       TEXT NOT NULL
+        );
+        """,
+    ),
 ]

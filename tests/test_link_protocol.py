@@ -21,7 +21,7 @@ from netbbs.link.events import (
     build_link_message_bounced,
 )
 from netbbs.link.node_identity import rotate_operational_key
-from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerListMessage
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
 
 
@@ -1262,3 +1262,234 @@ def test_handle_events_link_message_bounced_is_idempotent_for_already_seen(tmp_p
 
     alice.close()
     bob.close()
+
+
+# -- peer-list exchange (design doc round 95) --------------------------------
+
+
+def _descriptor_for(node, clock, *, created_at=None, outgoing_only=False):
+    return build_endpoint_descriptor(
+        signing_identity=node.identity.signing_key,
+        subject_fingerprint=node.fingerprint,
+        addresses=None if outgoing_only else [{"protocol": "http", "address": "203.0.113.1", "port": 7862}],
+        outgoing_only=outgoing_only,
+        created_at=created_at or clock.now_iso(),
+    )
+
+
+def test_build_peer_list_returns_own_verified_peers_descriptors(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    peer_list = alice_node.build_peer_list()
+
+    assert [d.payload["subject_fingerprint"] for d in peer_list.descriptors] == [bob.fingerprint]
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_peer_list_records_new_candidates(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    carol_descriptor = _descriptor_for(carol, clock)
+    message = PeerListMessage(descriptors=(carol_descriptor,))
+
+    recorded = alice_node.handle_peer_list(bob.fingerprint, message)
+
+    assert recorded == [carol.fingerprint]
+    assert alice_node.candidate_descriptors[carol.fingerprint].content_id == carol_descriptor.content_id
+    # not promoted to a real peer just from a secondhand claim
+    assert carol.fingerprint not in alice_node.peers
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_peer_list_rejects_from_a_peer_with_no_completed_hello(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    message = PeerListMessage(descriptors=(_descriptor_for(carol, clock),))
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_peer_list(bob.fingerprint, message)
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_peer_list_skips_this_nodes_own_fingerprint(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    # bob (harmlessly, or maliciously) hands alice's own descriptor back to her
+    own_descriptor = _descriptor_for(alice, clock)
+    recorded = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(own_descriptor,)))
+
+    assert recorded == []
+    assert alice_node.candidate_descriptors == {}
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_peer_list_skips_a_fingerprint_already_a_verified_peer(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    carol_hello = _hello_bytes(LinkNode(identity=carol.identity), clock=clock)
+    alice_node.handle_hello(carol_hello)
+
+    # bob shares a descriptor for carol, whom alice already directly knows
+    recorded = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(_descriptor_for(carol, clock),)))
+
+    assert recorded == []
+    assert carol.fingerprint not in alice_node.candidate_descriptors
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_hello_clears_a_matching_candidate_entry(tmp_path, clock):
+    """Once a real hello with a fingerprint completes, an earlier
+    secondhand candidate entry for it is superseded, not left sitting
+    alongside the real thing."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(_descriptor_for(carol, clock),)))
+    assert carol.fingerprint in alice_node.candidate_descriptors
+
+    carol_hello = _hello_bytes(LinkNode(identity=carol.identity), clock=clock)
+    alice_node.handle_hello(carol_hello)
+
+    assert carol.fingerprint not in alice_node.candidate_descriptors
+    assert carol.fingerprint in alice_node.peers
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_peer_list_skips_a_stale_descriptor_for_an_existing_candidate(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    newer = _descriptor_for(carol, clock, created_at="2026-01-02T00:00:00+00:00")
+    alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(newer,)))
+
+    older = _descriptor_for(carol, clock, created_at="2026-01-01T00:00:00+00:00")
+    recorded = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(older,)))
+
+    assert recorded == []
+    assert alice_node.candidate_descriptors[carol.fingerprint].content_id == newer.content_id
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_peer_list_refreshes_a_candidate_with_a_newer_descriptor(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    older = _descriptor_for(carol, clock, created_at="2026-01-01T00:00:00+00:00")
+    alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(older,)))
+
+    newer = _descriptor_for(carol, clock, created_at="2026-01-02T00:00:00+00:00")
+    recorded = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(newer,)))
+
+    assert recorded == [carol.fingerprint]
+    assert alice_node.candidate_descriptors[carol.fingerprint].content_id == newer.content_id
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_peer_list_rejects_an_oversized_request(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    too_many = [_descriptor_for(spawn_node(tmp_path, f"stranger-{i}"), clock) for i in range(101)]
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=tuple(too_many)))
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_peer_list_stops_accepting_brand_new_candidates_once_at_cap(tmp_path, clock, monkeypatch):
+    import netbbs.link.protocol as protocol_module
+
+    monkeypatch.setattr(protocol_module, "_MAX_CANDIDATE_DESCRIPTORS", 1)
+
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    dave = spawn_node(tmp_path, "dave")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    first = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(_descriptor_for(carol, clock),)))
+    assert first == [carol.fingerprint]
+
+    # at cap now -- a brand new fingerprint (dave) is refused...
+    second = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(_descriptor_for(dave, clock),)))
+    assert second == []
+    assert dave.fingerprint not in alice_node.candidate_descriptors
+
+    # ...but refreshing the existing candidate (carol) still works.
+    refreshed = _descriptor_for(carol, clock, created_at="2026-01-02T00:00:00+00:00")
+    third = alice_node.handle_peer_list(bob.fingerprint, PeerListMessage(descriptors=(refreshed,)))
+    assert third == [carol.fingerprint]
+
+    alice.close()
+    bob.close()
+    carol.close()
+    dave.close()

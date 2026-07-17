@@ -126,6 +126,18 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             continue
         node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (edit,)
 
+    for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peer_candidates"):
+        # Skip a fingerprint that's since become a real verified peer --
+        # handle_hello's own in-memory candidate cleanup (round 95)
+        # could predate this row's own on-disk delete if a crash landed
+        # between the two; never resurrect a stale candidate for
+        # someone already directly known.
+        if row["fingerprint"] in node.peers:
+            continue
+        node.candidate_descriptors[row["fingerprint"]] = EndpointDescriptor.from_dict(
+            json.loads(row["descriptor_json"])
+        )
+
     return node
 
 
@@ -137,6 +149,13 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     "harmless no-op" tolerance for a redundant write at this project's
     declared scale (§14), rather than this module owning the extra
     complexity of tracking what's already on disk.
+
+    Also deletes any on-disk candidate row for the same fingerprint
+    (round 95) -- mirrors `LinkNode.handle_hello`'s own in-memory
+    cleanup automatically, so a caller that already calls `save_peer`
+    after every successful hello (every caller does) doesn't need a
+    second explicit cleanup call to keep the on-disk candidate table
+    from resurrecting someone who's now a real peer after a restart.
     """
     db.connection.execute(
         """
@@ -155,6 +174,29 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
             json.dumps(peer.descriptor.to_dict()),
             utc_now_iso(),
         ),
+    )
+    db.connection.execute("DELETE FROM link_peer_candidates WHERE fingerprint = ?", (peer.fingerprint,))
+    db.connection.commit()
+
+
+def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: EndpointDescriptor) -> None:
+    """
+    Upsert one unverified candidate descriptor (round 95) -- called for
+    each fingerprint `LinkNode.handle_peer_list` newly recorded or
+    refreshed. No "is this already a real peer" guard here -- `handle_
+    peer_list` itself already refuses to record a candidate for an
+    existing peer in the first place (see that method's own docstring),
+    so this function has no reason to duplicate that check.
+    """
+    db.connection.execute(
+        """
+        INSERT INTO link_peer_candidates (fingerprint, descriptor_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(fingerprint) DO UPDATE SET
+            descriptor_json = excluded.descriptor_json,
+            updated_at = excluded.updated_at
+        """,
+        (fingerprint, json.dumps(descriptor.to_dict()), utc_now_iso()),
     )
     db.connection.commit()
 

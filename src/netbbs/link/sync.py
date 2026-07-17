@@ -67,6 +67,19 @@ ACK only means the bytes arrived" distinction); a pending
 *acknowledgement* is simpler and genuinely one-shot, marked sent as
 soon as the push itself succeeds, since nothing acknowledges an
 acknowledgement.
+
+**Round 95: `_sync_one_seed` also requests each seed's own peer list**,
+right after its hello completes -- `netbbs.link.protocol.LinkNode.
+handle_peer_list` records what comes back as unverified candidates
+(`node.candidate_descriptors`), persisted the same way `dial_hello`
+already persists its own `PeerRecord`. **Deliberately not consumed by
+anything yet** -- this round only closes the *exchange* half of §12's
+"a node isn't perpetually dependent on the seed list" resilience path;
+actually falling back to dialing a candidate when every configured seed
+is unavailable is real behavior this module doesn't have, named here
+rather than silently assumed done. A failed peer-list request logs and
+is skipped, same tolerance every other per-seed step in this loop
+already has.
 """
 
 from __future__ import annotations
@@ -84,7 +97,7 @@ from netbbs.link.mail import (
     mark_link_mail_acknowledgement_sent,
 )
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
-from netbbs.link.transport import LinkTransportError, dial_hello, push_events
+from netbbs.link.transport import LinkTransportError, dial_hello, push_events, request_peer_list
 from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
@@ -130,7 +143,7 @@ async def _sync_one_seed(
     lane: DatabaseLane,
 ) -> None:
     try:
-        await dial_hello(node, session, seed_url, own_hello_provider(), lane)
+        seed_peer = await dial_hello(node, session, seed_url, own_hello_provider(), lane)
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return
@@ -140,6 +153,15 @@ async def _sync_one_seed(
         await push_events(node, session, seed_url, own_events)
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+
+    # Round 95: also ask this seed who else it knows -- the resilience
+    # path for when every *configured* seed is eventually unavailable
+    # (not yet consumed anywhere; see module docstring's own note on
+    # what this round deliberately doesn't build yet).
+    try:
+        await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
+    except LinkTransportError as exc:
+        _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
 
 def _dialable_address(node: LinkNode, target_fingerprint: str) -> str | None:

@@ -24,7 +24,7 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
-from netbbs.link.store import load_link_node, save_event, save_peer
+from netbbs.link.store import load_link_node, save_candidate_descriptor, save_event, save_peer
 from netbbs.storage.database import Database
 
 
@@ -328,4 +328,86 @@ def test_load_link_node_reconstructs_peer_received_board_post_edit_chain_in_orde
         first_edit.content_id,
         second_edit.content_id,
     ]
+    db.close()
+
+
+# -- peer-list candidates (design doc round 95) ------------------------------
+
+
+def test_save_candidate_descriptor_then_load_link_node_reconstructs_it(tmp_path):
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    candidate_identity = bootstrap_node_identity("carol")
+    descriptor = build_endpoint_descriptor(
+        signing_identity=candidate_identity.signing_key,
+        subject_fingerprint=candidate_identity.fingerprint,
+        addresses=[{"protocol": "http", "address": "203.0.113.1", "port": 7862}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    save_candidate_descriptor(db, candidate_identity.fingerprint, descriptor)
+    node = load_link_node(db, own_identity)
+
+    assert node.candidate_descriptors[candidate_identity.fingerprint].content_id == descriptor.content_id
+    db.close()
+
+
+def test_save_candidate_descriptor_upserts_on_conflict(tmp_path):
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    candidate_identity = bootstrap_node_identity("carol")
+    first = build_endpoint_descriptor(
+        signing_identity=candidate_identity.signing_key,
+        subject_fingerprint=candidate_identity.fingerprint,
+        addresses=[{"protocol": "http", "address": "203.0.113.1", "port": 7862}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    second = build_endpoint_descriptor(
+        signing_identity=candidate_identity.signing_key,
+        subject_fingerprint=candidate_identity.fingerprint,
+        addresses=[{"protocol": "http", "address": "203.0.113.2", "port": 7862}],
+        outgoing_only=False,
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+
+    save_candidate_descriptor(db, candidate_identity.fingerprint, first)
+    save_candidate_descriptor(db, candidate_identity.fingerprint, second)
+    node = load_link_node(db, own_identity)
+
+    assert node.candidate_descriptors[candidate_identity.fingerprint].content_id == second.content_id
+    assert db.connection.execute("SELECT COUNT(*) FROM link_peer_candidates").fetchone()[0] == 1
+    db.close()
+
+
+def test_save_peer_clears_a_matching_on_disk_candidate(tmp_path):
+    """Mirrors `LinkNode.handle_hello`'s own in-memory candidate
+    cleanup (round 95) -- a fingerprint that becomes a real verified
+    peer must not also resurrect as a stale candidate after a
+    restart."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    peer_identity = bootstrap_node_identity("bob")
+    descriptor = build_endpoint_descriptor(
+        signing_identity=peer_identity.signing_key,
+        subject_fingerprint=peer_identity.fingerprint,
+        addresses=[{"protocol": "http", "address": "203.0.113.1", "port": 7862}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    save_candidate_descriptor(db, peer_identity.fingerprint, descriptor)
+
+    peer = PeerRecord(
+        fingerprint=peer_identity.fingerprint,
+        root_public_key=bytes(peer_identity.root.verify_key),
+        transitions=peer_identity.transitions,
+        descriptor=descriptor,
+    )
+    save_peer(db, peer)
+
+    node = load_link_node(db, own_identity)
+    assert peer_identity.fingerprint in node.peers
+    assert peer_identity.fingerprint not in node.candidate_descriptors
+    assert db.connection.execute("SELECT COUNT(*) FROM link_peer_candidates").fetchone()[0] == 0
     db.close()

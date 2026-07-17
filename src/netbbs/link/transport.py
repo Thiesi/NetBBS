@@ -62,8 +62,8 @@ from netbbs.link.events import (
     LinkMessageBounced,
 )
 from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
-from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerRecord
-from netbbs.link.store import save_event, save_peer
+from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerListMessage, PeerRecord
+from netbbs.link.store import save_candidate_descriptor, save_event, save_peer
 from netbbs.storage.execution import DatabaseLane
 
 LINK_PATH_PREFIX = "/link/v1"
@@ -124,6 +124,7 @@ class LinkServer:
         app = web.Application()
         app.router.add_post(f"{LINK_PATH_PREFIX}/hello", self._handle_hello)
         app.router.add_post(f"{LINK_PATH_PREFIX}/events/{{fingerprint}}", self._handle_events)
+        app.router.add_get(f"{LINK_PATH_PREFIX}/peers", self._handle_peers)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -191,6 +192,20 @@ class LinkServer:
             await self._lane.run(save_peer, self._node.peers[fingerprint])
 
         return web.json_response({"accepted": accepted})
+
+    async def _handle_peers(self, request: web.Request) -> web.Response:
+        """
+        Round 95's peer-list exchange: shares this node's own currently-
+        verified peers' endpoint descriptors with whoever asks.
+        Deliberately unauthenticated, like `/hello` itself — round 95
+        already treats reachability information as discoverable
+        bootstrap data, not something trust-gated ("a seed only ever
+        supplies reachability information; it grants no trust"). A
+        bodyless GET carries no signed claim about who's asking, so
+        there is nothing here to verify even if this endpoint wanted to
+        gate on it.
+        """
+        return web.json_response(self._node.build_peer_list().to_dict())
 
 
 async def dial_hello(
@@ -281,3 +296,51 @@ async def push_events(
         return body["accepted"]
     except (KeyError, TypeError) as exc:
         raise LinkTransportError(f"malformed events response from {url}: {exc}") from exc
+
+
+async def request_peer_list(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    peer_fingerprint: str,
+    lane: DatabaseLane,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> list[str]:
+    """
+    Request `base_url`'s own peer list (round 95, §12) and feed it into
+    `node.handle_peer_list`, persisting each newly recorded/refreshed
+    candidate via `lane` (`netbbs.link.store.save_candidate_descriptor`)
+    the same way `dial_hello` persists its own resulting `PeerRecord` —
+    returns the fingerprints newly recorded.
+
+    `peer_fingerprint` is the caller's to supply, not derived from the
+    response — unlike a hello, a bodyless peer-list response carries no
+    self-identifying claim about who answered it, so the caller (who
+    already completed a real hello with whoever is at `base_url` before
+    ever calling this) is the only one who actually knows. Raises
+    `LinkProtocolError` unwrapped if `peer_fingerprint` turns out not to
+    be a completed peer after all — same division of responsibility
+    `dial_hello`'s own `node.handle_hello` call already has.
+    """
+    url = f"{base_url}{LINK_PATH_PREFIX}/peers"
+    try:
+        async with session.get(url, timeout=ClientTimeout(total=timeout)) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"peer list request to {url} failed: HTTP {response.status}: {text}")
+            body = await response.json()
+    except ClientError as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+    try:
+        message = PeerListMessage.from_dict(body)
+    except (KeyError, ValueError, TypeError) as exc:
+        raise LinkTransportError(f"malformed peer list response from {url}: {exc}") from exc
+
+    recorded = node.handle_peer_list(peer_fingerprint, message)
+    for candidate_fingerprint in recorded:
+        await lane.run(
+            save_candidate_descriptor, candidate_fingerprint, node.candidate_descriptors[candidate_fingerprint]
+        )
+    return recorded

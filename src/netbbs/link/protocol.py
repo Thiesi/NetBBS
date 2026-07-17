@@ -90,6 +90,16 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
 
+# Round 95: bounds on remotely-influenced peer-list state (design doc's
+# own "every remotely influenced ... collection needs an explicit
+# bound" principle). A single request carrying an absurd number of
+# descriptors is refused outright, matching other malformed/abusive-
+# input rejection in this module; the total candidate set this node
+# will ever remember is separately capped so a peer can't grow it
+# without limit across many requests either.
+_MAX_PEER_LIST_ENTRIES_PER_REQUEST = 100
+_MAX_CANDIDATE_DESCRIPTORS = 500
+
 
 class LinkProtocolError(Exception):
     """Raised for a hello or event message that fails verification: an
@@ -166,6 +176,34 @@ class HelloMessage:
 
 
 @dataclass
+class PeerListMessage:
+    """
+    A bundle of `EndpointDescriptor`s shared between two already-
+    completed peers (design doc round 95, §12's "signed peer-list
+    exchange") — deliberately not a canonical `netbbs.link.events`
+    envelope of its own: this is ephemeral discovery data ("addresses
+    worth trying"), not durable state that needs content-addressing,
+    dedup, or gossip-replay semantics the way a `board_post` does.
+
+    Each individual descriptor inside is already self-signed by its own
+    claimed subject (round 116) — nothing here adds an outer signature
+    over the bundle, since a stale or malicious bundle only ever costs
+    a failed connection attempt on the receiving end (the same "connecting
+    to the wrong address just fails the handshake" property §12 already
+    claims for endpoint advertisement generally), never a safety issue.
+    """
+
+    descriptors: tuple[EndpointDescriptor, ...]
+
+    def to_dict(self) -> dict:
+        return {"descriptors": [d.to_dict() for d in self.descriptors]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PeerListMessage":
+        return cls(descriptors=tuple(EndpointDescriptor.from_dict(d) for d in data["descriptors"]))
+
+
+@dataclass
 class PeerRecord:
     """What this node has learned about one peer via a completed hello
     exchange — enough to independently verify any further signed
@@ -210,6 +248,12 @@ class LinkNode:
     # the current head" alone, the same shape simpler than key_
     # transition's two-interleaved-purposes chain.
     post_edits: dict[str, tuple[BoardPostEdit, ...]] = field(default_factory=dict)
+    # Round 95: fingerprint -> an unverified endpoint descriptor learned
+    # secondhand via peer-list exchange -- "worth trying," never
+    # promoted to `peers` until a real hello with that fingerprint
+    # actually completes. See `handle_peer_list`'s own docstring for why
+    # nothing here is ever cryptographically checked at receipt time.
+    candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
 
     def build_hello(
         self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str
@@ -280,7 +324,82 @@ class LinkNode:
             descriptor=message.descriptor,
         )
         self.peers[claimed_fingerprint] = record
+        # Now a real, verified peer -- an unverified candidate entry for
+        # the same fingerprint (round 95) is superseded, not left
+        # sitting alongside the real thing.
+        self.candidate_descriptors.pop(claimed_fingerprint, None)
         return record
+
+    def build_peer_list(self) -> PeerListMessage:
+        """This node's own currently-verified peers' endpoint
+        descriptors, to share with a directly-connected peer (design
+        doc round 95, §12's "signed peer-list exchange"). Only ever
+        drawn from `self.peers` (each one verified via a real completed
+        hello) -- never re-shares a candidate this node itself learned
+        secondhand, so a claim's provenance never grows past one hop of
+        "someone I've actually talked to vouches this address is worth
+        trying.\""""
+        return PeerListMessage(descriptors=tuple(peer.descriptor for peer in self.peers.values()))
+
+    def handle_peer_list(self, sender_fingerprint: str, message: PeerListMessage) -> list[str]:
+        """
+        Record candidate addresses shared by `sender_fingerprint`, who
+        must already be a completed peer (same "no relay from a
+        stranger" boundary `handle_events` enforces). Returns the
+        fingerprints newly recorded or refreshed, purely informational.
+
+        **Nothing here is cryptographically verified against a resolved
+        signing key, deliberately** -- a descriptor's own signature
+        can't be checked without that subject's root key/transition
+        chain, which this node doesn't have for a stranger yet (design
+        doc round 95: "a weak prior worth trying, not trusting
+        outright"). Real trust only ever happens once this node dials a
+        candidate directly and completes its own hello with it, the
+        same self-authenticating process any first contact already
+        goes through.
+
+        Skips: this node's own fingerprint; any fingerprint already a
+        verified peer (nothing gained from a secondhand claim about
+        someone already directly known -- `handle_hello` is the only
+        path that ever populates `self.peers`); a stale descriptor
+        (older `created_at` than a candidate already on file for the
+        same fingerprint); and, once `_MAX_CANDIDATE_DESCRIPTORS` is
+        reached, any fingerprint not already present (refreshing an
+        existing candidate's own descriptor is still allowed past the
+        cap, adding a brand new one is not).
+        """
+        if sender_fingerprint not in self.peers:
+            raise LinkProtocolError(
+                f"received a peer list from {sender_fingerprint}, which has no completed hello"
+            )
+        if len(message.descriptors) > _MAX_PEER_LIST_ENTRIES_PER_REQUEST:
+            raise LinkProtocolError(
+                f"peer list from {sender_fingerprint} carries "
+                f"{len(message.descriptors)} descriptors, more than the "
+                f"{_MAX_PEER_LIST_ENTRIES_PER_REQUEST} this node accepts in one request -- refusing"
+            )
+
+        recorded: list[str] = []
+        for descriptor in message.descriptors:
+            candidate_fingerprint = descriptor.payload.get("subject_fingerprint")
+            if candidate_fingerprint is None:
+                continue
+            if candidate_fingerprint == self.identity.fingerprint:
+                continue
+            if candidate_fingerprint in self.peers:
+                continue
+
+            existing = self.candidate_descriptors.get(candidate_fingerprint)
+            if existing is not None and descriptor.payload.get("created_at", "") <= existing.payload.get(
+                "created_at", ""
+            ):
+                continue
+            if existing is None and len(self.candidate_descriptors) >= _MAX_CANDIDATE_DESCRIPTORS:
+                continue
+
+            self.candidate_descriptors[candidate_fingerprint] = descriptor
+            recorded.append(candidate_fingerprint)
+        return recorded
 
     def _resolve_sender_signing_key(self, sender: "PeerRecord", sender_fingerprint: str, kind: str) -> nacl.signing.VerifyKey:
         """Shared by the `board_genesis`/`board_post` branches below:
