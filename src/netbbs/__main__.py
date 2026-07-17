@@ -24,6 +24,7 @@ from netbbs.files.storage import purge_incoming_staging
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
+from netbbs.link.seedlist import run_scheduled_seed_refresh
 from netbbs.link.store import load_link_node
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
@@ -32,6 +33,7 @@ from netbbs.net.nodeconfig import ConfigError, LinkConfig, NodeConfig, load_conf
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import run_shutdown_sequence
 from netbbs.net.throttle import LoginThrottle
+from netbbs.selfupdate import run_scheduled_update_check
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -383,6 +385,30 @@ async def run(
 
     daybreak_task.add_done_callback(_log_daybreak_failure)
 
+    # Design doc round 97/§17: the "startup" and "daily-background"
+    # halves of the check-for-updates off switch admin_flow's own
+    # screen already names and gates (`get_auto_update_check_enabled`)
+    # -- previously nothing actually performed a scheduled check despite
+    # that switch's own UI copy ("Daily automatic check: ON/off")
+    # implying one existed. Runs regardless of Link configuration, same
+    # as the daybreak announcer -- this is general node maintenance, not
+    # a Link-specific concern.
+    update_check_task = asyncio.create_task(run_scheduled_update_check(db))
+
+    def _log_update_check_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _logger.error(
+                "scheduled update-check task failed -- automatic release "
+                "checks will not run again this node uptime (the manual "
+                "admin-menu check is unaffected)",
+                exc_info=exc,
+            )
+
+    update_check_task.add_done_callback(_log_update_check_failure)
+
     async def session_handler(session):
         await handle_session(
             session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
@@ -418,6 +444,7 @@ async def run(
     servers: list = []
     link_sync_task: asyncio.Task | None = None
     link_sync_session = None
+    seed_refresh_task: asyncio.Task | None = None
     try:
         # Design doc round 89/111: a node's Link identity (root key +
         # signing/transport operational keys) auto-generates silently on
@@ -463,19 +490,30 @@ async def run(
 
         # Design doc round 119: the piece that makes this node
         # *originate* outbound Link activity, not just answer it (round
-        # 118) -- only worth starting if there's actually somewhere to
-        # dial. A separate try/except ImportError from LinkServer's own,
+        # 118). A separate try/except ImportError from LinkServer's own,
         # since this runs here in run(), not inside _start_servers,
         # after _start_servers may have already decided (independently)
         # whether aiohttp was available for the inbound listener.
-        if config.link.enabled and config.link.seeds and link_node is not None:
+        #
+        # Round 97: no longer gated on `config.link.seeds` being
+        # non-empty -- a node started with zero operator-configured
+        # seeds still starts this task, since `run_link_sync` itself now
+        # also merges in whatever `run_scheduled_seed_refresh` (below)
+        # most recently cached, and a genuinely empty combined list is
+        # already a harmless no-op pass (nothing to dial, nothing
+        # crashes). This is precisely the "brand-new node with no
+        # learned peers yet" case round 97 named as the one live
+        # seed-list refresh matters most for -- gating the task itself
+        # on operator-configured seeds would have made a live-fetched
+        # seed unreachable no matter how successfully it was fetched.
+        if config.link.enabled and link_node is not None:
             try:
                 import aiohttp
 
                 from netbbs.link.sync import run_link_sync
             except ImportError:
                 _logger.warning(
-                    "Link seeds are configured but aiohttp is not installed — "
+                    "Link is enabled but aiohttp is not installed — "
                     "skipping the Link sync task (pip install netbbs[web])"
                 )
             else:
@@ -503,9 +541,31 @@ async def run(
 
                 link_sync_task.add_done_callback(_log_link_sync_failure)
                 _logger.info(
-                    "NetBBS Link sync started: %d seed(s), every %.0fs",
+                    "NetBBS Link sync started: %d operator-configured seed(s), every %.0fs",
                     len(config.link.seeds), config.link.sync_interval_seconds,
                 )
+
+                # Design doc round 97: refreshes the supplementary seed
+                # list `run_link_sync` above merges in every pass. Its
+                # own off switch is `get_auto_update_check_enabled` --
+                # deliberately the same flag as the release-check task,
+                # not a second Link-specific toggle for a now explicitly
+                # coupled feature (see that function's own docstring).
+                seed_refresh_task = asyncio.create_task(run_scheduled_seed_refresh(db))
+
+                def _log_seed_refresh_failure(task: asyncio.Task) -> None:
+                    if task.cancelled():
+                        return
+                    exc = task.exception()
+                    if exc is not None:
+                        _logger.error(
+                            "Seed-list refresh task failed -- the supplementary seed "
+                            "list will no longer update this node uptime (operator-"
+                            "configured seeds are unaffected)",
+                            exc_info=exc,
+                        )
+
+                seed_refresh_task.add_done_callback(_log_seed_refresh_failure)
 
         await shutdown_event.wait()
     finally:
@@ -518,6 +578,16 @@ async def run(
         daybreak_task.cancel()
         try:
             await daybreak_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        # Design doc round 97: same cancel-await-swallow shape as
+        # daybreak_task, for the same reason (issue #48) -- already
+        # logged by _log_update_check_failure if it failed on its own.
+        update_check_task.cancel()
+        try:
+            await update_check_task
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -536,6 +606,17 @@ async def run(
                 pass
         if link_sync_session is not None:
             await link_sync_session.close()
+        # Design doc round 97: same cancel-await-swallow shape, for the
+        # same reason -- already logged by _log_seed_refresh_failure if
+        # it failed on its own.
+        if seed_refresh_task is not None:
+            seed_refresh_task.cancel()
+            try:
+                await seed_refresh_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
         for server in reversed(servers):
             await server.stop()
         foreground_lane.close()

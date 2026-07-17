@@ -80,6 +80,13 @@ is unavailable is real behavior this module doesn't have, named here
 rather than silently assumed done. A failed peer-list request logs and
 is skipped, same tolerance every other per-seed step in this loop
 already has.
+
+**Round 97: the per-pass seed list is operator-configured `seeds` plus
+whatever `netbbs.link.seedlist.run_scheduled_seed_refresh` has most
+recently cached**, re-merged every pass (not just once at startup) so a
+live-fetched seed takes effect without a restart. This is the one piece
+of §12's bootstrap model this module actually *consumes* live -- unlike
+the peer-list candidates two paragraphs up, still sitting unused.
 """
 
 from __future__ import annotations
@@ -97,6 +104,7 @@ from netbbs.link.mail import (
     mark_link_mail_acknowledgement_sent,
 )
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.seedlist import get_cached_supplementary_seeds
 from netbbs.link.transport import LinkTransportError, dial_hello, push_events, request_peer_list
 from netbbs.storage.execution import DatabaseLane
 
@@ -127,9 +135,21 @@ async def run_link_sync(
     transport.LinkServer` takes (design doc round 117/118) — reused
     here rather than duplicating the addresses/outgoing_only-from-
     config logic a second time.
+
+    `seeds` is the *operator-configured* list only (explicit intent
+    always wins, round 97) — each pass also merges in whatever `netbbs.
+    link.seedlist.run_scheduled_seed_refresh` has most recently cached
+    (empty until/unless that task is running and Link is enabled), so a
+    node started with zero configured seeds still eventually reaches
+    the network once a live fetch succeeds, without needing a restart.
+    Re-read from the lane every pass, not captured once at startup, or
+    "live" refresh would only ever take effect after a restart.
     """
     while True:
-        for seed_url in seeds:
+        supplementary = await lane.run(get_cached_supplementary_seeds)
+        # De-duplicated, order-preserving: operator-configured first.
+        pass_seeds = list(dict.fromkeys(seeds + supplementary))
+        for seed_url in pass_seeds:
             await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
         await _push_pending_link_mail(node, session, lane)
         await asyncio.sleep(interval_seconds)

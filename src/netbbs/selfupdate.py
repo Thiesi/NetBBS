@@ -24,6 +24,7 @@ sandbox.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -148,8 +149,6 @@ async def check_latest_release(
     call — the same dependency-injection shape `netbbs.net.daybreak`'s
     `now`/`sleep` already use for the identical reason.
     """
-    import asyncio
-
     try:
         raw = await asyncio.to_thread(fetch, _GITHUB_RELEASES_API_URL)
     except URLError as exc:
@@ -187,6 +186,58 @@ def get_last_check_summary(db: Database) -> tuple[str | None, str | None]:
     """`(last_checked_at_iso, last_outcome)`, either possibly `None` if
     no check has ever run on this node."""
     return get_config(db, _LAST_CHECK_AT_CONFIG_KEY), get_config(db, _LAST_OUTCOME_CONFIG_KEY)
+
+
+async def run_scheduled_update_check(
+    db: Database,
+    *,
+    fetch: Callable[[str], bytes] = _default_fetch,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    interval_seconds: float = 86400.0,
+) -> None:
+    """
+    Runs for the node's lifetime: checks for a newer release once
+    immediately on entry, then every `interval_seconds` (default once a
+    day) -- the "startup" and "daily-background" halves of §17's own
+    three-trigger-point design; the third, "manual," is `netbbs.net.
+    admin_flow._update_settings_screen`'s existing check-for-updates
+    screen. That screen's own UI copy ("Daily automatic check: ON/off")
+    and `get_auto_update_check_enabled`/`set_auto_update_check_enabled`
+    already named and gated this switch -- nothing previously wired to
+    it actually performed a scheduled check, a real gap traced and
+    closed here, not a hypothetical one.
+
+    Skips a pass entirely when `get_auto_update_check_enabled` is off.
+    Check-only, matching the manual screen's own explicit scope cut --
+    never downloads/applies/restarts unattended; see that screen's own
+    docstring for why (the graceful-drain-then-restart apply flow isn't
+    safely wired up yet, a real, substantially higher-stakes decision
+    deliberately not bundled into this).
+
+    `fetch`/`sleep` are injectable for the same reason `netbbs.net.
+    daybreak.run_daybreak_announcer`'s `now`/`sleep` are: a test drives
+    this without a real network call or a real day-long wait. The first
+    pass runs immediately, not after an initial sleep, unlike that
+    function's own always-wait-for-a-specific-moment shape -- there's
+    no meaningful "already happened today" concept for a version check
+    the way there is for a calendar event, so this instead matches
+    `netbbs.link.sync.run_link_sync`'s own "try immediately, don't make
+    a freshly started node wait" precedent.
+    """
+    from netbbs import __version__ as current_version
+
+    while True:
+        if get_auto_update_check_enabled(db):
+            try:
+                release = await check_latest_release(fetch=fetch)
+            except UpdateError as exc:
+                _logger.warning("Scheduled update check failed: %s", exc)
+            else:
+                if is_newer(current_version, release.tag_name):
+                    record_check_outcome(db, f"newer release available: {release.tag_name}")
+                else:
+                    record_check_outcome(db, f"up to date ({current_version})")
+        await sleep(interval_seconds)
 
 
 # -- Download & extract -----------------------------------------------------

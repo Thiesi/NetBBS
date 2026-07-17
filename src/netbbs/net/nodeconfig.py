@@ -97,15 +97,16 @@ class LinkConfig:
     `seeds` (design doc §12, round 119) is this node's operator-
     configured seed list -- a plain list of base URLs (e.g.
     `"http://198.51.100.7:7862"`) `netbbs.link.sync`'s background loop
-    dials every `sync_interval_seconds`. Deliberately just the fixed/
-    operator-configured half of §12's bootstrap model -- the self-
-    updating supplementary list (round 97, fetched over the same
-    channel `netbbs.selfupdate` uses) is not implemented yet; round
-    97's own design already frames the fetched list as "a supplement
-    to -- never a replacement for -- the operator-configured and
-    shipped-fallback seeds," so this piece was never optional scope to
-    begin with. Empty by default -- Link can run accepting inbound
-    traffic (round 118) with nothing configured here at all.
+    dials every `sync_interval_seconds`. Just the fixed/operator-
+    configured half of §12's bootstrap model -- `netbbs.link.seedlist.
+    run_scheduled_seed_refresh` (round 97) fetches a live supplementary
+    list over the same channel `netbbs.selfupdate` uses and
+    `run_link_sync` merges it in every pass, "a supplement to -- never a
+    replacement for" this list, exactly as round 97's own design framed
+    it. Empty by default -- Link can run accepting inbound traffic
+    (round 118) with nothing configured here at all, relying entirely on
+    the live-fetched list (or peer-list-exchange-discovered candidates,
+    once something consumes those) to ever reach the network.
 
     Defaults to disabled, matching §15's "Phase 3 is explicitly
     private/experimental federation" framing -- an operator opts in.

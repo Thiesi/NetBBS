@@ -27,6 +27,7 @@ from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queu
 from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import LinkNode
+from netbbs.link.seedlist import set_cached_supplementary_seeds
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer
 from netbbs.storage.database import Database
@@ -156,6 +157,45 @@ def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
         assert carol_identity.fingerprint not in dialer_node.peers
         row = dialer.db.connection.execute("SELECT fingerprint FROM link_peer_candidates").fetchone()
         assert row["fingerprint"] == carol_identity.fingerprint
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tmp_path):
+    """Round 97: a seed the operator never configured, but that a
+    (simulated) live seed-list refresh already cached, still gets
+    dialed -- proves the per-pass merge actually happens, not just that
+    the cache-read function exists."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        seed_url = f"http://127.0.0.1:{seed_server.port}"
+        # Not passed as an operator-configured seed below -- only cached,
+        # as if a prior run_scheduled_seed_refresh pass had already
+        # fetched it.
+        set_cached_supplementary_seeds(dialer.db, [seed_url])
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [],  # no operator-configured seeds at all
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert dialer_identity.fingerprint in seed_node.peers  # the dial actually reached the seed
     finally:
         dialer.close()
         seed.close()

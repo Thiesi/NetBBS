@@ -34,6 +34,7 @@ from netbbs.selfupdate import (
     record_check_outcome,
     restore_database,
     roll_back_update,
+    run_scheduled_update_check,
     set_auto_update_check_enabled,
     snapshot_database,
 )
@@ -245,6 +246,110 @@ def test_check_outcome_round_trip(tmp_path):
     checked_at, outcome = get_last_check_summary(db)
     assert checked_at is not None
     assert outcome == "up to date (v2.1.0)"
+    db.close()
+
+
+# -- run_scheduled_update_check (sleep injected -- no real waiting) ---------
+
+
+def test_scheduled_check_runs_immediately_and_records_an_outcome(tmp_path):
+    """The first pass runs before any sleep -- unlike run_daybreak_
+    announcer's always-wait-for-midnight shape, there's no meaningful
+    "already done today" concept for a version check."""
+    db = Database(tmp_path / "node.db")
+    fetch = lambda url: _fake_releases_json("v0.0.1")
+
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await parked.wait()
+
+    async def scenario():
+        task = asyncio.create_task(
+            run_scheduled_update_check(db, fetch=fetch, sleep=fake_sleep, interval_seconds=86400.0)
+        )
+        for _ in range(200):
+            if get_last_check_summary(db)[1] is not None:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert sleep_calls == [86400.0]  # exactly one pass happened before the (parked) sleep
+    _, outcome = get_last_check_summary(db)
+    assert outcome is not None
+    db.close()
+
+
+def test_scheduled_check_skips_a_pass_when_disabled(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_auto_update_check_enabled(db, False)
+    fetch_calls: list[str] = []
+    fetch = lambda url: (fetch_calls.append(url), _fake_releases_json("v0.0.1"))[1]
+
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await parked.wait()
+
+    async def scenario():
+        task = asyncio.create_task(
+            run_scheduled_update_check(db, fetch=fetch, sleep=fake_sleep, interval_seconds=86400.0)
+        )
+        for _ in range(200):
+            if sleep_calls:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert fetch_calls == []  # never even attempted
+    assert get_last_check_summary(db) == (None, None)
+    db.close()
+
+
+def test_scheduled_check_tolerates_a_fetch_failure_and_still_sleeps(tmp_path):
+    db = Database(tmp_path / "node.db")
+
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await parked.wait()
+
+    async def scenario():
+        task = asyncio.create_task(
+            run_scheduled_update_check(db, fetch=lambda url: b"not json", sleep=fake_sleep, interval_seconds=3600.0)
+        )
+        for _ in range(200):
+            if sleep_calls:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert sleep_calls == [3600.0]  # a failed fetch never crashes the loop
+    assert get_last_check_summary(db) == (None, None)  # nothing recorded for a failed check
     db.close()
 
 

@@ -104,7 +104,16 @@ infrastructure rather than only placeholders:
 - linked-board genesis, post, and self-authored edit events;
 - receive-side verification, persistence, restart reconstruction, local
   origination, admin linking, propagation, and convergence coverage for those
-  board events.
+  board events;
+- Link messages (tier1_home_node_key only): compose/encrypt, receive-side
+  decrypt/deliver/bounce, acknowledgement round trip, targeted per-recipient
+  sync delivery (not the configured-seed flood-fill model boards use), and
+  convergence coverage;
+- peer-list exchange (unverified candidate discovery, nothing auto-dials a
+  candidate yet) and live supplementary seed-list refresh, merged into the
+  configured-seed list every sync pass;
+- a scheduled background release-check task, closing a gap where the admin
+  menu's "daily automatic check" switch previously had nothing behind it.
 
 Important boundaries of the current Link implementation:
 
@@ -118,6 +127,12 @@ Important boundaries of the current Link implementation:
   support for every local object from the existence of the envelope.
 - Linked-board moderator edits, tombstones, closure/transfer events, advanced
   governance, and other author-signing tiers remain future work.
+- Tier2_personal_key Link messages are reserved but not offered: the server
+  can never hold a tier-2 user's decryption key, and nothing in this codebase
+  does client-side decryption yet.
+- Automatic relay selection remains undesigned in one real respect: whether
+  its reliability metric is a new, narrow Phase-3 tracker or genuinely needs
+  Phase 4's reputation system.
 - Current GitHub issues, not this file, are the task-status authority.
 
 ---
@@ -708,9 +723,13 @@ worker thread.
 Configured-seed sync currently sends the complete supported outbound event set
 on each pass. This is deliberately simple and relies on idempotent acceptance.
 
-There is no generic inventory/pull protocol, peer-list exchange, automatic
-relay selection, or multi-hop propagation yet. A node which learned data from
-another peer does not automatically relay that board state to a third node.
+Peer-list exchange exists (a node shares its own verified peers' endpoint
+descriptors with anyone it has itself completed a hello with) but only feeds
+an unverified candidate pool (`LinkNode.candidate_descriptors`); nothing
+auto-dials a candidate yet. There is still no generic inventory/pull protocol,
+automatic relay selection, or multi-hop propagation. A node which learned data
+from another peer does not automatically relay that board state to a third
+node.
 
 Persistent dedup/event retention policy still needs a correctness-preserving
 implementation. Purging the fast cache must not make old control events
@@ -858,10 +877,15 @@ Near-term Phase 3 work includes:
   types are added;
 - persistent event/dedup retention without replay or resurrection bugs;
 - linked-resource closure, transfer, succession, orphan, and fork behavior;
-- WAN reachability, outgoing-only operation, relay selection, peer exchange,
-  supplementary seed updates, and pull-based catch-up;
-- Link messages extending local mail with end-to-end encryption, routing,
-  expiry, acknowledgement, abuse controls, and offline delivery;
+- automatic relay selection for outgoing-only nodes (needs its own reliability-
+  metric scope decision: a narrow Phase-3 tracker, or genuinely gated on
+  Phase 4's real reputation system) and pull-based catch-up; peer-list
+  exchange and live supplementary seed-list refresh are done, but nothing yet
+  auto-dials a discovered candidate;
+- Link messages: tier1_home_node_key only (server-side decryption; tier2
+  needs a real client-side decryption story first) -- send/receive/read,
+  bounce, and acknowledgement are done; link_message_expired and active
+  blocklist-backed sender blocking are not;
 - user-key and node-author signing tiers beyond current node-vouched users;
 - linked-board moderator grants and later moderator edits/tombstones;
 - unread/follow/activity state for Communities;
