@@ -7063,3 +7063,92 @@ gossip push, and a stranger's events refused by the server. See
 `docs/NetBBS-worklog.md` round 117 for the full test count and suite
 re-run result.
 
+## Sign-off notes, round 118 (node integration: a real running node can accept Link traffic)
+
+Wires `netbbs.link.transport.LinkServer` into actual node startup —
+until this round, `netbbs.net.nodeconfig`/`netbbs.__main__` never
+touched it; the node's `NodeIdentity` loaded at every startup (round
+111) had nothing downstream consuming it. This round is the first
+where a real, configured `netbbs` node can accept genuine inbound Link
+traffic.
+
+**`LinkConfig`, a new dataclass, not a reused `TransportConfig`.**
+`enabled`/`host`/`port` alone can't express what §12's two deployment
+modes need: `outgoing_only` (does this node's own `endpoint_descriptor`
+claim to be dialable) and, for a full peer, `advertised_host`/
+`advertised_port` (what to *tell* a peer to dial, which can differ
+from the local bind address/port — a router port-forward, or
+`host="0.0.0.0"`, a valid bind wildcard but never a valid address to
+hand another node).
+
+**A real design question, worked through rather than assumed: does
+`outgoing_only=True` mean "don't run `LinkServer` at all"?** No —
+resolved by tracing through what round 117's `dial_hello`/`push_events`
+actually need. Both are pure outbound HTTP calls whose reply comes back
+over the *same* connection; completing a hello or pushing gossip needs
+no separate inbound listener at all. `LinkServer` is therefore useful
+to run even for a NAT'd, outgoing-only node — e.g. so a peer this node
+dialed can still reach it over that same connection, or (once relay
+selection exists, round 95's design, not yet implemented) so a relay
+has something local to forward to. `LinkConfig.enabled` and
+`outgoing_only` are consequently orthogonal: `enabled` governs whether
+the local listener runs; `outgoing_only` governs only what this node's
+own descriptor *claims* about its reachability. Getting this wrong
+would have meant either forcing outgoing-only nodes to run no listener
+at all (breaking the "peer replies over the dial" case) or conflating
+"I'm listening locally" with "I'm claiming to be reachable from
+anywhere," a real §12 distinction this round preserves rather than
+collapses.
+
+**Link is deliberately excluded from `_start_servers`'s "no listener
+actually started" failure check**, renamed `any_interactive_started`
+to make the distinction explicit in code, not just in a comment: Link
+is a machine-to-machine peer listener, never something a user connects
+to, so it must never be able to satisfy "the node has something to
+serve" on its own with every real interactive transport (Telnet/SSH/
+web) having failed to bind. `NodeConfig.validate()`'s own, older "no
+transport is enabled" check already had this same intent (checks only
+telnet/ssh/web) — this round's runtime check now matches it.
+
+**A resource-leak bug caught by hand-tracing before it shipped, not by
+a failing test**: the first draft of the `any_interactive_started`
+check raised `StartupError` *after* every listener had already
+attempted to start, without re-running `_start_one`'s own cleanup —
+meaning a scenario where Link started successfully but no interactive
+transport did would raise while leaving Link's socket bound
+indefinitely (never reaching `run()`'s own `finally`, since `_start_
+servers` never returns in that path). Caught while re-reading the
+control flow, not by a test failing first — fixed by explicitly
+stopping everything in `started` before that particular raise, the
+same cleanup `_start_one`'s own except-clause already does for a
+start() failure. Recorded as a pattern: any new "raise after the fact"
+check added downstream of `_start_one`'s accumulation needs to apply
+the same cleanup, not just the automatic one on a start() failure
+itself.
+
+**Full-peer Link is called out in `describe_insecure_bindings()`**,
+alongside the existing Telnet/plain-web plaintext warnings — not for
+the same reason (Link traffic is signed, not password-authenticated,
+so there's no plaintext-credential risk), but because issues #58/#60
+(WAN/NAT trust boundaries, operational model) are designed but not yet
+implemented, and §15 states plainly that "an externally operated
+persistent Link node should not precede these." The warning says so
+explicitly rather than silently allowing a full-peer config through
+with no signal.
+
+**`README.md`** gets a `[link]` example in the worked config, matching
+`[telnet]`/`[ssh]`/`[web]`'s existing style — commented-out `advertised_
+host`/`advertised_port` since a full peer is the less common,
+op-in-required case.
+
+**Deliberately still not built, unchanged from round 117's list except
+one item removed**: persistent on-disk event/dedup storage, accepting
+events relayed from a peer with no direct hello, and — the real
+remaining gap — nothing yet *initiates* outbound Link activity. A
+running node can now accept a dial and gossip correctly, but nothing
+calls `dial_hello`/`push_events` from inside `run()` itself; there is
+no seed list, no periodic background sync task, no automatic peer
+discovery. The node integration this round delivers is purely the
+inbound half. See `docs/NetBBS-worklog.md` round 118 for the full test
+count and suite re-run result.
+

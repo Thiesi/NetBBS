@@ -181,6 +181,19 @@ enabled = false
 [web]
 enabled = false
 
+[link]
+# NetBBS Link (design doc §11/§12) -- experimental peer-to-peer
+# federation, disabled by default. outgoing_only=true (the default)
+# runs the listener so peers this node dials can reply, without
+# claiming to be reachable from outside; a full peer needs
+# advertised_host (and, if different from port, advertised_port) set.
+enabled = false
+host = "0.0.0.0"
+port = 7862
+outgoing_only = true
+# advertised_host = "203.0.113.5"
+# advertised_port = 7862
+
 [throttle]
 # All optional -- shown here with their built-in defaults.
 max_attempts_per_connection = 3

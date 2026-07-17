@@ -23,8 +23,11 @@ import pytest
 
 from netbbs.__main__ import StartupError, _install_signal_handlers, run
 from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
+from netbbs.link.transport import dial_hello
 from netbbs.net.maintenance import MaintenanceMode
-from netbbs.net.nodeconfig import NodeConfig, ShutdownConfig, TransportConfig
+from netbbs.net.nodeconfig import LinkConfig, NodeConfig, ShutdownConfig, TransportConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
 
@@ -158,6 +161,66 @@ def test_configured_telnet_listener_on_known_port_accepts_connections(tmp_path):
         finally:
             shutdown_event.set()
             await task
+
+    asyncio.run(scenario())
+
+
+def test_configured_link_listener_completes_a_real_hello(tmp_path):
+    """design doc round 118: a real running node's Link listener
+    actually answers a genuine dial_hello -- not just "something is
+    listening" (test_configured_telnet_listener above), but a
+    verified, signed handshake against the node's own real, loaded
+    NodeIdentity."""
+    import aiohttp
+
+    async def scenario():
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12401),
+            link=LinkConfig(enabled=True, host="127.0.0.1", port=12402),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12401)  # node fully up
+
+            dialer = LinkNode(identity=bootstrap_node_identity("dialer"))
+            dialer_hello = dialer.build_hello(
+                addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"
+            )
+            async with aiohttp.ClientSession() as session:
+                record = await dial_hello(dialer, session, "http://127.0.0.1:12402", dialer_hello)
+
+            from netbbs.link.node_identity import load_or_bootstrap_node_identity
+
+            real_identity = load_or_bootstrap_node_identity(
+                config.identity_dir, label=config.node_name
+            )
+            assert record.fingerprint == real_identity.fingerprint
+        finally:
+            shutdown_event.set()
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_link_alone_does_not_count_as_an_interactive_listener(tmp_path):
+    """A node configured with only Link enabled (no telnet/ssh/web) has
+    nothing a *user* can connect to -- must still raise StartupError,
+    even though the Link listener itself would start fine. Confirms
+    round 118's any_interactive_started tracking is genuinely separate
+    from the servers list Link also participates in."""
+
+    async def scenario():
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(False, "127.0.0.1", 0),
+            ssh=TransportConfig(False, "127.0.0.1", 0),
+            web=TransportConfig(False, "127.0.0.1", 0),
+            link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+        )
+        with pytest.raises(StartupError, match="no interactive listener actually started"):
+            await run(config)
 
     asyncio.run(scenario())
 
@@ -402,7 +465,7 @@ def test_no_listener_started_raises_startup_error(tmp_path, monkeypatch):
             ssh=TransportConfig(True, "127.0.0.1", 0),
             web=TransportConfig(False, "127.0.0.1", 0),
         )
-        with pytest.raises(StartupError, match="no listener actually started"):
+        with pytest.raises(StartupError, match="no interactive listener actually started"):
             await run(config)
 
     asyncio.run(scenario())

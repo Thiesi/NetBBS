@@ -21,16 +21,18 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
-from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
+from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, load_or_bootstrap_node_identity
+from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
-from netbbs.net.nodeconfig import ConfigError, NodeConfig, load_config
+from netbbs.net.nodeconfig import ConfigError, LinkConfig, NodeConfig, load_config
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import run_shutdown_sequence
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import utc_now_iso
 
 _logger = logging.getLogger(__name__)
 
@@ -55,8 +57,40 @@ def _build_throttle(config: NodeConfig) -> LoginThrottle:
     )
 
 
+def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig):
+    """
+    Returns a plain callable producing this node's current `HelloMessage`
+    on demand (design doc round 117: `LinkServer`'s `own_hello_provider`
+    — a transport-level concern deliberately kept out of `LinkNode`
+    itself). `addresses` is only populated for a full peer
+    (`not outgoing_only`) -- `config.validate()` already guarantees
+    `advertised_host` is set whenever that's the case, so this can build
+    the descriptor unconditionally rather than re-checking here.
+    """
+
+    def _provide() -> HelloMessage:
+        addresses = None
+        if not link_config.outgoing_only:
+            advertised_port = (
+                link_config.advertised_port if link_config.advertised_port is not None else link_config.port
+            )
+            addresses = [
+                {"protocol": "http", "address": link_config.advertised_host, "port": advertised_port}
+            ]
+        return link_node.build_hello(
+            addresses=addresses, outgoing_only=link_config.outgoing_only, created_at=utc_now_iso()
+        )
+
+    return _provide
+
+
 async def _start_servers(
-    config: NodeConfig, db: Database, session_handler, ssh_session_handler, throttle: LoginThrottle
+    config: NodeConfig,
+    db: Database,
+    session_handler,
+    ssh_session_handler,
+    throttle: LoginThrottle,
+    node_identity: NodeIdentity,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -80,8 +114,14 @@ async def _start_servers(
     either handler is ever called, so it must not be handed the
     Telnet/web handler, which unconditionally prompts for a
     username/password a second time.
+
+    `node_identity` builds this node's `LinkNode` (design doc round
+    118) when `config.link.enabled` -- a fresh one each `run()`, since
+    nothing yet persists Link peer state across a restart (round 117's
+    own scope note).
     """
     started: list = []
+    any_interactive_started = False
 
     async def _start_one(name: str, server) -> None:
         try:
@@ -107,6 +147,7 @@ async def _start_servers(
                 host=config.telnet.host, port=config.telnet.port, session_handler=session_handler
             ),
         )
+        any_interactive_started = True
         _logger.info("NetBBS listening on %s:%d (Telnet)", config.telnet.host, config.telnet.port)
 
     if config.ssh.enabled:
@@ -129,6 +170,7 @@ async def _start_servers(
                     login_timeout=config.throttle.login_deadline_seconds,
                 ),
             )
+            any_interactive_started = True
             _logger.info("NetBBS listening on %s:%d (SSH)", config.ssh.host, config.ssh.port)
 
     if config.web.enabled:
@@ -144,12 +186,52 @@ async def _start_servers(
                 "web",
                 WebServer(host=config.web.host, port=config.web.port, session_handler=session_handler),
             )
+            any_interactive_started = True
             _logger.info("NetBBS listening on %s:%d (web)", config.web.host, config.web.port)
 
-    if not started:
+    if config.link.enabled:
+        try:
+            from netbbs.link.transport import LinkServer
+        except ImportError:
+            _logger.warning(
+                "Link is enabled in configuration but aiohttp is not installed — "
+                "skipping Link listener (pip install netbbs[web])"
+            )
+        else:
+            link_node = LinkNode(identity=node_identity)
+            await _start_one(
+                "link",
+                LinkServer(
+                    host=config.link.host,
+                    port=config.link.port,
+                    node=link_node,
+                    own_hello_provider=_build_own_hello_provider(link_node, config.link),
+                ),
+            )
+            # Deliberately not counted toward any_interactive_started
+            # below -- Link is a machine-to-machine peer listener, not
+            # something a user connects to, so it must never be able to
+            # satisfy "the node has nothing to serve" on its own with
+            # every actual interactive transport having failed to bind.
+            _logger.info(
+                "NetBBS Link listening on %s:%d (fingerprint %s, %s)",
+                config.link.host, config.link.port, node_identity.fingerprint,
+                "outgoing-only" if config.link.outgoing_only else "full peer",
+            )
+
+    if not any_interactive_started:
+        # A non-interactive listener (Link) may have started successfully
+        # even though no *interactive* one did -- must still be stopped
+        # here before raising, or it leaks a bound port. _start_one's own
+        # cleanup only runs when a start() call itself fails; this check
+        # fires after every attempt has already finished, so it needs the
+        # same cleanup applied explicitly.
+        for already_started in reversed(started):
+            await already_started.stop()
         raise StartupError(
-            "no listener actually started — every enabled transport either failed to "
-            "bind or is missing its optional dependency; the node has nothing to serve"
+            "no interactive listener actually started — every enabled transport "
+            "either failed to bind or is missing its optional dependency; the node "
+            "has nothing to serve"
         )
 
     return started
@@ -290,13 +372,14 @@ async def run(
         # Design doc round 89/111: a node's Link identity (root key +
         # signing/transport operational keys) auto-generates silently on
         # first-ever startup and just loads on every one after that -- no
-        # separate "init" step. Nothing downstream actually consumes
-        # node_identity yet (no Link transport/sync code exists -- design
-        # doc §15's Phase 3 dependency matrix), but it must exist and be
-        # verified sound before anything that will eventually sign with it
-        # does. Checked inside this try/finally, not before it, so a
-        # failure here still goes through the same db.close()/daybreak_
-        # task cleanup as every other startup failure below.
+        # separate "init" step. Always loaded regardless of whether
+        # config.link.enabled -- it must exist and be verified sound
+        # before anything that signs with it does, and _start_servers
+        # below needs it to build a LinkNode even when Link itself ends
+        # up not starting this run. Checked inside this try/finally, not
+        # before it, so a failure here still goes through the same
+        # db.close()/daybreak_task cleanup as every other startup
+        # failure below.
         try:
             node_identity = load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
         except NodeIdentityError as exc:
@@ -310,7 +393,9 @@ async def run(
                 "the network-facing server; a node with no SysOp could "
                 "never be administered once it's running"
             )
-        servers = await _start_servers(config, db, session_handler, ssh_session_handler, throttle)
+        servers = await _start_servers(
+            config, db, session_handler, ssh_session_handler, throttle, node_identity
+        )
 
         await shutdown_event.wait()
     finally:

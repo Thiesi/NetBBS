@@ -73,6 +73,43 @@ class TransportConfig:
 
 
 @dataclass(frozen=True)
+class LinkConfig:
+    """
+    NetBBS Link's own transport (design doc §11/§12, round 118) --
+    distinct from `TransportConfig` because "am I dialable" and "what
+    do I claim about how to reach me" are two independent questions
+    for Link in a way they aren't for an interactive transport: a node
+    can run `LinkServer` (`enabled`, bound to `host`/`port`) purely so
+    peers *it* dials can reply over the same connection, while still
+    being unreachable from anywhere else (`outgoing_only=True`, §12's
+    common NAT/residential case) -- `outgoing_only` controls what this
+    node's own `endpoint_descriptor` (round 116) claims, never whether
+    the local listener runs at all.
+
+    `advertised_host`/`advertised_port` are only meaningful when
+    `outgoing_only` is false (a full peer): what a peer should be told
+    to dial, which may differ from `host`/`port` (a router port-forward
+    to a different external port, or `host="0.0.0.0"` — a valid bind
+    wildcard, never a valid address to hand another node). `advertised_
+    port` defaults to `port` when unset; `advertised_host` has no
+    default -- see `NodeConfig.validate`.
+
+    Defaults to disabled, matching §15's "Phase 3 is explicitly
+    private/experimental federation" framing -- an operator opts in.
+    Automatic seed bootstrapping/relay selection (§12, rounds 95/97)
+    are not implemented yet (round 117's own scope note); this config
+    only governs the inbound listener itself.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 7862
+    outgoing_only: bool = True
+    advertised_host: str | None = None
+    advertised_port: int | None = None
+
+
+@dataclass(frozen=True)
 class ThrottleConfig:
     """Defaults are deliberately chosen, reasonable starting points for
     the design doc's stated deployment scale (§14: low hundreds of
@@ -134,6 +171,7 @@ class NodeConfig:
     telnet: TransportConfig = field(default_factory=lambda: TransportConfig(False, "127.0.0.1", 2323))
     ssh: TransportConfig = field(default_factory=lambda: TransportConfig(True, "0.0.0.0", 2222))
     web: TransportConfig = field(default_factory=lambda: TransportConfig(False, "127.0.0.1", 8080))
+    link: LinkConfig = field(default_factory=LinkConfig)
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
 
@@ -143,6 +181,25 @@ class NodeConfig:
                 raise ConfigError(f"{name}.port must be between 1 and 65535, got {transport.port}")
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
+
+        if self.link.enabled:
+            if not (1 <= self.link.port <= 65535):
+                raise ConfigError(f"link.port must be between 1 and 65535, got {self.link.port}")
+            if not self.link.host.strip():
+                raise ConfigError("link.host must not be empty")
+            if not self.link.outgoing_only:
+                if not self.link.advertised_host or not self.link.advertised_host.strip():
+                    raise ConfigError(
+                        "link.advertised_host must be set when link.outgoing_only is false -- "
+                        "a full peer must know what address to tell others to dial"
+                    )
+                advertised_port = (
+                    self.link.advertised_port if self.link.advertised_port is not None else self.link.port
+                )
+                if not (1 <= advertised_port <= 65535):
+                    raise ConfigError(
+                        f"link.advertised_port must be between 1 and 65535, got {advertised_port}"
+                    )
 
         t = self.throttle
         _require_positive = {
@@ -199,6 +256,17 @@ class NodeConfig:
                 "bind the web transport to 127.0.0.1 and have the proxy be the only thing "
                 "reachable externally), or restrict it to trusted/local use only."
             )
+        if self.link.enabled and not self.link.outgoing_only:
+            warnings.append(
+                f"NetBBS Link is configured as a full peer, advertising "
+                f"{self.link.advertised_host}:{self.link.advertised_port or self.link.port} to other "
+                "nodes -- design doc §15: Phase 3 is explicitly private/experimental federation, and "
+                "the WAN/NAT trust-boundary and operational-model work (issues #58/#60) is not yet "
+                "implemented. Not a plaintext-password risk the way Telnet/web are (Link traffic is "
+                "signed, not password-authenticated), but an externally reachable Link listener should "
+                "not be operated persistently before that work lands. Prefer outgoing_only (the "
+                "default) until then."
+            )
         return warnings
 
 
@@ -223,6 +291,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(f"--{transport}-host", dest=f"{transport}_host", default=None)
         parser.add_argument(f"--{transport}-port", dest=f"{transport}_port", type=int, default=None)
+
+    # Link (round 118): special-cased, not folded into the _TRANSPORTS
+    # loop above -- LinkConfig carries outgoing_only/advertised_host/
+    # advertised_port beyond bare TransportConfig's enabled/host/port.
+    link_group = parser.add_mutually_exclusive_group()
+    link_group.add_argument("--enable-link", dest="link_enabled", action="store_true", default=None)
+    link_group.add_argument("--disable-link", dest="link_enabled", action="store_false", default=None)
+    parser.add_argument("--link-host", dest="link_host", default=None)
+    parser.add_argument("--link-port", dest="link_port", type=int, default=None)
+    outgoing_group = parser.add_mutually_exclusive_group()
+    outgoing_group.add_argument(
+        "--link-outgoing-only", dest="link_outgoing_only", action="store_true", default=None
+    )
+    outgoing_group.add_argument(
+        "--link-full-peer", dest="link_outgoing_only", action="store_false", default=None
+    )
+    parser.add_argument("--link-advertised-host", dest="link_advertised_host", default=None)
+    parser.add_argument("--link-advertised-port", dest="link_advertised_port", type=int, default=None)
     return parser
 
 
@@ -281,8 +367,25 @@ def _node_from_toml(data: dict, config: NodeConfig) -> tuple[Path, str]:
     return identity_dir, node_name
 
 
+def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
+    table = data.get("link", {})
+    if not isinstance(table, dict):
+        raise ConfigError("[link] in the config file must be a table")
+    unknown = set(table) - set(LinkConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"[link] has unknown setting(s): {', '.join(sorted(unknown))}")
+    return LinkConfig(
+        enabled=bool(table.get("enabled", current.enabled)),
+        host=str(table.get("host", current.host)),
+        port=int(table.get("port", current.port)),
+        outgoing_only=bool(table.get("outgoing_only", current.outgoing_only)),
+        advertised_host=table.get("advertised_host", current.advertised_host),
+        advertised_port=table.get("advertised_port", current.advertised_port),
+    )
+
+
 def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
-    known_tables = {"database", "node", "telnet", "ssh", "web", "throttle", "shutdown"}
+    known_tables = {"database", "node", "telnet", "ssh", "web", "link", "throttle", "shutdown"}
     unknown = set(data) - known_tables
     if unknown:
         raise ConfigError(f"config file has unknown section(s): {', '.join(sorted(unknown))}")
@@ -301,6 +404,7 @@ def _apply_toml(config: NodeConfig, data: dict) -> NodeConfig:
         telnet=_transport_from_toml(data, "telnet", config.telnet),
         ssh=_transport_from_toml(data, "ssh", config.ssh),
         web=_transport_from_toml(data, "web", config.web),
+        link=_link_from_toml(data, config.link),
         throttle=_throttle_from_toml(data, config.throttle),
         shutdown=_shutdown_from_toml(data, config.shutdown),
     )
@@ -329,6 +433,34 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     port=current.port if port is None else port,
                 )
             },
+        )
+
+    link = config.link
+    link_overrides = (
+        args.link_enabled,
+        args.link_host,
+        args.link_port,
+        args.link_outgoing_only,
+        args.link_advertised_host,
+        args.link_advertised_port,
+    )
+    if any(value is not None for value in link_overrides):
+        config = replace(
+            config,
+            link=LinkConfig(
+                enabled=link.enabled if args.link_enabled is None else args.link_enabled,
+                host=link.host if args.link_host is None else args.link_host,
+                port=link.port if args.link_port is None else args.link_port,
+                outgoing_only=(
+                    link.outgoing_only if args.link_outgoing_only is None else args.link_outgoing_only
+                ),
+                advertised_host=(
+                    link.advertised_host if args.link_advertised_host is None else args.link_advertised_host
+                ),
+                advertised_port=(
+                    link.advertised_port if args.link_advertised_port is None else args.link_advertised_port
+                ),
+            ),
         )
     return config
 

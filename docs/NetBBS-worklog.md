@@ -7692,3 +7692,67 @@ config knob, `netbbs.__main__` standing up a `LinkServer` alongside
 telnet/SSH/web, and a real `own_hello_provider` sourced from actual
 node network configuration rather than a test-supplied lambda.
 
+## Sign-off notes, round 118 (node integration: a real running node can accept Link traffic)
+
+Wires everything rounds 116/117 built into actual node startup. See
+`docs/NetBBS-design-doc.md` round 118 for the design decisions
+(`LinkConfig` as its own dataclass, `outgoing_only` vs. whether
+`LinkServer` runs at all, the `any_interactive_started` split, the
+full-peer warning) — this entry is implementation/testing narrative.
+
+**`netbbs/net/nodeconfig.py`**: new `LinkConfig` dataclass (`enabled`,
+`host`, `port`, `outgoing_only`, `advertised_host`, `advertised_port`),
+added as `NodeConfig.link`. `validate()` extended: port/host checks
+when enabled (mirroring telnet/ssh/web), plus a full-peer-specific
+check that `advertised_host` is set and `advertised_port` (or `port`,
+if unset) is a valid port. `describe_insecure_bindings()` extended
+with the full-peer warning. CLI args (`--enable-link`/`--disable-link`,
+`--link-host`, `--link-port`, `--link-outgoing-only`/`--link-full-
+peer`, `--link-advertised-host`, `--link-advertised-port`) and a
+`[link]` TOML table, both special-cased outside the existing
+`_TRANSPORTS` generic loop (that loop's shared `TransportConfig`
+shape doesn't have `outgoing_only`/`advertised_*`).
+
+**`netbbs/__main__.py`**: `_build_own_hello_provider(link_node,
+link_config)` — a plain closure producing this node's current
+`HelloMessage`, populating `addresses` only for a full peer. `_start_
+servers` gained a `node_identity` parameter (needed to construct the
+`LinkNode`) and a `link` branch, following the exact same `_start_one`/
+optional-dependency-`ImportError`/logging shape telnet/ssh/web already
+use. `any_interactive_started`, tracked separately from the `started`
+list, replaces the old bare `started` check for the "nothing to
+serve" failure — `started` itself still includes Link, since it's
+still a real listener needing the same stop()-on-partial-failure
+cleanup, just not one that counts toward "can a user reach this node."
+
+**Tests**: `tests/test_nodeconfig.py` (+21) — defaults, validation
+(port/host/advertised-host/advertised-port, both failure and success
+cases), `describe_insecure_bindings` (full peer warns, outgoing-only
+and disabled don't), CLI overrides, TOML table parsing, TOML unknown-
+key rejection, CLI-overrides-TOML precedence. `tests/test_main_
+lifecycle.py` (+2): a real running node's Link listener completing an
+actual `dial_hello` against its genuine loaded `NodeIdentity` (not
+just "something is listening," the way the existing Telnet test only
+checks the first negotiation byte); and Link-alone (no telnet/ssh/web)
+still correctly raising `StartupError`, confirming `any_interactive_
+started` does what it's for. One existing test's assertion string
+updated for the deliberate "no listener" → "no interactive listener"
+wording change.
+
+**Testing**: full suite: **1998 passed, 4 skipped** (23 net new — 21 in
+`test_nodeconfig.py`, 2 in `test_main_lifecycle.py` — up from round
+117's 1975/4).
+
+**Also touched**: `README.md` gets a `[link]` section in the worked
+example config.
+
+**What's still open**, unchanged from round 117's list minus the node-
+integration piece itself: persistent event/dedup storage, accepting
+relayed events from a peer with no direct hello, and — now the clearest
+remaining gap — nothing yet *initiates* outbound Link activity from a
+running node. This round makes a node correctly *answer* Link traffic;
+it does not make one *originate* any. The natural next round is a
+background sync task: a seed list (design doc §12, rounds 95/97 — not
+yet implemented at all), and a periodic loop that dials known peers and
+calls `dial_hello`/`push_events`.
+
