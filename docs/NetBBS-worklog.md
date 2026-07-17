@@ -7935,3 +7935,98 @@ and pull-based catch-up all remain unimplemented, unchanged from round
 as `handle_events` is currently written, not merely unbuilt) — `link_
 events` rows accumulate indefinitely for now.
 
+## Round 121 (chain-level idempotency fix — `push_events` had a 100% failure rate on every real sync pass since round 119)
+
+See `docs/NetBBS-design-doc.md` round 121 for the design decision (why
+the fix checks `sender.transitions` membership rather than touching
+`node_identity`'s chain-walking code, why a genuine fork still gets
+rejected) and — this is the important part — the severity finding: a
+hand-verified reproduction proving `push_events` has never once
+succeeded in real operation since round 119 shipped it, for any node,
+on any sync pass. This entry is the implementation/testing narrative
+plus the reproduction steps that confirmed it.
+
+**The bug, confirmed directly against round 120's shipped code before
+writing the fix**: a fresh `LinkNode`/`LinkServer` pair, one real
+`dial_hello` (no rotation, nothing adversarial), immediately followed
+by one real `push_events` call with `list(node.identity.transitions)`
+(round 119's own "push everything" payload) — the push fails every
+time with `LinkTransportError: ... HTTP 400: {"error": "rejected
+key_transition ...: forked transition chain ...: two transitions both
+extend None"}`. The hello (round 116) always carries the node's
+"signing"-purpose transitions; the very next push always resends them
+as part of "everything," and — since `handle_hello` never touches
+`known_event_ids` — the duplicate falls straight through to `sender.
+transitions + (transition,)`, which `_verify_and_order_chain` correctly
+identifies as *looking like* a fork (two transitions claiming the same
+`previous_transition_id`) since it has no way to know they're actually
+identical. `handle_events` has no per-event try/except, so this one
+false rejection aborted every event in the batch, every time. `_sync_
+one_seed` catches `LinkTransportError`, logs a warning, and moves on —
+which is exactly why this shipped silently in round 119 and stayed
+silent through round 120: nothing crashed, nothing else observed the
+failure, and neither round's own test suite happened to assert on
+whether `push_events`'s payload actually landed (only on peer
+*presence*, which the hello alone already establishes).
+
+**`src/netbbs/link/protocol.py`**: `handle_events` gained one new
+check, right after the existing `known_event_ids` fast-path skip —
+`if any(existing.content_id == transition.content_id for existing in
+sender.transitions): continue` (after self-healing `known_event_ids`/
+`events` from the recovered state first). A genuine fork carries a
+*different* `content_id`, so it never matches this check and still
+reaches `resolve_current_operational_key`, still correctly rejected
+there.
+
+**`node_identity.py` untouched** — round 120's own sign-off note
+guessed the fix would need to touch it; it didn't. The whole fix lives
+in `protocol.handle_events`'s decision of whether an incoming
+transition is new, before it ever reaches the chain-walking code.
+
+**Tests**: `tests/test_link_protocol.py` (+2) —
+`test_handle_events_recovers_idempotency_from_the_chain_when_the_
+dedup_entry_is_gone` (manually clears `known_event_ids` post-acceptance
+to simulate a future purge, confirms a resend is still a safe no-op and
+self-heals the fast-path cache) and `test_handle_events_still_rejects_
+a_genuine_fork_when_dedup_is_gone` (confirms clearing `known_event_ids`
+does *not* turn a real fork — a different transition claiming the same
+`previous_transition_id` — into a false no-op). `tests/test_link_
+transport.py` (+1) — `test_push_events_succeeds_on_the_very_first_
+pass_after_a_hello`, the direct, minimal regression test for the bug
+found above: no rotation, just hello-then-push, asserting the push
+actually succeeds and reports only the genuinely-new transport
+transition as newly accepted.
+
+**One pre-existing test's assertion was fragile, exposed rather than
+broken by this fix**: `tests/test_link_sync.py::test_sync_completes_
+a_hello_and_pushes_events_to_a_real_seed` rotates the dialer's signing
+key *before* the first sync pass, so its hello already carries the
+post-rotation chain, then asserted `peer_record.transitions[-1].
+content_id == dialer_node.identity.transitions[-1].content_id`. Before
+this round's fix, `push_events` in this test silently failed entirely
+(the bug above), so the assertion was accidentally satisfied by the
+hello alone. After the fix, `push_events` genuinely succeeds and also
+delivers the not-yet-seen transport-purpose transition, which lands
+after the two now-correctly-no-op'd signing transitions in the flat,
+multi-purpose `PeerRecord.transitions` tuple — `[-1]` was never a
+valid proxy for "the signing head arrived" once more than one purpose
+is interleaved (`resolve_current_operational_key` itself never relies
+on tuple position, only this assertion did). Fixed to check membership
+of every one of the dialer's transitions by `content_id`, not tuple
+position.
+
+**Testing**: full suite: **2022 passed, 4 skipped** (3 net new — 2 in
+`test_link_protocol.py`, 1 in `test_link_transport.py` — up from round
+120's 2019/4).
+
+**What's still open**: retention-window purging itself remains
+unimplemented (this round only removed the correctness blocker, per
+design doc round 121); the self-updating supplementary seed list,
+automatic relay selection, peer-list exchange, and pull-based catch-up
+all remain unimplemented, unchanged from round 119/120's lists. Next
+up: expanding `tests/link_harness.py` to cover 3+ nodes, duplicate/
+reordered delivery, restart, and partition/convergence (issue #59's
+own gate, design doc §15 — "before the first end-to-end Linked feature
+is treated as complete") — now able to exercise a `push_events` that
+actually works, rather than one that silently failed on every pass.
+

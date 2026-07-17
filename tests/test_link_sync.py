@@ -98,8 +98,18 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
         assert dialer_identity.fingerprint in seed_node_after.peers
         peer_record = seed_node_after.peers[dialer_identity.fingerprint]
         # Both halves of the rotation (revoke + authorize, design doc round
-        # 116's own ordering note) reached the seed via push_events.
-        assert peer_record.transitions[-1].content_id == dialer_node.identity.transitions[-1].content_id
+        # 116's own ordering note) reached the seed -- via the hello (which
+        # already carried them, since the rotation happened before the
+        # first sync pass) and via push_events (round 119: pushes *all* of
+        # identity.transitions, including the not-yet-seen transport-purpose
+        # transition, which lands after them in the flat tuple -- round
+        # 121: no longer a duplicate-signing_orig rejection, so this
+        # assertion checks membership, not tuple position, which was never
+        # a meaningful proxy for "current head" once more than one purpose
+        # is interleaved in the same flat PeerRecord.transitions tuple).
+        peer_content_ids = {t.content_id for t in peer_record.transitions}
+        for transition in dialer_node.identity.transitions:
+            assert transition.content_id in peer_content_ids
     finally:
         dialer.close()
         seed.close()

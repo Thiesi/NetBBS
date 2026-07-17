@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from netbbs.link.events import build_endpoint_descriptor
+from netbbs.link.events import build_endpoint_descriptor, build_key_transition
 from netbbs.link.node_identity import rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
@@ -256,6 +256,92 @@ def test_handle_events_is_idempotent_for_an_already_seen_event(tmp_path, clock):
 
     assert first == [revoke_transition.content_id, authorize_transition.content_id]
     assert second == []  # already seen -- silently skipped, not re-applied or errored
+
+    alice.close()
+
+
+def test_handle_events_recovers_idempotency_from_the_chain_when_the_dedup_entry_is_gone(tmp_path, clock):
+    """Round 121: simulates what a future purge of known_event_ids
+    would look like today -- clear the dedup entry by hand (nothing
+    currently purges it, round 120), but leave sender.transitions
+    alone (that state is permanent, never purged). A resend of the
+    exact same, already-integrated transition must still be recognized
+    as a safe no-op via chain membership, not rejected as a forged
+    fork, and must re-populate known_event_ids/events from the
+    authoritative chain state."""
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    rotated = rotate_operational_key(alice.identity, purpose="signing")
+    revoke_transition, authorize_transition = rotated.transitions[-2:]
+    pair = [revoke_transition.to_dict(), authorize_transition.to_dict()]
+
+    first = bob_node.handle_events(alice.fingerprint, pair)
+    assert first == [revoke_transition.content_id, authorize_transition.content_id]
+
+    # Simulate a purged dedup table: the entries are gone, but the
+    # peer's own chain (permanent state) still has both transitions.
+    bob_node.known_event_ids.discard(revoke_transition.content_id)
+    bob_node.known_event_ids.discard(authorize_transition.content_id)
+    del bob_node.events[revoke_transition.content_id]
+    del bob_node.events[authorize_transition.content_id]
+
+    second = bob_node.handle_events(alice.fingerprint, pair)
+    assert second == []  # still a no-op, not a rejection
+
+    # Self-healed: a third resend takes the known_event_ids fast path.
+    assert revoke_transition.content_id in bob_node.known_event_ids
+    assert authorize_transition.content_id in bob_node.known_event_ids
+    assert bob_node.events[authorize_transition.content_id] == authorize_transition.to_dict()
+
+    # The chain itself was never touched twice -- still exactly the
+    # transitions from the one real acceptance above.
+    assert bob_node.peers[alice.fingerprint].transitions[-1].content_id == authorize_transition.content_id
+
+    alice.close()
+
+
+def test_handle_events_still_rejects_a_genuine_fork_when_dedup_is_gone(tmp_path, clock):
+    """The other half of round 121's proof: clearing known_event_ids
+    must not turn a *real* fork attempt into a false no-op. A fork
+    carries a different transition (different content_id) claiming the
+    same previous_transition_id as one already applied -- must still
+    be rejected."""
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    rotated = rotate_operational_key(alice.identity, purpose="signing")
+    revoke_transition, authorize_transition = rotated.transitions[-2:]
+    accepted = bob_node.handle_events(
+        alice.fingerprint, [revoke_transition.to_dict(), authorize_transition.to_dict()]
+    )
+    assert accepted == [revoke_transition.content_id, authorize_transition.content_id]
+
+    # A second, *different* transition extending the same revoke --
+    # same previous_transition_id as authorize_transition, different
+    # content_id. Even with known_event_ids cleared (as if purged), the
+    # chain-membership check must not mistake this for the same event.
+    bob_node.known_event_ids.discard(revoke_transition.content_id)
+    bob_node.known_event_ids.discard(authorize_transition.content_id)
+
+    forked = build_key_transition(
+        root=alice.identity.root,
+        purpose="signing",
+        action="authorize",
+        operational_key=rotate_operational_key(alice.identity, purpose="transport").transport_key.verify_key,
+        previous_transition_id=revoke_transition.content_id,
+        created_at=clock.now_iso(),
+    )
+    assert forked.content_id != authorize_transition.content_id
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [forked.to_dict()])
 
     alice.close()
 

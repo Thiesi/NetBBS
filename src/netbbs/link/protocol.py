@@ -233,7 +233,10 @@ class LinkNode:
         events are refused this round, not queued/relayed). Returns the
         content_ids of events newly accepted; already-seen ones are
         silently skipped (§7: transport-level dedup is a performance
-        optimization, not a safety mechanism).
+        optimization, not a safety mechanism -- round 121 makes that
+        true in practice, not just in intent: idempotency for an
+        already-applied `key_transition` no longer depends solely on
+        `known_event_ids` still holding the entry, see below).
 
         The only recognized `object_type` so far is `key_transition`
         (round 116) — accepting one also extends the sending peer's own
@@ -253,6 +256,23 @@ class LinkNode:
 
             transition = KeyTransition.from_dict(raw)
             if transition.content_id in self.known_event_ids:
+                continue
+
+            if any(existing.content_id == transition.content_id for existing in sender.transitions):
+                # Round 121: already integrated into sender's own chain
+                # (permanent, never-purged key-lifecycle state, round 89)
+                # even though known_event_ids doesn't currently have it
+                # -- a legitimate resend (round 119's own "push every
+                # transition every pass," or a future purged-then-resent
+                # dedup entry), not a fork attempt: a genuine fork
+                # carries a *different* content_id claiming the same
+                # previous_transition_id, so it never matches here and
+                # still reaches -- and is still rejected by -- the
+                # resolve_current_operational_key check below. Self-
+                # heals the fast-path cache from the authoritative chain
+                # state rather than re-verifying from scratch.
+                self.known_event_ids.add(transition.content_id)
+                self.events.setdefault(transition.content_id, raw)
                 continue
 
             if transition.payload.get("subject_fingerprint") != sender_fingerprint:

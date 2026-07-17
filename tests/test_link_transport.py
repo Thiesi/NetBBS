@@ -215,6 +215,59 @@ def test_dial_hello_raises_link_transport_error_when_nothing_is_listening(tmp_pa
 # -- events: real HTTP gossip push ------------------------------------------
 
 
+def test_push_events_succeeds_on_the_very_first_pass_after_a_hello(tmp_path):
+    """Round 121 regression test: this is the *minimal* case that
+    exposed the bug -- no rotation involved at all. Every node's hello
+    (round 116) already carries its "signing"-purpose transitions, and
+    round 119's push_events sends *every* transition of both purposes
+    moments later, in the same sync pass -- meaning the very first
+    push after the very first hello, for any node, always resends at
+    least one transition the hello already delivered. Before round
+    121's chain-membership check, `known_event_ids` didn't have it yet
+    (handle_hello never touches that set), so it fell through to a
+    duplicate append and got rejected as a forged fork, aborting the
+    *entire* push (verified by hand against round 120's actual shipped
+    code -- push_events had a 100% failure rate on every real sync
+    pass since round 119 shipped, silently swallowed by
+    _sync_one_seed's own catch-and-log). Only the genuinely-new
+    transport-purpose transition (never in the hello) should be
+    reported as newly accepted."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                # No rotation -- alice_node.identity is exactly what
+                # bootstrap_node_identity produced: one signing
+                # transition (already in the hello bob just accepted)
+                # and one transport transition (never sent yet).
+                return await push_events(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", list(alice_identity.transitions)
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        accepted = asyncio.run(scenario())
+        signing_transition, transport_transition = alice_identity.transitions
+        assert accepted == [transport_transition.content_id]  # the signing one was already known, a no-op
+        peer_content_ids = {t.content_id for t in bob_node.peers[alice_identity.fingerprint].transitions}
+        assert signing_transition.content_id in peer_content_ids
+        assert transport_transition.content_id in peer_content_ids
+    finally:
+        alice.close()
+        bob.close()
+
+
 def test_push_events_gossips_a_real_key_rotation_over_http(tmp_path):
     alice_identity = bootstrap_node_identity("alice")
     bob_identity = bootstrap_node_identity("bob")

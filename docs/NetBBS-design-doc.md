@@ -7338,3 +7338,85 @@ above rather than silently assumed solved by this round's other
 storage work. See `docs/NetBBS-worklog.md` round 120 for the
 implementation narrative and test counts.
 
+## Sign-off notes, round 121 (chain-level idempotency for `handle_events` — fixes `push_events` having silently failed on every sync pass since round 119)
+
+Closes the correctness gap round 120 found and deliberately didn't
+fix: `handle_events` treated a resend of an already-applied
+`key_transition` as safe *only* via the global `known_event_ids`
+dedup set — a purely in-memory-then-persisted fast-path lookup that
+round 120 chose to keep unpurged specifically because purging it would
+have made a legitimate resend fall through to `candidate_transitions =
+sender.transitions + (transition,)` and get rejected by `_verify_
+and_order_chain`'s fork detection as if it were a forged fork, since
+that function only distinguishes chains by `previous_transition_id`
+linkage, not by whether the *exact same* transition was already
+integrated.
+
+**Fix: `handle_events` also checks whether the incoming transition's
+`content_id` already appears in `sender.transitions` itself** — the
+peer's permanent, never-purged chain-lifecycle state (round 89), not
+the separate performance-optimization dedup table §7 describes.
+Anything already present in `sender.transitions` passed real
+verification when it was first accepted, so its presence there *is*
+"already an ancestor of the current head" in exactly the sense §7
+point 2 describes ("projection-level idempotency... the actual,
+permanent safety mechanism") — checking it doesn't weaken anything; a
+genuine fork attempt carries a *different* `content_id` (a different
+signature over a different payload) claiming the same `previous_
+transition_id`, so it never matches this check and still reaches
+`resolve_current_operational_key`, still correctly rejected there
+exactly as before.
+
+**Not hypothetical at all — verified by hand to be a live, 100%-failure
+bug in shipped round-119 code, not a future risk.** `_sync_one_seed`
+calls `dial_hello` (sends the "signing"-purpose subset via the hello,
+round 116) immediately followed by `push_events` with *every* transition
+of *both* purposes (round 119: "no per-peer tracking... re-pushing
+everything every interval is simply a harmless no-op"). Every node has
+at least one signing-purpose transition (the bootstrap authorize, at
+minimum), so the hello *always* carries at least one transition that
+the very next `push_events` call, moments later, resends as part of
+"everything." Before this round's fix, `known_event_ids` doesn't have
+it yet (`handle_hello` never touches that set), so it falls straight
+through to `candidate_transitions = sender.transitions + (transition,)`
+— a duplicate — and `_verify_and_order_chain` rejects it as a forged
+fork. `handle_events` has no per-event try/except, so that one
+rejection aborts the *entire* batch, not just the duplicate. Confirmed
+directly against round 120's actual shipped code, no rotation involved
+at all: a brand-new node's very first `push_events` call, right after
+its very first hello, fails with exactly this error. `_sync_one_seed`
+catches and logs it as a warning and moves on, so it never crashed
+anything or showed up as a test failure — round 119/120's own test
+suites happened to only ever assert on peer *presence* (set by the
+hello alone) or on a scenario whose final-state assertion was
+independently satisfied by the hello, never on whether `push_events`'s
+own payload actually landed. **In effect, `push_events` — the
+mechanism round 119's entire sign-off note is about — has never
+successfully pushed a single event since it shipped, for any node, on
+any pass, until this fix.** This round's chain-membership check fixes
+that outright; the retention-purging framing above is a real
+additional benefit, not the primary reason this fix matters.
+
+**A recovered/already-applied transition self-heals the fast-path
+cache** (`known_event_ids`/`events`) rather than merely being skipped
+— written back from the authoritative chain state the same way a
+never-purged entry would already be present, so a *third* resend of
+the same transition takes the cheap `known_event_ids` fast path again
+rather than re-walking `sender.transitions` every time.
+
+**Scope correction from round 120's own sign-off note**: that note
+guessed the fix would touch `netbbs.link.node_identity` in addition to
+`netbbs.link.protocol`. It doesn't — `_verify_and_order_chain`/
+`resolve_current_operational_key` (`node_identity.py`) are unchanged;
+the whole fix lives in `protocol.handle_events`'s own decision of
+whether an incoming transition is new before it ever reaches those
+functions.
+
+**Retention-window purging itself remains unimplemented** — this
+round only removes the correctness blocker round 120 identified; it
+doesn't build the purge mechanism. Named explicitly so this round
+isn't mistaken for "purging is done," matching this project's
+consistent practice of not silently folding a prerequisite fix into
+the feature it unblocks. See `docs/NetBBS-worklog.md` round 121 for
+the implementation narrative and test counts.
+
