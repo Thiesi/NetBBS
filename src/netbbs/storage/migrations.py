@@ -1298,4 +1298,33 @@ MIGRATIONS = [
             WHERE object_id IS NULL AND community_id IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "NetBBS Link persistent storage (design doc round 120): peer table and "
+            "seen-event/event-body store, replacing netbbs.link.protocol.LinkNode's "
+            "previously in-memory-only peers/known_event_ids/events."
+        ),
+        sql="""
+        CREATE TABLE link_peers (
+            fingerprint       TEXT PRIMARY KEY,
+            root_public_key   TEXT NOT NULL,  -- base64
+            transitions_json  TEXT NOT NULL,  -- JSON list of KeyTransition.to_dict()
+            descriptor_json   TEXT NOT NULL,  -- JSON EndpointDescriptor.to_dict()
+            updated_at        TEXT NOT NULL
+        );
+
+        -- Round 120: doubles as both the seen-event dedup table and the event-body
+        -- store (§7 already describes them as one concept, not two). No retention-
+        -- window purging yet -- see round 120's sign-off note for the real chain-
+        -- idempotency gap that has to close first.
+        CREATE TABLE link_events (
+            content_id          TEXT PRIMARY KEY,
+            sender_fingerprint  TEXT NOT NULL,
+            object_type         TEXT NOT NULL,
+            envelope_json       TEXT NOT NULL,  -- the raw event dict as received
+            received_at         TEXT NOT NULL
+        );
+        CREATE INDEX idx_link_events_sender ON link_events(sender_fingerprint);
+        """,
+    ),
 ]

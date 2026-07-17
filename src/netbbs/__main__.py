@@ -23,6 +23,7 @@ from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
+from netbbs.link.store import load_link_node
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -91,6 +92,7 @@ async def _start_servers(
     ssh_session_handler,
     throttle: LoginThrottle,
     link_node: LinkNode | None,
+    link_lane: DatabaseLane,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -120,6 +122,8 @@ async def _start_servers(
     background sync task needs to share this *same* `LinkNode`
     instance, not a second one with its own independent, diverging
     peer table), is what `LinkServer` answers inbound traffic through.
+    `link_lane` (round 120) is the background `DatabaseLane` `LinkServer`
+    persists accepted peers/events through.
     """
     started: list = []
     any_interactive_started = False
@@ -207,6 +211,7 @@ async def _start_servers(
                     port=config.link.port,
                     node=link_node,
                     own_hello_provider=_build_own_hello_provider(link_node, config.link),
+                    lane=link_lane,
                 ),
             )
             # Deliberately not counted toward any_interactive_started
@@ -277,6 +282,14 @@ async def run(
     # Opened lazily on first use, not here, so node startup doesn't pay
     # for a connection nothing may touch this run.
     foreground_lane = DatabaseLane(config.db_path)
+
+    # Design doc round 120: the background DatabaseLane round 91 named
+    # but never actually constructed -- "peer inventory exchange, event
+    # verification/ingestion, retry/outbox processing." First real use:
+    # netbbs.link.transport persists accepted Link peers/events through
+    # it, off the event loop, independent of foreground_lane's own
+    # session-driven work.
+    background_lane = DatabaseLane(config.db_path)
 
     # GitHub issue #34, reopened a third time: any file left under
     # .incoming staging is guaranteed stale at this exact point --
@@ -392,7 +405,16 @@ async def run(
         # to share this *same* LinkNode instance (its peer table, its
         # tracked transitions-per-peer), not a second one that would
         # silently diverge from what LinkServer sees.
-        link_node = LinkNode(identity=node_identity) if config.link.enabled else None
+        #
+        # Round 120: hydrated from persisted storage via load_link_node,
+        # not a bare LinkNode(...) construction -- so a restarted node
+        # doesn't forget its peers or reprocess/re-forward events it has
+        # already seen. Reads `db` directly (not background_lane): this
+        # is a one-time synchronous read before the event loop is
+        # serving any traffic or lane jobs exist to dispatch onto, the
+        # same reasoning node_identity/count_sysops(db) already read
+        # synchronously at this point in startup.
+        link_node = load_link_node(db, node_identity) if config.link.enabled else None
 
         if count_sysops(db) == 0:
             raise StartupError(
@@ -402,7 +424,7 @@ async def run(
                 "never be administered once it's running"
             )
         servers = await _start_servers(
-            config, db, session_handler, ssh_session_handler, throttle, link_node
+            config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane
         )
 
         # Design doc round 119: the piece that makes this node
@@ -428,6 +450,7 @@ async def run(
                     run_link_sync(
                         link_node, link_sync_session, config.link.seeds,
                         _build_own_hello_provider(link_node, config.link),
+                        background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
                     )
                 )
@@ -482,6 +505,7 @@ async def run(
         for server in reversed(servers):
             await server.stop()
         foreground_lane.close()
+        background_lane.close()
         db.close()
         _logger.info("NetBBS node shut down cleanly")
 

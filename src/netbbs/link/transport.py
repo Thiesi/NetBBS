@@ -31,6 +31,16 @@ note).
 `own_hello_provider` beyond what a caller (today: only tests) supplies
 directly. See design doc round 117 sign-off note for the full list of
 what's still open.
+
+**Round 120 adds a required `lane: DatabaseLane` to `LinkServer` and
+`dial_hello`** — the only three call sites in this codebase that
+mutate a `LinkNode`'s peer table or event store (`_handle_hello`,
+`_handle_events`, and `dial_hello`'s own trailing `handle_hello` call)
+now persist what changed via `netbbs.link.store`, off the event loop,
+after `netbbs.link.protocol`'s own in-memory verification succeeds.
+`push_events` is untouched — it never mutates local `LinkNode` state.
+See design doc round 120 for the full reasoning on why persistence
+lives here rather than inside `netbbs.link.protocol` itself.
 """
 
 from __future__ import annotations
@@ -41,6 +51,8 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from netbbs.link.events import KeyTransition
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerRecord
+from netbbs.link.store import save_event, save_peer
+from netbbs.storage.execution import DatabaseLane
 
 LINK_PATH_PREFIX = "/link/v1"
 
@@ -68,6 +80,10 @@ class LinkServer:
     deployment/node-config concerns, out of scope here, same reasoning
     `LinkNode.build_hello` itself already applies at the protocol
     layer, one level down).
+
+    `lane` (round 120): the background `DatabaseLane` this server
+    persists accepted peers/events through, off the event loop, after
+    `node`'s own in-memory verification accepts them.
     """
 
     def __init__(
@@ -76,11 +92,13 @@ class LinkServer:
         port: int,
         node: LinkNode,
         own_hello_provider: Callable[[], HelloMessage],
+        lane: DatabaseLane,
     ) -> None:
         self._host = host
         self._port = port
         self._node = node
         self._own_hello_provider = own_hello_provider
+        self._lane = lane
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -112,10 +130,11 @@ class LinkServer:
             return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
 
         try:
-            self._node.handle_hello(hello)
+            peer = self._node.handle_hello(hello)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
+        await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
 
     async def _handle_events(self, request: web.Request) -> web.Response:
@@ -132,6 +151,20 @@ class LinkServer:
         except (KeyError, TypeError) as exc:
             return web.json_response({"error": f"malformed events: {exc}"}, status=400)
 
+        for content_id in accepted:
+            envelope = self._node.events[content_id]
+            await self._lane.run(
+                save_event,
+                sender_fingerprint=fingerprint,
+                content_id=content_id,
+                object_type=envelope["envelope"]["object_type"],
+                envelope=envelope,
+            )
+        if accepted:
+            # sender.transitions grew -- one updated write, not one per
+            # accepted event (round 120).
+            await self._lane.run(save_peer, self._node.peers[fingerprint])
+
         return web.json_response({"accepted": accepted})
 
 
@@ -140,14 +173,15 @@ async def dial_hello(
     session: ClientSession,
     base_url: str,
     hello: HelloMessage,
+    lane: DatabaseLane,
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> PeerRecord:
     """
     Say hello to a peer at `base_url` (e.g. `"http://198.51.100.7:7862"`,
     no trailing slash): POST `hello`, feed the peer's own hello — carried
-    back in the response — into `node.handle_hello`, and return the
-    resulting `PeerRecord`.
+    back in the response — into `node.handle_hello`, persist the
+    resulting `PeerRecord` via `lane` (round 120), and return it.
 
     Raises `LinkTransportError` for anything transport-level gone wrong
     (connection failure, timeout, non-200, an unparseable response
@@ -172,7 +206,9 @@ async def dial_hello(
     except (KeyError, ValueError, TypeError) as exc:
         raise LinkTransportError(f"malformed hello response from {url}: {exc}") from exc
 
-    return node.handle_hello(peer_hello)
+    peer = node.handle_hello(peer_hello)
+    await lane.run(save_peer, peer)
+    return peer
 
 
 async def push_events(

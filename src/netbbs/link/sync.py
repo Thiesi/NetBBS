@@ -29,6 +29,10 @@ sign-off note already flagged this as the next real gap), and no pull
 direction this module drives. A single unreachable or misbehaving seed
 logs a warning and is skipped; it never aborts the rest of that pass
 or the loop itself.
+
+**Round 120**: `dial_hello` now persists the resulting `PeerRecord`
+via a `DatabaseLane`, so `run_link_sync` takes one and threads it
+through unchanged -- this module has no storage concerns of its own.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from aiohttp import ClientSession
 
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.transport import LinkTransportError, dial_hello, push_events
+from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +55,7 @@ async def run_link_sync(
     session: ClientSession,
     seeds: list[str],
     own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
     *,
     interval_seconds: float,
 ) -> None:
@@ -69,15 +75,19 @@ async def run_link_sync(
     """
     while True:
         for seed_url in seeds:
-            await _sync_one_seed(node, session, seed_url, own_hello_provider)
+            await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
         await asyncio.sleep(interval_seconds)
 
 
 async def _sync_one_seed(
-    node: LinkNode, session: ClientSession, seed_url: str, own_hello_provider: Callable[[], HelloMessage]
+    node: LinkNode,
+    session: ClientSession,
+    seed_url: str,
+    own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
 ) -> None:
     try:
-        await dial_hello(node, session, seed_url, own_hello_provider())
+        await dial_hello(node, session, seed_url, own_hello_provider(), lane)
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return

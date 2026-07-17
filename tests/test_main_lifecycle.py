@@ -30,6 +30,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import LinkConfig, NodeConfig, ShutdownConfig, TransportConfig
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 
 def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
@@ -188,8 +189,14 @@ def test_configured_link_listener_completes_a_real_hello(tmp_path):
             dialer_hello = dialer.build_hello(
                 addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"
             )
-            async with aiohttp.ClientSession() as session:
-                record = await dial_hello(dialer, session, "http://127.0.0.1:12402", dialer_hello)
+            dialer_db = Database(tmp_path / "dialer.db")
+            dialer_lane = DatabaseLane(dialer_db.path)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    record = await dial_hello(dialer, session, "http://127.0.0.1:12402", dialer_hello, dialer_lane)
+            finally:
+                dialer_lane.close()
+                dialer_db.close()
 
             from netbbs.link.node_identity import load_or_bootstrap_node_identity
 
@@ -216,11 +223,14 @@ def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
 
     async def scenario():
         seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+        seed_db = Database(tmp_path / "seed.db")
+        seed_lane = DatabaseLane(seed_db.path)
         seed_server = LinkServer(
             host="127.0.0.1", port=0, node=seed_node,
             own_hello_provider=lambda: seed_node.build_hello(
                 addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"
             ),
+            lane=seed_lane,
         )
         await seed_server.start()
 
@@ -253,6 +263,8 @@ def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
             shutdown_event.set()
             await task
             await seed_server.stop()
+            seed_lane.close()
+            seed_db.close()
 
     asyncio.run(scenario())
 

@@ -7836,3 +7836,102 @@ in §7/§12 now has one working, tested, end-to-end implementation for
 push-only propagation) but real, and the shape the next event type
 plugs into.
 
+## Round 120 (persistent Link storage: peers and events survive a restart)
+
+Closes this round's own named gap from 116/117/119. See `docs/NetBBS-
+design-doc.md` round 120 for the design decisions (why persistence
+lives outside `netbbs.link.protocol`, the background lane finally
+getting a real construction, and the retention-window purging gap
+found and deliberately not closed this round) — this entry is
+implementation/testing narrative.
+
+**`netbbs/storage/migrations.py`**: one new migration, `link_peers`
+(`fingerprint` PK, `root_public_key`, `transitions_json`,
+`descriptor_json`, `updated_at`) and `link_events` (`content_id` PK,
+`sender_fingerprint`, `object_type`, `envelope_json`, `received_at`,
+indexed on `sender_fingerprint`).
+
+**`netbbs/link/store.py`** (new): `load_link_node(db, identity)`
+(reconstructs a `LinkNode` from both tables), `save_peer(db, peer)`
+(upsert via `ON CONFLICT ... DO UPDATE`), `save_event(db, *,
+sender_fingerprint, content_id, object_type, envelope)` (`ON CONFLICT
+... DO NOTHING` — a defensive backstop, not the primary dedup
+mechanism, since `handle_events`'s own `known_event_ids` check already
+means a resend never reaches this function a second time). All three
+plain, synchronous, `db`-first — no asyncio, no lane, matching every
+other business-logic function's existing calling convention.
+
+**`netbbs/link/transport.py`**: `LinkServer` gained a required `lane:
+DatabaseLane`; `_handle_hello` now persists the returned `PeerRecord`
+via `await self._lane.run(save_peer, peer)` after a successful
+`handle_hello`. `_handle_events` persists each newly-accepted event
+via `save_event`, then — once, after the loop, not once per event —
+the sender's updated `PeerRecord` via `save_peer`, reading the
+envelope back out of `self._node.events[content_id]` (already stored
+there by `handle_events` itself) rather than re-deriving it from the
+raw request body. `dial_hello` gained the same required `lane`
+parameter and persists its own returned `PeerRecord` the same way.
+`push_events` untouched, exactly as designed — it never mutates local
+`LinkNode` state.
+
+**`netbbs/link/sync.py`**: `run_link_sync`/`_sync_one_seed` gained a
+`lane: DatabaseLane` parameter, threaded straight through to
+`dial_hello` — no storage concerns of its own.
+
+**`netbbs/__main__.py`**: `background_lane = DatabaseLane(config.
+db_path)` constructed alongside `foreground_lane` (round 91's own
+long-named lane, first real construction) and closed alongside it in
+the shutdown `finally`. `_start_servers` gained a `link_lane:
+DatabaseLane` parameter, passed straight to `LinkServer`. `link_node =
+LinkNode(identity=node_identity)` became `link_node = load_link_node(
+db, node_identity)` — read synchronously via the foreground `db`
+connection, not `background_lane`, at the same point in startup
+`node_identity`/`count_sysops(db)` already read synchronously, before
+the event loop is serving traffic or any lane job exists to dispatch.
+The `run_link_sync(...)` call gained `background_lane` as a new
+positional argument.
+
+**Tests**: `tests/test_link_store.py` (new, 5 tests) — `load_link_node`
+against empty tables, a `save_peer`-then-`load_link_node` round trip,
+`save_peer`'s upsert behavior (a second call with an extended
+transitions tuple replaces the row, not a second one — `SELECT
+COUNT(*)` confirms exactly one row), a `save_event`-then-`load_link_
+node` round trip (both `known_event_ids` and `events` reconstructed),
+and `save_event`'s `ON CONFLICT ... DO NOTHING` backstop (a resend
+with a tampered envelope never overwrites the original row). `tests/
+test_link_transport.py` (+1 new test, existing tests extended with
+inline DB-row assertions after each real hello/push) — the actual
+round-120 proof: a *second*, freshly-constructed `LinkNode` (not the
+original in-memory object bob's server used) hydrated via `load_link_
+node` from the same database file has bob's peer and event state
+intact, the real shape of a node restart. `tests/test_link_sync.py`
+and `tests/test_main_lifecycle.py` updated for the new required `lane`
+parameter on `LinkServer`/`dial_hello`/`run_link_sync`, following
+`tests/test_admin_flow.py`'s existing `db`/`lane`-pair fixture pattern
+(a lane's connection only runs on its own worker thread, per `Database
+Lane`'s own docstring, so a test's own assertions need a second,
+separately-opened `Database` against the same file rather than reading
+through the lane directly).
+
+**One test bug caught and fixed before the suite went green, not a
+production bug**: an early draft of the `test_push_events_gossips_a_
+real_key_rotation_over_http` persistence assertion checked `authorize_
+id in peer_row["transitions_json"]` — a substring check that can never
+pass, since `content_id` is a computed hash (`event_content_id`) never
+stored as a literal field anywhere in a `KeyTransition`'s own
+`to_dict()` output. Fixed by parsing the stored JSON back into real
+`KeyTransition` objects and comparing `.content_id`, matching how
+`test_link_store.py`'s own assertions already did it correctly.
+
+**Testing**: full suite: **2019 passed, 4 skipped** (6 net new — 5 in
+`test_link_store.py`, 1 in `test_link_transport.py` — up from round
+119's 2013/4).
+
+**What's still open**: the self-updating supplementary seed list
+(round 97), automatic relay selection (round 95), peer-list exchange,
+and pull-based catch-up all remain unimplemented, unchanged from round
+119's list. Retention-window purging joins that list as of this round
+(design doc round 120: found to be actively unsafe for `key_transition`
+as `handle_events` is currently written, not merely unbuilt) — `link_
+events` rows accumulate indefinitely for now.
+

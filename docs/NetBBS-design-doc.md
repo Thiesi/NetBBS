@@ -7243,3 +7243,98 @@ Phase 3 tackles next) plugs into rather than re-deriving. See
 `docs/NetBBS-worklog.md` round 119 for the full test count and suite
 re-run result.
 
+## Sign-off notes, round 120 (persistent Link storage: peers and events survive a restart)
+
+Closes round 116/117/119's own repeatedly-named gap: `LinkNode` kept
+its peer table and seen-event set in memory only, so a restart forgot
+every peer (requiring a fresh hello from each) and every already-seen
+event (nothing stopped a resend from being reprocessed from scratch).
+
+**Two new tables, `link_peers` and `link_events`, on the database's
+existing migration sequence — not a separate Link-specific database
+file.** `link_events` deliberately does double duty as both the seen-
+event dedup table *and* the event-body store, since §7 already
+describes them as one concept ("a small persistent table of already-
+processed event IDs... verify → check table → drop if seen, else
+record + process + relay") rather than two.
+
+**This round constructs the first real `background_lane`.** Round 91
+named the background lane's purpose explicitly — "peer inventory
+exchange, event verification/ingestion, retry/outbox processing" — but
+nothing had actually instantiated one; `netbbs.__main__.run()` built
+only a `foreground_lane` until now. This round's persistence work is
+squarely what that lane was reserved for, so it's the first real
+consumer rather than a new mechanism invented alongside it.
+
+**Persistence deliberately stays outside `netbbs.link.protocol.
+LinkNode` — that module is untouched by this round.** `handle_hello`/
+`handle_events` remain pure, synchronous, in-memory, exactly as round
+116 built them. Making them async to `await lane.run(...)` internally
+would ripple the two-lane/executor machinery into `tests/
+link_harness.py`'s `ScriptedTransport`, which calls both methods
+directly today with zero I/O and zero asyncio dependency — the exact
+property round 116's own module docstring calls out ("fully testable
+... with no real network call anywhere"). Instead, a new `netbbs.link.
+store` module holds plain `db`-first sync functions (`load_link_node`,
+`save_peer`, `save_event`), matching every other lane-dispatched
+function's existing convention, and the only three places that already
+own I/O — `LinkServer`'s two route handlers and `dial_hello`, all in
+`netbbs.link.transport` (round 117's own "the only place that imports
+both aiohttp and netbbs.link.protocol together") — call `await lane.
+run(...)` after a successful `handle_hello`/`handle_events` returns.
+`push_events` is untouched; it never mutates local `LinkNode` state.
+`tests/link_harness.py` and `tests/test_link_protocol.py` are
+consequently unaffected by this round's changes.
+
+**Startup hydration replaces bare construction.** `netbbs.__main__.
+run()`'s `link_node = LinkNode(identity=node_identity)` becomes
+`load_link_node(db, node_identity)`, reading persisted `link_peers`/
+`link_events` rows back into a populated `LinkNode` before `LinkServer`
+or the sync task starts — using the foreground `db` directly for this
+one synchronous read, not `background_lane`, matching how `node_
+identity` loading and `count_sysops(db)` already read synchronously at
+startup before the event loop is serving any traffic or lane jobs
+exist to dispatch onto.
+
+**A real correctness gap found by tracing the retention-window
+requirement through, not assumed away: §7's "purged after a retention
+window" is not safe to implement yet for `key_transition`, as `handle_
+events` is actually written today.** §7 separately claims the dedup
+table is *only* a performance optimization — real replay safety is
+supposed to live at the projection level, where re-applying an
+already-integrated event is a safe no-op regardless of whether the
+dedup table still remembers it. Tracing `handle_events` shows that
+property doesn't actually hold for `key_transition`: if a dedup entry
+were purged and the same transition later resent, it would fall
+through `if content_id in known_event_ids: continue` and get appended
+a second time to `sender.transitions` via `candidate_transitions =
+sender.transitions + (transition,)`. `_verify_and_order_chain`'s own
+fork detection (`by_previous[previous_id] = transition`, raising on a
+repeated key) would then see two transitions claiming the same `previous_
+transition_id` and reject the legitimate resend as a forged fork.
+Not a silent safety hole — it fails closed, as a `LinkProtocolError` —
+but a real availability bug, and it falsifies "the dedup table is
+purely a performance optimization" for this event type as currently
+implemented.
+
+**Decision: no retention-window purging this round; `link_events` rows
+accumulate indefinitely.** Fine at this project's declared scale
+(§14) — the same reasoning round 119 already applied to not tracking
+per-peer push deltas ("a handful of transitions is the realistic
+ceiling, not thousands. Revisit if that stops being true — not
+before"), extended here to storage. Building *correct* purging needs
+chain-append itself to recognize "this transition is already applied,
+treat as a no-op" independent of the dedup table — a `netbbs.link.
+node_identity`/`netbbs.link.protocol` change, not a storage-layer one,
+named explicitly as follow-up scope rather than silently deferred or
+folded into "persistence is done."
+
+**What's still open, unchanged from round 119's list**: the self-
+updating supplementary seed list (round 97), automatic relay selection
+(round 95), peer-list exchange (a peer that has only ever dialed *this*
+node is still never re-contacted), and pull-based catch-up all remain
+unimplemented. Retention-window purging joins the list, newly named
+above rather than silently assumed solved by this round's other
+storage work. See `docs/NetBBS-worklog.md` round 120 for the
+implementation narrative and test counts.
+

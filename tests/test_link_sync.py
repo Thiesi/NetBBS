@@ -6,6 +6,11 @@ own real-server/real-client convention) rather than `ScriptedTransport`,
 since the whole point is proving the loop actually reaches a peer over
 a real socket, pushes real events, and tolerates a real peer being
 unreachable or rejecting it.
+
+Round 120: `run_link_sync`/`dial_hello` persist through a
+`DatabaseLane`, so every node here gets a real, separately-opened
+`Database` file too -- see `tests/test_link_transport.py`'s module
+docstring for why a `Database`/`DatabaseLane` pair, not just one.
 """
 
 from __future__ import annotations
@@ -19,14 +24,18 @@ from netbbs.link.node_identity import bootstrap_node_identity, rotate_operationa
 from netbbs.link.protocol import LinkNode
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer
+from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 
 def _hello_for(node: LinkNode, *, created_at: str = "2026-01-01T00:00:00+00:00"):
     return node.build_hello(addresses=None, outgoing_only=True, created_at=created_at)
 
 
-async def _run_server(node: LinkNode) -> LinkServer:
-    server = LinkServer(host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node))
+async def _run_server(node: LinkNode, lane: DatabaseLane) -> LinkServer:
+    server = LinkServer(
+        host="127.0.0.1", port=0, node=node, own_hello_provider=lambda: _hello_for(node), lane=lane
+    )
     await server.start()
     return server
 
@@ -43,14 +52,30 @@ async def _run_sync_briefly(coro_task: asyncio.Task, *, settle: float = 0.2) -> 
         pass
 
 
-def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed():
+class _NodeDb:
+    """A node's paired `Database` (test assertions) and `DatabaseLane`
+    (what the code under test dispatches through) against the same
+    file -- see this module's docstring."""
+
+    def __init__(self, tmp_path, name: str) -> None:
+        self.db = Database(tmp_path / f"{name}.db")
+        self.lane = DatabaseLane(self.db.path)
+
+    def close(self) -> None:
+        self.lane.close()
+        self.db.close()
+
+
+def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
     dialer_node = LinkNode(identity=dialer_identity)
     seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
 
     async def scenario():
-        seed_server = await _run_server(seed_node)
+        seed_server = await _run_server(seed_node, seed.lane)
         try:
             rotated = rotate_operational_key(dialer_identity, purpose="signing")
             dialer_node.identity = rotated
@@ -59,7 +84,7 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed():
                 task = asyncio.create_task(
                     run_link_sync(
                         dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
-                        lambda: _hello_for(dialer_node), interval_seconds=60.0,
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
                     )
                 )
                 await _run_sync_briefly(task)
@@ -68,42 +93,54 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed():
 
         return seed_node
 
-    seed_node_after = asyncio.run(scenario())
-    assert dialer_identity.fingerprint in seed_node_after.peers
-    peer_record = seed_node_after.peers[dialer_identity.fingerprint]
-    # Both halves of the rotation (revoke + authorize, design doc round
-    # 116's own ordering note) reached the seed via push_events.
-    assert peer_record.transitions[-1].content_id == dialer_node.identity.transitions[-1].content_id
+    try:
+        seed_node_after = asyncio.run(scenario())
+        assert dialer_identity.fingerprint in seed_node_after.peers
+        peer_record = seed_node_after.peers[dialer_identity.fingerprint]
+        # Both halves of the rotation (revoke + authorize, design doc round
+        # 116's own ordering note) reached the seed via push_events.
+        assert peer_record.transitions[-1].content_id == dialer_node.identity.transitions[-1].content_id
+    finally:
+        dialer.close()
+        seed.close()
 
 
-def test_sync_dials_every_configured_seed_in_one_pass():
+def test_sync_dials_every_configured_seed_in_one_pass(tmp_path):
     dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
     seed_a_node = LinkNode(identity=bootstrap_node_identity("seed-a"))
     seed_b_node = LinkNode(identity=bootstrap_node_identity("seed-b"))
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed_a = _NodeDb(tmp_path, "seed-a")
+    seed_b = _NodeDb(tmp_path, "seed-b")
 
     async def scenario():
-        seed_a = await _run_server(seed_a_node)
-        seed_b = await _run_server(seed_b_node)
+        seed_a_server = await _run_server(seed_a_node, seed_a.lane)
+        seed_b_server = await _run_server(seed_b_node, seed_b.lane)
         try:
             async with aiohttp.ClientSession() as session:
                 task = asyncio.create_task(
                     run_link_sync(
                         dialer_node, session,
-                        [f"http://127.0.0.1:{seed_a.port}", f"http://127.0.0.1:{seed_b.port}"],
-                        lambda: _hello_for(dialer_node), interval_seconds=60.0,
+                        [f"http://127.0.0.1:{seed_a_server.port}", f"http://127.0.0.1:{seed_b_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
                     )
                 )
                 await _run_sync_briefly(task)
         finally:
-            await seed_a.stop()
-            await seed_b.stop()
+            await seed_a_server.stop()
+            await seed_b_server.stop()
 
-    asyncio.run(scenario())
-    assert dialer_node.identity.fingerprint in seed_a_node.peers
-    assert dialer_node.identity.fingerprint in seed_b_node.peers
+    try:
+        asyncio.run(scenario())
+        assert dialer_node.identity.fingerprint in seed_a_node.peers
+        assert dialer_node.identity.fingerprint in seed_b_node.peers
+    finally:
+        dialer.close()
+        seed_a.close()
+        seed_b.close()
 
 
-def test_sync_skips_an_unreachable_seed_without_crashing_the_loop():
+def test_sync_skips_an_unreachable_seed_without_crashing_the_loop(tmp_path):
     """A dead seed (port 1, nothing listening) must not prevent a
     *later* reachable seed in the same pass from being dialed. A
     generous settle window -- how long a real "connection refused" to
@@ -112,32 +149,40 @@ def test_sync_skips_an_unreachable_seed_without_crashing_the_loop():
     it took longer than expected."""
     dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
     reachable_node = LinkNode(identity=bootstrap_node_identity("reachable"))
+    dialer = _NodeDb(tmp_path, "dialer")
+    reachable = _NodeDb(tmp_path, "reachable")
 
     async def scenario():
-        reachable_server = await _run_server(reachable_node)
+        reachable_server = await _run_server(reachable_node, reachable.lane)
         try:
             async with aiohttp.ClientSession() as session:
                 task = asyncio.create_task(
                     run_link_sync(
                         dialer_node, session,
                         ["http://127.0.0.1:1", f"http://127.0.0.1:{reachable_server.port}"],
-                        lambda: _hello_for(dialer_node), interval_seconds=60.0,
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
                     )
                 )
                 await _run_sync_briefly(task, settle=3.0)
         finally:
             await reachable_server.stop()
 
-    asyncio.run(scenario())
-    assert dialer_node.identity.fingerprint in reachable_node.peers
+    try:
+        asyncio.run(scenario())
+        assert dialer_node.identity.fingerprint in reachable_node.peers
+    finally:
+        dialer.close()
+        reachable.close()
 
 
-def test_sync_runs_a_second_pass_after_the_interval_elapses():
+def test_sync_runs_a_second_pass_after_the_interval_elapses(tmp_path):
     """A short interval must produce a *second* completed hello, not
     just the immediate first-pass one -- proves the sleep-then-repeat
     shape actually repeats, not just runs once."""
     dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
     seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
 
     hello_count = 0
     real_handle_hello = seed_node.handle_hello
@@ -150,38 +195,48 @@ def test_sync_runs_a_second_pass_after_the_interval_elapses():
     seed_node.handle_hello = _counting_handle_hello
 
     async def scenario():
-        seed_server = await _run_server(seed_node)
+        seed_server = await _run_server(seed_node, seed.lane)
         try:
             async with aiohttp.ClientSession() as session:
                 task = asyncio.create_task(
                     run_link_sync(
                         dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
-                        lambda: _hello_for(dialer_node), interval_seconds=0.05,
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=0.05,
                     )
                 )
                 await _run_sync_briefly(task, settle=0.3)
         finally:
             await seed_server.stop()
 
-    asyncio.run(scenario())
-    assert hello_count >= 2
+    try:
+        asyncio.run(scenario())
+        assert hello_count >= 2
+    finally:
+        dialer.close()
+        seed.close()
 
 
-def test_sync_is_cleanly_cancellable_mid_sleep():
+def test_sync_is_cleanly_cancellable_mid_sleep(tmp_path):
     """Cancelling during the interval sleep (not mid-dial) must still
     propagate CancelledError cleanly, the same contract netbbs.__main__
     already relies on for its other background tasks (e.g. the
     daybreak announcer)."""
     dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
+    dialer = _NodeDb(tmp_path, "dialer")
 
     async def scenario():
         async with aiohttp.ClientSession() as session:
             task = asyncio.create_task(
-                run_link_sync(dialer_node, session, [], lambda: _hello_for(dialer_node), interval_seconds=60.0)
+                run_link_sync(
+                    dialer_node, session, [], lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0
+                )
             )
             await asyncio.sleep(0.05)  # past the (empty) seed pass, into the sleep
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        dialer.close()
