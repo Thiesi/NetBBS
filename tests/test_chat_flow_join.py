@@ -20,7 +20,7 @@ from netbbs.chat.channels import create_channel, get_channel_by_name
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
-from netbbs.chat.scrollback import get_scrollback
+from netbbs.chat.scrollback import ChannelMessage, get_scrollback
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
@@ -240,6 +240,11 @@ def test_topic_change_is_broadcast_to_other_participants(db, hub, presence, syso
         received = []
         while not queue.empty():
             item = queue.get_nowait()
+            if isinstance(item, ChannelMessage):
+                # join/leave now travel as structured ChannelMessage
+                # events (GitHub issue #64, round 109), not text -- this
+                # test only cares about the plain-string topic notice.
+                continue
             received.append(item.text if isinstance(item, chat_flow._TimestampedNotice) else item)
         assert any("Topic changed by sysop: Retro chat" in msg for msg in received)
     finally:

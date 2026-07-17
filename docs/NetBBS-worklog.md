@@ -6922,3 +6922,96 @@ it).
 **Testing**: full suite re-run: **1880 passed, 4 skipped** (up from
 round 107's 1871 -- 9 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 109 (real-name attestation wired into live chat -- resolves GitHub issue #64)
+
+Implementation of the design decided in `docs/NetBBS-design-doc.md`'s
+own round 109 note -- see that note for the reasoning behind the
+composition choice, the module boundaries, the live re-validation
+scope decision, and the reviewer-adoption process; this entry is the
+implementation narrative only.
+
+**`netbbs/attestation.py`**: `format_name_for_resource`'s trusted
+colored-unit logic extracted into a new `format_verified_name_unit(db,
+user, *, name_requirement) -> str | None`, returning just the
+`(={real name}=)` unit in `VERIFIED_COLOR`, or `None` if the gate
+doesn't apply or there's no attestation. `format_name_for_resource`
+itself now just calls it and composes around `display_name or
+username` exactly as before -- no behavior change for its existing
+callers (boards/files), confirmed by the full suite passing unchanged.
+
+**`netbbs/net/chat_flow.py`**, several pieces:
+- `_chat_author_label(db, channel, user)`: `chat_stream_label` plus
+  `channel`'s resolved verified unit (via
+  `netbbs.communities.get_effective_name_requirement`), composed
+  `~nick~ (=Real Name=)` / `display-name-or-username (=Real Name=)` per
+  the design note.
+- `_resolve_message_author`/`_message_author_label`/
+  `_render_channel_message`: replace the old
+  `_resolve_chat_stream_label`/inline-rendering split.
+  `_render_channel_message(db, channel, viewer, message, *,
+  self_message=False)` is the one renderer for `message`/`action`/
+  `join`/`leave` `ChannelMessage`s, used by `receive_loop`, the
+  sender's own direct write, `_handle_me`, and
+  `_render_scrollback_message` (which now takes a `channel` parameter
+  and delegates to it for those four kinds, keeping its own handling
+  only for `nick`/`daybreak`/moderation kinds).
+- `_colored_around(prefix, middle, suffix, *, fg_color, bold=False)`:
+  the ANSI-composition helper described in the design note's bugfix
+  writeup -- single-`colored()`-call output when `middle` has no
+  embedded ANSI, three independently-wrapped segments when it does.
+- `send_loop`'s plain-message branch and `_handle_me` now broadcast the
+  recorded `ChannelMessage` itself via `hub.broadcast`, not a
+  pre-rendered `_TimestampedNotice` string; channel join/leave do the
+  same. `receive_loop` gained an `isinstance(message, ChannelMessage)`
+  branch rendering via `_render_channel_message`
+  (`repaint_status=True`, matching what the old `_TimestampedNotice`
+  branch did for these same event kinds). `_TimestampedNotice` itself
+  is unchanged and still used for private-message delivery via
+  `send_to`.
+- `_meets_live_participation_requirements(db, channel, user)`: re-fetches
+  `channel` fresh via `get_channel_by_name` and re-runs
+  `meets_age`/`meets_name_requirement` against current policy --
+  called by `send_loop`'s ordinary-message branch and `_handle_me`
+  immediately before accepting a send; on failure, writes
+  `_NO_LONGER_QUALIFIES_MESSAGE` and returns `_ToPicker()`.
+  `_handle_me`'s return type widened from `-> None` to `-> ChatAction |
+  None` accordingly.
+
+**A real bug caught by the existing test suite, not just a hypothetical**
+(see the design note's own writeup): the first version of the
+segment-based ANSI composition left plain (non-gated, no-nick) author
+labels completely unstyled, breaking `* alice waves`-shaped literal-
+substring assertions across `tests/test_chat_action.py` and
+`tests/test_chat_flow_timestamps.py` and visibly un-muting join/leave/
+action lines for the common case. Caught immediately on the first real
+test run (round rule: "actually run the tests, don't just
+syntax-check" -- this is exactly the shape of bug that discipline
+exists to catch), fixed with `_colored_around`.
+
+**Existing tests updated for the new signatures/types** (behavior
+unchanged, only the mechanism observed): `tests/test_daybreak.py` and
+`tests/test_terminal_sanitization.py` pass `channel` to
+`_render_scrollback_message`'s now-3-arg signature;
+`tests/test_terminal_sanitization.py` and `tests/test_chat_flow_join.py`
+handle `ChannelMessage` items now appearing on `ChatHub` queues where a
+pre-rendered string or `_TimestampedNotice` used to (rendering them via
+`_render_channel_message` where the test needs the visible text, or
+skipping them where the test only cares about an unrelated notice).
+
+**Tests**: 15 new, `tests/test_chat_verified_name_display.py` --
+`_chat_author_label` composition across non-gated/gated/verified/nick
+combinations; unresolvable-author fallback never verified-colored;
+live-sender/live-recipient/scrollback-replay parity for a gated
+message; `/me` and join notices showing the verified unit; an SGR-
+sequencing test asserting `MUTED_COLOR` is freshly re-established
+immediately before trailing text after an embedded verified unit (the
+literal round-102-shaped hazard this round fixed); and the live
+fail-closed re-check both as a direct unit test and end-to-end
+(channel tightened to `verified_and_displayed` after a session already
+joined it while open -- the next ordinary message/`/me` is refused and
+the session is routed back to the picker, with nothing recorded to
+scrollback).
+
+**Testing**: full suite re-run: **1895 passed, 4 skipped** (up from
+round 108's 1880 -- 15 net new tests, no regressions elsewhere).
+

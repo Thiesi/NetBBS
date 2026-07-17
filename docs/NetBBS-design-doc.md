@@ -6505,3 +6505,140 @@ names gets *lighter* — parentheses are freed for legitimate use (e.g.
 reserved. Not yet implemented, same as round 98 — still part of the
 identity-attestation addendum-backlog item, not built yet.
 
+## Sign-off notes, round 109 (real-name attestation reaches live chat — resolves GitHub issue #64)
+
+Round 102/103 wired round 99's anti-forgery display into board posts,
+file listings, and channel *entry* gating, but deliberately left the
+live chat message stream itself unwired — GitHub issue #64, opened at
+the end of round 108, flagged this explicitly as needing a dedicated
+design pass rather than a mechanical copy of the boards/files pattern,
+for two reasons specific to chat: (1) live chat already has its own
+established colored-marker convention (`/nick`'s `~marker~`,
+`NICK_COLOR`, round 53) occupying the same rendering position a
+verified name would need, raising the exact nested-`colored()`-call
+hazard round 102 caught once already for post headers; (2) chat has
+*two* independent rendering paths — live broadcast and scrollback
+replay — that both need the identical gated-display rule, where boards
+only ever render once, from stored rows.
+
+**External review requested and largely adopted.** Issue #64 asked for
+outside input on the right approach before building it. The reviewer's
+recommendation was implemented close to as proposed, with two decisions
+explicitly left to Thiesi rather than the reviewer:
+
+1. **Display composition, when a channel requires `verified_and_displayed`
+   names: `~nick~ (=Real Name=)` when the speaker has a `/nick` alias
+   set, `display-name-or-username (=Real Name=)` otherwise.** The
+   rejected alternative was a three-name form, `~nick~ display-name
+   (=Real Name=)`, showing nick, display name, *and* real name
+   simultaneously — Thiesi chose the two-name form, matching the
+   reviewer's own stated preference: a third simultaneous name on every
+   line of live chat would reverse round 53's deliberate clutter
+   reduction, and `/whois`/`/who`/`/names` (`display_label`) already
+   supply canonical/display identity on demand for anyone who wants it.
+   This composition lives in a new private `_chat_author_label(db,
+   channel, user)` in `netbbs.net.chat_flow` — deliberately *not* folded
+   into `netbbs.chat.nick.chat_stream_label` itself (which stays exactly
+   what it was: the plain, channel-policy-ignorant alias renderer) and
+   *not* reusing `netbbs.attestation.format_name_for_resource` directly
+   (chat's primary name may be a nick, which that function has no
+   concept of). Instead, `format_name_for_resource` was split: the
+   trusted colored `(={real name}=)` unit alone is now its own
+   primitive, `format_verified_name_unit(db, user, *,
+   name_requirement)`, and `format_name_for_resource` is rebuilt on top
+   of it unchanged in behavior. `_chat_author_label` composes that same
+   primitive around whichever primary name chat actually wants — one
+   function in the codebase still manufactures the trusted colored unit,
+   regardless of how many different "primary name" conventions exist
+   around it.
+
+2. **Live re-validation scope: included now, not deferred.** The
+   reviewer flagged, as a related but separable hardening item, that
+   `_authorize_channel_entry`'s age/name-verification check only ever
+   ran once, at channel entry — a session then stays in `_chat_loop` for
+   arbitrarily long, during which a channel's (or its Community's)
+   `name_requirement`/`min_age` could change, or a verifier could revoke
+   or replace a name/age attestation, leaving an already-connected
+   speaker broadcasting under styling that claims a verification they no
+   longer hold. The reviewer suggested this could reasonably be deferred
+   as a follow-up if resourcing were tight; Thiesi chose to include it in
+   this same round rather than ship the display fix with a known gap
+   still open. Implemented as `_meets_live_participation_requirements`,
+   re-checking `meets_age`/`meets_name_requirement` against a *freshly
+   refetched* channel (not the long-lived session's frozen snapshot)
+   immediately before `send_loop`'s ordinary-message branch and
+   `_handle_me` each accept a send — on failure, the send is refused and
+   the session is routed back to the channel picker (`_ToPicker()`, the
+   same outcome `/leave` produces) rather than allowed through. Scoped
+   deliberately narrowly: only the two participant-authored broadcasts
+   that now carry verified-name styling are re-checked; level/ban/
+   members-only access already have their own live enforcement paths
+   (kick/ban evicts immediately; nothing revokes level or membership out
+   from under a live session), so re-checking those here would duplicate
+   existing mechanisms rather than close a real gap.
+
+**Unifying live and replay onto one renderer, per the reviewer's core
+recommendation.** Previously, live message/action/join/leave events were
+broadcast through `ChatHub` as *already-rendered strings* (`_TimestampedNotice`
+wrapping pre-colored text), independently of how `_render_scrollback_message`
+rendered the same `ChannelMessage` kinds during replay — two
+independently-maintained code paths that had to agree on the gated-display
+rule by discipline alone, not by construction. `ChatHub.broadcast`/`send_to`
+already accept an arbitrary `object`, not just `str` (used since the
+per-recipient-timestamp round to carry a raw timestamp alongside text) —
+this round leans on that directly: `record_message`'s returned
+`ChannelMessage` is now broadcast as-is for these four kinds, and a new
+shared `_render_channel_message(db, channel, viewer, message, *,
+self_message=False)` is the *only* place that turns one into a display
+string, called identically by `receive_loop` (on receiving a
+`ChannelMessage` off the queue), by the sender's own direct write, by
+`_handle_me`, and by `_render_scrollback_message` (which now delegates to
+it for these four kinds, keeping only `nick`/moderation/`daybreak`
+handling of its own — those stay canonical-identity-only, never a
+verified-name candidate, unchanged from round 102's reasoning).
+`_TimestampedNotice` itself wasn't removed — it remains the delivery
+wrapper for private (`/msg`/`/private`) messages, which have no
+`ChannelMessage` to carry since private conversations are deliberately
+not persisted (design doc round 32 point 1).
+
+**A real ANSI-composition bug found and fixed while implementing this,
+distinct from the nesting hazard issue #64 anticipated.** The reviewer's
+proposed fix — building each colored segment independently and
+concatenating, rather than interpolating already-colored text into one
+larger `colored()` call — is correct and was adopted, but the first
+implementation of it introduced a *new* regression: wrapping `<`,
+`author_label`, and `>` (or `*** `, `author_label`, and the trailing
+text) as three *always-independent* `colored()` calls left a *plain*
+(no nick, not verified) author label sitting completely unstyled between
+two SGR resets, instead of carried in the surrounding muted/self/accent
+color the way every existing test (and the actual terminal output)
+expected — caught immediately by the existing test suite (`* alice
+waves` no longer appeared as a literal substring, and colors that should
+have spanned the whole line visibly didn't). Fixed with a small
+`_colored_around(prefix, middle, suffix, *, fg_color, bold=False)`
+helper: when `middle` carries no embedded ANSI of its own (the common
+case), it returns the exact same single-`colored()`-call output as
+before this round; only when `middle` *does* carry its own color+reset
+(a nick or a verified unit) does it fall back to three independently-
+wrapped segments. `colored()` tolerates text that already carries its
+own embedded SGR codes without needing to detect or strip them — each
+such segment is already a fully self-contained open-content-reset unit,
+so wrapping it again just adds a redundant (harmless) open/reset pair
+around it.
+
+**Deferred, not built:** the reviewer's suggestion to prefer
+`author_fingerprint`-based author resolution over the existing
+username-based lookup once a fingerprint-lookup helper exists —
+`_resolve_message_author` still resolves via `get_user_by_username`
+(matching the pre-round-109 `_resolve_chat_stream_label` it replaces),
+since no `get_user_by_fingerprint` exists anywhere in the codebase yet
+and building one solely for this would be speculative infrastructure
+disguised as a narrower fix, the same reasoning this doc has applied
+elsewhere (e.g. round 85's attestation-signing deferral). Revisit if/when
+a real fingerprint-lookup need arises elsewhere.
+
+**Implementation, tests, and full-suite results** are in
+`docs/NetBBS-worklog.md`, round 109 — this note covers the design
+decisions and their reasoning only, per this doc's split from the
+worklog.
+

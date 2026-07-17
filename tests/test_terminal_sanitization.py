@@ -16,6 +16,7 @@ from netbbs.auth.passwords import hash_password
 from netbbs.auth.users import create_user, get_user_by_username
 from netbbs.boards import create_board, create_post
 from netbbs.chat import (
+    ChannelMessage,
     ChatHub,
     MessageMailbox,
     ParticipantId,
@@ -26,7 +27,12 @@ from netbbs.chat import (
 )
 from netbbs.files import create_file_area, upload_file
 from netbbs.net.char_input import InputHistory
-from netbbs.net.chat_flow import _TimestampedNotice, _chat_loop, _render_scrollback_message
+from netbbs.net.chat_flow import (
+    _TimestampedNotice,
+    _chat_loop,
+    _render_channel_message,
+    _render_scrollback_message,
+)
 from netbbs.net.file_flow import _show_area
 from netbbs.net.login_flow import _show_board
 from netbbs.net.picker import pick_item
@@ -223,7 +229,7 @@ def test_chat_scrollback_replay_sanitizes_author_and_body(tmp_path):
         db, channel, kind="message", author_label=HOSTILE, author_fingerprint=None, body=HOSTILE
     )
 
-    rendered = _render_scrollback_message(db, user, get_scrollback(db, channel)[0])
+    rendered = _render_scrollback_message(db, channel, user, get_scrollback(db, channel)[0])
 
     _assert_hostile_payload_neutralized(rendered)
     db.close()
@@ -259,7 +265,16 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
 
     _assert_hostile_payload_neutralized(sender_session.output)
 
-    received_text = [item.text if isinstance(item, _TimestampedNotice) else item for item in received]
+    # join/message/leave now arrive as structured ChannelMessage events
+    # (GitHub issue #64, round 109) -- render each through the same
+    # shared renderer receive_loop itself uses before checking
+    # sanitization, so this still exercises the real rendering path.
+    received_text = [
+        _render_channel_message(db, channel, recipient, item)
+        if isinstance(item, ChannelMessage)
+        else (item.text if isinstance(item, _TimestampedNotice) else item)
+        for item in received
+    ]
     broadcast_text = "".join(received_text)
     _assert_hostile_payload_neutralized(broadcast_text)
     db.close()

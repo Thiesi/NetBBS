@@ -357,7 +357,7 @@ def test_scrollback_replay_renders_daybreak_with_no_author(db, alice):
         db, channel, kind="daybreak", author_label="system",
         body="Good morning, chatters! A new day has just begun.",
     )
-    rendered = _render_scrollback_message(db, alice, recorded)
+    rendered = _render_scrollback_message(db, channel, alice, recorded)
     assert "Good morning, chatters!" in rendered
     assert "system" not in rendered
     assert "<" not in rendered  # no "<author>" tag, unlike an ordinary message

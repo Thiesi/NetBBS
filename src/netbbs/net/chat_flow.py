@@ -12,7 +12,12 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
+from netbbs.attestation import (
+    format_verified_name_unit,
+    get_display_name,
+    meets_age,
+    meets_name_requirement,
+)
 from netbbs.auth.users import (
     SYSOP_LEVEL,
     AuthError,
@@ -395,52 +400,219 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     return False, "You are not authorized to enter that channel."
 
 
+_NO_LONGER_QUALIFIES_MESSAGE = (
+    "You no longer meet this channel's participation requirements. Returning to the channel picker."
+)
+
+
+def _meets_live_participation_requirements(db: Database, channel: Channel, user: User) -> bool:
+    """
+    Re-checks the age/name-verification gates a long-lived chat
+    session's `channel` snapshot can drift out of sync with (GitHub
+    issue #64 point 5, round 109) — `_authorize_channel_entry` only
+    ever runs once, at join time, but a channel's (or its Community's)
+    `min_age`/`name_requirement` can change, or a name/age attestation
+    can be revoked/replaced (design doc §18), while a session sits in
+    `_chat_loop` for arbitrarily long. Called by `send_loop`'s
+    ordinary-message branch and `_handle_me`, immediately before either
+    accepts a send — the two paths whose broadcast now carries
+    verified-name styling (`_chat_author_label`).
+
+    Re-fetches `channel` fresh via `get_channel_by_name` rather than
+    trusting the frozen snapshot passed in — acting on a stale snapshot
+    here specifically risks letting a since-disqualified speaker keep
+    posting under styling that claims a verification they no longer
+    hold, not just showing a stale topic/description.
+
+    Only re-checks name/age — level, ban, and members-only access
+    already have their own live enforcement (kick/ban immediately
+    evicts a live session; nothing in this codebase revokes level or
+    membership out from under one). Name/age verification is the one
+    gate that can silently stop being satisfied with no corresponding
+    live eviction, since an attestation is a mutable row a verifier can
+    revoke or replace at any time.
+    """
+    current = get_channel_by_name(db, channel.name)
+    return meets_age(db, user, get_effective_min_age(db, current)) and meets_name_requirement(
+        db, user, get_effective_name_requirement(db, current)
+    )
+
+
 def _channel_description(hub: ChatHub, channel: Channel) -> str:
     online = hub.participant_count(channel.name)
     base = channel.description or ""
     return f"{base} ({online} online)".strip()
 
 
-def _resolve_chat_stream_label(db: Database, author_label: str) -> str:
+def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     """
-    Best-effort live alias lookup for scrollback replay (design doc
-    round 32/41, switched to the marked nick-only form in round 53):
-    there's no per-message nick snapshot — an alias is presentation
-    metadata looked up live, not stored history — so replay shows the
-    author's *current* alias, not whatever was set at the original
-    moment. Falls back to the stored canonical label if the account can
-    no longer be found (defensive; no account-deletion feature exists
-    yet to actually trigger this).
+    `chat_stream_label(db, user)` — the alias-or-username presentation
+    form, design doc round 53, deliberately untouched by this function —
+    with `channel`'s colored verified-real-name unit appended when its
+    *effective* `name_requirement` (`netbbs.communities.
+    get_effective_name_requirement`, Community-inheritance-aware) is
+    `verified_and_displayed`: the chat-specific composition of round
+    99's anti-forgery display for the live message stream (GitHub issue
+    #64, round 109).
 
-    `chat_stream_label` already sanitizes internally — no second
-    `sanitize_text` wrap here, which would risk stripping its own
-    legitimate color codes rather than just hostile content.
+    Deliberately its own function here in the net layer, not folded
+    into `chat_stream_label` itself or into `netbbs.attestation.
+    format_name_for_resource`: `chat_stream_label`'s one job is the
+    presentation alias, plain and channel-policy-ignorant (round 53) —
+    making it resource-aware would give the nick module a dependency on
+    chat/Communities policy it has no other reason to carry.
+    `format_name_for_resource` doesn't transfer directly either, since
+    chat's primary name may be a nick, not `display_name` — this reuses
+    that function's own extracted primitive, `format_verified_name_unit`
+    (round 109), rather than either duplicating the coloring or trying
+    to parse a fully-composed string back apart.
+
+    Composition confirmed with Thiesi (issue #64): `~nick~ (=Real
+    Name=)` when a nick is set, `display-name-or-username (=Real
+    Name=)` otherwise — deliberately not a three-name `~nick~
+    display-name (=Real Name=)` form, which would put three
+    simultaneous names on every line of live chat and reverse round
+    53's deliberate clutter reduction; `/whois` still supplies
+    canonical/display identity on demand.
     """
+    ordinary = chat_stream_label(db, user)
+    verified_unit = format_verified_name_unit(
+        db, user, name_requirement=get_effective_name_requirement(db, channel)
+    )
+    if verified_unit is None:
+        return ordinary
+    if get_nick(db, user) is not None:
+        return f"{ordinary} {verified_unit}"
+    primary = sanitize_text(get_display_name(db, user) or user.username)
+    return f"{primary} {verified_unit}"
+
+
+def _resolve_message_author(db: Database, author_label: str) -> User | None:
+    """Best-effort live-account lookup behind a stored `ChannelMessage.
+    author_label` (a denormalized username, design doc round 19/20) —
+    `None` if the account can no longer be found (defensive; no
+    account-deletion feature exists yet to actually trigger this)."""
     try:
-        author = get_user_by_username(db, author_label)
+        return get_user_by_username(db, author_label)
     except AuthError:
-        return sanitize_text(author_label)
-    return chat_stream_label(db, author)
+        return None
 
 
-def _render_scrollback_message(db: Database, user: User, message: ChannelMessage) -> str:
+def _message_author_label(db: Database, channel: Channel, message: ChannelMessage) -> str:
+    """
+    The author label to show for one `ChannelMessage` of kind
+    `"message"`/`"action"`/`"join"`/`"leave"` — resolves the *current*
+    live account behind `message.author_label` and renders it through
+    `_chat_author_label` (current nick/alias, current verified-name
+    unit if `channel` currently calls for one) when possible, exactly
+    the same whether this is a live event or scrollback replay (GitHub
+    issue #64, round 109) — there's no per-message alias/attestation
+    snapshot, matching the existing "replay shows current presentation"
+    behavior `chat_stream_label`'s own docstring already establishes.
+
+    Falls back to the sanitized *stored* label, with no `VERIFIED_COLOR`
+    styling at all, if the account can no longer be resolved — a stored
+    string, even one that once came from a verified user, must never
+    itself be treated as proof.
+    """
+    author = _resolve_message_author(db, message.author_label)
+    if author is None:
+        return sanitize_text(message.author_label)
+    return _chat_author_label(db, channel, author)
+
+
+def _colored_around(prefix: str, middle: str, suffix: str, *, fg_color: int, bold: bool = False) -> str:
+    """
+    Compose `prefix + middle + suffix`, all in `fg_color` — the fix for
+    design doc round 102's nesting bug (GitHub issue #64 point 4):
+    `middle` (almost always `_message_author_label`'s output) may
+    already carry its own embedded `NICK_COLOR`/`VERIFIED_COLOR` segment
+    with its own trailing reset. Interpolating it into one larger string
+    and passing the whole thing through a single outer `colored()` call
+    would let that inner reset clear the outer color early, leaving
+    `suffix` rendered in the terminal's default color instead of
+    `fg_color`.
+
+    When `middle` carries no embedded ANSI of its own — the common case,
+    no nick and no verified-name unit — this returns exactly what a
+    single `colored(f"{prefix}{middle}{suffix}", ...)` call would
+    (checked directly, not just assumed as an optimization): several
+    existing tests assert literal, uninterrupted substrings like
+    `"* alice waves"`, true only when no escape codes are injected
+    mid-string, and there is no reason to fragment output that doesn't
+    need isolating in the first place. Only when `middle` does carry its
+    own color+reset are the three pieces wrapped independently instead,
+    each a fully self-contained open-content-reset unit immune to
+    whatever came before or after it.
+    """
+    if "\x1b" not in middle:
+        return colored(f"{prefix}{middle}{suffix}", fg_color=fg_color, bold=bold)
+    return (
+        colored(prefix, fg_color=fg_color, bold=bold)
+        + colored(middle, fg_color=fg_color, bold=bold)
+        + colored(suffix, fg_color=fg_color, bold=bold)
+    )
+
+
+def _render_channel_message(
+    db: Database, channel: Channel, viewer: User, message: ChannelMessage, *, self_message: bool = False
+) -> str:
+    """
+    Render one `"message"`/`"action"`/`"join"`/`"leave"` `ChannelMessage`
+    for `viewer` — the single renderer shared by the live broadcast path
+    (`send_loop`/`receive_loop`, `_handle_me`, channel join/leave) and
+    scrollback replay (`_render_scrollback_message`), so the two paths
+    can never disagree about whether a currently-verified real name is
+    shown (GitHub issue #64, round 109). Previously each path rendered
+    independently — a live-only fix would have left replay behind, and
+    a rule fixed in one path but not the other could have either shown
+    a visible inconsistency or reintroduced the historical-instability
+    bug round 102 was written to avoid.
+
+    `self_message` selects `SELF_COLOR` over `ACCENT_COLOR` for a
+    `"message"` kind's delimiter — the sender's own live-typing
+    affordance (design doc -- per-user chat timestamp preference round);
+    meaningless for `"action"`/`"join"`/`"leave"` (never self-colored,
+    matching existing behavior) and always `False` for scrollback replay
+    — a past message read back isn't "what I just sent," possibly from a
+    different session than whichever one originally sent it.
+
+    See `_colored_around` for how each line safely incorporates
+    `_message_author_label`'s output, which may or may not already
+    carry its own embedded color.
+    """
+    author_label = _message_author_label(db, channel, message)
+    if message.kind == "join":
+        line = _colored_around("*** ", author_label, " has joined the channel.", fg_color=MUTED_COLOR)
+    elif message.kind == "leave":
+        line = _colored_around("*** ", author_label, " has left the channel.", fg_color=MUTED_COLOR)
+    elif message.kind == "action":
+        line = _colored_around(
+            "* ", author_label, f" {sanitize_text(message.body)}", fg_color=MUTED_COLOR
+        )
+    else:  # "message"
+        color = SELF_COLOR if self_message else ACCENT_COLOR
+        label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
+        line = f"{label} {sanitize_text(message.body)}"
+    return format_with_preference(db, viewer, line, message.created_at)
+
+
+def _render_scrollback_message(db: Database, channel: Channel, user: User, message: ChannelMessage) -> str:
     """
     Render a persisted `ChannelMessage` for replay on join, matching the
     live formatting `_chat_loop` itself uses for the same kind of event —
     a replay should look exactly like the original moment did, just
-    delayed. Unlike live messages, no message here is ever "self"-colored
-    (`netbbs.rendering.theme.SELF_COLOR`): that's a live-typing affordance
-    ("this is what I just sent"), which doesn't carry any meaning when
-    reading back history, possibly from a different session than whichever
-    one originally sent it.
+    delayed.
 
-    `join`/`leave`/`action`/plain-message kinds show the author's
-    *current* alias, nick-only-plus-marker if one is set
-    (`_resolve_chat_stream_label`, design doc round 53) — moderation
-    kinds (`_VERB_BY_KIND`) and `nick` itself deliberately don't:
-    moderation/auditing always shows canonical identity only (design
+    `"message"`/`"action"`/`"join"`/`"leave"` kinds delegate entirely to
+    `_render_channel_message` (GitHub issue #64, round 109) — the exact
+    same renderer the live broadcast path uses, so the two can never
+    drift apart on the gated-display rule. Moderation kinds
+    (`_VERB_BY_KIND`) and `nick` itself deliberately don't go through
+    it: moderation/auditing always shows canonical identity only (design
     doc round 32, point 7), and a `nick` event's own body text already
-    fully describes the change.
+    fully describes the change — neither is a candidate for verified-
+    name display in the first place.
 
     `user` is the *replaying* session's own account — every kind gets
     prefixed with `message.created_at` per `user`'s own timestamp
@@ -450,22 +622,9 @@ def _render_scrollback_message(db: Database, user: User, message: ChannelMessage
     in that round's scope, not a kind-by-kind carryover of which live
     events happen to be timestamped.
     """
-    if message.kind == "join":
-        line = colored(
-            f"*** {_resolve_chat_stream_label(db, message.author_label)} has joined the channel.",
-            fg_color=MUTED_COLOR,
-        )
-    elif message.kind == "leave":
-        line = colored(
-            f"*** {_resolve_chat_stream_label(db, message.author_label)} has left the channel.",
-            fg_color=MUTED_COLOR,
-        )
-    elif message.kind == "action":
-        line = colored(
-            f"* {_resolve_chat_stream_label(db, message.author_label)} {sanitize_text(message.body)}",
-            fg_color=MUTED_COLOR,
-        )
-    elif message.kind == "nick":
+    if message.kind in ("message", "action", "join", "leave"):
+        return _render_channel_message(db, channel, user, message, self_message=False)
+    if message.kind == "nick":
         line = colored(
             f"*** {sanitize_text(message.author_label)} {sanitize_text(message.body)}",
             fg_color=MUTED_COLOR,
@@ -475,15 +634,12 @@ def _render_scrollback_message(db: Database, user: User, message: ChannelMessage
         # announcement, unlike every other kind here, none of which
         # reference message.author_label.
         line = colored(sanitize_text(message.body), fg_color=MUTED_COLOR)
-    elif message.kind in _VERB_BY_KIND:
+    else:  # message.kind in _VERB_BY_KIND
         author_label = sanitize_text(message.author_label)
         detail = f" ({sanitize_text(message.body)})" if message.body else ""
         line = colored(
             f"*** {author_label} was {_VERB_BY_KIND[message.kind]}{detail}.", fg_color=MUTED_COLOR
         )
-    else:
-        label = colored(f"<{_resolve_chat_stream_label(db, message.author_label)}>", fg_color=ACCENT_COLOR)
-        line = f"{label} {sanitize_text(message.body)}"
     return format_with_preference(db, user, line, message.created_at)
 
 
@@ -1159,7 +1315,7 @@ async def _handle_finger(ctx: ChatCommandContext, args: str) -> None:
     await _write_vcard_detail(ctx.session, ctx.db, vcard)
 
 
-async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
+async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     """
     `/me <action>` (design doc round 32, point 4): a typed action
     event ("* alice waves"), stored and transported as a distinct
@@ -1171,6 +1327,15 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
     if not args:
         await _show_usage(ctx.session, "me")
         return
+
+    # GitHub issue #64: a long-lived session's meets_name_requirement()
+    # was only ever checked once, at channel entry -- re-checked here
+    # (and in send_loop's plain-message branch) against the *current*
+    # policy/attestation state before accepting the send. See
+    # _meets_live_participation_requirements's own docstring.
+    if not _meets_live_participation_requirements(ctx.db, ctx.channel, ctx.user):
+        await ctx.session.write_line(colored(_NO_LONGER_QUALIFIES_MESSAGE, fg_color=MUTED_COLOR))
+        return _ToPicker()
 
     # GitHub issue #30: /me is a slash command, so it used to reach the
     # dispatcher before send_loop's own is_muted() check (which only
@@ -1189,9 +1354,6 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
         )
         return
 
-    label = chat_stream_label(ctx.db, ctx.user)
-    notice = colored(f"* {label} {sanitize_text(args)}", fg_color=MUTED_COLOR)
-
     recorded = record_message(
         ctx.db,
         ctx.channel,
@@ -1200,10 +1362,8 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> None:
         author_fingerprint=ctx.user.fingerprint,
         body=args,
     )
-    await ctx.session.write_line(format_with_preference(ctx.db, ctx.user, notice, recorded.created_at))
-    await ctx.hub.broadcast(
-        ctx.channel.name, _TimestampedNotice(notice, recorded.created_at), exclude={ctx.participant_id}
-    )
+    await ctx.session.write_line(_render_channel_message(ctx.db, ctx.channel, ctx.user, recorded))
+    await ctx.hub.broadcast(ctx.channel.name, recorded, exclude={ctx.participant_id})
 
 
 async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
@@ -2231,7 +2391,7 @@ async def _chat_loop(
     if scrollback:
         await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
         for message in scrollback:
-            await session.write_line(_render_scrollback_message(db, user, message))
+            await session.write_line(_render_scrollback_message(db, channel, user, message))
         # Round 19, point 5: even bounded persistence is a different
         # promise than pure ephemeral chat — worth surfacing explicitly
         # rather than leaving as an internal implementation detail.
@@ -2245,21 +2405,16 @@ async def _chat_loop(
     await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
     # author_label is stored raw here (user.username, not a sanitized/
     # alias-aware label) -- sanitize on output, not on storage, per
-    # sanitize_text's docstring; only the broadcast text below is
-    # actually rendered to a terminal. chat_stream_label (design doc
-    # round 53) looked up fresh here (not cached) since it can change
-    # mid-session via /nick.
+    # sanitize_text's docstring; only the rendered copy each recipient's
+    # receive_loop produces is actually shown to a terminal (GitHub
+    # issue #64, round 109) -- the recorded ChannelMessage itself is
+    # broadcast, not a pre-rendered string, so live and scrollback
+    # replay always agree on how to render it (see
+    # _render_channel_message).
     recorded_join = record_message(
         db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
     )
-    await hub.broadcast(
-        channel.name,
-        _TimestampedNotice(
-            colored(f"*** {chat_stream_label(db, user)} has joined the channel.", fg_color=MUTED_COLOR),
-            recorded_join.created_at,
-        ),
-        exclude={participant_id},
-    )
+    await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
     if pinned_ui_enabled:
         await _repaint_status_line(session, db, hub, presence, channel, user)
         # Neither task is running yet (both are created below, after
@@ -2301,12 +2456,33 @@ async def _chat_loop(
                     colored(f"\r\n*** You have been {message.reason} from this channel.", fg_color=MUTED_COLOR)
                 )
                 return
+            if isinstance(message, ChannelMessage):
+                # GitHub issue #64, round 109: join/leave/message/action
+                # broadcasts now carry the structured, persisted event
+                # itself rather than a pre-rendered string, so this is
+                # the same renderer scrollback replay uses
+                # (_render_channel_message) -- the two paths can no
+                # longer independently drift on whether a currently-
+                # verified real name is shown. repaint_status=True
+                # unconditionally, same as the _TimestampedNotice branch
+                # below did for these same event kinds before this
+                # split (design doc round 75) -- join/leave affect the
+                # participant count every repaint shows regardless.
+                await deliver(
+                    _render_channel_message(db, channel, user, message, self_message=False),
+                    repaint_status=True,
+                )
+                continue
             if isinstance(message, _TimestampedNotice):
-                # repaint_status=True covers every reason this notice
-                # type exists -- joins/leaves (participant count), topic
-                # changes, and moderation notices alike -- with one call
-                # rather than enumerating which specific notices are
-                # "count-relevant" (design doc round 75).
+                # The one remaining use of this wrapper after round 109
+                # moved join/leave/message/action onto ChannelMessage
+                # above: private (`/msg`/`/private`) message delivery via
+                # `send_to` (`_deliver_private_message`), which has no
+                # ChannelMessage to carry -- private conversations are
+                # deliberately not persisted (design doc round 32 point
+                # 1). repaint_status=True here too since a private
+                # message can arrive while the status line is showing
+                # something now-stale (e.g. an away reminder).
                 await deliver(
                     format_with_preference(db, user, message.text, message.created_at),
                     repaint_status=True,
@@ -2477,33 +2653,33 @@ async def _chat_loop(
                             await _repaint_status_line(session, db, hub, presence, channel, user)
                         continue
 
-                    # Two differently-colored copies of the same message, not
-                    # one broadcast to everyone: the sender gets a direct write
-                    # using SELF_COLOR so their own messages visually stand out
-                    # from the rest of the conversation, while everyone else
-                    # receives the normal ACCENT_COLOR-formatted version via the
-                    # broadcast (sender excluded this time, unlike before —
-                    # they're getting their own copy directly instead). This
-                    # can't be done as a single shared broadcast string the way
-                    # join/leave notices are, since it's genuinely different
-                    # text per recipient.
-                    # Looked up fresh on every message, not cached from join
-                    # time -- an alias set via /nick mid-session must show up
-                    # immediately, not just after the next rejoin. Nick-only-
-                    # plus-marker, not both forms (design doc round 53) --
-                    # chat_stream_label already sanitizes internally, unlike
-                    # display_label, so no separate sanitize_text wrap here.
-                    current_label = chat_stream_label(db, user)
-                    self_label = colored(f"<{current_label}>", fg_color=SELF_COLOR, bold=True)
-                    others_label = colored(f"<{current_label}>", fg_color=ACCENT_COLOR)
-                    # Sanitized once here, used for both the direct self-write
-                    # and the broadcast -- receive_loop (above) writes whatever
-                    # arrives from the hub queue as-is, with no sanitization of
-                    # its own, so the broadcast payload must already be safe by
-                    # the time it's queued. record_message below stores the raw
-                    # `line`, not this sanitized copy -- sanitize on output, not
-                    # on storage.
-                    displayed_line = sanitize_text(line)
+                    # GitHub issue #64, round 109: re-checked here against
+                    # the *current* channel/Community policy and the
+                    # user's *current* attestation, not just at channel
+                    # entry -- see _meets_live_participation_requirements.
+                    if not _meets_live_participation_requirements(db, channel, user):
+                        await session.write_line(colored(_NO_LONGER_QUALIFIES_MESSAGE, fg_color=MUTED_COLOR))
+                        return _ToPicker()
+
+                    # The sender gets a direct write with self_message=True
+                    # (SELF_COLOR, so their own messages visually stand out
+                    # from the rest of the conversation) while everyone else
+                    # receives the ACCENT_COLOR-formatted version via the
+                    # broadcast (sender excluded, since they already got
+                    # their own copy directly) -- _render_channel_message
+                    # composes the two independently per recipient rather
+                    # than reusing one shared string, since it's genuinely
+                    # different text per recipient (GitHub issue #64 point
+                    # 4: never nest a second color inside `_chat_author_
+                    # label`'s already-colored/reset segments).
+                    #
+                    # The broadcast payload is the recorded ChannelMessage
+                    # itself, not a pre-rendered string -- receive_loop
+                    # renders it the same way scrollback replay does
+                    # (_render_channel_message), so live and replay can't
+                    # independently drift on the gated-display rule.
+                    # record_message stores the raw `line`, not a sanitized
+                    # copy -- sanitize on output, not on storage.
                     recorded_message = record_message(
                         db,
                         channel,
@@ -2513,15 +2689,9 @@ async def _chat_loop(
                         body=line,
                     )
                     await session.write_line(
-                        format_with_preference(
-                            db, user, f"{self_label} {displayed_line}", recorded_message.created_at
-                        )
+                        _render_channel_message(db, channel, user, recorded_message, self_message=True)
                     )
-                    await hub.broadcast(
-                        channel.name,
-                        _TimestampedNotice(f"{others_label} {displayed_line}", recorded_message.created_at),
-                        exclude={participant_id},
-                    )
+                    await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
                     # Design doc round 32, point 6: sending a message does not
                     # clear away state -- a user may intentionally remain away
                     # while briefly responding. Reminded, not silently changed.
@@ -2620,11 +2790,4 @@ async def _chat_loop(
         recorded_leave = record_message(
             db, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint
         )
-        await hub.broadcast(
-            channel.name,
-            _TimestampedNotice(
-                colored(f"*** {chat_stream_label(db, user)} has left the channel.", fg_color=MUTED_COLOR),
-                recorded_leave.created_at,
-            ),
-            exclude={participant_id},
-        )
+        await hub.broadcast(channel.name, recorded_leave, exclude={participant_id})

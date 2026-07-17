@@ -324,6 +324,36 @@ def _row_to_attestation(row: sqlite3.Row) -> UserAttestation:
 # -- anti-forgery display (design doc round 99) ------------------------------
 
 
+def format_verified_name_unit(db: Database, user: User, *, name_requirement: str | None) -> str | None:
+    """
+    The trusted, colored `(={attested real name}=)` unit alone, or
+    `None` if `name_requirement` isn't `verified_and_displayed` or
+    `user` has no name attestation — the primitive `format_name_for_resource`
+    itself is built from (round 99's rendering-layer guarantee, extracted
+    in round 109/GitHub issue #64).
+
+    Split out of `format_name_for_resource` specifically because chat's
+    per-message author label (`netbbs.net.chat_flow._chat_author_label`)
+    needs this unit composed with a *different* primary name than
+    `format_name_for_resource` uses (a `/nick` alias when one is set,
+    not `display_name`/`username`) — this is the one function in the
+    codebase capable of manufacturing the trusted colored unit, so every
+    caller composes around it rather than reimplementing the coloring
+    itself.
+
+    Sanitizes before coloring, not after (round 53's established
+    ordering) — running `sanitize_text` on an already-colored string
+    would risk stripping this function's own legitimate SGR codes right
+    alongside any genuinely hostile content.
+    """
+    if name_requirement != "verified_and_displayed":
+        return None
+    attestation = get_attestation(db, user, "name")
+    if attestation is None:
+        return None
+    return colored(f"(={sanitize_text(attestation.attested_value)}=)", fg_color=VERIFIED_COLOR)
+
+
 def format_name_for_resource(db: Database, user: User, *, name_requirement: str | None) -> str:
     """
     The name `user` should be shown as within one specific resource that
@@ -333,9 +363,10 @@ def format_name_for_resource(db: Database, user: User, *, name_requirement: str 
     (design doc §18).
 
     Format: `"{display_name or username} (={attested real name}=)"`,
-    with the whole `(=...=)` unit rendered in `VERIFIED_COLOR`. This is
-    a **rendering-layer guarantee, not a text-pattern one** (round 99):
-    the color is applied here, directly to the trusted
+    with the whole `(=...=)` unit rendered in `VERIFIED_COLOR` via
+    `format_verified_name_unit` (round 99; extracted as its own
+    primitive round 109). This is a **rendering-layer guarantee, not a
+    text-pattern one**: the color is applied directly to the trusted
     `attested_value` from `user_attestations`, never derived from or
     combined with `display_name` — and `display_name` already rejects
     the `=` marker at write time (`set_display_name`), so nothing a user
@@ -343,14 +374,7 @@ def format_name_for_resource(db: Database, user: User, *, name_requirement: str 
     color-stripped view.
     """
     primary = sanitize_text(get_display_name(db, user) or user.username)
-    if name_requirement != "verified_and_displayed":
+    verified_unit = format_verified_name_unit(db, user, name_requirement=name_requirement)
+    if verified_unit is None:
         return primary
-    attestation = get_attestation(db, user, "name")
-    if attestation is None:
-        return primary
-    # Sanitize before coloring, not after (round 53's established
-    # ordering) -- running sanitize_text on an already-colored string
-    # would risk stripping this function's own legitimate SGR codes
-    # right alongside any genuinely hostile content.
-    verified_unit = colored(f"(={sanitize_text(attestation.attested_value)}=)", fg_color=VERIFIED_COLOR)
     return f"{primary} {verified_unit}"
