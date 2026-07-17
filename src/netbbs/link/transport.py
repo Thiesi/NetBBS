@@ -49,7 +49,19 @@ from typing import Callable
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from netbbs.link.events import BoardGenesis, BoardPost, KeyTransition
+from netbbs.link.events import (
+    LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
+    LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
+    LINK_MESSAGE_OBJECT_TYPE,
+    BoardGenesis,
+    BoardPost,
+    BoardPostEdit,
+    KeyTransition,
+    LinkMessage,
+    LinkMessageAccepted,
+    LinkMessageBounced,
+)
+from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerRecord
 from netbbs.link.store import save_event, save_peer
 from netbbs.storage.execution import DatabaseLane
@@ -153,13 +165,26 @@ class LinkServer:
 
         for content_id in accepted:
             envelope = self._node.events[content_id]
+            object_type = envelope["envelope"]["object_type"]
             await self._lane.run(
                 save_event,
                 sender_fingerprint=fingerprint,
                 content_id=content_id,
-                object_type=envelope["envelope"]["object_type"],
+                object_type=object_type,
                 envelope=envelope,
             )
+            # Link messages (design doc round 93) need real follow-up
+            # beyond persisting the envelope -- decrypt/deliver into a
+            # local mailbox or bounce, and apply an incoming
+            # acknowledgement to the outbound row it's about. Board
+            # events need none of this; persistence alone is enough for
+            # them (round 126's own finding).
+            if object_type == LINK_MESSAGE_OBJECT_TYPE:
+                await self._lane.run(deliver_link_message, envelope, node_identity=self._node.identity)
+            elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
+                await self._lane.run(apply_link_message_accepted, envelope)
+            elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
+                await self._lane.run(apply_link_message_bounced, envelope)
         if accepted:
             # sender.transitions grew -- one updated write, not one per
             # accepted event (round 120).
@@ -215,17 +240,22 @@ async def push_events(
     node: LinkNode,
     session: ClientSession,
     base_url: str,
-    events: list[KeyTransition | BoardGenesis | BoardPost],
+    events: list[
+        KeyTransition | BoardGenesis | BoardPost | BoardPostEdit
+        | LinkMessage | LinkMessageAccepted | LinkMessageBounced
+    ],
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """
     Push `events` — this node's *own* originated events (`key_
-    transition`s, and since round 128, `board_genesis`/`board_post`),
-    per round 116's "no relay from a stranger" scope note — to a peer
-    at `base_url`. Returns whichever content_ids the peer newly
-    accepted; purely informational, since the sender's own copies are
-    already known-good on its own side.
+    transition`s, `board_genesis`/`board_post`/`board_post_edit` since
+    round 128/130, and `link_message`/`link_message_accepted`/`link_
+    message_bounced` since round 93's mail-sync wiring) — per round
+    116's "no relay from a stranger" scope note — to a peer at
+    `base_url`. Returns whichever content_ids the peer newly accepted;
+    purely informational, since the sender's own copies are already
+    known-good on its own side.
 
     Raises `LinkTransportError` for a transport-level failure. A
     peer rejecting one of the pushed events (e.g. an inconsistent

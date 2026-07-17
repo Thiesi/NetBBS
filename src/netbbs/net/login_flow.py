@@ -853,7 +853,7 @@ async def _main_menu(
             # real connection, since netbbs.__main__.run() always
             # passes a real foreground lane.
             if lane is not None:
-                await browse_mail(session, lane, user)
+                await browse_mail(session, lane, user, link_context=link_context)
             else:
                 await session.write_line(
                     colored("Mail is not available in this context.", fg_color=MUTED_COLOR)

@@ -24,6 +24,11 @@ from netbbs.auth.users import create_user
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
+from netbbs.link.boards import LinkContext
+from netbbs.link.events import build_endpoint_descriptor
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode, PeerRecord
+from netbbs.link.store import save_peer
 from netbbs.mail import list_inbox, list_sent, send_mail
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _main_menu
@@ -342,5 +347,101 @@ def test_compose_reports_bounce_when_mailbox_is_full(tmp_path, monkeypatch):
 
     assert "mailbox is full" in _written_text(session)
     assert len(list_inbox(db, bob)) == 1
+    lane.close()
+    db.close()
+
+
+# -- compose: Link addresses (design doc round 93) ----------------------------
+
+
+def _link_context_with_known_peer(db, node_identity, peer_identity):
+    descriptor = build_endpoint_descriptor(
+        signing_identity=peer_identity.signing_key,
+        subject_fingerprint=peer_identity.fingerprint,
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    save_peer(
+        db,
+        PeerRecord(
+            fingerprint=peer_identity.fingerprint,
+            root_public_key=bytes(peer_identity.root.verify_key),
+            transitions=peer_identity.transitions,
+            descriptor=descriptor,
+        ),
+    )
+    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+
+def test_compose_sends_a_link_message_to_a_remote_address(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+
+    session = FakeSession(
+        keys=["c", "b"], lines=[f"bob@{remote_identity.fingerprint}", "Hello", "How are you?", ""]
+    )
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert "Message sent." in _written_text(session)
+    row = db.connection.execute(
+        "SELECT recipient_remote_address, subject, body, link_delivery_status FROM mail_messages"
+    ).fetchone()
+    assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
+    assert row["subject"] == "Hello"
+    assert row["body"] == "How are you?"
+    assert row["link_delivery_status"] == "pending"
+    lane.close()
+    db.close()
+
+
+def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+    session = FakeSession(keys=["c", "b"], lines=[""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert "node-fingerprint" in _written_text(session)
+    lane.close()
+    db.close()
+
+
+def test_compose_rejects_a_link_address_for_a_node_never_seen(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+    session = FakeSession(keys=["c", "b"], lines=["bob@neverseenfingerprint", "Hello", "World", ""])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    assert "Could not send" in _written_text(session)
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+    lane.close()
+    db.close()
+
+
+def test_compose_without_link_context_treats_an_at_sign_as_an_ordinary_username_lookup(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+
+    session = FakeSession(keys=["c", "b"], lines=["bob@somewhere"])
+    lane = DatabaseLane(db_path)
+    asyncio.run(browse_mail(session, lane, alice))  # no link_context
+
+    assert "No such user" in _written_text(session)
     lane.close()
     db.close()

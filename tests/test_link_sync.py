@@ -24,6 +24,7 @@ from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
 from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
+from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import LinkNode
 from netbbs.link.sync import run_link_sync
@@ -340,3 +341,85 @@ def test_sync_is_cleanly_cancellable_mid_sleep(tmp_path):
         asyncio.run(scenario())
     finally:
         dialer.close()
+
+
+def test_sync_pushes_pending_link_mail_directly_to_its_known_recipient(tmp_path):
+    """Round 93's routing decision, proved over a real socket: a pending
+    `link_message` is pushed straight to its own recipient node using
+    the address already on file for it (from a prior hello), not to
+    whichever seeds happen to be configured. Uses the recipient itself
+    as the configured "seed" for the first pass -- exactly what lets
+    the dialer resolve its signing key (to compose to it) and its
+    address (to reach it directly) in the first place, per this
+    module's own docstring on why a target must already be a known
+    peer."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    recipient_identity = bootstrap_node_identity("recipient")
+    dialer_node = LinkNode(identity=dialer_identity)
+    recipient_node = LinkNode(identity=recipient_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    recipient = _NodeDb(tmp_path, "recipient")
+
+    alice = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    create_user(recipient.db, "bob", password="hunter2", user_level=10)
+
+    async def scenario():
+        # Unlike _hello_for/_run_server's own outgoing_only=True default
+        # (fine for every other test here, which only ever pushes *to* a
+        # statically-configured seed URL), the recipient must advertise
+        # a real, dialable address in its own hello -- that's the only
+        # way the dialer's later _dialable_address lookup has anything
+        # to find for it.
+        recipient_server = LinkServer(
+            host="127.0.0.1", port=0, node=recipient_node,
+            own_hello_provider=lambda: recipient_node.build_hello(
+                addresses=[{"protocol": "http", "address": "127.0.0.1", "port": recipient_server.port}],
+                outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+            ),
+            lane=recipient.lane,
+        )
+        await recipient_server.start()
+        seed_url = f"http://127.0.0.1:{recipient_server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                # First pass: just the hello, so the dialer learns
+                # recipient's signing key/address.
+                first_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [seed_url], lambda: _hello_for(dialer_node),
+                        dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(first_pass)
+
+                message = compose_link_message(
+                    dialer.db, alice, f"bob@{recipient_identity.fingerprint}", "hello", "world",
+                    node_identity=dialer_identity,
+                )
+
+                # Second pass: the pending message should now reach
+                # recipient directly.
+                second_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [seed_url], lambda: _hello_for(dialer_node),
+                        dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(second_pass)
+        finally:
+            await recipient_server.stop()
+
+        return message
+
+    try:
+        message = asyncio.run(scenario())
+        assert message.content_id in recipient_node.known_event_ids
+        row = recipient.db.connection.execute(
+            "SELECT subject, body, link_source_event_id FROM mail_messages"
+        ).fetchone()
+        assert row["subject"] == "hello"
+        assert row["body"] == "world"
+        assert row["link_source_event_id"] == message.content_id
+    finally:
+        dialer.close()
+        recipient.close()

@@ -36,6 +36,21 @@ such bundle — a hello only ever carries key-lifecycle state — so healing
 a partition for linked-board state requires an explicit resend of the
 board events themselves, not just a fresh hello. The partition/heal test
 below makes that resend explicit rather than leaving it implied.
+
+**This file also extends coverage to `link_message`/`link_message_
+accepted`/`link_message_bounced`** (design doc round 93, wired up in the
+same round as this extension). Unlike board events, a link_message has
+no natural "N-node convergence" or "reordered chain" shape (design doc
+round 93: exactly one intended recipient, no per-object chain to
+extend) -- the scenarios below are reshaped to fit what this event
+family actually does rather than mechanically forcing the same five
+categories: a full point-to-point round trip (message out, accepted
+back) with an uninvolved third node confirmed to never learn anything
+about it (the meaningful equivalent of "partition" for something that
+was never broadcast in the first place), duplicate delivery of both the
+message and its acknowledgement, and restart-mid-sequence (proving
+`load_link_node`'s existing generic `link_events` restoration is
+already sufficient here, with no round-127-shaped gap to fix).
 """
 
 from __future__ import annotations
@@ -44,7 +59,13 @@ import json
 
 import pytest
 
-from netbbs.link.events import build_board_genesis, build_board_post, build_board_post_edit
+from netbbs.link.events import (
+    build_board_genesis,
+    build_board_post,
+    build_board_post_edit,
+    build_link_message,
+    build_link_message_accepted,
+)
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node, save_event, save_peer
@@ -734,3 +755,203 @@ def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_a
     a.close()
     b.close()
     c.close()
+
+
+# -- link_message: full round trip, an uninvolved third node isolated -------
+
+
+def _link_message(sender, recipient, clock):
+    return build_link_message(
+        signing_identity=sender.identity.signing_key,
+        home_node_fingerprint=sender.fingerprint,
+        local_user_id="wanderer",
+        recipient_home_node_fingerprint=recipient.fingerprint,
+        recipient_local_user_id="recipient-user",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at=clock.now_iso(),
+    )
+
+
+def test_link_message_full_round_trip_and_an_uninvolved_third_node_never_learns_anything(tmp_path, clock):
+    """alice sends a link_message to bob; bob accepts it and sends back
+    a link_message_accepted; alice accepts that. carol -- a fully
+    hello-connected third node -- never receives either event and never
+    learns anything about the exchange, since neither event is
+    broadcast the way a board_post is (design doc round 93: exactly one
+    intended recipient each way). The meaningful equivalent of
+    "partition" for something that was never multi-node gossip in the
+    first place."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    transport = ScriptedTransport()
+    for node in (alice, bob, carol):
+        transport.register(node)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    carol_node = LinkNode(identity=carol.identity)
+
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    _exchange_hellos(transport, alice, alice_node, carol, carol_node, clock)
+    _exchange_hellos(transport, bob, bob_node, carol, carol_node, clock)
+
+    message = _link_message(alice, bob, clock)
+    message_payload = json.dumps([message.to_dict()]).encode()
+    transport.send(alice, bob, message_payload)
+    transport.deliver_all()
+    [to_bob] = [m for m in transport.inbox(bob) if m.sender == alice.label and m.payload == message_payload]
+    accepted = bob_node.handle_events(alice.fingerprint, json.loads(to_bob.payload))
+    assert accepted == [message.content_id]
+
+    # alice must already know about her own message to accept an ack
+    # about it -- self-origination never passes through handle_events
+    # (same as board_genesis/board_post local origination, round 128).
+    alice_node.known_event_ids.add(message.content_id)
+    alice_node.events[message.content_id] = message.to_dict()
+
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+    ack_payload = json.dumps([ack.to_dict()]).encode()
+    transport.send(bob, alice, ack_payload)
+    transport.deliver_all()
+    [to_alice] = [m for m in transport.inbox(alice) if m.sender == bob.label and m.payload == ack_payload]
+    accepted = alice_node.handle_events(bob.fingerprint, json.loads(to_alice.payload))
+    assert accepted == [ack.content_id]
+
+    # carol was never sent either event -- confirm she genuinely has
+    # nothing, not just that nothing has reached her inbox yet.
+    assert carol_node.known_event_ids == set()
+    assert carol_node.events == {}
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+# -- link_message: duplicate delivery ----------------------------------------
+
+
+def test_duplicate_delivery_of_a_link_message_is_a_pure_no_op(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+
+    message = _link_message(alice, bob, clock)
+    payload = json.dumps([message.to_dict()]).encode()
+    transport.send(alice, bob, payload)
+    transport.send(alice, bob, payload)
+    transport.deliver_all()
+
+    first, second = [m for m in transport.inbox(bob) if m.sender == alice.label and m.payload == payload]
+    accepted_first = bob_node.handle_events(alice.fingerprint, json.loads(first.payload))
+    accepted_second = bob_node.handle_events(alice.fingerprint, json.loads(second.payload))
+
+    assert accepted_first == [message.content_id]
+    assert accepted_second == []  # pure no-op, not an error, not re-applied
+
+    alice.close()
+    bob.close()
+
+
+def test_duplicate_delivery_of_a_link_message_accepted_is_a_pure_no_op(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+
+    message = _link_message(alice, bob, clock)
+    alice_node.known_event_ids.add(message.content_id)
+    alice_node.events[message.content_id] = message.to_dict()
+
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+    payload = json.dumps([ack.to_dict()]).encode()
+    transport.send(bob, alice, payload)
+    transport.send(bob, alice, payload)
+    transport.deliver_all()
+
+    first, second = [m for m in transport.inbox(alice) if m.sender == bob.label and m.payload == payload]
+    accepted_first = alice_node.handle_events(bob.fingerprint, json.loads(first.payload))
+    accepted_second = alice_node.handle_events(bob.fingerprint, json.loads(second.payload))
+
+    assert accepted_first == [ack.content_id]
+    assert accepted_second == []  # pure no-op, not an error, not re-applied
+
+    alice.close()
+    bob.close()
+
+
+# -- link_message: restart mid-sequence --------------------------------------
+
+
+def test_a_restarted_node_still_correctly_processes_a_link_message_and_its_acknowledgement(tmp_path, clock):
+    """Proves `netbbs.link.store.load_link_node`'s existing generic
+    `link_events` restoration (round 126's own finding: "already
+    persists any accepted event generically... no type-specific code of
+    its own") is already sufficient for `link_message`/`link_message_
+    accepted` -- no round-127-shaped restart gap to fix here."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    message = _link_message(alice, bob, clock)
+    accepted = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+    assert accepted == [message.content_id]
+    save_event(
+        bob.db, sender_fingerprint=alice.fingerprint, content_id=message.content_id,
+        object_type="link_message", envelope=message.to_dict(),
+    )
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    # -- restart: a fresh LinkNode, not the one bob_node object above --
+    restarted_bob_node = load_link_node(bob.db, bob.identity)
+    assert restarted_bob_node is not bob_node
+    assert message.content_id in restarted_bob_node.known_event_ids
+
+    # A duplicate resend after the restart is still correctly a no-op.
+    duplicate = restarted_bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+    assert duplicate == []
+
+    # bob's own acknowledgement, built and applied against the restarted
+    # node, round-trips back to alice correctly.
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+    alice_node.known_event_ids.add(message.content_id)
+    alice_node.events[message.content_id] = message.to_dict()
+    accepted = alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+    assert accepted == [ack.content_id]
+
+    alice.close()
+    bob.close()

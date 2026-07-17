@@ -42,6 +42,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
+from netbbs.link.boards import LinkContext
+from netbbs.link.mail import LinkMailError, compose_link_message
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MailboxFullError,
@@ -73,8 +75,16 @@ from netbbs.timeutil import format_for_display, resolve_display_preferences
 _MAX_PLAIN_MAIL_LINES = 200
 
 
-async def browse_mail(session: Session, lane: DatabaseLane, user: User) -> None:
-    """Entry point from the main menu's `[E]-mail` option."""
+async def browse_mail(
+    session: Session, lane: DatabaseLane, user: User, *, link_context: LinkContext | None = None
+) -> None:
+    """Entry point from the main menu's `[E]-mail` option.
+
+    `link_context` (design doc round 93), if given, lets `_compose_mail`
+    recognize a `user@node-fingerprint` address and send a Link message
+    instead of ordinary local mail -- `None` whenever this node has Link
+    disabled, the same convention `netbbs.link.boards.LinkContext`
+    itself already establishes for boards."""
     await _render_mail_menu(session, lane, user)
     while True:
         choice = (await session.read_key()).lower()
@@ -92,7 +102,7 @@ async def browse_mail(session: Session, lane: DatabaseLane, user: User) -> None:
             await _render_mail_menu(session, lane, user)
         elif choice == "c":
             await session.write_line("")
-            await _compose_mail(session, lane, user)
+            await _compose_mail(session, lane, user, link_context=link_context)
             await _render_mail_menu(session, lane, user)
         else:
             await session.write(reject_keystroke())
@@ -262,21 +272,37 @@ async def _compose_mail(
     *,
     prefill_recipient: User | None = None,
     prefill_subject: str = "",
+    link_context: LinkContext | None = None,
 ) -> None:
+    """
+    `link_context`, if given, lets the "To:" prompt accept a `user@
+    node-fingerprint` address (design doc round 93) in addition to a
+    plain local username -- routed to `netbbs.link.mail.compose_link_
+    message` instead of `netbbs.mail.send_mail`. Only checked on the
+    fresh-compose path: a reply always targets an already-resolved
+    local `User` (`prefill_recipient`), never a typed address.
+    """
+    recipient: User | None = None
+    link_recipient_address: str | None = None
+
     if prefill_recipient is not None:
         recipient = prefill_recipient
         await session.write_line(f"To: {sanitize_text(recipient.username)}")
     else:
-        await session.write("\r\nTo (username): ")
-        username = (await session.read_line()).strip()
-        if not username:
+        prompt = "username or user@node-fingerprint" if link_context is not None else "username"
+        await session.write(f"\r\nTo ({prompt}): ")
+        typed = (await session.read_line()).strip()
+        if not typed:
             await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
             return
-        try:
-            recipient = await lane.run(get_user_by_username, username)
-        except AuthError:
-            await session.write_line(colored(f"No such user: {username!r}", fg_color=MUTED_COLOR))
-            return
+        if link_context is not None and "@" in typed:
+            link_recipient_address = typed
+        else:
+            try:
+                recipient = await lane.run(get_user_by_username, typed)
+            except AuthError:
+                await session.write_line(colored(f"No such user: {typed!r}", fg_color=MUTED_COLOR))
+                return
 
     if prefill_subject:
         await session.write(f"Subject [{prefill_subject}] (Enter to keep): ")
@@ -291,6 +317,18 @@ async def _compose_mail(
     body = await _compose_mail_body(session, lane, user)
     if body is None or not body.strip():
         await session.write_line(colored("Cancelled -- message body cannot be blank.", fg_color=MUTED_COLOR))
+        return
+
+    if link_recipient_address is not None:
+        try:
+            await lane.run(
+                compose_link_message, user, link_recipient_address, subject, body,
+                node_identity=link_context.node_identity,
+            )
+        except (LinkMailError, MailError) as exc:
+            await session.write_line(colored(f"Could not send: {exc}", fg_color=MUTED_COLOR))
+            return
+        await session.write_line("Message sent.")
         return
 
     try:
