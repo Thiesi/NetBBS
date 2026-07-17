@@ -79,6 +79,7 @@ from netbbs.chat import (
     format_with_preference,
     list_pending_invitations_for_user,
 )
+from netbbs.communities import Community, list_communities
 from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.directory import (
     MAX_BIO_BYTES,
@@ -94,9 +95,9 @@ from netbbs.mail import unread_count as unread_mail_count
 from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
-from netbbs.net.chat_flow import browse_channels
+from netbbs.net.chat_flow import browse_channels, has_visible_channels
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
-from netbbs.net.file_flow import browse_file_areas
+from netbbs.net.file_flow import browse_file_areas, has_visible_areas
 from netbbs.net.mail_flow import browse_mail
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
@@ -655,9 +656,26 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     it's a core always-available feature, not a transient notification --
     but grows an "(N unread)" suffix the same "re-query on every redraw,
     no separate seen-tracking" way. Deliberately a different letter and a
-    different persistence model from `[M]essage Boards`/`/msg`: `M` is
-    already taken, and `E` (for "E-mail") is the closest thing to a
-    ready-made convention BBS users already have muscle memory for.
+    different persistence model from `/msg`: `E` (for "E-mail") is the
+    closest thing to a ready-made convention BBS users already have
+    muscle memory for.
+
+    `[C]ommunities`/`[U]ncategorized`/`[J]ump to...` (design doc §16,
+    round 84) replace the old flat `[M]essage Boards`/`[C]hat`/
+    `[F]ile areas` split -- `[C]` is reused here specifically because
+    Chat moving one level into the shared resource-type sub-menu frees
+    it back up (confirmed directly with Thiesi: round 84's original
+    spec assumed `[E]nter a Community`, written before round 104 claimed
+    `E` for mail). `[C]ommunities`/`[U]ncategorized` are conditionally
+    visible -- hidden when there are zero (visible) Communities, or
+    zero visible Uncategorized resources, respectively -- same "only
+    offer what currently applies" convention as `[I]nvitations`;
+    `[J]ump to...` is always shown, matching the old flat menu's own
+    unconditional `[M]/[C]/[F]` behavior exactly. On a freshly upgraded
+    node with no Communities created yet, this reduces the menu to
+    `[U]ncategorized  [J]ump to...` (assuming at least one board/
+    channel/area already exists), functionally identical to today's
+    flat menu -- migration is a non-event, per round 83.
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
@@ -665,14 +683,19 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     header = colored("Main menu:", fg_color=HEADER_COLOR, bold=True)
     unread = unread_mail_count(db, user)
     mail_label = f"-mail ({unread} unread)" if unread else "-mail"
-    option_list = [
-        menu_key("M", "essage Boards"),
-        menu_key("C", "hat"),
-        menu_key("F", "ile areas"),
-        menu_key("D", "irectory"),
-        menu_key("P", "rofile"),
-        menu_key("E", mail_label),
-    ]
+    option_list = []
+    if _has_visible_communities(db, user):
+        option_list.append(menu_key("C", "ommunities"))
+    if _has_uncategorized_resources(db, user):
+        option_list.append(menu_key("U", "ncategorized"))
+    option_list.append(menu_key("J", "ump to..."))
+    option_list.extend(
+        [
+            menu_key("D", "irectory"),
+            menu_key("P", "rofile"),
+            menu_key("E", mail_label),
+        ]
+    )
     if list_pending_invitations_for_user(db, user):
         option_list.append(menu_key("I", "nvitations"))
     if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
@@ -742,20 +765,21 @@ async def _main_menu(
         if choice == "l":
             await session.write_line("")
             return
-        elif choice == "m":
+        elif choice == "c" and _has_visible_communities(db, user):
             await session.write_line("")
-            await _browse_boards(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user)
-        elif choice == "c":
-            await session.write_line("")
-            session_registry = node_controls.session_registry if node_controls is not None else None
-            await browse_channels(
-                session, db, hub, presence, mailbox, history, user, session_registry=session_registry
+            await _enter_communities(
+                session, db, hub, presence, mailbox, history, user, node_controls=node_controls
             )
             await _draw_main_menu(session, db, mailbox, user)
-        elif choice == "f":
+        elif choice == "u" and _has_uncategorized_resources(db, user):
             await session.write_line("")
-            await browse_file_areas(session, db, user)
+            await _enter_uncategorized(
+                session, db, hub, presence, mailbox, history, user, node_controls=node_controls
+            )
+            await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "j":
+            await session.write_line("")
+            await _jump_to(session, db, hub, presence, mailbox, history, user, node_controls=node_controls)
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
             await session.write_line("")
@@ -1009,13 +1033,241 @@ async def _register_new_account(
     return new_user
 
 
-async def _browse_boards(session: Session, db: Database, user: User) -> None:
+# -- Communities navigation (design doc §16, rounds 71/83/84/86) ------------
+
+
+def _visible_communities_for(db: Database, user: User) -> list[Community]:
+    """Every Community `user` is allowed to see. A `hidden` Community is
+    delisted from ordinary browsing -- same "listed/hidden" visibility
+    language the design doc's own round 84 text reuses -- except for a
+    SysOp, who still sees everything here, matching every other admin-
+    visibility bypass already established in this codebase (e.g.
+    `netbbs.moderation.roles.has_permission`'s own SysOp bypass)."""
+    communities = list_communities(db)
+    if meets_level(user, SYSOP_LEVEL):
+        return communities
+    return [c for c in communities if not c.hidden]
+
+
+def _has_visible_communities(db: Database, user: User) -> bool:
+    return bool(_visible_communities_for(db, user))
+
+
+def _has_uncategorized_resources(db: Database, user: User) -> bool:
+    """Whether `user` can currently see at least one Uncategorized
+    board, channel, or file area -- gates the main menu's `[U]ncategorized`
+    entry the same "only offer what currently applies" way `[I]nvitations`
+    already does. `community_id=None, community_scoped=True` filters
+    each resource type to exactly its Uncategorized members -- see
+    `_browse_boards_in_category`'s docstring for why `None` needs no
+    special-casing here."""
+    return (
+        _has_visible_boards(db, user, community_id=None, community_scoped=True)
+        or has_visible_channels(db, user, community_id=None, community_scoped=True)
+        or has_visible_areas(db, user, community_id=None, community_scoped=True)
+    )
+
+
+async def _resource_type_menu(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    node_controls: NodeControls | None,
+    community_id: int | None,
+    community_scoped: bool,
+    menu_header: str,
+    title_prefix: str | None,
+) -> None:
+    """
+    Shared sub-menu for `[C]ommunities`/`[U]ncategorized`/`[J]ump to...`
+    (design doc §16, round 84) -- all three main-menu entry points lead
+    here, differing only in what Community filter they apply. Reuses the
+    *original* `[M]/[C]/[F]` letters one level in rather than inventing
+    new ones -- caught during design: `[B]oards` collides with `[B]ack`
+    -- so existing muscle memory is relocated one screen deeper, not
+    lost.
+
+    Offers only resource types with at least one currently-visible
+    match when `community_scoped` (same "only offer what currently
+    applies" convention as `[I]nvitations`); the unfiltered Jump case
+    (`community_scoped=False`) always offers all three, matching the
+    flat main menu's own former unconditional `[M]/[C]/[F]` behavior
+    exactly -- Jump is meant to feel identical to how browsing used to
+    work before Communities existed.
+
+    Loops rather than a one-shot dispatch, same shape as `_main_menu`
+    itself -- staying within one Community's (or Uncategorized's, or
+    Jump's) context across several resource-type visits without
+    re-entering the Community picker each time.
+    """
+    while True:
+        show_boards = not community_scoped or _has_visible_boards(
+            db, user, community_id=community_id, community_scoped=community_scoped
+        )
+        show_channels = not community_scoped or has_visible_channels(
+            db, user, community_id=community_id, community_scoped=community_scoped
+        )
+        show_areas = not community_scoped or has_visible_areas(
+            db, user, community_id=community_id, community_scoped=community_scoped
+        )
+
+        header = colored(f"\r\n{menu_header}:", fg_color=HEADER_COLOR, bold=True)
+        option_list = []
+        if show_boards:
+            option_list.append(menu_key("M", "essage Boards"))
+        if show_channels:
+            option_list.append(menu_key("C", "hat"))
+        if show_areas:
+            option_list.append(menu_key("F", "ile areas"))
+        option_list.append(menu_key("B", "ack"))
+        await session.write_line(f"{header} {'  '.join(option_list)}")
+        await session.write("Choice: ")
+
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "m" and show_boards:
+            await session.write_line("")
+            await _browse_boards(
+                session, db, user,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            )
+        elif choice == "c" and show_channels:
+            await session.write_line("")
+            session_registry = node_controls.session_registry if node_controls is not None else None
+            await browse_channels(
+                session, db, hub, presence, mailbox, history, user, session_registry=session_registry,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            )
+        elif choice == "f" and show_areas:
+            await session.write_line("")
+            await browse_file_areas(
+                session, db, user,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            )
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _enter_communities(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    node_controls: NodeControls | None,
+) -> None:
+    """`[C]ommunities` entry point -- pick one via the shared picker,
+    then the shared resource-type sub-menu scoped to it."""
+    communities = _visible_communities_for(db, user)
+    selected = await pick_item(
+        session, communities,
+        name_of=lambda c: c.name,
+        stable_id_of=lambda c: c.id,
+        description_of=lambda c: c.description,
+        title="Communities",
+        empty_message="No Communities exist yet.",
+    )
+    if selected is None:
+        return
+    await _resource_type_menu(
+        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
+        community_id=selected.id, community_scoped=True,
+        menu_header=selected.name, title_prefix=selected.name,
+    )
+
+
+async def _enter_uncategorized(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    node_controls: NodeControls | None,
+) -> None:
+    """`[U]ncategorized` entry point -- straight into the shared
+    resource-type sub-menu, no picker needed (there's only one
+    Uncategorized "bucket")."""
+    await _resource_type_menu(
+        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
+        community_id=None, community_scoped=True,
+        menu_header="Uncategorized", title_prefix="Uncategorized",
+    )
+
+
+async def _jump_to(
+    session: Session,
+    db: Database,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    node_controls: NodeControls | None,
+) -> None:
+    """`[J]ump to...` entry point -- the shared resource-type sub-menu
+    with no Community filter at all (`community_scoped=False`), reusing
+    round 18's existing search/goto commands against the full,
+    unfiltered list exactly as browsing worked before Communities
+    existed (design doc §16, round 84). `title_prefix=None` keeps every
+    browse function's title exactly as it always was ("Available
+    message boards", etc.) rather than prefixing it."""
+    await _resource_type_menu(
+        session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
+        community_id=None, community_scoped=False,
+        menu_header="Jump to...", title_prefix=None,
+    )
+
+
+async def _browse_boards(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
+) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
-    await _browse_boards_in_category(session, db, user, category_id=None)
+    await _browse_boards_in_category(
+        session, db, user, category_id=None,
+        community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+    )
+
+
+def _has_visible_boards(db: Database, user: User, *, community_id: int | None, community_scoped: bool) -> bool:
+    """Whether `user` can see at least one board under the given
+    Community filter -- backs the shared resource-type sub-menu's
+    "only offer what currently applies" conditional visibility (design
+    doc §16, round 84), same convention as `[I]nvitations`."""
+    boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level) and meets_age(db, user, b.min_age)]
+    if community_scoped:
+        boards = [b for b in boards if b.community_id == community_id]
+    return bool(boards)
 
 
 async def _browse_boards_in_category(
-    session: Session, db: Database, user: User, *, category_id: int | None
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    category_id: int | None,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
 ) -> None:
     """
     Browse boards within a category (or the top level, if `category_id`
@@ -1040,6 +1292,22 @@ async def _browse_boards_in_category(
     Disambiguated by negating category IDs for picker purposes only
     (`-item.id`) — boards keep their real, positive ID unchanged, so
     existing board `goto` numbers aren't affected by this at all.
+
+    `community_id`/`community_scoped` (design doc §16, round 84) narrow
+    browsing to one Community's boards (`community_scoped=True`,
+    `community_id=X`), Uncategorized boards (`community_scoped=True`,
+    `community_id=None` -- `board.community_id == None` filters
+    identically to the real-Community case, no special-casing needed),
+    or no filter at all (`community_scoped=False`, the default --
+    every existing caller's unchanged behavior, and what `[J]ump to...`
+    uses). `title_prefix`, threaded alongside, is `None` for the
+    unfiltered/Jump case (keeping today's unchanged "Available message
+    boards" title) or a human label ("Uncategorized", a Community's own
+    name) that becomes "{title_prefix} — message boards" otherwise.
+    Category leak prevention (round 84: "only show/offer categories
+    currently used by ≥1 resource in this Community") only applies when
+    `community_scoped` -- the unfiltered Jump path shows every category
+    exactly as it always has.
     """
     # name_requirement deliberately does not gate reading here -- it's a
     # participation/accountability requirement (design doc §18 point 7:
@@ -1047,11 +1315,25 @@ async def _browse_boards_in_category(
     # content-restriction the way min_age is; see can_post's own check,
     # below, for where it actually applies.
     all_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level) and meets_age(db, user, b.min_age)]
+    if community_scoped:
+        all_boards = [b for b in all_boards if b.community_id == community_id]
     boards_here = [b for b in all_boards if b.category_id == category_id]
 
     categories_here = (
         list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
     )
+    if community_scoped:
+        used_category_ids = {b.category_id for b in all_boards if b.category_id is not None}
+        if category_id is None:
+            categories_here = [
+                c for c in categories_here
+                if c.id in used_category_ids
+                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+            ]
+        else:
+            categories_here = [c for c in categories_here if c.id in used_category_ids]
+
+    title = f"{title_prefix} — message boards" if title_prefix is not None else "Available message boards"
 
     if not categories_here:
         board = await pick_item(
@@ -1060,7 +1342,7 @@ async def _browse_boards_in_category(
             name_of=lambda b: b.name,
             stable_id_of=lambda b: b.id,
             description_of=lambda b: b.description,
-            title="Available message boards",
+            title=title,
             empty_message="No message boards are available to you yet.",
         )
         if board is not None:
@@ -1086,14 +1368,17 @@ async def _browse_boards_in_category(
         name_of=render_name,
         stable_id_of=stable_id,
         description_of=render_description,
-        title="Available message boards",
+        title=title,
         empty_message="No message boards are available to you yet.",
     )
     if selected is None:
         return
 
     if isinstance(selected, Category):
-        await _browse_boards_in_category(session, db, user, category_id=selected.id)
+        await _browse_boards_in_category(
+            session, db, user, category_id=selected.id,
+            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        )
     else:
         await _show_board(session, db, selected, user)
 

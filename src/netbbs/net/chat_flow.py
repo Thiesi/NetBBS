@@ -104,6 +104,9 @@ async def browse_channels(
     user: User,
     *,
     session_registry: ActiveSessionRegistry | None = None,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
@@ -144,13 +147,26 @@ async def browse_channels(
     the identical check (and already consumed any invitation) before
     ever returning that action, so this just re-confirms "yes, still a
     member" for free.
+
+    `community_id`/`community_scoped`/`title_prefix` (design doc §16,
+    round 84) narrow every picker re-entry in this loop -- not just the
+    initial pick -- to the same Community/Uncategorized/unfiltered
+    scope the caller entered with; see
+    `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
+    the full reasoning, identical here.
     """
-    channel = await _pick_channel(session, db, hub, user, category_id=None)
+    channel = await _pick_channel(
+        session, db, hub, user, category_id=None,
+        community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+    )
     while channel is not None:
         allowed, denial_message = _authorize_channel_entry(db, channel, user)
         if not allowed:
             await session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
-            channel = await _pick_channel(session, db, hub, user, category_id=None)
+            channel = await _pick_channel(
+                session, db, hub, user, category_id=None,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            )
             continue
 
         action = await _chat_loop(
@@ -160,7 +176,10 @@ async def browse_channels(
             channel = action.channel
             continue
         if isinstance(action, _ToPicker):
-            channel = await _pick_channel(session, db, hub, user, category_id=None)
+            channel = await _pick_channel(
+                session, db, hub, user, category_id=None,
+                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            )
             continue
         return  # _Quit
 
@@ -204,6 +223,21 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     return visible
 
 
+def has_visible_channels(
+    db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
+) -> bool:
+    """Whether `user` can see at least one channel under the given
+    Community filter -- public (unlike `_visible_channels_for`)
+    specifically so `netbbs.net.login_flow`'s shared resource-type
+    sub-menu can use it for the same "only offer what currently
+    applies" conditional visibility `_has_visible_boards` provides for
+    boards (design doc §16, round 84)."""
+    channels = _visible_channels_for(db, user)
+    if community_scoped:
+        channels = [c for c in channels if c.community_id == community_id]
+    return bool(channels)
+
+
 async def _pick_channel(
     session: Session,
     db: Database,
@@ -211,18 +245,25 @@ async def _pick_channel(
     user: User,
     *,
     category_id: int | None,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
 ) -> Channel | None:
     """
     Browse channels within a category (or the top level) and return
     whichever one the user picks, or `None` if they back out — mirrors
     `netbbs.net.login_flow._browse_boards_in_category` exactly — same
     reasoning, same two-level cap, same category/item ID-namespace
-    disambiguation trick (negated category IDs). See that function's
-    docstring for the full rationale; not repeated here to avoid the two
-    copies drifting out of sync in what they claim rather than just in
-    what they say.
+    disambiguation trick (negated category IDs), and the same
+    `community_id`/`community_scoped`/`title_prefix` Community-filter
+    threading (design doc §16, round 84). See that function's docstring
+    for the full rationale; not repeated here to avoid the two copies
+    drifting out of sync in what they claim rather than just in what
+    they say.
     """
     all_channels = _visible_channels_for(db, user)
+    if community_scoped:
+        all_channels = [c for c in all_channels if c.community_id == community_id]
     # Activity-sort applied before splitting by category, so ordering
     # within each category's channel list is still most-recent-first —
     # same node-wide default as boards (design doc round 17).
@@ -233,6 +274,18 @@ async def _pick_channel(
     categories_here = (
         list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
     )
+    if community_scoped:
+        used_category_ids = {c.category_id for c in all_channels if c.category_id is not None}
+        if category_id is None:
+            categories_here = [
+                c for c in categories_here
+                if c.id in used_category_ids
+                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+            ]
+        else:
+            categories_here = [c for c in categories_here if c.id in used_category_ids]
+
+    title = f"{title_prefix} — chat channels" if title_prefix is not None else "Available channels"
 
     if not categories_here:
         return await pick_item(
@@ -241,7 +294,7 @@ async def _pick_channel(
             name_of=lambda c: c.name,
             stable_id_of=lambda c: c.id,
             description_of=lambda c: _channel_description(hub, c),
-            title="Available channels",
+            title=title,
             empty_message="No chat channels are available to you yet.",
         )
 
@@ -264,14 +317,17 @@ async def _pick_channel(
         name_of=render_name,
         stable_id_of=stable_id,
         description_of=render_description,
-        title="Available channels",
+        title=title,
         empty_message="No chat channels are available to you yet.",
     )
     if selected is None:
         return None
 
     if isinstance(selected, Category):
-        return await _pick_channel(session, db, hub, user, category_id=selected.id)
+        return await _pick_channel(
+            session, db, hub, user, category_id=selected.id,
+            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        )
     return selected
 
 

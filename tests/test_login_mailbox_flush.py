@@ -110,17 +110,22 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
     mailbox = MessageMailbox()
     user = _make_user(db)
 
-    async def fake_browse_boards(session, db, u):
+    async def fake_browse_boards(session, db, u, **kwargs):
         # Simulate a message arriving while the user was off in another
         # screen entirely. Delivered by `session` (GitHub issue #27) --
         # the exact object passed in here is the same one _main_menu is
-        # about to flush() by.
+        # about to flush() by. **kwargs absorbs the community_id/
+        # community_scoped/title_prefix keywords _resource_type_menu now
+        # passes through (design doc §16, round 84) -- irrelevant here.
         mailbox.deliver(session, "*** Private message from bob: while you were away", _T)
 
     monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)
 
     async def scenario():
-        session = FakeSession(keys=["m", "l"])  # boards, then logoff
+        # jump to... (boards/chat/areas are always offered, unfiltered)
+        # -> [M]essage Boards -> back out of the resource-type sub-menu
+        # -> logoff.
+        session = FakeSession(keys=["j", "m", "b", "l"])
         await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
         return session
 

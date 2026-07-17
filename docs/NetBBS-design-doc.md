@@ -1515,15 +1515,35 @@ helper had no way to ever set a value back to `None` (i.e. actually opt
 a board/area into inheriting a Community's default), so a new
 `_prompt_optional_int` helper (same "blank = keep, 'none' = clear"
 shape `_prompt_min_age` already uses) now backs those two fields at
-both create and edit time. 15 new tests. **Not yet built**: the
-main-menu `[E]nter a Community`/`[U]ncategorized`/`[J]ump to...`
-restructuring, category leak-prevention filtering, and no board/chat/
-file-area call site yet actually resolves levels/age/name-requirement
-through a Community -- `get_effective_*` exist and are now assignable
-via the admin UI, but nothing reads them back yet. See the round 105/
-106 worklog entries for the full writeups, including the one scope
-note worth flagging: this implementation deliberately does *not* give
-`channels.min_level` a Community-inheritable default
+both create and edit time. 15 new tests. **Round 107 (third slice):
+main-menu navigation restructuring built** -- the flat `[M]essage
+Boards`/`[C]hat`/`[F]ile areas` split is gone, replaced by
+`[C]ommunities`/`[U]ncategorized`/`[J]ump to...`, all three leading to
+one shared resource-type sub-menu that reuses the original `[M]/[C]/[F]`
+letters one level in. `_browse_boards_in_category`/`_pick_channel`/
+`_browse_areas_in_category` all gained `community_id`/`community_scoped`/
+`title_prefix` threading (including through `browse_channels`'s whole
+`/leave`/`/join` re-pick loop, not just the initial pick), plus category
+leak-prevention filtering at the query layer exactly as specced.
+**Letter collision caught and resolved with Thiesi**: round 84's
+original spec assumed `[E]nter a Community`, written before round 104
+claimed `E` for `-mail`; resolved by reusing `[C]` (freed when Chat
+moved one level into the sub-menu) rather than disturbing the already-
+shipped mail binding. **Not yet built**: no board/chat/file-area
+enforcement call site (post read/write, channel entry, file-area
+read/write) actually resolves levels/age/name-requirement through a
+Community yet -- `get_effective_*` (round 105) exist and are now
+assignable via the admin UI (round 106), but nothing reads them back
+at the actual gate points; and the admin-side category-assignment
+picker (`_pick_optional_category` in `netbbs.net.admin_flow`) doesn't
+apply the same community-scoped existence filter the end-user browse
+path now does -- explicitly named in round 84's own text but left for
+a later pass given its lower practical impact (a curation-quality
+question, not a leak, since nothing stops an admin creating a
+mis-scoped category manually either way). See the round 105/106/107
+worklog entries for the full writeups, including the one scope note
+worth flagging from round 105: this implementation deliberately does
+*not* give `channels.min_level` a Community-inheritable default
 (`default_min_level`) -- the design doc's own round 84 Community
 edit-screen spec names exactly four inheritable fields, none of them
 channel-level-shaped, so extending the model to a fifth field it never

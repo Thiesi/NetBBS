@@ -45,20 +45,54 @@ from netbbs.storage.database import Database
 from netbbs.timeutil import format_for_display
 
 
-async def browse_file_areas(session: Session, db: Database, user: User) -> None:
+async def browse_file_areas(
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
+) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
-    await _browse_areas_in_category(session, db, user, category_id=None)
+    await _browse_areas_in_category(
+        session, db, user, category_id=None,
+        community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+    )
+
+
+def has_visible_areas(
+    db: Database, user: User, *, community_id: int | None = None, community_scoped: bool = False
+) -> bool:
+    """Whether `user` can see at least one file area under the given
+    Community filter -- backs `netbbs.net.login_flow`'s shared
+    resource-type sub-menu, same convention as `_has_visible_boards`/
+    `netbbs.net.chat_flow.has_visible_channels` (design doc §16, round
+    84)."""
+    areas = [a for a in list_file_areas(db) if meets_level(user, a.min_read_level) and meets_age(db, user, a.min_age)]
+    if community_scoped:
+        areas = [a for a in areas if a.community_id == community_id]
+    return bool(areas)
 
 
 async def _browse_areas_in_category(
-    session: Session, db: Database, user: User, *, category_id: int | None
+    session: Session,
+    db: Database,
+    user: User,
+    *,
+    category_id: int | None,
+    community_id: int | None = None,
+    community_scoped: bool = False,
+    title_prefix: str | None = None,
 ) -> None:
     """
     Browse file areas within a category (or the top level), mirroring
     `netbbs.net.login_flow._browse_boards_in_category` exactly — same
     reasoning, same two-level cap, same category/item ID-namespace
-    disambiguation trick (negated category IDs). See that function's
-    docstring for the full rationale.
+    disambiguation trick (negated category IDs), and the same
+    `community_id`/`community_scoped`/`title_prefix` Community-filter
+    threading (design doc §16, round 84). See that function's docstring
+    for the full rationale.
     """
     # name_requirement deliberately does not gate reading here -- same
     # participation-vs-content-restriction split as
@@ -68,11 +102,25 @@ async def _browse_areas_in_category(
         a for a in list_file_areas(db)
         if meets_level(user, a.min_read_level) and meets_age(db, user, a.min_age)
     ]
+    if community_scoped:
+        all_areas = [a for a in all_areas if a.community_id == community_id]
     areas_here = [a for a in all_areas if a.category_id == category_id]
 
     categories_here = (
         list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
     )
+    if community_scoped:
+        used_category_ids = {a.category_id for a in all_areas if a.category_id is not None}
+        if category_id is None:
+            categories_here = [
+                c for c in categories_here
+                if c.id in used_category_ids
+                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+            ]
+        else:
+            categories_here = [c for c in categories_here if c.id in used_category_ids]
+
+    title = f"{title_prefix} — file areas" if title_prefix is not None else "Available file areas"
 
     if not categories_here:
         area = await pick_item(
@@ -81,7 +129,7 @@ async def _browse_areas_in_category(
             name_of=lambda a: a.name,
             stable_id_of=lambda a: a.id,
             description_of=lambda a: a.description,
-            title="Available file areas",
+            title=title,
             empty_message="No file areas are available to you yet.",
         )
         if area is not None:
@@ -107,14 +155,17 @@ async def _browse_areas_in_category(
         name_of=render_name,
         stable_id_of=stable_id,
         description_of=render_description,
-        title="Available file areas",
+        title=title,
         empty_message="No file areas are available to you yet.",
     )
     if selected is None:
         return
 
     if isinstance(selected, FileAreaCategory):
-        await _browse_areas_in_category(session, db, user, category_id=selected.id)
+        await _browse_areas_in_category(
+            session, db, user, category_id=selected.id,
+            community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        )
     else:
         await _show_area(session, db, selected, user)
 

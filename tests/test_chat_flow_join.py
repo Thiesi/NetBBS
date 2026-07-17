@@ -268,7 +268,7 @@ def test_topic_change_is_not_persisted_to_scrollback(db, hub, presence, sysop, c
 def test_browse_channels_switch_to_skips_the_picker(monkeypatch, db, hub, presence, alice, channel, other_channel):
     pick_calls = []
 
-    async def fake_pick_channel(session, db, hub, user, *, category_id):
+    async def fake_pick_channel(session, db, hub, user, *, category_id, **kwargs):
         pick_calls.append(category_id)
         return channel
 
@@ -292,7 +292,7 @@ def test_browse_channels_switch_to_skips_the_picker(monkeypatch, db, hub, presen
 def test_browse_channels_to_picker_reconsults_the_picker(monkeypatch, db, hub, presence, alice, channel):
     pick_calls = []
 
-    async def fake_pick_channel(session, db, hub, user, *, category_id):
+    async def fake_pick_channel(session, db, hub, user, *, category_id, **kwargs):
         pick_calls.append(category_id)
         return channel
 
@@ -317,7 +317,7 @@ def test_browse_channels_to_picker_reconsults_the_picker(monkeypatch, db, hub, p
 def test_browse_channels_quit_exits_without_repicking(monkeypatch, db, hub, presence, alice, channel):
     pick_calls = []
 
-    async def fake_pick_channel(session, db, hub, user, *, category_id):
+    async def fake_pick_channel(session, db, hub, user, *, category_id, **kwargs):
         pick_calls.append(category_id)
         return channel
 
@@ -333,7 +333,7 @@ def test_browse_channels_quit_exits_without_repicking(monkeypatch, db, hub, pres
 
 
 def test_browse_channels_returns_immediately_if_nothing_picked(monkeypatch, db, hub, presence, alice):
-    async def fake_pick_channel(session, db, hub, user, *, category_id):
+    async def fake_pick_channel(session, db, hub, user, *, category_id, **kwargs):
         return None
 
     chat_loop_called = False

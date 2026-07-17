@@ -6717,3 +6717,123 @@ exact new prompt sequence, insert the right scripted key).
 **Testing**: full suite re-run: **1856 passed, 4 skipped** (up from
 round 105's 1852 -- 4 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 107 (Communities -- main-menu navigation restructuring implemented)
+
+Third and largest implementation slice of design doc §16: the actual
+`[C]ommunities`/`[U]ncategorized`/`[J]ump to...` navigation restructuring
+that gives Communities its whole reason to exist -- topic-first browsing
+replacing the resource-type-first split. Rounds 105/106 built the data
+model and admin tooling; this round is what an ordinary user actually
+sees and uses.
+
+**A real letter collision, resolved with Thiesi rather than silently
+picked**: round 84's original spec named the entry point
+`[E]nter a Community`, written before round 104 (this same session,
+earlier) claimed `E` for `-mail`. Presented as an explicit three-way
+choice (rename to `[T]opics`, reuse freed-up `[C]`, or move mail to a
+different letter) since it's a visible, effectively-permanent main-menu
+decision with no objectively correct answer -- Thiesi chose reusing the
+freed `[C]` (Chat moves one level into the shared sub-menu, freeing its
+old top-level letter). Documented here since it's a real design
+decision, not just an implementation nit.
+
+**`netbbs/net/login_flow.py` -- main-menu restructuring**: `_draw_main_menu`
+replaces the flat `[M]essage Boards`/`[C]hat`/`[F]ile areas` trio with
+`[C]ommunities`/`[U]ncategorized` (both conditionally visible, same
+"only offer what currently applies" convention as `[I]nvitations`) and
+`[J]ump to...` (always shown, matching the old flat menu's own
+unconditional behavior exactly -- Jump is meant to feel identical to
+pre-Communities browsing). New `_visible_communities_for` (hides
+`hidden` Communities from non-SysOps, same admin-bypass convention
+`has_permission`'s SysOp check already established), `_has_visible_communities`,
+`_has_uncategorized_resources`. New shared `_resource_type_menu` --
+the `[M]/[C]/[F]` sub-menu every one of the three entry points
+(`_enter_communities`/`_enter_uncategorized`/`_jump_to`) leads into,
+looping (not one-shot) so a user can check boards then chat within the
+same Community without re-entering the picker. Offers only resource
+types with a currently-visible match when Community/Uncategorized-
+scoped; Jump always offers all three unconditionally.
+
+**Community-filter threading through every browse function** --
+`_browse_boards_in_category` (login_flow.py), `_pick_channel`/
+`browse_channels` (chat_flow.py), `_browse_areas_in_category`/
+`browse_file_areas` (file_flow.py) all gained matching `community_id`/
+`community_scoped`/`title_prefix` keyword-only parameters, defaulting
+to today's exact unfiltered behavior for every existing caller.
+`community_scoped=True` filters directly on `resource.community_id ==
+community_id` -- works identically whether `community_id` is a real
+Community's id or `None` (Uncategorized), needing no special-casing
+per round 84's own design. `browse_channels` needed the filter threaded
+through its *entire* `/leave`/`/join` re-pick loop, not just the
+initial pick -- a repick after leaving a channel or an invalid-entry
+retry must stay within the same Community scope the user entered with,
+not silently widen to the full node. New public `has_visible_channels`/
+`has_visible_areas` (chat_flow.py/file_flow.py) back the main menu's
+and sub-menu's conditional visibility, mirroring `_has_visible_boards`.
+
+**Category leak prevention (design doc §16, round 84's own explicit
+concern)**: since Community and category are independent nullable FKs,
+nothing stops the same category row being used by boards in different
+Communities. Resolved at the query layer, schema untouched: when
+`community_scoped`, a category is only included in `categories_here` if
+at least one board/channel/area *already filtered to the current
+Community* uses it directly, or (for a top-level category) one of its
+sub-categories does -- `used_category_ids = {r.community_id for r in
+all_<resources> if r.category_id is not None}`, checked against the
+already-Community-filtered resource list, not the global one. The
+unfiltered Jump path applies no such filter, showing every category
+exactly as it always has.
+
+**Titles**: `"{Community name} — message boards"` / `"Uncategorized —
+message boards"` (and the channel/file-area equivalents) when
+`title_prefix` is given, else the browse function's own unchanged
+literal title ("Available message boards", etc.) for the unfiltered
+Jump case -- exactly the wording round 84 specified.
+
+**Deliberately not done this round** (see the design doc's own updated
+status note): the admin-side category-assignment picker
+(`_pick_optional_category` in `netbbs.net.admin_flow`) doesn't get the
+same community-scoped existence filter the end-user browse path now
+has, even though round 84's text names it explicitly alongside the
+browse path. Left for a later pass -- lower practical impact than the
+browse-side leak prevention (a curation-quality question for the admin
+choosing a category, not something an ordinary user could ever
+observe leaking, since nothing stops an admin creating a mis-scoped
+category by hand regardless). Also still not done: no actual
+enforcement call site (post read/write, channel entry, file-area
+read/write) resolves levels/age/name-requirement through a Community
+yet -- `get_effective_*` remain unused by anything outside
+`tests/test_communities.py`.
+
+**A test-breakage risk assessed before touching anything, not
+discovered after**: removing the top-level `[M]/[C]/[F]` main-menu keys
+risked breaking every test driving `_main_menu` directly with a
+scripted `"m"`/`"c"`/`"f"` as its first key. Checked which test files
+actually exercise `_main_menu` (only 8, most other board/chat/file-area
+tests call the browse functions directly, bypassing the main menu
+entirely) before running anything -- the full suite run afterward
+found exactly 5 breakages, matching that assessment: 4 in
+`tests/test_chat_flow_join.py` (a monkeypatched `fake_pick_channel`
+whose signature didn't accept the new `community_id`/`community_scoped`/
+`title_prefix` keywords -- fixed by adding `**kwargs`) and 1 in
+`tests/test_login_mailbox_flush.py` (scripted `"m"` no longer bound at
+the top level -- fixed by re-scripting through `"j"` then `"m"` inside
+the resource-type sub-menu).
+
+**Tests**: 15 new, `tests/test_communities_navigation.py` -- main-menu
+conditional visibility (Communities/Uncategorized shown or hidden per
+what actually exists, hidden-Community exclusion for a regular user vs.
+a SysOp still seeing it), the shared sub-menu offering only resource
+types with matching items, Community-scoped board browsing excluding
+both other Communities' and Uncategorized boards, Uncategorized
+browsing showing only Uncategorized boards, Jump showing the full
+unfiltered list with its title unchanged, both Community/Uncategorized
+titles, category leak prevention (a category used only by another
+Community's board doesn't leak into this Community's picker; a
+category genuinely used within this Community does show), and a
+spot-check that channel/file-area browsing get the identical Community-
+filter treatment as boards.
+
+**Testing**: full suite re-run: **1871 passed, 4 skipped** (up from
+round 106's 1856 -- 15 net new tests, no regressions elsewhere).
+
