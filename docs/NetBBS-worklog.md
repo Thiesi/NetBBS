@@ -7132,3 +7132,101 @@ scope note). No node-to-node transport exists yet either -- `node_identity`
 is real and verified, but nothing yet uses it to sign or send anything
 over a wire, since there is no wire yet.
 
+## Sign-off notes, round 112 (issue #57 implementation begins -- DatabaseLane infrastructure + mail_flow.py fully migrated)
+
+First implementation slice of round 91's two-lane database execution
+model. Design reasoning for the two complications discovered while
+doing this (signature-threading depth, synchronous picker callbacks) is
+in `docs/NetBBS-design-doc.md`, round 112; this entry is the
+implementation narrative.
+
+**New `netbbs/storage/execution.py`**: `DatabaseLane` -- one
+`ThreadPoolExecutor(max_workers=1)` per lane, its own `Database` opened
+lazily on first use *from inside the worker thread itself* (not
+whatever thread constructs the lane), a bounded `asyncio.Semaphore` for
+backpressure (`LaneBusyError` if `block_if_busy=False` and the lane's
+already at `max_queued`), and `async def run(func, *args, **kwargs)`
+which injects the lane's own `db` as `func`'s first positional argument
+via `functools.partial`, matching every existing business-logic
+function's `db`-first convention. `.path` exposes the lane's database
+file path directly (a plain attribute read, not a query -- see
+`netbbs.net.mail_flow._mail_draft_path`, the one caller that needs it).
+`.close()` submits the connection close as one more job on the lane's
+own thread, then shuts the executor down.
+
+**`netbbs/net/mail_flow.py` fully migrated** -- every function now
+takes `lane: DatabaseLane` instead of `db: Database`; every business-
+logic call goes through `await lane.run(...)`. The `_show_inbox`/
+`_show_sent` picker call sites now fetch `list_inbox`/`list_sent` and
+`resolve_display_preferences` up front via the lane, build plain
+`dict`s of pre-rendered descriptions, and pass `pick_item` closures over
+those dicts -- no DB access happens inside `name_of`/`description_of`
+anymore. `_mail_draft_path` dropped its `Database` parameter entirely,
+reading `lane.path` instead.
+
+**`netbbs/net/login_flow.py`**: `lane: DatabaseLane | None = None`
+threaded through `handle_session` -> `_run_authenticated_session` ->
+`run_authenticated_session` -> `_main_menu`, and separately through
+`handle_ssh_session` -> `run_authenticated_session` (both entry points
+converge on the same `run_authenticated_session`/`_main_menu` pair).
+`_main_menu`'s `"e"` (mail) branch calls `browse_mail(session, lane,
+user)` when `lane is not None`, else shows "Mail is not available in
+this context." -- same degrade-gracefully shape `node_controls=None`
+already established for the `[N]ode` admin option. Every other
+`_main_menu` branch (boards, channels, files, chat, directory, profile,
+admin) is untouched, still running on `db` directly -- unmigrated,
+matching design doc round 112's explicit scope note.
+
+**`netbbs/__main__.py`**: constructs `foreground_lane =
+DatabaseLane(config.db_path)` alongside the existing `db = Database(...)`
+(same file, WAL mode, a second independent connection -- exactly round
+91's model), opened lazily rather than eagerly at startup. Threaded into
+both `session_handler`/`ssh_session_handler` closures as `lane=
+foreground_lane`. Closed in the same `finally` block as `db.close()`,
+right before it.
+
+**Two existing tests fixed, not new behavior breaking**: monkeypatched
+spy functions in `tests/test_main_lifecycle.py`
+(`test_shutdown_event_and_graceful_delay_reach_handle_session`) and
+`tests/test_login_presence.py`
+(`test_presence_left_even_if_main_menu_raises`) stand in for
+`_run_authenticated_session`/`_main_menu` with a fixed parameter list --
+both needed the new `lane=None` keyword added to their signatures to
+keep accepting the real call, same as they'd need updating for any
+other new optional parameter on the function they're replacing.
+
+**Tests**: 16 new -- `tests/test_database_execution.py` (11: new file --
+`db` injection, keyword-argument support, connection reuse across
+calls, running on a distinct worker thread, multiple jobs sharing the
+same worker thread, not blocking the event loop while a job runs
+(verified with a concurrent ticker coroutine actually making progress),
+`block_if_busy` both ways, cancellation safety (a cancelled awaiter's
+already-running job still completes and its write is visible after),
+close on a never-used lane, and the lane's file actually persisting to
+the configured path), `tests/test_timeutil.py` (+4:
+`resolve_display_preferences` matching per-call `format_for_display`
+results, reflecting node config, falling back on invalid stored values,
+and giving identical results across a batch of timestamps to what
+repeated per-call resolution would have given), and
+`tests/test_mail_flow.py` (+1: `lane=None` degrades to "Mail is not
+available" rather than crashing; every other existing mail_flow test
+updated in place to construct a `DatabaseLane` instead of calling
+`browse_mail`/`_main_menu` with a bare `db`, not counted as new).
+
+**Testing**: full suite re-run: **1957 passed, 4 skipped** (up from
+round 111's 1941 -- 16 net new tests, no regressions elsewhere).
+
+**What's still open**: every other `net/` file (chat_flow.py,
+admin_flow.py, login_flow.py's own remaining ~2000 lines, file_flow.py,
+and the rest) still runs entirely on `db` directly, unmigrated -- design
+doc round 112's recipe (pass-through signatures -> `lane`, DB-touching
+picker callbacks -> eager pre-fetch, `lane` threaded alongside `db`
+during transition) is now established and proven against one real
+feature, but deliberately not applied further this round given the
+scale (~14,000 lines across `net/`, realistically several hundred
+individual call sites once every file is counted). Follow-up rounds
+apply the same recipe file by file. The background lane
+(`DatabaseLane` for Phase 3 Link activity) exists in
+`netbbs.storage.execution` but nothing constructs or uses one yet --
+there is no background Link work to run on it.
+

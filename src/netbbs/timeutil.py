@@ -156,6 +156,31 @@ def get_node_timezone(db: Database) -> ZoneInfo:
     return ZoneInfo(tz_name)
 
 
+def resolve_display_preferences(db: Database) -> tuple[str, str]:
+    """
+    The node-wide `(format, timezone)` pair, resolved and validated once
+    — design doc round 91/issue #57: once a DB read only happens via
+    `netbbs.storage.execution.DatabaseLane.run`, a caller building
+    several `format_for_display` calls in a batch (e.g. every row of a
+    `netbbs.net.picker.pick_item` listing) needs to fetch the node's
+    config *once* via the lane, then pass the results back into
+    `format_for_display`'s `override_format`/`override_timezone`
+    parameters for every item — never call `format_for_display` itself
+    with `db` directly inside a picker's `name_of`/`description_of`
+    callback, since those run synchronously, outside the lane. Also
+    strictly fewer DB reads than the old per-call pattern, which
+    re-resolved both settings from scratch on every single
+    `format_for_display(..., db)` call.
+    """
+    fmt = get_config(db, DISPLAY_FORMAT_CONFIG_KEY, default=_DEFAULT_DISPLAY_FORMAT)
+    if not is_valid_display_format(fmt):
+        fmt = _DEFAULT_DISPLAY_FORMAT
+    tz_name = get_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, default=_DEFAULT_DISPLAY_TIMEZONE)
+    if not is_valid_timezone(tz_name):
+        tz_name = _DEFAULT_DISPLAY_TIMEZONE
+    return fmt, tz_name
+
+
 def format_for_display(
     iso_timestamp: str,
     db: Database | None = None,

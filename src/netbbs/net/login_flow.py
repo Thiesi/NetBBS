@@ -127,6 +127,7 @@ from netbbs.rendering import (
     sanitize_text,
 )
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display
 
 _MAX_LOGIN_ATTEMPTS = 3
@@ -169,9 +170,22 @@ async def handle_session(
     *,
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
+
+    `lane` (design doc round 91/issue #57, Phase 3's database execution
+    model): the foreground `DatabaseLane`, threaded straight through to
+    `_main_menu`'s mail branch (`netbbs.net.mail_flow`, the first —
+    proof-of-pattern — module actually migrated onto the lane model).
+    Optional and defaulted to `None`, same reasoning as `node_controls`
+    below: every existing test calling this function directly, none of
+    which exercise mail, needs no changes; `netbbs.__main__.run()` is
+    the only caller that passes a real one. `db` above remains the
+    synchronous connection every *other* feature in this module still
+    uses unmigrated — the two coexist deliberately during this
+    transition, not a contradiction.
 
     `shutdown_event`/`graceful_delay_seconds` (design doc -- node
     management round) are bundled with `session_registry`/`maintenance`
@@ -233,7 +247,8 @@ async def handle_session(
     session_registry.enter(session)
     try:
         await _run_authenticated_session(
-            session, db, hub, presence, mailbox, throttle, throttle_config, node_controls=node_controls
+            session, db, hub, presence, mailbox, throttle, throttle_config,
+            node_controls=node_controls, lane=lane,
         )
     finally:
         session_registry.leave(session)
@@ -255,6 +270,7 @@ async def _run_authenticated_session(
     throttle_config: ThrottleConfig,
     *,
     node_controls: NodeControls | None = None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """The login-through-logoff body of a *Telnet/web* connection,
     wrapped by `handle_session`'s maintenance-mode check and session-
@@ -313,7 +329,9 @@ async def _run_authenticated_session(
     if login_result is LoginOutcome.BLOCKED:
         return
 
-    await run_authenticated_session(session, db, hub, presence, mailbox, login_result, node_controls=node_controls)
+    await run_authenticated_session(
+        session, db, hub, presence, mailbox, login_result, node_controls=node_controls, lane=lane
+    )
 
 
 async def _watch_for_account_revocation(
@@ -387,6 +405,7 @@ async def run_authenticated_session(
     user: User,
     *,
     node_controls: NodeControls | None = None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """
     The authenticated-through-logoff body of a connection (GitHub issue
@@ -431,7 +450,9 @@ async def run_authenticated_session(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )
     try:
-        await _main_menu(session, db, hub, presence, mailbox, history, user, node_controls=node_controls)
+        await _main_menu(
+            session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+        )
     finally:
         presence.leave(user.username)
         if watcher_task is not None:
@@ -498,6 +519,7 @@ async def handle_ssh_session(
     *,
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -557,7 +579,7 @@ async def handle_ssh_session(
         if isinstance(result, LoginOutcome):
             return
         await run_authenticated_session(
-            session, db, hub, presence, mailbox, result, node_controls=node_controls
+            session, db, hub, presence, mailbox, result, node_controls=node_controls, lane=lane
         )
     finally:
         session_registry.leave(session)
@@ -725,6 +747,7 @@ async def _main_menu(
     user: User,
     *,
     node_controls: NodeControls | None = None,
+    lane: DatabaseLane | None = None,
 ) -> None:
     """
     The main menu, now dispatching immediately on a single keystroke
@@ -798,7 +821,19 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "e":
             await session.write_line("")
-            await browse_mail(session, db, user)
+            # design doc round 91/issue #57: mail is the first feature
+            # migrated onto the two-lane database execution model --
+            # `lane` is None only for a direct test call site that
+            # doesn't supply one (same degrade-gracefully-in-tests
+            # shape `node_controls` already uses above), never for a
+            # real connection, since netbbs.__main__.run() always
+            # passes a real foreground lane.
+            if lane is not None:
+                await browse_mail(session, lane, user)
+            else:
+                await session.write_line(
+                    colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
+                )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "i" and list_pending_invitations_for_user(db, user):
             await session.write_line("")

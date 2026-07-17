@@ -6789,3 +6789,96 @@ changes because of this round.
 **Implementation of round 89's node key-lifecycle model, using this
 format, is round 111** — see `docs/NetBBS-worklog.md`.
 
+## Sign-off notes, round 112 (issue #57 implementation begins — two complications round 91 didn't anticipate, resolved)
+
+Round 91 chose the two-lane database execution model but explicitly
+left "the actual implementation (wrapping the real call sites, wiring
+the two executors into node startup)... open" (round 91's own closing
+line). Starting that implementation — on `netbbs.net.mail_flow`, chosen
+as a small, self-contained, real feature to prove the pattern against
+before applying it net/-wide — surfaced two structural complications
+round 91's design didn't anticipate, both discovered only by actually
+attempting the migration, not by further up-front analysis. Both are
+resolved here; this note is scoped to *those two resolutions*, not a
+restatement of round 91's already-settled two-lane choice itself.
+
+**1. Signature threading is deeper than "wrap the leaf call sites."**
+Round 91 said existing call sites "move... from a direct synchronous
+call to `await loop.run_in_executor(lane, existing_function, *args)`."
+That's accurate for the literal leaf call, but incomplete on its own:
+because each lane owns *its own* SQLite connection (not the single
+connection every function currently receives as `db`), any function
+that today holds `db: Database` purely to thread it down to an eventual
+leaf call no longer has a `db` object of its own to pass — it needs to
+hold the *lane* instead. In `netbbs.net.mail_flow` alone this reached
+`browse_mail`, `_show_inbox`, `_show_sent`, `_render_message`,
+`_compose_mail`, and several more — none of which touch the database
+directly themselves, all of which exist solely to pass `db` one level
+further down. **Resolution: `db: Database` becomes `lane: DatabaseLane`
+at every such pass-through signature, not just at leaf calls** —
+mechanically larger than round 91's own wording suggested, but not a
+different mechanism, just a wider footprint for the identical one.
+
+**2. Synchronous picker callbacks cannot make lane calls.**
+`netbbs.net.picker.pick_item`'s `name_of`/`description_of` parameters
+are plain synchronous callables, invoked inside its own render loop —
+and several existing call sites build those callbacks as lambdas that
+read the database directly (`netbbs.net.mail_flow`'s inbox/sent
+listings called `netbbs.timeutil.format_for_display(created_at, db)`
+per row, and this shape repeats at picker call sites throughout boards,
+channels, and file areas). Once a DB read only happens via `await
+lane.run(...)`, a synchronous callback structurally cannot make one —
+there is no way to `await` inside it. **Confirmed with Thiesi: resolve
+by eager pre-fetch, not by making `pick_item`'s callbacks async.**
+Every such call site now fetches whatever its callbacks need — via the
+lane, once, in a batch — *before* calling `pick_item`, and the
+callbacks become closures over that already-fetched data. `pick_item`
+itself is untouched: no change to its contract, no ripple into every
+*other* call site that doesn't happen to need a DB read in its
+callback. The rejected alternative (making `name_of`/`description_of`
+async, awaited inside `pick_item`'s loop) was explicitly weighed and
+set aside — it would touch a core, heavily-used shared abstraction's
+API and every existing call site's lambda signature, including ones
+with no DB access at all, for a problem eager pre-fetch solves without
+touching `pick_item` at all.
+
+A direct consequence of point 2: `netbbs.timeutil` gained
+`resolve_display_preferences(db) -> tuple[format, timezone]`, fetching
+the node's display format/timezone *once* (via the lane) rather than
+`format_for_display`'s old per-call resolution — every item in a batch
+then calls `format_for_display(timestamp, override_format=..., 
+override_timezone=...)` with no further DB access. Strictly fewer reads
+than the pre-migration per-row behavior, not just an equivalent
+restructuring.
+
+**Migration strategy: `lane` and `db` deliberately coexist during the
+transition, not a flag-day switch.** `netbbs.__main__.run()` now
+constructs both a `Database` (`db`, everything not yet migrated) and a
+`DatabaseLane` (`foreground_lane`, opened lazily, same file, WAL mode)
+and threads *both* down through `handle_session`/`handle_ssh_session`/
+`_main_menu` — `lane: DatabaseLane | None = None`, optional and
+defaulted exactly the way `node_controls: NodeControls | None = None`
+already works, so no existing call site or test not touching mail needs
+any change. Only `netbbs.net.mail_flow` actually requires `lane` (a
+hard requirement inside that module — the coexistence is at the
+call-chain-threading level, not inside the migrated module itself,
+which has no `db` fallback path to keep in sync). Given a `lane is
+None` scenario is a same-shape situation to `node_controls is None`,
+it degrades the same way: `_main_menu`'s mail option shows "Mail is not
+available in this context." rather than crashing — reachable only from
+a test bypassing real node startup, since `netbbs.__main__.run()`
+always constructs and passes a real one.
+
+**What this establishes for every future net/ file's migration**
+(explicitly *not* attempted further this round — see
+`docs/NetBBS-worklog.md` round 112 for what's implemented vs. what
+remains): the same three-part recipe now applies uniformly — (a)
+pass-through signatures become `lane: DatabaseLane`, not just leaf
+calls; (b) any DB-touching picker callback gets eager-pre-fetched
+before the `pick_item` call, never restructured into an async
+callback; (c) the caller chain gets `lane` threaded through as an
+additional optional-then-required parameter, coexisting with `db` for
+everything not yet migrated. Nothing about this recipe is file-specific
+to mail — it should apply directly to boards, channels, file areas, and
+chat when each is migrated in turn.
+

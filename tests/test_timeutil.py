@@ -12,6 +12,7 @@ from netbbs.timeutil import (
     format_for_display,
     is_valid_display_format,
     is_valid_timezone,
+    resolve_display_preferences,
     set_display_format,
     set_display_timezone,
     utc_now_iso,
@@ -66,6 +67,49 @@ def test_display_falls_back_to_default_when_no_node_config_set(tmp_path):
     db = Database(tmp_path / "node.db")
     stamp = "2026-07-09T14:32:07.123456Z"
     assert format_for_display(stamp, db) == "09.07.2026 14:32"
+    db.close()
+
+
+# -- resolve_display_preferences (design doc round 91/issue #57) -----------
+
+
+def test_resolve_display_preferences_defaults_with_no_config_set(tmp_path):
+    db = Database(tmp_path / "node.db")
+    fmt, tz = resolve_display_preferences(db)
+    stamp = "2026-07-09T14:32:07.123456Z"
+    assert format_for_display(stamp, override_format=fmt, override_timezone=tz) == format_for_display(stamp, db)
+    db.close()
+
+
+def test_resolve_display_preferences_reflects_node_config(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_config(db, DISPLAY_FORMAT_CONFIG_KEY, "%Y-%m-%d %H:%M")
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, "America/New_York")
+    fmt, tz = resolve_display_preferences(db)
+    assert fmt == "%Y-%m-%d %H:%M"
+    assert tz == "America/New_York"
+    db.close()
+
+
+def test_resolve_display_preferences_falls_back_on_invalid_stored_values(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_config(db, DISPLAY_FORMAT_CONFIG_KEY, "%Q garbage")
+    set_config(db, DISPLAY_TIMEZONE_CONFIG_KEY, "not/a/real/zone")
+    fmt, tz = resolve_display_preferences(db)
+    assert is_valid_display_format(fmt)
+    assert is_valid_timezone(tz)
+    db.close()
+
+
+def test_resolve_display_preferences_matches_repeated_format_for_display_calls(tmp_path):
+    """The whole point: fetch once, apply to many items, with the exact
+    same result format_for_display(..., db) would have given per-call."""
+    db = Database(tmp_path / "node.db")
+    set_config(db, DISPLAY_FORMAT_CONFIG_KEY, "%d.%m.%Y")
+    fmt, tz = resolve_display_preferences(db)
+    stamps = ["2026-07-09T14:32:07.123456Z", "2026-01-01T00:00:00.000000Z"]
+    for stamp in stamps:
+        assert format_for_display(stamp, override_format=fmt, override_timezone=tz) == format_for_display(stamp, db)
     db.close()
 
 

@@ -179,7 +179,7 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
 
     captured: dict = {}
 
-    async def spy(session, db, hub, presence, mailbox, throttle, throttle_config, *, node_controls=None):
+    async def spy(session, db, hub, presence, mailbox, throttle, throttle_config, *, node_controls=None, lane=None):
         captured["node_controls"] = node_controls
 
     monkeypatch.setattr(login_flow, "_run_authenticated_session", spy)

@@ -30,6 +30,7 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import run_shutdown_sequence
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
 
@@ -183,6 +184,17 @@ async def run(
 
     db = Database(config.db_path)
 
+    # Design doc round 91/issue #57: the foreground DatabaseLane -- a
+    # second, independent connection to the same database file (WAL
+    # mode makes this safe), off the event loop, that migrated features
+    # dispatch through instead of calling business logic directly via
+    # `db`. Only `netbbs.net.mail_flow` (the first module migrated,
+    # proof-of-pattern) actually uses it yet -- every other feature
+    # still runs on `db` directly, unmigrated, per design doc round 111.
+    # Opened lazily on first use, not here, so node startup doesn't pay
+    # for a connection nothing may touch this run.
+    foreground_lane = DatabaseLane(config.db_path)
+
     # GitHub issue #34, reopened a third time: any file left under
     # .incoming staging is guaranteed stale at this exact point --
     # nothing has had a chance to start a legitimate upload yet, so
@@ -257,6 +269,7 @@ async def run(
             session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+            lane=foreground_lane,
         )
 
     async def ssh_session_handler(session):
@@ -269,6 +282,7 @@ async def run(
             session, db, hub, presence, mailbox, session_registry, maintenance,
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+            lane=foreground_lane,
         )
 
     servers: list = []
@@ -315,6 +329,7 @@ async def run(
             pass
         for server in reversed(servers):
             await server.stop()
+        foreground_lane.close()
         db.close()
         _logger.info("NetBBS node shut down cleanly")
 
