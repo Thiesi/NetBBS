@@ -1185,11 +1185,20 @@ async def _resource_type_menu(
             )
         elif choice == "c" and show_channels:
             await session.write_line("")
-            session_registry = node_controls.session_registry if node_controls is not None else None
-            await browse_channels(
-                session, db, hub, presence, mailbox, history, user, session_registry=session_registry,
-                community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
-            )
+            # design doc round 91/114: chat is the third feature migrated
+            # onto the two-lane database execution model -- see the "e"
+            # (mail) branch above for the identical lane-is-None
+            # degrade-gracefully reasoning.
+            if lane is not None:
+                session_registry = node_controls.session_registry if node_controls is not None else None
+                await browse_channels(
+                    session, lane, hub, presence, mailbox, history, user, session_registry=session_registry,
+                    community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                )
+            else:
+                await session.write_line(
+                    colored("Chat is not available in this context.", fg_color=MUTED_COLOR)
+                )
         elif choice == "f" and show_areas:
             await session.write_line("")
             # design doc round 91/112: file areas are the second feature

@@ -238,6 +238,7 @@ def test_chat_scrollback_replay_sanitizes_author_and_body(tmp_path):
 
 def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     db = Database(tmp_path / "node.db")
+    lane = DatabaseLane(db.path)
     sender = create_user(db, "alice", password="hunter2", user_level=10)
     recipient = create_user(db, "bob", password="hunter2", user_level=10)
     channel = create_channel(db, "lobby", creator=sender)
@@ -258,7 +259,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
             received.append(await queue.get())  # sender's leave notice
 
         collector = asyncio.create_task(collect_one())
-        await _chat_loop(sender_session, db, hub, presence, mailbox, InputHistory(), channel, sender)
+        await _chat_loop(sender_session, lane, hub, presence, mailbox, InputHistory(), channel, sender)
         await collector
         hub.leave(channel.name, bob_participant)
 
@@ -278,6 +279,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     ]
     broadcast_text = "".join(received_text)
     _assert_hostile_payload_neutralized(broadcast_text)
+    lane.close()
     db.close()
 
 

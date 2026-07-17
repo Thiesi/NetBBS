@@ -30,6 +30,7 @@ from netbbs.net import char_input, chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -38,6 +39,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -74,11 +82,11 @@ def _written_text(session) -> str:
     return "".join(session.written)
 
 
-async def _run(db, hub, presence, mailbox, channel, user, lines):
+async def _run(lane, hub, presence, mailbox, channel, user, lines):
     session = FakeSession(lines)
     history = InputHistory()
     action = await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user),
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user),
         timeout=2,
     )
     return session, action
@@ -87,16 +95,16 @@ async def _run(db, hub, presence, mailbox, channel, user, lines):
 # -- initial paint / redraw-after-command, via the whole-line FakeSession --
 
 
-def test_input_row_is_painted_on_entry_with_the_prompt_marker(db, hub, presence, mailbox, channel, alice):
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+def test_input_row_is_painted_on_entry_with_the_prompt_marker(lane, hub, presence, mailbox, channel, alice):
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     text = _written_text(session)
     # Row 23 on the default 80x24 terminal (row 22 is the last scrolling
     # row, row 24 is the status row -- design doc round 79).
     assert "\x1b[23;1H\x1b[2K> " in text
 
 
-def test_input_row_is_redrawn_empty_after_a_command(db, hub, presence, mailbox, channel, alice):
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
+def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox, channel, alice):
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     text = _written_text(session)
     # At least two distinct "row 23, cleared, prompt-only" repaints --
     # one on entry, at least one more after /away's own dispatch.
@@ -129,7 +137,7 @@ def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence
     assert "..." in text
 
 
-def test_pinned_ui_min_height_requires_three_rows(db, hub, presence, mailbox, channel, alice):
+def test_pinned_ui_min_height_requires_three_rows(lane, hub, presence, mailbox, channel, alice):
     """Design doc round 79: one more than the status-line-only minimum
     (2, round 75) -- at least one row of actual scrolling content, plus
     both reserved rows."""
@@ -138,7 +146,7 @@ def test_pinned_ui_min_height_requires_three_rows(db, hub, presence, mailbox, ch
     history = InputHistory()
     asyncio.run(
         asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
     )
     text = _written_text(session)
@@ -224,7 +232,7 @@ class _LiveTypingSession(Session):
         return "".join(self.written)
 
 
-def test_in_progress_typing_survives_an_incoming_message(db, hub, presence, mailbox, channel, alice, bob):
+def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, mailbox, channel, alice, bob):
     """
     The actual bug this whole round exists to fix: an incoming chat
     message arriving while alice is mid-keystroke must not corrupt or
@@ -237,7 +245,7 @@ def test_in_progress_typing_survives_an_incoming_message(db, hub, presence, mail
         alice_session = _LiveTypingSession()
         alice_task = asyncio.create_task(
             chat_flow._chat_loop(
-                alice_session, db, hub, presence, mailbox, InputHistory(), channel, alice
+                alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
             )
         )
         await asyncio.sleep(0.05)  # let alice join and reach her first read_line()
@@ -249,7 +257,7 @@ def test_in_progress_typing_survives_an_incoming_message(db, hub, presence, mail
         bob_session = FakeSession(["hello there", "/quit"])
         await asyncio.wait_for(
             chat_flow._chat_loop(
-                bob_session, db, hub, presence, mailbox, InputHistory(), channel, bob
+                bob_session, lane, hub, presence, mailbox, InputHistory(), channel, bob
             ),
             timeout=2,
         )
@@ -452,7 +460,7 @@ def test_web_session_enter_completion_is_atomic_with_concurrent_lock_holder():
 # -- GitHub issue #46: pinned UI must track resize dynamically, not once --
 
 
-def test_shrink_below_minimum_mid_session_then_submit_does_not_crash(db, hub, presence, mailbox, channel, alice):
+def test_shrink_below_minimum_mid_session_then_submit_does_not_crash(lane, hub, presence, mailbox, channel, alice):
     """The core defect: `_chat_loop` used to decide `pinned_ui_enabled`
     once at entry and trust it for the whole session. Shrinking below
     `_PINNED_UI_MIN_HEIGHT` afterward made the next submitted line's own
@@ -462,7 +470,7 @@ def test_shrink_below_minimum_mid_session_then_submit_does_not_crash(db, hub, pr
     async def scenario():
         session = _LiveTypingSession()  # starts at 24 rows
         task = asyncio.create_task(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
         await asyncio.sleep(0.05)  # join + initial pinned-UI paint
 
@@ -481,7 +489,7 @@ def test_shrink_below_minimum_mid_session_then_submit_does_not_crash(db, hub, pr
 
 
 def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
-    db, hub, presence, mailbox, channel, alice, bob
+    lane, hub, presence, mailbox, channel, alice, bob
 ):
     """Same defect, hit via `receive_loop`'s `deliver()` instead of
     `send_loop` -- an incoming broadcast while too-short must not crash
@@ -491,7 +499,7 @@ def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
         alice_session = _LiveTypingSession()
         alice_task = asyncio.create_task(
             chat_flow._chat_loop(
-                alice_session, db, hub, presence, mailbox, InputHistory(), channel, alice
+                alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
             )
         )
         await asyncio.sleep(0.05)
@@ -500,7 +508,7 @@ def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
 
         bob_session = FakeSession(["hi there", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(bob_session, db, hub, presence, mailbox, InputHistory(), channel, bob),
+            chat_flow._chat_loop(bob_session, lane, hub, presence, mailbox, InputHistory(), channel, bob),
             timeout=2,
         )
         await asyncio.sleep(0.05)  # let alice's receive_loop process the broadcast
@@ -515,7 +523,7 @@ def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
     assert isinstance(action, chat_flow._Quit)
 
 
-def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(db, hub, presence, mailbox, channel, alice):
+def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(lane, hub, presence, mailbox, channel, alice):
     """The reverse transition, also broken before this fix (design doc
     round 79's pinned UI never rechecked height after entry at all): a
     session that enters chat too short to support the pinned UI, then
@@ -526,7 +534,7 @@ def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(db, hub, prese
         session = _LiveTypingSession()
         session.terminal_height = 2  # too short from the very start
         task = asyncio.create_task(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
         await asyncio.sleep(0.05)
 
@@ -552,7 +560,7 @@ def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(db, hub, prese
 
 
 def test_repeated_threshold_crossings_track_the_current_height_each_time(
-    db, hub, presence, mailbox, channel, alice
+    lane, hub, presence, mailbox, channel, alice
 ):
     """Shrink, grow, shrink again within one session -- each transition
     must reflect the terminal's size *at that moment*, and exit cleanup
@@ -564,7 +572,7 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
     async def scenario():
         session = _LiveTypingSession()  # starts tall (24 rows)
         task = asyncio.create_task(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice)
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
         )
         await asyncio.sleep(0.05)
 

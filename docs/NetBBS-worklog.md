@@ -7308,3 +7308,122 @@ admin_flow.py, the rest of login_flow.py, and the rest) remains on `db`
 directly. Two files down, following the same recipe each time; the
 remaining scope is unchanged from round 112's own estimate.
 
+## Sign-off notes, round 114 (issue #57 implementation continues -- chat_flow.py migrated, third and largest file; no functions exempted)
+
+Third file migrated onto round 91's two-lane model. Largest and most
+complex file in the migration (2794 lines going in) — real-time chat,
+two concurrent per-session tasks (`send_loop`/`receive_loop`), a
+picker, a synchronous Tab-completer callback, and a pinned status/
+input row that repaints from both tasks concurrently. Per Thiesi's own
+choice this round (chat hot-paths question), **no functions are
+exempted** the way round 112's `unread_mail_count` and round 113's
+`has_visible_areas` were — every DB-touching code path in this file,
+including the status line and completer, now goes through `lane`.
+
+**`netbbs/net/chat_flow.py` fully migrated** onto `lane: DatabaseLane`,
+reachable from `browse_channels`/`_chat_loop`. Three restructuring
+patterns beyond round 112/113's established recipe (pass-through
+signature rename, `db`-first leaf functions dispatched via `lane.run`,
+bundled per-item loops):
+
+- **The Tab completer.** `netbbs.net.char_input.Completer`'s contract
+  is a plain synchronous callback — it can't itself make a lane call.
+  `_build_completer` became `async def`, gathering everything the
+  returned closure will ever need (visible commands, all usernames,
+  member usernames) in one `lane.run()` call *before* constructing the
+  synchronous `completer(text)` closure, rather than trying to make the
+  closure itself async.
+- **Split sync-read/async-write functions.** `_resolve_target` and
+  `_write_vcard_detail` each mix a DB read with session I/O (which
+  can't happen inside a lane job, since a lane job can't itself
+  `await`). Split into `await lane.run(...)` for the read, then a plain
+  `await session.write(...)`/`format_for_display(...)` afterward in the
+  same coroutine.
+- **Bundled ban/mute checks.** New `_check_ban`/`_check_mute` helpers
+  combine a moderation-state check with its expiry-text formatting into
+  one function, so `_chat_loop`'s ban check, `send_loop`'s mute check,
+  and `_handle_me`'s mute check are each one `lane.run()` call instead
+  of two.
+
+**A real correctness bug, found via a test and fixed as part of this
+migration, not a pre-existing one:** the two
+`tests/test_chat_flow_cancellation.py` tests (regression tests for a
+real Ctrl-C-on-NetBSD bug, see that file's own docstring) failed after
+migration — not from a test-authoring mistake, but because the
+migration itself opened a real gap. Before round 91, everything between
+`hub.join()` and the `try`/`finally` wrapping `_chat_loop`'s
+receive/send-task wait was synchronous `db` access with no real
+`await` points — a cancellation arriving in that window was structurally
+impossible, so the `finally` block's `hub.leave()` cleanup only ever
+needed to cover the wait itself. Post-migration, that same span
+(scrollback fetch/render, the join broadcast, the initial status-line
+paint) crosses several real `lane.run()` thread-pool round trips —
+genuine `await` points a cancellation can now land on. A session
+cancelled during that window (e.g. `ActiveSessionRegistry.
+disconnect_all()` during a slow scrollback replay) would skip
+`hub.leave()` entirely, orphaning it in the `ChatHub` forever. Fixed by
+moving the `try:` up to immediately after `hub.join()`, so the existing
+`finally:` cleanup now covers the whole post-join body, not just the
+task-wait. **Flagged as a pattern to check on any future file
+migration**: wherever a lane migration turns a previously-synchronous,
+uncancellable span into one with real `await` points, any `finally`-
+based cleanup that used to implicitly rely on that span being atomic
+needs to be checked for the same gap — the tests happened to already
+exist here (written for an unrelated bug) and caught it; a file without
+an equivalent cancellation test could have carried this silently.
+
+**Two new categories of test timing fragility**, both from the same
+root cause (real thread-pool round trips now add wall-clock latency a
+bare `await asyncio.sleep(0)` can't reliably outlast), fixed
+individually across ten migrated test files: (1) "let X join before Y
+acts" races, fixed by polling `while hub.participant_count(channel.name)
+< 1: await asyncio.sleep(0)` instead of one `sleep(0)`; (2) "assert on
+a watcher's rendered output immediately after an event" races (the
+event is already recorded/broadcast by the time the acting session's
+`_chat_loop` returns, but the *watcher's* `receive_loop` still needs a
+scheduling turn plus its own `lane.run()` dispatch to render and write
+it), fixed with a short real `await asyncio.sleep(0.05)`.
+
+**A process note, not a design finding:** partway through this round,
+an attempt to fix an unrelated indentation slip via `git checkout --
+src/netbbs/net/chat_flow.py` discarded the round's uncommitted work
+(never staged, so nothing for git itself to recover) — caught
+immediately, recovered from OneDrive's own file version history (this
+repo lives under OneDrive-synced storage), and the indentation issue
+re-fixed properly afterward. No lasting effect on the code, but worth
+recording as a reminder of why the standing git-safety convention
+(`git status` before any command that can discard uncommitted work)
+exists — this round is the concrete incident that convention is for.
+
+**`netbbs/net/login_flow.py`**: the `"c"` (chat) branch in
+`_resource_type_menu` gets the same `lane is not None` degrade-
+gracefully-to-"not available in this context" treatment as mail's `"e"`
+branch (round 112) and file areas' `"f"` branch (round 113).
+
+**Tests**: 0 new — eleven files updated in place to construct a
+`DatabaseLane` and thread `lane` through every `_chat_loop`/
+`browse_channels`/`_build_completer` call site: `test_chat_flow_
+moderation.py`, `test_chat_flow_join.py`, `test_chat_flow_timestamps.py`,
+`test_chat_pinned_input.py`, `test_chat_discovery.py`,
+`test_chat_action.py`, `test_chat_flow_private.py`, `test_chat_
+verified_name_display.py`, `test_chat_flow_nick.py`, `test_chat_flow_
+membership.py`, `test_chat_status_line.py`, `test_chat_visibility.py`,
+`test_chat_flow_picker_authorization.py`, `test_chat_flow_away.py`,
+`test_chat_flow_cancellation.py`, `test_chat_flow_account_
+revalidation.py`, `test_chat_help.py`, `test_chat_dispatch.py`,
+`test_chat_completion.py` (the last one calls `_build_completer`
+directly and needed `asyncio.run(...)` added around each call, since
+that function is now `async def`), plus `test_terminal_sanitization.py`'s
+one chat call site.
+
+**Testing**: full suite re-run: **1957 passed, 4 skipped** (unchanged
+from round 112/113's count — no net new tests, existing coverage
+preserved, plus the cancellation-window bug above caught for real by
+existing tests rather than silently regressing).
+
+**What's still open**: `admin_flow.py` and the rest of `login_flow.py`
+remain on `db` directly. Three files down (mail, files, chat — the
+three highest-traffic interactive loops); admin and the remaining
+login_flow.py menu branches are the rest of round 91/issue #57's
+original scope.
+

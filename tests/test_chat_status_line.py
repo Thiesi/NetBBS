@@ -29,6 +29,7 @@ from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -37,6 +38,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -73,12 +81,12 @@ def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
 
-async def _run(db, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
+async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
     session = FakeSession(lines)
     history = InputHistory()
     action = await asyncio.wait_for(
         chat_flow._chat_loop(
-            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
         ),
         timeout=2,
     )
@@ -207,44 +215,44 @@ def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, a
 # -- scroll region setup/teardown, via the real _chat_loop --------------
 
 
-def test_chat_loop_sets_a_scroll_region_reserving_the_last_two_rows(db, hub, presence, mailbox, channel, alice):
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+def test_chat_loop_sets_a_scroll_region_reserving_the_last_two_rows(lane, hub, presence, mailbox, channel, alice):
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     # Default FakeSession terminal is 80x24 (netbbs.net.session.Session's
     # own class defaults) -- rows 1-22 scroll, row 23 is the pinned
     # input row, row 24 is the status row (design doc round 79).
     assert "\x1b[1;22r" in _written_text(session)
 
 
-def test_chat_loop_clears_the_screen_on_entry(db, hub, presence, mailbox, channel, alice):
+def test_chat_loop_clears_the_screen_on_entry(lane, hub, presence, mailbox, channel, alice):
     """Setting a scroll region moves the real terminal cursor home as
     an unavoidable side effect of the escape sequence itself -- entry
     clears the screen first so that jump lands on a blank canvas
     rather than overwriting whatever screen preceded chat."""
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     assert _written_text(session).startswith("\x1b[2J\x1b[H")
 
 
-def test_chat_loop_resets_the_scroll_region_on_exit(db, hub, presence, mailbox, channel, alice):
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+def test_chat_loop_resets_the_scroll_region_on_exit(lane, hub, presence, mailbox, channel, alice):
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     assert "\x1b[r" in _written_text(session)
 
 
-def test_chat_loop_clears_the_screen_on_exit(db, hub, presence, mailbox, channel, alice):
+def test_chat_loop_clears_the_screen_on_exit(lane, hub, presence, mailbox, channel, alice):
     """Design doc round 77 bugfix: neither the channel picker (/leave)
     nor the main menu (/quit) ever clear the screen themselves, so
     without an exit-side clear here the last screenful of chat stayed
     visible until unrelated output happened to overwrite it."""
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/quit"]))
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     assert _written_text(session).endswith("\x1b[r\x1b[2J\x1b[H")
 
 
-def test_chat_loop_skips_the_pinned_ui_on_a_too_short_terminal(db, hub, presence, mailbox, channel, alice):
+def test_chat_loop_skips_the_pinned_ui_on_a_too_short_terminal(lane, hub, presence, mailbox, channel, alice):
     session = FakeSession(["/quit"])
     session.terminal_height = 1  # below _PINNED_UI_MIN_HEIGHT (3)
     history = InputHistory()
     asyncio.run(
         asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
     )
     text = _written_text(session)
@@ -253,7 +261,7 @@ def test_chat_loop_skips_the_pinned_ui_on_a_too_short_terminal(db, hub, presence
 
 
 def test_chat_loop_resets_the_scroll_region_even_if_that_write_itself_fails(
-    db, hub, presence, mailbox, channel, alice
+    lane, hub, presence, mailbox, channel, alice
 ):
     """A session that's already gone (the common reason _chat_loop is
     unwinding at all) must not crash the cleanup path or mask whatever
@@ -273,7 +281,7 @@ def test_chat_loop_resets_the_scroll_region_even_if_that_write_itself_fails(
     # finally block's own best-effort reset write.
     action = asyncio.run(
         asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
     )
     assert isinstance(action, chat_flow._Quit)
@@ -282,23 +290,23 @@ def test_chat_loop_resets_the_scroll_region_even_if_that_write_itself_fails(
 # -- repaint triggers -----------------------------------------------------
 
 
-def test_status_line_repaints_after_a_self_state_changing_command(db, hub, presence, mailbox, channel, alice):
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
+def test_status_line_repaints_after_a_self_state_changing_command(lane, hub, presence, mailbox, channel, alice):
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     text = _written_text(session)
     # At least one repaint after the /away command shows the new state.
     assert "[away]" in text
 
 
-def test_status_line_repaints_when_a_muted_message_is_rejected(db, hub, presence, mailbox, channel, alice, bob):
+def test_status_line_repaints_when_a_muted_message_is_rejected(db, lane, hub, presence, mailbox, channel, alice, bob):
     _grant_moderate(db, bob, channel)
     mute_user(db, channel, alice, duration=None, reason=None, muted_by=bob)
-    session, _ = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["hello", "/quit"]))
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["hello", "/quit"]))
     text = _written_text(session)
     assert "You are muted" in text
     assert "[muted]" in text
 
 
-def test_status_line_reflects_a_second_participant_joining(db, hub, presence, mailbox, channel, alice, bob):
+def test_status_line_reflects_a_second_participant_joining(lane, hub, presence, mailbox, channel, alice, bob):
     """alice's own status line must pick up bob's arrival -- driven via
     receive_loop's handling of the join notice bob's own _chat_loop
     broadcasts, not anything alice typed herself."""
@@ -307,12 +315,13 @@ def test_status_line_reflects_a_second_participant_joining(db, hub, presence, ma
         alice_session = FakeSession([])  # never types anything -- observes only
         alice_task = asyncio.create_task(
             chat_flow._chat_loop(
-                alice_session, db, hub, presence, mailbox, InputHistory(), channel, alice
+                alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
             )
         )
-        await asyncio.sleep(0.05)  # let alice actually join first
+        while hub.participant_count(channel.name) < 1:
+            await asyncio.sleep(0)
 
-        bob_session, _ = await _run(db, hub, presence, mailbox, channel, bob, ["/quit"])
+        bob_session, _ = await _run(lane, hub, presence, mailbox, channel, bob, ["/quit"])
 
         alice_task.cancel()
         try:

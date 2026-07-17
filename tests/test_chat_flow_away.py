@@ -22,6 +22,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -30,6 +31,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -56,39 +64,39 @@ def _written_text(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, channel, user, lines):
+async def _run(lane, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
     history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
 
 
-def test_away_with_message_sets_status(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/away gone to lunch", "/quit"]))
+def test_away_with_message_sets_status(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/away gone to lunch", "/quit"]))
     assert "You are now marked away: gone to lunch" in _written_text(session)
     assert presence.is_away("alice") is True
     assert presence.get_away_message("alice") == "gone to lunch"
 
 
-def test_away_with_no_args_clears_existing_status(db, hub, presence, alice, channel):
+def test_away_with_no_args_clears_existing_status(db, lane, hub, presence, alice, channel):
     presence.set_away("alice", "brb")
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/away", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/away", "/quit"]))
     assert "You are no longer marked away." in _written_text(session)
     assert presence.is_away("alice") is False
 
 
-def test_away_with_no_args_and_not_away_shows_message(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/away", "/quit"]))
+def test_away_with_no_args_and_not_away_shows_message(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/away", "/quit"]))
     assert "You are not currently marked away." in _written_text(session)
 
 
-def test_away_not_written_to_scrollback(db, hub, presence, alice, channel):
+def test_away_not_written_to_scrollback(db, lane, hub, presence, alice, channel):
     from netbbs.chat.scrollback import get_scrollback
 
-    asyncio.run(_run(db, hub, presence, channel, alice, ["/away gone to lunch", "/quit"]))
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["/away gone to lunch", "/quit"]))
     # join/leave events are always recorded regardless -- /away itself
     # must not add anything beyond those (design doc round 32: not
     # written to channel scrollback or broadcast as a channel event).
@@ -96,7 +104,7 @@ def test_away_not_written_to_scrollback(db, hub, presence, alice, channel):
     assert {m.kind for m in scrollback} == {"join", "leave"}
 
 
-def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
+def test_away_not_broadcast_to_others(db, lane, hub, presence, alice, channel):
     bob = create_user(db, "bob", password="hunter2", user_level=10)
 
     async def scenario():
@@ -104,13 +112,14 @@ def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
         history = InputHistory()
         watcher = FakeSession()
         watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
+            chat_flow._chat_loop(watcher, lane, hub, presence, mailbox, history, channel, bob)
         )
-        await asyncio.sleep(0)
+        while hub.participant_count(channel.name) < 1:
+            await asyncio.sleep(0)
 
         actor = FakeSession(["/away gone to lunch", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(actor, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -131,22 +140,22 @@ def test_away_not_broadcast_to_others(db, hub, presence, alice, channel):
 # -- sending while away (design doc round 32, point 6) ----------------------
 
 
-def test_sending_a_message_while_away_reminds_but_does_not_clear(db, hub, presence, alice, channel):
+def test_sending_a_message_while_away_reminds_but_does_not_clear(db, lane, hub, presence, alice, channel):
     session = asyncio.run(
-        _run(db, hub, presence, channel, alice, ["/away gone to lunch", "hello", "/quit"])
+        _run(lane, hub, presence, channel, alice, ["/away gone to lunch", "hello", "/quit"])
     )
     assert "(You are still marked away.)" in _written_text(session)
     assert presence.is_away("alice") is True
 
 
-def test_sending_a_message_while_away_still_sends_it(db, hub, presence, alice, channel):
+def test_sending_a_message_while_away_still_sends_it(db, lane, hub, presence, alice, channel):
     from netbbs.chat.scrollback import get_scrollback
 
-    asyncio.run(_run(db, hub, presence, channel, alice, ["/away gone to lunch", "hello", "/quit"]))
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["/away gone to lunch", "hello", "/quit"]))
     scrollback = get_scrollback(db, channel)
     assert any(m.kind == "message" and m.body == "hello" for m in scrollback)
 
 
-def test_no_reminder_when_not_away(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["hello", "/quit"]))
+def test_no_reminder_when_not_away(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello", "/quit"]))
     assert "still marked away" not in _written_text(session)

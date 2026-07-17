@@ -27,6 +27,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -35,6 +36,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -141,41 +149,41 @@ def test_hidden_channel_still_respects_min_level(db, alice, bob):
 # -- /list through the real dispatcher --------------------------------
 
 
-def test_list_excludes_a_hidden_channel_for_a_non_member(db, hub, presence, mailbox, alice, bob):
+def test_list_excludes_a_hidden_channel_for_a_non_member(db, lane, hub, presence, mailbox, alice, bob):
     create_channel(db, "secret", creator=alice, hidden=True)
     visible_channel = create_channel(db, "lobby", creator=alice)
 
     session = asyncio.run(
-        _run_list(db, hub, presence, mailbox, visible_channel, bob)
+        _run_list(lane, hub, presence, mailbox, visible_channel, bob)
     )
     output = _written(session)
     assert "secret" not in output
     assert "lobby" in output
 
 
-def test_list_includes_a_hidden_channel_for_a_member(db, hub, presence, mailbox, alice, bob):
+def test_list_includes_a_hidden_channel_for_a_member(db, lane, hub, presence, mailbox, alice, bob):
     channel = create_channel(db, "secret", creator=alice, hidden=True, members_only=True)
     _grant_manage_members(db, alice, channel)
     add_member(db, channel, bob, granted_by=alice)
 
-    session = asyncio.run(_run_list(db, hub, presence, mailbox, channel, bob))
+    session = asyncio.run(_run_list(lane, hub, presence, mailbox, channel, bob))
     assert "secret" in _written(session)
 
 
-def test_list_includes_a_members_only_but_not_hidden_channel_for_a_non_member(db, hub, presence, mailbox, alice, bob):
+def test_list_includes_a_members_only_but_not_hidden_channel_for_a_non_member(db, lane, hub, presence, mailbox, alice, bob):
     channel = create_channel(db, "vip-lounge", creator=alice, members_only=True)
     other = create_channel(db, "lobby", creator=alice)
 
-    session = asyncio.run(_run_list(db, hub, presence, mailbox, other, bob))
+    session = asyncio.run(_run_list(lane, hub, presence, mailbox, other, bob))
     assert "vip-lounge" in _written(session)
 
 
-async def _run_list(db, hub, presence, mailbox, channel, user):
+async def _run_list(lane, hub, presence, mailbox, channel, user):
     from netbbs.net.char_input import InputHistory
 
     session = FakeSession(["/list", "/quit"])
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, user), timeout=2
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, user), timeout=2
     )
     return session
 
@@ -183,7 +191,7 @@ async def _run_list(db, hub, presence, mailbox, channel, user):
 # -- /whois's channel-membership display --------------------------------
 
 
-def test_whois_hides_a_hidden_channel_the_requester_cannot_see(db, hub, presence, mailbox, alice, bob):
+def test_whois_hides_a_hidden_channel_the_requester_cannot_see(db, lane, hub, presence, mailbox, alice, bob):
     # A separate admin grants bob membership -- alice (the requester
     # below) must hold no grant of her own on "secret" at all, or she'd
     # legitimately gain visibility through it and the test would prove
@@ -198,15 +206,16 @@ def test_whois_hides_a_hidden_channel_the_requester_cannot_see(db, hub, presence
     async def scenario():
         target_session = FakeSession()
         target_task = asyncio.create_task(
-            _run_whois_target(db, hub, presence, mailbox, secret, bob)
+            _run_whois_target(lane, hub, presence, mailbox, secret, bob)
         )
-        await asyncio.sleep(0)
+        while hub.participant_count(secret.name) < 1:
+            await asyncio.sleep(0)
 
         asker_session = FakeSession(["/whois bob", "/quit"])
         from netbbs.net.char_input import InputHistory
 
         await asyncio.wait_for(
-            chat_flow._chat_loop(asker_session, db, hub, presence, mailbox, InputHistory(), lobby, alice),
+            chat_flow._chat_loop(asker_session, lane, hub, presence, mailbox, InputHistory(), lobby, alice),
             timeout=2,
         )
         target_task.cancel()
@@ -218,8 +227,8 @@ def test_whois_hides_a_hidden_channel_the_requester_cannot_see(db, hub, presence
     assert "secret" not in output
 
 
-async def _run_whois_target(db, hub, presence, mailbox, channel, user):
+async def _run_whois_target(lane, hub, presence, mailbox, channel, user):
     from netbbs.net.char_input import InputHistory
 
     session = FakeSession()
-    await chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, user)
+    await chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, user)

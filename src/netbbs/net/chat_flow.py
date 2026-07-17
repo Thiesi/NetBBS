@@ -3,6 +3,67 @@ Chat channel browsing and the real-time chat loop.
 
 Kept in its own module rather than growing login_flow.py indefinitely —
 matches the project's modular-package approach (design doc §3).
+
+**Third module migrated onto design doc round 91's two-lane database
+execution model (issue #57/round 114)**, following `netbbs.net.
+mail_flow`/`netbbs.net.file_flow`'s established recipe: every function
+reachable from `browse_channels` takes `lane: DatabaseLane` instead of
+`db: Database`. Unlike those two, chat has no functions left
+deliberately unmigrated — confirmed with Thiesi (round 114): the pinned
+status line (`_render_chat_status_line`, repainted after nearly every
+message) and the tab-completer (`_build_completer`, rebuilt fresh on
+every `read_line()` call) are both hot, read-only, cosmetic paths that
+still move fully onto the lane, same as everything else, rather than
+staying on a lingering `db` the way `file_flow.has_visible_areas` did —
+real added per-message overhead, accepted as consistent with round 91's
+own "defer benchmarking to #59's harness" stance rather than guessed at
+now.
+
+Every module-level helper function that takes `db: Database` as its own
+first parameter (`_visible_channels_for`, `_authorize_channel_entry`,
+`_meets_live_participation_requirements`, `_chat_author_label`,
+`_resolve_message_author`, `_message_author_label`,
+`_render_channel_message`, `_render_scrollback_message`,
+`_own_channel_privileges`, `_render_chat_status_line`,
+`_requires_moderate`, `_requires_manage_members`, `_can_invite`,
+`_lookup_user_quietly`, `_channel_names_for_user`,
+`_find_live_participants`, `_check_mute`, `_check_ban`) stays exactly
+that shape, unchanged — these are leaf/callee functions dispatched
+*through* the lane (`lane.run(func, ...)`), never callers of it
+themselves, the same "callee, not caller" distinction
+`netbbs.net.file_flow._uploader_display_name`'s own docstring already
+established. `_channel_names_for_user`/`_find_live_participants` were
+reordered to be `db`-first (`hub` used to come first) specifically so
+`lane.run`'s db-injection convention applies to them without a wrapper
+closure — both are private, single-call-site functions, safe to
+reorder.
+
+Three call-site shapes needed real restructuring, not just a
+db-to-lane rename, because they mix a synchronous DB read with
+something that can't run inside a lane job (async session I/O, or a
+synchronous callback contract this module doesn't control):
+
+- `_build_completer` (a `pick_item`-callback-shaped problem, one level
+  removed — `netbbs.net.picker`'s callbacks were the first instance,
+  round 112): its `completer(text)` closure is itself a plain
+  synchronous callable (`netbbs.net.char_input.Completer`'s own
+  contract), invoked possibly several times per `read_line()` call as
+  the user presses Tab — same fix as the picker case, eager pre-fetch
+  of everything it might need (visible commands, the user list, current
+  membership) in one lane call *before* the closure is built, not a
+  live DB read inside it.
+- `_resolve_target`/`_write_vcard_detail`: previously took `db` and
+  mixed one synchronous lookup/read with `await session.write_line(...)`
+  in the same function body — split so the DB read goes through
+  `lane.run` and the write stays a plain `await` in the caller's own
+  coroutine, never inside a lane job (a lane job can't itself `await`
+  anything).
+- `_handle_names`/`_handle_who`/`_handle_help`: each had a per-item
+  loop making one live DB call per roster entry/command name — bundled
+  into one small inner function dispatched through a single `lane.run`
+  call, the same "one round trip, not N" shape
+  `netbbs.net.file_flow._show_area`'s own bundled `_load` helper
+  established.
 """
 
 from __future__ import annotations
@@ -97,12 +158,13 @@ from netbbs.rendering import (
     truncate,
 )
 from netbbs.storage.database import Database
-from netbbs.timeutil import format_for_display, utc_now_iso
+from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import format_for_display, resolve_display_preferences, utc_now_iso
 
 
 async def browse_channels(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     hub: ChatHub,
     presence: PresenceRegistry,
     mailbox: MessageMailbox,
@@ -162,28 +224,28 @@ async def browse_channels(
     the full reasoning, identical here.
     """
     channel = await _pick_channel(
-        session, db, hub, user, category_id=None,
+        session, lane, hub, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
     )
     while channel is not None:
-        allowed, denial_message = _authorize_channel_entry(db, channel, user)
+        allowed, denial_message = await lane.run(_authorize_channel_entry, channel, user)
         if not allowed:
             await session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
             channel = await _pick_channel(
-                session, db, hub, user, category_id=None,
+                session, lane, hub, user, category_id=None,
                 community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
             )
             continue
 
         action = await _chat_loop(
-            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
         )
         if isinstance(action, _SwitchTo):
             channel = action.channel
             continue
         if isinstance(action, _ToPicker):
             channel = await _pick_channel(
-                session, db, hub, user, category_id=None,
+                session, lane, hub, user, category_id=None,
                 community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
             )
             continue
@@ -237,7 +299,10 @@ def has_visible_channels(
     specifically so `netbbs.net.login_flow`'s shared resource-type
     sub-menu can use it for the same "only offer what currently
     applies" conditional visibility `_has_visible_boards` provides for
-    boards (design doc §16, round 84)."""
+    boards (design doc §16, round 84). Deliberately still `db`-based --
+    a menu-gating check called from still-unmigrated `login_flow.py`
+    code, same category as `netbbs.net.file_flow.has_visible_areas`
+    (round 113)."""
     channels = _visible_channels_for(db, user)
     if community_scoped:
         channels = [c for c in channels if c.community_id == community_id]
@@ -246,7 +311,7 @@ def has_visible_channels(
 
 async def _pick_channel(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     hub: ChatHub,
     user: User,
     *,
@@ -266,30 +331,43 @@ async def _pick_channel(
     for the full rationale; not repeated here to avoid the two copies
     drifting out of sync in what they claim rather than just in what
     they say.
-    """
-    all_channels = _visible_channels_for(db, user)
-    if community_scoped:
-        all_channels = [c for c in all_channels if c.community_id == community_id]
-    # Activity-sort applied before splitting by category, so ordering
-    # within each category's channel list is still most-recent-first —
-    # same node-wide default as boards (design doc round 17).
-    all_channels.sort(key=lambda c: hub.last_activity(c.name) or c.created_at, reverse=True)
-    all_channels.sort(key=lambda c: not c.pinned)
-    channels_here = [c for c in all_channels if c.category_id == category_id]
 
-    categories_here = (
-        list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
-    )
-    if community_scoped:
-        used_category_ids = {c.category_id for c in all_channels if c.category_id is not None}
-        if category_id is None:
-            categories_here = [
-                c for c in categories_here
-                if c.id in used_category_ids
-                or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
-            ]
-        else:
-            categories_here = [c for c in categories_here if c.id in used_category_ids]
+    The channel/category list-building (round 114) is one bundled
+    `lane.run` call, not several -- `_channel_description` (the picker's
+    own `description_of` callback) needs no DB access at all (`hub.
+    participant_count` plus the channel's own already-fetched
+    `description` field), so, like `netbbs.net.file_flow`'s own category
+    picker (round 113), nothing about the picker callback itself needed
+    eager-pre-fetch restructuring -- only the list construction moved.
+    """
+
+    def _load(db: Database) -> tuple[list[Channel], list[Category]]:
+        all_channels = _visible_channels_for(db, user)
+        if community_scoped:
+            all_channels = [c for c in all_channels if c.community_id == community_id]
+        # Activity-sort applied before splitting by category, so ordering
+        # within each category's channel list is still most-recent-first —
+        # same node-wide default as boards (design doc round 17).
+        all_channels.sort(key=lambda c: hub.last_activity(c.name) or c.created_at, reverse=True)
+        all_channels.sort(key=lambda c: not c.pinned)
+        channels_here = [c for c in all_channels if c.category_id == category_id]
+
+        categories_here = (
+            list_top_level_categories(db) if category_id is None else list_subcategories(db, category_id)
+        )
+        if community_scoped:
+            used_category_ids = {c.category_id for c in all_channels if c.category_id is not None}
+            if category_id is None:
+                categories_here = [
+                    c for c in categories_here
+                    if c.id in used_category_ids
+                    or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+                ]
+            else:
+                categories_here = [c for c in categories_here if c.id in used_category_ids]
+        return channels_here, categories_here
+
+    channels_here, categories_here = await lane.run(_load)
 
     title = f"{title_prefix} — chat channels" if title_prefix is not None else "Available channels"
 
@@ -331,7 +409,7 @@ async def _pick_channel(
 
     if isinstance(selected, Category):
         return await _pick_channel(
-            session, db, hub, user, category_id=selected.id,
+            session, lane, hub, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
         )
     return selected
@@ -369,7 +447,8 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     Deliberately synchronous -- every check here (`meets_level`,
     `is_member`, `has_pending_invitation`, `accept_invitation`) already
     is, and there's no `await` point for a race to open up between them
-    within a single call.
+    within a single call. Dispatched as one `lane.run` call by every
+    caller (round 114) -- the whole point of staying synchronous here.
 
     `meets_age`/`meets_name_requirement` (design doc §18, round 102) are
     both checked here, not split across a separate read/write boundary
@@ -643,6 +722,13 @@ def _render_scrollback_message(db: Database, channel: Channel, user: User, messa
     return format_with_preference(db, user, line, message.created_at)
 
 
+def _render_all_scrollback(db: Database, channel: Channel, user: User, messages: list[ChannelMessage]) -> list[str]:
+    """Bundles rendering the whole scrollback replay into one `lane.run`
+    call (round 114) rather than one per message -- the same "one round
+    trip, not N" reasoning as every other bundled loop in this round."""
+    return [_render_scrollback_message(db, channel, user, message) for message in messages]
+
+
 # -- command dispatch (design doc §13, sign-off round 39; ChatAction result
 # type widened from a bare bool in round 44/Track 5d) ------------------------
 
@@ -653,10 +739,11 @@ class ChatCommandContext:
     consistent shape — replaces what used to be a different ad hoc
     positional-argument list per handler (Track 3/4's `/mute` etc. each
     took their own subset of `session, db, hub, channel, user`;
-    `/finger` omitted `hub` entirely)."""
+    `/finger` omitted `hub` entirely). `lane`, not `db` (round 114) --
+    see this module's own docstring."""
 
     session: Session
-    db: Database
+    lane: DatabaseLane
     hub: ChatHub
     presence: PresenceRegistry
     mailbox: MessageMailbox
@@ -756,7 +843,7 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         return None
 
     try:
-        channel = get_channel_by_name(ctx.db, channel_name)
+        channel = await ctx.lane.run(get_channel_by_name, channel_name)
     except ChannelError:
         await ctx.session.write_line(
             colored(f"No such channel: {sanitize_text(channel_name)!r}", fg_color=MUTED_COLOR)
@@ -769,7 +856,7 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
         )
         return None
 
-    allowed, denial_message = _authorize_channel_entry(ctx.db, channel, ctx.user)
+    allowed, denial_message = await ctx.lane.run(_authorize_channel_entry, channel, ctx.user)
     if not allowed:
         await ctx.session.write_line(colored(denial_message, fg_color=MUTED_COLOR))
         return None
@@ -798,7 +885,7 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     `/nick`.
     """
     if not args:
-        current = get_channel_by_name(ctx.db, ctx.channel.name)
+        current = await ctx.lane.run(get_channel_by_name, ctx.channel.name)
         if current.topic:
             await ctx.session.write_line(f"Topic: {sanitize_text(current.topic)}")
         else:
@@ -806,7 +893,7 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
         return
 
     try:
-        set_topic(ctx.db, ctx.channel, args, set_by=ctx.user)
+        await ctx.lane.run(set_topic, ctx.channel, args, set_by=ctx.user)
     except TopicError:
         await ctx.session.write_line(
             colored("You do not have permission to change the topic.", fg_color=MUTED_COLOR)
@@ -821,7 +908,7 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
 
 
-def _find_live_participants(hub: ChatHub, db: Database, username: str) -> list[tuple[str, ParticipantId]]:
+def _find_live_participants(db: Database, hub: ChatHub, username: str) -> list[tuple[str, ParticipantId]]:
     """
     Every live session belonging to `username`, across every channel —
     `(channel_name, participant_id)` for each one found, not just the
@@ -829,7 +916,9 @@ def _find_live_participants(hub: ChatHub, db: Database, username: str) -> list[t
     chat sessions used to have only the first one located actually
     receive a `/msg`). `ChatHub` has no reverse "which channel is this
     user in" index, the same O(channels) shape `_kick_live_sessions`
-    already has for the same reason.
+    already has for the same reason. Reordered `db`-first (round 114,
+    was `hub`-first) so `DatabaseLane.run`'s db-injection convention
+    applies without a wrapper closure -- private, single call site.
     """
     found = []
     for channel in list_channels(db):
@@ -864,7 +953,7 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     1's "online-only" private messages are intentionally as ephemeral as
     live chat itself.
     """
-    sender_label = sanitize_text(display_label(ctx.db, ctx.user))
+    sender_label = sanitize_text(await ctx.lane.run(display_label, ctx.user))
     notice = colored(
         f"*** Private message from {sender_label}: {sanitize_text(body)}",
         fg_color=MUTED_COLOR,
@@ -872,7 +961,7 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     )
     created_at = utc_now_iso()
 
-    live = _find_live_participants(ctx.hub, ctx.db, target.username)
+    live = await ctx.lane.run(_find_live_participants, ctx.hub, target.username)
     live_session_keys = {pid.session_key for _channel_name, pid in live}
     for channel_name, pid in live:
         await ctx.hub.send_to(channel_name, pid, _TimestampedNotice(notice, created_at))
@@ -901,7 +990,7 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
         return
     target_name, body = parts
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
@@ -928,7 +1017,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         await _show_usage(ctx.session, "private")
         return None
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return None
 
@@ -984,13 +1073,16 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(description)
         return
 
+    def _visible_names(db: Database) -> list[str]:
+        return sorted(
+            name
+            for name in _COMMANDS
+            if name in _COMMAND_INFO
+            and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, ctx.channel, ctx.user))
+        )
+
     await ctx.session.write_line(colored("Available commands:", fg_color=MUTED_COLOR, bold=True))
-    visible_names = sorted(
-        name
-        for name in _COMMANDS
-        if name in _COMMAND_INFO
-        and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](ctx.db, ctx.channel, ctx.user))
-    )
+    visible_names = await ctx.lane.run(_visible_names)
     for name in visible_names:
         syntax, description = _COMMAND_INFO[name]
         await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
@@ -1101,7 +1193,7 @@ def _moderation_detail(actor_label: str, duration: datetime.timedelta | None, re
 
 
 async def _announce_moderation(
-    db: Database, hub: ChatHub, channel: Channel, *, kind: str, target_label: str, detail: str
+    lane: DatabaseLane, hub: ChatHub, channel: Channel, *, kind: str, target_label: str, detail: str
 ) -> None:
     """Records a scrollback event and broadcasts a system notice —
     matches the existing join/leave precedent in `_chat_loop` exactly
@@ -1110,7 +1202,7 @@ async def _announce_moderation(
     join/leave: there's no separate direct message a moderation
     action's *target* gets the way a joining/leaving user gets "Joined
     #channel" — they see the same notice as everyone else."""
-    record_message(db, channel, kind=kind, author_label=target_label, body=detail)
+    await lane.run(record_message, channel, kind=kind, author_label=target_label, body=detail)
     notice = colored(
         f"*** {sanitize_text(target_label)} was {_VERB_BY_KIND[kind]} ({sanitize_text(detail)}).",
         fg_color=MUTED_COLOR,
@@ -1128,14 +1220,18 @@ async def _show_usage(session: Session, command: str) -> None:
     await session.write_line(colored(f"Usage: {syntax}", fg_color=MUTED_COLOR))
 
 
-async def _resolve_target(session: Session, db: Database, username: str) -> User | None:
+async def _resolve_target(session: Session, lane: DatabaseLane, username: str) -> User | None:
     """Look up a mute/ban/kick command's target username, writing a
     friendly message and returning `None` if there's no such account —
     `AuthError`'s own message is deliberately generic for login-failure
     enumeration-avoidance (see its docstring), not meant for this
-    different, non-login context."""
+    different, non-login context. `lane`, not `db` (round 114) -- split
+    from a single function body mixing a synchronous lookup with async
+    session I/O into a `lane.run` call (the lookup) wrapped by ordinary
+    `await`s (the write) in this same coroutine, since a lane job can't
+    itself await anything."""
     try:
-        return get_user_by_username(db, username)
+        return await lane.run(get_user_by_username, username)
     except AuthError:
         await session.write_line(colored(f"No such user: {sanitize_text(username)!r}", fg_color=MUTED_COLOR))
         return None
@@ -1168,12 +1264,12 @@ async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        mute_user(ctx.db, ctx.channel, target, duration=duration, reason=reason, muted_by=ctx.user)
+        await ctx.lane.run(mute_user, ctx.channel, target, duration=duration, reason=reason, muted_by=ctx.user)
     except ChatModerationError:
         await ctx.session.write_line(
             colored("You do not have permission to mute in this channel.", fg_color=MUTED_COLOR)
@@ -1181,7 +1277,7 @@ async def _handle_mute(ctx: ChatCommandContext, args: str) -> None:
         return
 
     detail = _moderation_detail(ctx.user.username, duration, reason)
-    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="mute", target_label=target.username, detail=detail)
+    await _announce_moderation(ctx.lane, ctx.hub, ctx.channel, kind="mute", target_label=target.username, detail=detail)
 
 
 async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
@@ -1190,12 +1286,12 @@ async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "unmute")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        unmute_user(ctx.db, ctx.channel, target, unmuted_by=ctx.user)
+        await ctx.lane.run(unmute_user, ctx.channel, target, unmuted_by=ctx.user)
     except ChatModerationError:
         await ctx.session.write_line(
             colored("You do not have permission to unmute in this channel.", fg_color=MUTED_COLOR)
@@ -1204,7 +1300,7 @@ async def _handle_unmute(ctx: ChatCommandContext, args: str) -> None:
 
     detail = _moderation_detail(ctx.user.username, None, None)
     await _announce_moderation(
-        ctx.db, ctx.hub, ctx.channel, kind="unmute", target_label=target.username, detail=detail
+        ctx.lane, ctx.hub, ctx.channel, kind="unmute", target_label=target.username, detail=detail
     )
 
 
@@ -1216,12 +1312,12 @@ async def _handle_ban(ctx: ChatCommandContext, args: str) -> None:
     target_name, rest = parts[0], (parts[1] if len(parts) > 1 else "")
     duration, reason = _split_duration_and_reason(rest)
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        ban_user(ctx.db, ctx.channel, target, duration=duration, reason=reason, banned_by=ctx.user)
+        await ctx.lane.run(ban_user, ctx.channel, target, duration=duration, reason=reason, banned_by=ctx.user)
     except ChatModerationError:
         await ctx.session.write_line(
             colored("You do not have permission to ban in this channel.", fg_color=MUTED_COLOR)
@@ -1229,7 +1325,7 @@ async def _handle_ban(ctx: ChatCommandContext, args: str) -> None:
         return
 
     detail = _moderation_detail(ctx.user.username, duration, reason)
-    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="ban", target_label=target.username, detail=detail)
+    await _announce_moderation(ctx.lane, ctx.hub, ctx.channel, kind="ban", target_label=target.username, detail=detail)
     await _kick_live_sessions(ctx.hub, ctx.channel, target, reason="banned")
 
 
@@ -1239,12 +1335,12 @@ async def _handle_unban(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "unban")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        unban_user(ctx.db, ctx.channel, target, unbanned_by=ctx.user)
+        await ctx.lane.run(unban_user, ctx.channel, target, unbanned_by=ctx.user)
     except ChatModerationError:
         await ctx.session.write_line(
             colored("You do not have permission to unban in this channel.", fg_color=MUTED_COLOR)
@@ -1253,7 +1349,7 @@ async def _handle_unban(ctx: ChatCommandContext, args: str) -> None:
 
     detail = _moderation_detail(ctx.user.username, None, None)
     await _announce_moderation(
-        ctx.db, ctx.hub, ctx.channel, kind="unban", target_label=target.username, detail=detail
+        ctx.lane, ctx.hub, ctx.channel, kind="unban", target_label=target.username, detail=detail
     )
 
 
@@ -1265,12 +1361,12 @@ async def _handle_kick(ctx: ChatCommandContext, args: str) -> None:
     target_name = parts[0]
     reason = parts[1] if len(parts) > 1 else None
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        kick_user(ctx.db, ctx.channel, target, reason=reason, kicked_by=ctx.user)
+        await ctx.lane.run(kick_user, ctx.channel, target, reason=reason, kicked_by=ctx.user)
     except ChatModerationError:
         await ctx.session.write_line(
             colored("You do not have permission to kick in this channel.", fg_color=MUTED_COLOR)
@@ -1278,16 +1374,20 @@ async def _handle_kick(ctx: ChatCommandContext, args: str) -> None:
         return
 
     detail = _moderation_detail(ctx.user.username, None, reason)
-    await _announce_moderation(ctx.db, ctx.hub, ctx.channel, kind="kick", target_label=target.username, detail=detail)
+    await _announce_moderation(ctx.lane, ctx.hub, ctx.channel, kind="kick", target_label=target.username, detail=detail)
     await _kick_live_sessions(ctx.hub, ctx.channel, target, reason="kicked")
 
 
-async def _write_vcard_detail(session: Session, db: Database, vcard: VCard) -> None:
+async def _write_vcard_detail(session: Session, lane: DatabaseLane, vcard: VCard) -> None:
     """Shared by `/finger` and `/whois` (design doc round 32/43) — the
     identity/bio block both commands show identically; `/whois`
     appends online/away/channel-membership lines of its own after
-    calling this."""
-    when = format_for_display(vcard.created_at, db)
+    calling this. `lane`, not `db` (round 114) -- the one DB read
+    (`resolve_display_preferences`) happens via `lane.run` before any
+    `await session.write_line(...)` call, same split as
+    `_resolve_target`."""
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+    when = format_for_display(vcard.created_at, override_format=display_format, override_timezone=display_timezone)
     await session.write_line(colored(f"\r\n{sanitize_text(vcard.username)}", fg_color=ACCENT_COLOR, bold=True))
     await session.write_line(f"Member since: {when}")
     if vcard.bio is not None:
@@ -1307,12 +1407,12 @@ async def _handle_finger(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "finger")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
-    vcard = get_vcard(ctx.db, target, requesting_user=ctx.user)
-    await _write_vcard_detail(ctx.session, ctx.db, vcard)
+    vcard = await ctx.lane.run(get_vcard, target, requesting_user=ctx.user)
+    await _write_vcard_detail(ctx.session, ctx.lane, vcard)
 
 
 async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
@@ -1333,7 +1433,7 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     # (and in send_loop's plain-message branch) against the *current*
     # policy/attestation state before accepting the send. See
     # _meets_live_participation_requirements's own docstring.
-    if not _meets_live_participation_requirements(ctx.db, ctx.channel, ctx.user):
+    if not await ctx.lane.run(_meets_live_participation_requirements, ctx.channel, ctx.user):
         await ctx.session.write_line(colored(_NO_LONGER_QUALIFIES_MESSAGE, fg_color=MUTED_COLOR))
         return _ToPicker()
 
@@ -1342,27 +1442,22 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     # guards the plain, non-slash message branch) -- a muted user could
     # still broadcast arbitrary visible text as an action event. Same
     # response text/expiry formatting as the ordinary-message check.
-    restriction = is_muted(ctx.db, ctx.channel, ctx.user)
-    if restriction is not None:
-        until = (
-            "indefinitely"
-            if restriction.expires_at is None
-            else f"until {format_for_display(restriction.expires_at, ctx.db)}"
-        )
+    until = await ctx.lane.run(_check_mute, ctx.channel, ctx.user)
+    if until is not None:
         await ctx.session.write_line(
             colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
         )
         return
 
-    recorded = record_message(
-        ctx.db,
+    recorded = await ctx.lane.run(
+        record_message,
         ctx.channel,
         kind="action",
         author_label=ctx.user.username,
         author_fingerprint=ctx.user.fingerprint,
         body=args,
     )
-    await ctx.session.write_line(_render_channel_message(ctx.db, ctx.channel, ctx.user, recorded))
+    await ctx.session.write_line(await ctx.lane.run(_render_channel_message, ctx.channel, ctx.user, recorded))
     await ctx.hub.broadcast(ctx.channel.name, recorded, exclude={ctx.participant_id})
 
 
@@ -1375,7 +1470,7 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
     in — announced the same way join/leave/action events are.
     """
     if not args:
-        current = get_nick(ctx.db, ctx.user)
+        current = await ctx.lane.run(get_nick, ctx.user)
         if current:
             await ctx.session.write_line(f"Your current alias: {sanitize_text(current)}")
         else:
@@ -1383,12 +1478,12 @@ async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
         return
 
     if args.lower() == "off":
-        set_nick(ctx.db, ctx.user, "")
+        await ctx.lane.run(set_nick, ctx.user, "")
         await _announce_nick_change(ctx, new_nick=None)
         return
 
     try:
-        set_nick(ctx.db, ctx.user, args)
+        await ctx.lane.run(set_nick, ctx.user, args)
     except NickError as exc:
         await ctx.session.write_line(colored(f"Could not set alias: {exc}", fg_color=MUTED_COLOR))
         return
@@ -1405,7 +1500,7 @@ async def _announce_nick_change(ctx: ChatCommandContext, *, new_nick: str | None
     notice = colored(f"*** {username} {body}", fg_color=MUTED_COLOR)
 
     await ctx.session.write_line(notice)
-    record_message(ctx.db, ctx.channel, kind="nick", author_label=ctx.user.username, body=body)
+    await ctx.lane.run(record_message, ctx.channel, kind="nick", author_label=ctx.user.username, body=body)
     await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
 
 
@@ -1445,7 +1540,7 @@ async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
     wording lists exactly these three subcommands).
     """
     if not args:
-        state = "on" if timestamps_enabled(ctx.db, ctx.user) else "off"
+        state = "on" if await ctx.lane.run(timestamps_enabled, ctx.user) else "off"
         await ctx.session.write_line(colored(f"Chat timestamps are {state}.", fg_color=MUTED_COLOR))
         return
 
@@ -1455,12 +1550,12 @@ async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
     elif choice == "off":
         new_state = False
     elif choice == "toggle":
-        new_state = not timestamps_enabled(ctx.db, ctx.user)
+        new_state = not await ctx.lane.run(timestamps_enabled, ctx.user)
     else:
         await _show_usage(ctx.session, "timestamps")
         return
 
-    set_timestamps_enabled(ctx.db, ctx.user, new_state)
+    await ctx.lane.run(set_timestamps_enabled, ctx.user, new_state)
     state = "on" if new_state else "off"
     await ctx.session.write_line(colored(f"Chat timestamps are now {state}.", fg_color=MUTED_COLOR))
 
@@ -1495,11 +1590,16 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     if not usernames:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
-    labels = []
-    for username in usernames:
-        user = _lookup_user_quietly(ctx.db, username)
-        if user is not None:
-            labels.append(sanitize_text(display_label(ctx.db, user)))
+
+    def _labels(db: Database) -> list[str]:
+        result = []
+        for username in usernames:
+            user = _lookup_user_quietly(db, username)
+            if user is not None:
+                result.append(sanitize_text(display_label(db, user)))
+        return result
+
+    labels = await ctx.lane.run(_labels)
     await ctx.session.write_line(", ".join(labels))
 
 
@@ -1511,11 +1611,20 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     if not usernames:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
+
+    def _labels(db: Database) -> dict[str, str]:
+        result = {}
+        for username in usernames:
+            user = _lookup_user_quietly(db, username)
+            if user is not None:
+                result[username] = sanitize_text(display_label(db, user))
+        return result
+
+    labels_by_username = await ctx.lane.run(_labels)
     for username in usernames:
-        user = _lookup_user_quietly(ctx.db, username)
-        if user is None:
+        label = labels_by_username.get(username)
+        if label is None:
             continue
-        label = sanitize_text(display_label(ctx.db, user))
         if ctx.presence.is_away(username):
             message = ctx.presence.get_away_message(username)
             suffix = f" (away: {sanitize_text(message)})" if message else " (away)"
@@ -1532,7 +1641,7 @@ async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
     precedent — a quick text reference from inside chat, not the
     interactive category-nested picker the main menu's Chat option
     already provides."""
-    visible = _visible_channels_for(ctx.db, ctx.user)
+    visible = await ctx.lane.run(_visible_channels_for, ctx.user)
     if not visible:
         await ctx.session.write_line(colored("No channels are available to you.", fg_color=MUTED_COLOR))
         return
@@ -1546,7 +1655,7 @@ async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
 
 
 def _channel_names_for_user(
-    hub: ChatHub, db: Database, requesting_user: User, target_username: str
+    db: Database, hub: ChatHub, requesting_user: User, target_username: str
 ) -> list[str]:
     """
     Every channel `target_username` currently has a live session in,
@@ -1560,7 +1669,9 @@ def _channel_names_for_user(
     `ChatHub` has no reverse "which channels is this user in" index —
     only per-channel participant lists — so this checks every visible
     channel's roster in turn. O(channels × participants); fine at this
-    project's declared scale (§14).
+    project's declared scale (§14). Reordered `db`-first (round 114,
+    was `hub`-first) -- see `_find_live_participants`'s own docstring
+    for why.
     """
     visible = _visible_channels_for(db, requesting_user)
     names = []
@@ -1585,12 +1696,12 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "whois")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
-    vcard = get_vcard(ctx.db, target, requesting_user=ctx.user)
-    await _write_vcard_detail(ctx.session, ctx.db, vcard)
+    vcard = await ctx.lane.run(get_vcard, target, requesting_user=ctx.user)
+    await _write_vcard_detail(ctx.session, ctx.lane, vcard)
 
     online = ctx.presence.is_online(target.username)
     await ctx.session.write_line(f"Status: {'online' if online else 'offline'}")
@@ -1598,7 +1709,7 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
         message = ctx.presence.get_away_message(target.username)
         await ctx.session.write_line(f"Away: {sanitize_text(message)}" if message else "Away")
 
-    channel_names = _channel_names_for_user(ctx.hub, ctx.db, ctx.user, target.username)
+    channel_names = await ctx.lane.run(_channel_names_for_user, ctx.hub, ctx.user, target.username)
     if channel_names:
         joined = ", ".join(f"#{sanitize_text(name)}" for name in channel_names)
         await ctx.session.write_line(f"Channels: {joined}")
@@ -1637,12 +1748,12 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "invite")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        create_invitation(ctx.db, ctx.channel, target, invited_by=ctx.user)
+        await ctx.lane.run(create_invitation, ctx.channel, target, invited_by=ctx.user)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to invite users to this channel.", fg_color=MUTED_COLOR)
@@ -1664,12 +1775,12 @@ async def _handle_uninvite(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "uninvite")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        revoke_invitation(ctx.db, ctx.channel, target, revoked_by=ctx.user)
+        await ctx.lane.run(revoke_invitation, ctx.channel, target, revoked_by=ctx.user)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to do that, or there is no pending invitation.", fg_color=MUTED_COLOR)
@@ -1691,12 +1802,12 @@ async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "grantaccess")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        add_member(ctx.db, ctx.channel, target, granted_by=ctx.user)
+        await ctx.lane.run(add_member, ctx.channel, target, granted_by=ctx.user)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to manage members on this channel.", fg_color=MUTED_COLOR)
@@ -1725,12 +1836,12 @@ async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "revokeaccess")
         return
 
-    target = await _resolve_target(ctx.session, ctx.db, target_name)
+    target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
         return
 
     try:
-        remove_member(ctx.db, ctx.channel, target, removed_by=ctx.user)
+        await ctx.lane.run(remove_member, ctx.channel, target, removed_by=ctx.user)
     except MembershipError:
         await ctx.session.write_line(
             colored("You do not have permission to manage members on this channel.", fg_color=MUTED_COLOR)
@@ -1750,7 +1861,7 @@ async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
     members. Viewable by anyone already in the channel (you can only
     run this from inside it) — not further gated, reviewing your own
     channel's roster is different from administering it."""
-    members = list_members(ctx.db, ctx.channel)
+    members = await ctx.lane.run(list_members, ctx.channel)
     if not members:
         await ctx.session.write_line(colored("No members have been granted access yet.", fg_color=MUTED_COLOR))
         return
@@ -1887,27 +1998,48 @@ _ANY_USER_COMMAND_PREFIXES = ("/whois ", "/finger ")
 _INVITE_COMMAND_PREFIX = "/invite "
 
 
-def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel, user: User) -> Completer:
+async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, channel: Channel, user: User) -> Completer:
     """
     Builds one Tab-completion closure per `read_line()` call in
     `send_loop`, from the state available there -- cheap (a handful of
-    string comparisons plus, at most, one permission lookup), and always
-    reflects the actor's *current* permissions rather than a snapshot
-    taken once at channel entry (moderator grants can change
-    mid-session, unlike a static completer built once and reused).
+    string comparisons), and always reflects the actor's *current*
+    permissions rather than a snapshot taken once at channel entry
+    (moderator grants can change mid-session, unlike a static completer
+    built once and reused).
 
     All matching is case-insensitive (design doc round 33 point 6).
+
+    `async` and `lane`-based, not `db`-based (round 114): the returned
+    `completer(text)` closure is itself a plain *synchronous* callable
+    (`netbbs.net.char_input.Completer`'s own contract) that `session.
+    read_line` may call several times per invocation, once per Tab
+    press -- it structurally cannot make a `lane.run` call itself, the
+    same "callback can't await" problem `netbbs.net.picker.pick_item`'s
+    `name_of`/`description_of` callbacks had (round 112). Fixed the
+    same way: everything the completer might need -- which commands are
+    currently visible, the full username list, and current membership --
+    is fetched once, eagerly, in one bundled `lane.run` call *before*
+    the closure is built, and the closure itself only ever reads that
+    already-fetched data.
     """
+
+    def _gather(db: Database) -> tuple[list[str], list[str], set[str]]:
+        visible_commands = sorted(
+            f"/{name}"
+            for name in _COMMANDS
+            if _COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, channel, user)
+        )
+        all_users = list_users(db)
+        all_usernames = [candidate.username for candidate in all_users]
+        member_usernames = {candidate.username for candidate in all_users if is_member(db, channel, candidate)}
+        return visible_commands, all_usernames, member_usernames
+
+    visible_commands, all_usernames, member_usernames = await lane.run(_gather)
 
     def completer(text: str) -> list[str]:
         if text.startswith("/") and " " not in text:
             prefix = text[1:].lower()
-            return sorted(
-                f"/{name}"
-                for name in _COMMANDS
-                if name.lower().startswith(prefix)
-                and (_COMMAND_VISIBILITY.get(name) is None or _COMMAND_VISIBILITY[name](db, channel, user))
-            )
+            return sorted(name for name in visible_commands if name[1:].lower().startswith(prefix))
 
         for command_prefix in _ONLINE_USER_COMMAND_PREFIXES:
             rest = text[len(command_prefix) :]
@@ -1921,17 +2053,13 @@ def _build_completer(db: Database, presence: PresenceRegistry, channel: Channel,
             rest = text[len(command_prefix) :]
             if text.lower().startswith(command_prefix) and " " not in rest:
                 word = rest.lower()
-                return sorted(
-                    candidate.username for candidate in list_users(db) if candidate.username.lower().startswith(word)
-                )
+                return sorted(name for name in all_usernames if name.lower().startswith(word))
 
         rest = text[len(_INVITE_COMMAND_PREFIX) :]
         if text.lower().startswith(_INVITE_COMMAND_PREFIX) and " " not in rest:
             word = rest.lower()
             return sorted(
-                candidate.username
-                for candidate in list_users(db)
-                if candidate.username.lower().startswith(word) and not is_member(db, channel, candidate)
+                name for name in all_usernames if name.lower().startswith(word) and name not in member_usernames
             )
 
         return []
@@ -1989,6 +2117,27 @@ def _own_channel_privileges(db: Database, channel: Channel, user: User) -> str |
     return ",".join(labels) if labels else None
 
 
+def _check_mute(db: Database, channel: Channel, user: User) -> str | None:
+    """`None` if `user` isn't currently muted in `channel`, else the
+    human-readable "indefinitely"/"until ..." text -- bundles the
+    restriction check and its expiry formatting into one function so
+    every call site (`_chat_loop`'s send-path checks, `_handle_me`) is
+    a single `lane.run` round trip, not two (round 114)."""
+    restriction = is_muted(db, channel, user)
+    if restriction is None:
+        return None
+    return "indefinitely" if restriction.expires_at is None else f"until {format_for_display(restriction.expires_at, db)}"
+
+
+def _check_ban(db: Database, channel: Channel, user: User) -> str | None:
+    """Same shape as `_check_mute`, for `_chat_loop`'s entry-time ban
+    check."""
+    restriction = is_banned(db, channel, user)
+    if restriction is None:
+        return None
+    return "indefinitely" if restriction.expires_at is None else f"until {format_for_display(restriction.expires_at, db)}"
+
+
 def _render_chat_status_line(
     db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
 ) -> str:
@@ -2017,6 +2166,12 @@ def _render_chat_status_line(
     continuously and only ever shows *right now*. Still honors the
     node's configured timezone, which `override_format` alone doesn't
     affect (see that parameter's own resolution order).
+
+    Dispatched as one bundled `lane.run` call by `_repaint_status_line`
+    (round 114) -- this whole function runs on the lane's worker
+    thread, so every read here (`get_nick`, `_own_channel_privileges`,
+    `is_muted`, `format_for_display`) stays a plain synchronous call,
+    unchanged from before this round.
     """
     channel_type = "invite" if channel.members_only else ("hidden" if channel.hidden else "pub")
     channel_label = f"#{sanitize_text(channel.name)}[{channel_type}]"
@@ -2043,12 +2198,10 @@ def _render_chat_status_line(
         own_indicators.append(privileges)
     if presence.is_away(user.username):
         own_indicators.append("away")
-    restriction = is_muted(db, channel, user)
-    if restriction is not None:
-        if restriction.expires_at is None:
-            own_indicators.append("muted")
-        else:
-            own_indicators.append(f"muted until {format_for_display(restriction.expires_at, db)}")
+
+    until = _check_mute(db, channel, user)
+    if until is not None:
+        own_indicators.append("muted" if until == "indefinitely" else f"muted {until}")
     identity += "".join(f"[{indicator}]" for indicator in own_indicators)
     fields.append(identity)
 
@@ -2057,7 +2210,7 @@ def _render_chat_status_line(
 
 
 async def _repaint_status_line(
-    session: Session, db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+    session: Session, lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
 ) -> None:
     """
     Redraws the pinned status row in place, leaving the user's own
@@ -2089,11 +2242,20 @@ async def _repaint_status_line(
     lock's job is only to stop this call's own sequence of writes from
     interleaving with some *other* concurrent write, not to protect
     this function against itself.
+
+    `lane`, not `db` (round 114, per Thiesi's explicit choice to
+    migrate this hot, cosmetic, repainted-after-nearly-every-message
+    path fully rather than leave it on direct `db` access): one
+    `lane.run` call renders the whole line's text on the worker thread
+    (`_render_chat_status_line`), then the actual terminal write stays
+    a plain `await` here, same split as `_resolve_target`/
+    `_write_vcard_detail`.
     """
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    text = truncate(_render_chat_status_line(db, hub, presence, channel, user), session.terminal_width)
+    rendered = await lane.run(_render_chat_status_line, hub, presence, channel, user)
+    text = truncate(rendered, session.terminal_width)
     # Padded to the full row width, not just the text's own length --
     # otherwise reverse video (design doc round 77) would only invert
     # the characters themselves, leaving a ragged, only-partly-colored
@@ -2246,7 +2408,7 @@ class _PinnedUIState:
     async def sync(
         self,
         session: Session,
-        db: Database,
+        lane: DatabaseLane,
         hub: ChatHub,
         presence: PresenceRegistry,
         channel: Channel,
@@ -2259,7 +2421,7 @@ class _PinnedUIState:
                 await session.write(
                     clear_screen() + set_scroll_region(1, session.terminal_height - 2)
                 )
-                await _repaint_status_line(session, db, hub, presence, channel, user)
+                await _repaint_status_line(session, lane, hub, presence, channel, user)
                 await _repaint_input_row(session, live_buffer, session.terminal_height)
             else:
                 await session.write(reset_scroll_region() + clear_screen())
@@ -2269,7 +2431,7 @@ class _PinnedUIState:
 
 async def _chat_loop(
     session: Session,
-    db: Database,
+    lane: DatabaseLane,
     hub: ChatHub,
     presence: PresenceRegistry,
     mailbox: MessageMailbox,
@@ -2354,14 +2516,16 @@ async def _chat_loop(
     parallel "were these even created" check. When the pinned UI is
     off, `lock` is simply never contended (`receive_loop` never
     acquires it either in that case), so this costs nothing.
+
+    `lane`, not `db` (round 114): both `send_loop`/`receive_loop`
+    dispatch concurrently through this same lane -- safe by
+    construction, the identical property that already lets two
+    different *sessions* share one lane (`DatabaseLane`'s own single
+    worker thread plus bounded semaphore backpressure doesn't
+    distinguish which coroutine submitted a job).
     """
-    restriction = is_banned(db, channel, user)
-    if restriction is not None:
-        until = (
-            "indefinitely"
-            if restriction.expires_at is None
-            else f"until {format_for_display(restriction.expires_at, db)}"
-        )
+    until = await lane.run(_check_ban, channel, user)
+    if until is not None:
         await session.write_line(
             colored(f"\r\nYou are banned from this channel ({until}).", fg_color=MUTED_COLOR)
         )
@@ -2369,354 +2533,354 @@ async def _chat_loop(
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
+    # Round 114: this try now starts immediately after hub.join(), not
+    # just around the receive/send-task wait below -- scrollback replay
+    # and the initial join broadcast/status-line paint between here and
+    # task creation now cross real lane.run() round trips, so a
+    # cancellation landing in that window needs the same finally-block
+    # hub.leave() cleanup as one landing in the wait() below. Before
+    # this migration that window was effectively zero-width (pure
+    # synchronous db calls, no await points to be cancelled at).
+    try:
+        pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
+        live_buffer = LiveInputBuffer()
+        lock = asyncio.Lock()
+        # GitHub issue #46: `pinned_ui` tracks this dynamically for the rest
+        # of the session (see `_PinnedUIState`) -- constructed directly from
+        # the boolean just computed, not via `sync()`, since entry's own
+        # setup immediately below already does the equivalent one-time
+        # activation work itself (and repainting the status/input rows here
+        # would be premature -- scrollback and the join notice haven't been
+        # written yet).
+        pinned_ui = _PinnedUIState(active=pinned_ui_enabled)
+        if pinned_ui_enabled:
+            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
 
-    pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
-    live_buffer = LiveInputBuffer()
-    lock = asyncio.Lock()
-    # GitHub issue #46: `pinned_ui` tracks this dynamically for the rest
-    # of the session (see `_PinnedUIState`) -- constructed directly from
-    # the boolean just computed, not via `sync()`, since entry's own
-    # setup immediately below already does the equivalent one-time
-    # activation work itself (and repainting the status/input rows here
-    # would be premature -- scrollback and the join notice haven't been
-    # written yet).
-    pinned_ui = _PinnedUIState(active=pinned_ui_enabled)
-    if pinned_ui_enabled:
-        await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
+        channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
+        quit_hint = menu_key("/quit", " to leave")
 
-    channel_label = colored(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True)
-    quit_hint = menu_key("/quit", " to leave")
-
-    scrollback = get_scrollback(db, channel)
-    if scrollback:
-        await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
-        for message in scrollback:
-            await session.write_line(_render_scrollback_message(db, channel, user, message))
-        # Round 19, point 5: even bounded persistence is a different
-        # promise than pure ephemeral chat — worth surfacing explicitly
-        # rather than leaving as an internal implementation detail.
-        await session.write_line(
-            colored(
-                f"--- end scrollback (last {len(scrollback)} events retained) ---",
-                fg_color=MUTED_COLOR,
+        scrollback = await lane.run(get_scrollback, channel)
+        if scrollback:
+            rendered_scrollback = await lane.run(_render_all_scrollback, channel, user, scrollback)
+            await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
+            for line in rendered_scrollback:
+                await session.write_line(line)
+            # Round 19, point 5: even bounded persistence is a different
+            # promise than pure ephemeral chat — worth surfacing explicitly
+            # rather than leaving as an internal implementation detail.
+            await session.write_line(
+                colored(
+                    f"--- end scrollback (last {len(rendered_scrollback)} events retained) ---",
+                    fg_color=MUTED_COLOR,
+                )
             )
+
+        await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
+        # author_label is stored raw here (user.username, not a sanitized/
+        # alias-aware label) -- sanitize on output, not on storage, per
+        # sanitize_text's docstring; only the rendered copy each recipient's
+        # receive_loop produces is actually shown to a terminal (GitHub
+        # issue #64, round 109) -- the recorded ChannelMessage itself is
+        # broadcast, not a pre-rendered string, so live and scrollback
+        # replay always agree on how to render it (see
+        # _render_channel_message).
+        recorded_join = await lane.run(
+            record_message, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
         )
+        await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
+        if pinned_ui_enabled:
+            await _repaint_status_line(session, lane, hub, presence, channel, user)
+            # Neither task is running yet (both are created below, after
+            # this initial setup completes) -- no concurrent writer exists
+            # at this exact point, so this first paint needs no lock.
+            await _repaint_input_row(session, live_buffer, session.terminal_height)
 
-    await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
-    # author_label is stored raw here (user.username, not a sanitized/
-    # alias-aware label) -- sanitize on output, not on storage, per
-    # sanitize_text's docstring; only the rendered copy each recipient's
-    # receive_loop produces is actually shown to a terminal (GitHub
-    # issue #64, round 109) -- the recorded ChannelMessage itself is
-    # broadcast, not a pre-rendered string, so live and scrollback
-    # replay always agree on how to render it (see
-    # _render_channel_message).
-    recorded_join = record_message(
-        db, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
-    )
-    await hub.broadcast(channel.name, recorded_join, exclude={participant_id})
-    if pinned_ui_enabled:
-        await _repaint_status_line(session, db, hub, presence, channel, user)
-        # Neither task is running yet (both are created below, after
-        # this initial setup completes) -- no concurrent writer exists
-        # at this exact point, so this first paint needs no lock.
-        await _repaint_input_row(session, live_buffer, session.terminal_height)
+        async def receive_loop() -> None:
+            async def deliver(text: str, *, repaint_status: bool = False) -> None:
+                """
+                The one place `receive_loop` actually writes to the screen
+                (design doc round 79) -- routes through the pinned-row-
+                aware print-and-redraw path when the pinned UI is active
+                (under `lock`, so this can never interleave with `send_loop`
+                mid-keystroke or mid-dispatch -- see `_repaint_status_line`'s
+                docstring), or falls straight back to a plain `write_line`
+                when it isn't (a too-short terminal, exactly the old,
+                unconfined-scrolling behavior).
 
-    async def receive_loop() -> None:
-        async def deliver(text: str, *, repaint_status: bool = False) -> None:
-            """
-            The one place `receive_loop` actually writes to the screen
-            (design doc round 79) -- routes through the pinned-row-
-            aware print-and-redraw path when the pinned UI is active
-            (under `lock`, so this can never interleave with `send_loop`
-            mid-keystroke or mid-dispatch -- see `_repaint_status_line`'s
-            docstring), or falls straight back to a plain `write_line`
-            when it isn't (a too-short terminal, exactly the old,
-            unconfined-scrolling behavior).
-
-            Always acquires `lock` first, then re-derives whether the
-            pinned UI is *currently* active via `pinned_ui.sync()`
-            (GitHub issue #46) -- a resize can flip this at any moment
-            between two deliveries, and `sync()` itself needs the lock
-            held to perform a threshold-crossing transition atomically
-            with respect to `send_loop`.
-            """
-            async with lock:
-                if not await pinned_ui.sync(session, db, hub, presence, channel, user, live_buffer):
-                    await session.write_line(text)
-                    return
-                await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
-                if repaint_status:
-                    await _repaint_status_line(session, db, hub, presence, channel, user)
-
-        while True:
-            message = await queue.get()
-            if isinstance(message, _KickNotice):
-                await deliver(
-                    colored(f"\r\n*** You have been {message.reason} from this channel.", fg_color=MUTED_COLOR)
-                )
-                return
-            if isinstance(message, ChannelMessage):
-                # GitHub issue #64, round 109: join/leave/message/action
-                # broadcasts now carry the structured, persisted event
-                # itself rather than a pre-rendered string, so this is
-                # the same renderer scrollback replay uses
-                # (_render_channel_message) -- the two paths can no
-                # longer independently drift on whether a currently-
-                # verified real name is shown. repaint_status=True
-                # unconditionally, same as the _TimestampedNotice branch
-                # below did for these same event kinds before this
-                # split (design doc round 75) -- join/leave affect the
-                # participant count every repaint shows regardless.
-                await deliver(
-                    _render_channel_message(db, channel, user, message, self_message=False),
-                    repaint_status=True,
-                )
-                continue
-            if isinstance(message, _TimestampedNotice):
-                # The one remaining use of this wrapper after round 109
-                # moved join/leave/message/action onto ChannelMessage
-                # above: private (`/msg`/`/private`) message delivery via
-                # `send_to` (`_deliver_private_message`), which has no
-                # ChannelMessage to carry -- private conversations are
-                # deliberately not persisted (design doc round 32 point
-                # 1). repaint_status=True here too since a private
-                # message can arrive while the status line is showing
-                # something now-stale (e.g. an away reminder).
-                await deliver(
-                    format_with_preference(db, user, message.text, message.created_at),
-                    repaint_status=True,
-                )
-                continue
-            if isinstance(message, QueueOverflowNotice):
-                # GitHub issue #31: this session's own queue overflowed
-                # (too far behind the channel's message rate) and one
-                # message was dropped to make room for this notice --
-                # an honest signal that something was missed, rather
-                # than silently losing it.
-                await deliver(
-                    colored(
-                        "\r\n*** You're falling behind -- a message was dropped.",
-                        fg_color=MUTED_COLOR,
-                    )
-                )
-                continue
-            await deliver(message)
-
-    async def send_loop() -> ChatAction | None:
-        # Per-session private-conversation state (design doc round 33
-        # point 1, sign-off round 46/Track 5e): set by `/private`
-        # (`_EnterPrivate`), cleared by `/close` (`_ExitPrivate`). A
-        # plain local, not anything shared/global -- only this session's
-        # own next lines of ordinary input are affected. While set,
-        # slash-commands still dispatch exactly as normal (confirmed
-        # with Thiesi, matching round 39's existing "leading / is always
-        # a command attempt" rule) -- only *non-slash* lines change
-        # meaning, routed to the private conversation instead of posted
-        # to the channel.
-        private_target: User | None = None
-
-        while True:
-            completer = _build_completer(db, presence, channel, user)
-            line = (
-                await session.read_line(
-                    history=history, completer=completer, live_buffer=live_buffer, lock=lock
-                )
-            ).strip()
-
-            # Everything from here to the next read_line() call is one
-            # atomic critical section under `lock` (design doc round 79)
-            # -- entering the scroll region's content row up front, so
-            # every existing write_line() call below (unchanged) prints
-            # and auto-scrolls in the right place instead of landing on
-            # the pinned input row it was just echoed on. `finally`
-            # guarantees the input row gets redrawn (now-empty, ready
-            # for the next line) before this iteration ends, regardless
-            # of which of the several continue/return paths below fires
-            # -- same reasoning as netbbs.net.char_input's own per-
-            # keystroke `finally`, one level up: per *submitted line*
-            # here, rather than per keystroke.
-            #
-            # `lock` is now taken unconditionally (GitHub issue #46),
-            # not just when the pinned UI was active at channel entry --
-            # `pinned_ui.sync()` needs it held to perform a threshold-
-            # crossing transition atomically, and a resize can enable or
-            # disable the pinned UI at any point during a long-running
-            # session, not just decide it once up front.
-            try:
+                Always acquires `lock` first, then re-derives whether the
+                pinned UI is *currently* active via `pinned_ui.sync()`
+                (GitHub issue #46) -- a resize can flip this at any moment
+                between two deliveries, and `sync()` itself needs the lock
+                held to perform a threshold-crossing transition atomically
+                with respect to `send_loop`.
+                """
                 async with lock:
-                    pinned_ui_enabled = await pinned_ui.sync(
-                        session, db, hub, presence, channel, user, live_buffer
+                    if not await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
+                        await session.write_line(text)
+                        return
+                    await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
+                    if repaint_status:
+                        await _repaint_status_line(session, lane, hub, presence, channel, user)
+
+            while True:
+                message = await queue.get()
+                if isinstance(message, _KickNotice):
+                    await deliver(
+                        colored(f"\r\n*** You have been {message.reason} from this channel.", fg_color=MUTED_COLOR)
                     )
-                    if pinned_ui_enabled:
-                        await _enter_content_region(session, session.terminal_height)
-
-                    if not account_still_active(db, user):
-                        # GitHub issue #29 (reopened): the same cross-process
-                        # revalidation netbbs.net.login_flow._main_menu already
-                        # does at its own boundary -- a session that stays in
-                        # chat (or any other long-running submenu) never
-                        # returns to that menu to pick up a disable/delete made
-                        # through a separate `python -m netbbs.admin`
-                        # invocation, so this loop needs the identical check at
-                        # its own equivalent boundary: every attempted message
-                        # or command, before any of it is actually processed.
-                        await session.write_line(
-                            colored(
-                                "\r\nYour account is no longer active. Disconnecting.",
-                                fg_color=MUTED_COLOR,
-                            )
+                    return
+                if isinstance(message, ChannelMessage):
+                    # GitHub issue #64, round 109: join/leave/message/action
+                    # broadcasts now carry the structured, persisted event
+                    # itself rather than a pre-rendered string, so this is
+                    # the same renderer scrollback replay uses
+                    # (_render_channel_message) -- the two paths can no
+                    # longer independently drift on whether a currently-
+                    # verified real name is shown. repaint_status=True
+                    # unconditionally, same as the _TimestampedNotice branch
+                    # below did for these same event kinds before this
+                    # split (design doc round 75) -- join/leave affect the
+                    # participant count every repaint shows regardless.
+                    rendered = await lane.run(_render_channel_message, channel, user, message, self_message=False)
+                    await deliver(rendered, repaint_status=True)
+                    continue
+                if isinstance(message, _TimestampedNotice):
+                    # The one remaining use of this wrapper after round 109
+                    # moved join/leave/message/action onto ChannelMessage
+                    # above: private (`/msg`/`/private`) message delivery via
+                    # `send_to` (`_deliver_private_message`), which has no
+                    # ChannelMessage to carry -- private conversations are
+                    # deliberately not persisted (design doc round 32 point
+                    # 1). repaint_status=True here too since a private
+                    # message can arrive while the status line is showing
+                    # something now-stale (e.g. an away reminder).
+                    rendered = await lane.run(format_with_preference, user, message.text, message.created_at)
+                    await deliver(rendered, repaint_status=True)
+                    continue
+                if isinstance(message, QueueOverflowNotice):
+                    # GitHub issue #31: this session's own queue overflowed
+                    # (too far behind the channel's message rate) and one
+                    # message was dropped to make room for this notice --
+                    # an honest signal that something was missed, rather
+                    # than silently losing it.
+                    await deliver(
+                        colored(
+                            "\r\n*** You're falling behind -- a message was dropped.",
+                            fg_color=MUTED_COLOR,
                         )
-                        return _Quit()
+                    )
+                    continue
+                await deliver(message)
 
-                    if not line:
-                        continue
-                    if line.startswith("/"):
-                        ctx = ChatCommandContext(
-                            session=session,
-                            db=db,
-                            hub=hub,
-                            presence=presence,
-                            mailbox=mailbox,
-                            channel=channel,
-                            user=user,
-                            participant_id=participant_id,
-                            session_registry=session_registry,
+        async def send_loop() -> ChatAction | None:
+            # Per-session private-conversation state (design doc round 33
+            # point 1, sign-off round 46/Track 5e): set by `/private`
+            # (`_EnterPrivate`), cleared by `/close` (`_ExitPrivate`). A
+            # plain local, not anything shared/global -- only this session's
+            # own next lines of ordinary input are affected. While set,
+            # slash-commands still dispatch exactly as normal (confirmed
+            # with Thiesi, matching round 39's existing "leading / is always
+            # a command attempt" rule) -- only *non-slash* lines change
+            # meaning, routed to the private conversation instead of posted
+            # to the channel.
+            private_target: User | None = None
+
+            while True:
+                completer = await _build_completer(lane, presence, channel, user)
+                line = (
+                    await session.read_line(
+                        history=history, completer=completer, live_buffer=live_buffer, lock=lock
+                    )
+                ).strip()
+
+                # Everything from here to the next read_line() call is one
+                # atomic critical section under `lock` (design doc round 79)
+                # -- entering the scroll region's content row up front, so
+                # every existing write_line() call below (unchanged) prints
+                # and auto-scrolls in the right place instead of landing on
+                # the pinned input row it was just echoed on. `finally`
+                # guarantees the input row gets redrawn (now-empty, ready
+                # for the next line) before this iteration ends, regardless
+                # of which of the several continue/return paths below fires
+                # -- same reasoning as netbbs.net.char_input's own per-
+                # keystroke `finally`, one level up: per *submitted line*
+                # here, rather than per keystroke.
+                #
+                # `lock` is now taken unconditionally (GitHub issue #46),
+                # not just when the pinned UI was active at channel entry --
+                # `pinned_ui.sync()` needs it held to perform a threshold-
+                # crossing transition atomically, and a resize can enable or
+                # disable the pinned UI at any point during a long-running
+                # session, not just decide it once up front.
+                try:
+                    async with lock:
+                        pinned_ui_enabled = await pinned_ui.sync(
+                            session, lane, hub, presence, channel, user, live_buffer
                         )
-                        action = await _dispatch_command(ctx, line)
-                        if isinstance(action, _EnterPrivate):
-                            private_target = action.target
-                            continue
-                        if isinstance(action, _ExitPrivate):
-                            if private_target is None:
-                                await session.write_line(
-                                    colored("You are not in a private conversation.", fg_color=MUTED_COLOR)
-                                )
-                            else:
-                                private_target = None
-                                await session.write_line(
-                                    colored(
-                                        f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR
-                                    )
-                                )
-                            continue
-                        if action is not None:
-                            return action
-                        # A dispatched command may have changed status-line-
-                        # relevant state of this user's own (/away, /nick) --
-                        # repainting after every command, not just those two,
-                        # is simpler than enumerating which ones matter and no
-                        # more expensive (design doc round 75).
                         if pinned_ui_enabled:
-                            await _repaint_status_line(session, db, hub, presence, channel, user)
-                        continue
+                            await _enter_content_region(session, session.terminal_height)
 
-                    if private_target is not None:
-                        ctx = ChatCommandContext(
-                            session=session,
-                            db=db,
-                            hub=hub,
-                            presence=presence,
-                            mailbox=mailbox,
-                            channel=channel,
-                            user=user,
-                            participant_id=participant_id,
-                            session_registry=session_registry,
-                        )
-                        if not presence.is_online(private_target.username):
+                        if not await lane.run(account_still_active, user):
+                            # GitHub issue #29 (reopened): the same cross-process
+                            # revalidation netbbs.net.login_flow._main_menu already
+                            # does at its own boundary -- a session that stays in
+                            # chat (or any other long-running submenu) never
+                            # returns to that menu to pick up a disable/delete made
+                            # through a separate `python -m netbbs.admin`
+                            # invocation, so this loop needs the identical check at
+                            # its own equivalent boundary: every attempted message
+                            # or command, before any of it is actually processed.
                             await session.write_line(
                                 colored(
-                                    f"{sanitize_text(private_target.username)} is no longer online.",
+                                    "\r\nYour account is no longer active. Disconnecting.",
                                     fg_color=MUTED_COLOR,
                                 )
                             )
-                            private_target = None
+                            return _Quit()
+
+                        if not line:
                             continue
-                        await _deliver_private_message(ctx, private_target, line)
-                        continue
+                        if line.startswith("/"):
+                            ctx = ChatCommandContext(
+                                session=session,
+                                lane=lane,
+                                hub=hub,
+                                presence=presence,
+                                mailbox=mailbox,
+                                channel=channel,
+                                user=user,
+                                participant_id=participant_id,
+                                session_registry=session_registry,
+                            )
+                            action = await _dispatch_command(ctx, line)
+                            if isinstance(action, _EnterPrivate):
+                                private_target = action.target
+                                continue
+                            if isinstance(action, _ExitPrivate):
+                                if private_target is None:
+                                    await session.write_line(
+                                        colored("You are not in a private conversation.", fg_color=MUTED_COLOR)
+                                    )
+                                else:
+                                    private_target = None
+                                    await session.write_line(
+                                        colored(
+                                            f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR
+                                        )
+                                    )
+                                continue
+                            if action is not None:
+                                return action
+                            # A dispatched command may have changed status-line-
+                            # relevant state of this user's own (/away, /nick) --
+                            # repainting after every command, not just those two,
+                            # is simpler than enumerating which ones matter and no
+                            # more expensive (design doc round 75).
+                            if pinned_ui_enabled:
+                                await _repaint_status_line(session, lane, hub, presence, channel, user)
+                            continue
 
-                    restriction = is_muted(db, channel, user)
-                    if restriction is not None:
-                        until = (
-                            "indefinitely"
-                            if restriction.expires_at is None
-                            else f"until {format_for_display(restriction.expires_at, db)}"
+                        if private_target is not None:
+                            ctx = ChatCommandContext(
+                                session=session,
+                                lane=lane,
+                                hub=hub,
+                                presence=presence,
+                                mailbox=mailbox,
+                                channel=channel,
+                                user=user,
+                                participant_id=participant_id,
+                                session_registry=session_registry,
+                            )
+                            if not presence.is_online(private_target.username):
+                                await session.write_line(
+                                    colored(
+                                        f"{sanitize_text(private_target.username)} is no longer online.",
+                                        fg_color=MUTED_COLOR,
+                                    )
+                                )
+                                private_target = None
+                                continue
+                            await _deliver_private_message(ctx, private_target, line)
+                            continue
+
+                        until = await lane.run(_check_mute, channel, user)
+                        if until is not None:
+                            await session.write_line(
+                                colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
+                            )
+                            # The user may be learning they're muted right now, for
+                            # the first time -- there's no live-push notice for a
+                            # new mute the way kick/ban get one, so this rejection
+                            # is the first opportunity to reflect it.
+                            if pinned_ui_enabled:
+                                await _repaint_status_line(session, lane, hub, presence, channel, user)
+                            continue
+
+                        # GitHub issue #64, round 109: re-checked here against
+                        # the *current* channel/Community policy and the
+                        # user's *current* attestation, not just at channel
+                        # entry -- see _meets_live_participation_requirements.
+                        if not await lane.run(_meets_live_participation_requirements, channel, user):
+                            await session.write_line(colored(_NO_LONGER_QUALIFIES_MESSAGE, fg_color=MUTED_COLOR))
+                            return _ToPicker()
+
+                        # The sender gets a direct write with self_message=True
+                        # (SELF_COLOR, so their own messages visually stand out
+                        # from the rest of the conversation) while everyone else
+                        # receives the ACCENT_COLOR-formatted version via the
+                        # broadcast (sender excluded, since they already got
+                        # their own copy directly) -- _render_channel_message
+                        # composes the two independently per recipient rather
+                        # than reusing one shared string, since it's genuinely
+                        # different text per recipient (GitHub issue #64 point
+                        # 4: never nest a second color inside `_chat_author_
+                        # label`'s already-colored/reset segments).
+                        #
+                        # The broadcast payload is the recorded ChannelMessage
+                        # itself, not a pre-rendered string -- receive_loop
+                        # renders it the same way scrollback replay does
+                        # (_render_channel_message), so live and replay can't
+                        # independently drift on the gated-display rule.
+                        # record_message stores the raw `line`, not a sanitized
+                        # copy -- sanitize on output, not on storage.
+                        recorded_message = await lane.run(
+                            record_message,
+                            channel,
+                            kind="message",
+                            author_label=user.username,
+                            author_fingerprint=user.fingerprint,
+                            body=line,
                         )
-                        await session.write_line(
-                            colored(f"You are muted in this channel ({until}).", fg_color=MUTED_COLOR)
+                        rendered_self = await lane.run(
+                            _render_channel_message, channel, user, recorded_message, self_message=True
                         )
-                        # The user may be learning they're muted right now, for
-                        # the first time -- there's no live-push notice for a
-                        # new mute the way kick/ban get one, so this rejection
-                        # is the first opportunity to reflect it.
+                        await session.write_line(rendered_self)
+                        await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
+                        # Design doc round 32, point 6: sending a message does not
+                        # clear away state -- a user may intentionally remain away
+                        # while briefly responding. Reminded, not silently changed.
+                        if presence.is_away(user.username):
+                            await session.write_line(
+                                colored("(You are still marked away.)", fg_color=MUTED_COLOR)
+                            )
                         if pinned_ui_enabled:
-                            await _repaint_status_line(session, db, hub, presence, channel, user)
-                        continue
+                            await _repaint_status_line(session, lane, hub, presence, channel, user)
+                finally:
+                    # Re-synced once more here, not just trusted from the
+                    # top of this same iteration (GitHub issue #46) -- a
+                    # resize could have crossed the threshold while this
+                    # iteration's own body was busy (command dispatch, a
+                    # broadcast, etc.), and this is the one place that
+                    # decides whether the final per-iteration repaint below
+                    # is even valid to attempt.
+                    async with lock:
+                        if await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
+                            await _repaint_input_row(session, live_buffer, session.terminal_height)
 
-                    # GitHub issue #64, round 109: re-checked here against
-                    # the *current* channel/Community policy and the
-                    # user's *current* attestation, not just at channel
-                    # entry -- see _meets_live_participation_requirements.
-                    if not _meets_live_participation_requirements(db, channel, user):
-                        await session.write_line(colored(_NO_LONGER_QUALIFIES_MESSAGE, fg_color=MUTED_COLOR))
-                        return _ToPicker()
+        receive_task = asyncio.create_task(receive_loop())
+        send_task = asyncio.create_task(send_loop())
 
-                    # The sender gets a direct write with self_message=True
-                    # (SELF_COLOR, so their own messages visually stand out
-                    # from the rest of the conversation) while everyone else
-                    # receives the ACCENT_COLOR-formatted version via the
-                    # broadcast (sender excluded, since they already got
-                    # their own copy directly) -- _render_channel_message
-                    # composes the two independently per recipient rather
-                    # than reusing one shared string, since it's genuinely
-                    # different text per recipient (GitHub issue #64 point
-                    # 4: never nest a second color inside `_chat_author_
-                    # label`'s already-colored/reset segments).
-                    #
-                    # The broadcast payload is the recorded ChannelMessage
-                    # itself, not a pre-rendered string -- receive_loop
-                    # renders it the same way scrollback replay does
-                    # (_render_channel_message), so live and replay can't
-                    # independently drift on the gated-display rule.
-                    # record_message stores the raw `line`, not a sanitized
-                    # copy -- sanitize on output, not on storage.
-                    recorded_message = record_message(
-                        db,
-                        channel,
-                        kind="message",
-                        author_label=user.username,
-                        author_fingerprint=user.fingerprint,
-                        body=line,
-                    )
-                    await session.write_line(
-                        _render_channel_message(db, channel, user, recorded_message, self_message=True)
-                    )
-                    await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
-                    # Design doc round 32, point 6: sending a message does not
-                    # clear away state -- a user may intentionally remain away
-                    # while briefly responding. Reminded, not silently changed.
-                    if presence.is_away(user.username):
-                        await session.write_line(
-                            colored("(You are still marked away.)", fg_color=MUTED_COLOR)
-                        )
-                    if pinned_ui_enabled:
-                        await _repaint_status_line(session, db, hub, presence, channel, user)
-            finally:
-                # Re-synced once more here, not just trusted from the
-                # top of this same iteration (GitHub issue #46) -- a
-                # resize could have crossed the threshold while this
-                # iteration's own body was busy (command dispatch, a
-                # broadcast, etc.), and this is the one place that
-                # decides whether the final per-iteration repaint below
-                # is even valid to attempt.
-                async with lock:
-                    if await pinned_ui.sync(session, db, hub, presence, channel, user, live_buffer):
-                        await _repaint_input_row(session, live_buffer, session.terminal_height)
-
-    receive_task = asyncio.create_task(receive_loop())
-    send_task = asyncio.create_task(send_loop())
-
-    try:
         try:
             done, pending = await asyncio.wait(
                 {receive_task, send_task}, return_when=asyncio.FIRST_COMPLETED
@@ -2787,7 +2951,7 @@ async def _chat_loop(
             except SessionClosedError:
                 pass
         hub.leave(channel.name, participant_id)
-        recorded_leave = record_message(
-            db, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint
+        recorded_leave = await lane.run(
+            record_message, channel, kind="leave", author_label=user.username, author_fingerprint=user.fingerprint
         )
         await hub.broadcast(channel.name, recorded_leave, exclude={participant_id})

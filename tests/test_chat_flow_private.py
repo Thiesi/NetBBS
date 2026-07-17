@@ -3,6 +3,10 @@ Tests for Phase 2 Track 5e (design doc round 32/33, sign-off round 46):
 `/msg`, `/private`, `/close`, driven through the real `_chat_loop`
 dispatcher via the shared `FakeSession` (`test_chat_flow_moderation.py`).
 `/query` was removed in round 54 -- see `test_query_is_no_longer_a_command`.
+
+`netbbs.net.chat_flow` is the third module migrated onto design doc
+round 91's two-lane database execution model (issue #57/round 114) --
+`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -30,6 +35,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -76,38 +88,51 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
+async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
     session = FakeSession(lines)
     history = InputHistory()
     await asyncio.wait_for(
         chat_flow._chat_loop(
-            session, db, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
         ),
         timeout=2,
     )
     return session
 
 
+async def _join_and_wait(lane, hub, presence, mailbox, history, channel, user, session):
+    """Same polled-join reasoning as every other migrated chat test file
+    (design doc round 114): a single `asyncio.sleep(0)` is no longer
+    reliably enough wall-clock time for `_chat_loop`'s own join sequence
+    (now several real `ThreadPoolExecutor` round trips) to complete."""
+    task = asyncio.create_task(
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user)
+    )
+    while hub.participant_count(channel.name) < 1:
+        await asyncio.sleep(0)
+    return task
+
+
 # -- /msg: online check ------------------------------------------------------
 
 
-def test_msg_to_offline_user_is_refused(db, hub, presence, mailbox, alice, bob, channel):
+def test_msg_to_offline_user_is_refused(lane, hub, presence, mailbox, alice, bob, channel):
     session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/msg bob hello", "/quit"])
+        _run(lane, hub, presence, mailbox, channel, alice, ["/msg bob hello", "/quit"])
     )
     assert "not currently online" in _written(session)
     assert mailbox.flush("bob") == []
 
 
-def test_msg_to_unknown_user_shows_friendly_message(db, hub, presence, mailbox, alice, channel):
+def test_msg_to_unknown_user_shows_friendly_message(lane, hub, presence, mailbox, alice, channel):
     session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/msg nosuchuser hello", "/quit"])
+        _run(lane, hub, presence, mailbox, channel, alice, ["/msg nosuchuser hello", "/quit"])
     )
     assert "No such user" in _written(session)
 
 
-def test_msg_with_no_text_shows_usage(db, hub, presence, mailbox, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/msg bob", "/quit"]))
+def test_msg_with_no_text_shows_usage(lane, hub, presence, mailbox, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/msg bob", "/quit"]))
     assert "Usage: /msg" in _written(session)
 
 
@@ -115,21 +140,18 @@ def test_msg_with_no_text_shows_usage(db, hub, presence, mailbox, alice, channel
 
 
 def test_msg_delivers_live_to_a_recipient_in_a_different_channel(
-    db, hub, presence, mailbox, alice, bob, channel, other_channel
+    lane, hub, presence, mailbox, alice, bob, channel, other_channel
 ):
     presence.enter("bob")
 
     async def scenario():
         history = InputHistory()
         target_session = FakeSession()  # sits in other_channel, never types
-        target_task = asyncio.create_task(
-            chat_flow._chat_loop(target_session, db, hub, presence, mailbox, history, other_channel, bob)
-        )
-        await asyncio.sleep(0)  # let bob actually join before the /msg is sent
+        target_task = await _join_and_wait(lane, hub, presence, mailbox, history, other_channel, bob, target_session)
 
         sender_session = FakeSession(["/msg bob hello there", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(sender_session, db, hub, presence, mailbox, history, channel, alice),
+            chat_flow._chat_loop(sender_session, lane, hub, presence, mailbox, history, channel, alice),
             timeout=2,
         )
 
@@ -145,7 +167,7 @@ def test_msg_delivers_live_to_a_recipient_in_a_different_channel(
 
 
 def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
-    db, hub, presence, mailbox, alice, bob, channel
+    lane, hub, presence, mailbox, alice, bob, channel
 ):
     # Online (e.g. browsing boards) but not currently in a chat channel --
     # exactly the gap the mailbox exists for (design doc round 32/46).
@@ -161,7 +183,7 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
         registry.enter(bob_session)  # requires a running event loop
         registry.mark_authenticated(bob_session, "bob")
         return await _run(
-            db, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
+            lane, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
             session_registry=registry,
         )
 
@@ -177,7 +199,7 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
 
 
 def test_msg_reaches_every_one_of_the_recipients_sessions(
-    db, hub, presence, mailbox, alice, bob, channel, other_channel
+    lane, hub, presence, mailbox, alice, bob, channel, other_channel
 ):
     """Regression test for the core bug: a recipient with two
     simultaneous non-chat-live sessions used to share one account-wide
@@ -192,7 +214,7 @@ def test_msg_reaches_every_one_of_the_recipients_sessions(
         registry.enter(bob_session_two)
         registry.mark_authenticated(bob_session_two, "bob")
         return await _run(
-            db, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
+            lane, hub, presence, mailbox, channel, alice, ["/msg bob hello there", "/quit"],
             session_registry=registry,
         )
 
@@ -207,7 +229,7 @@ def test_msg_reaches_every_one_of_the_recipients_sessions(
 
 
 def test_msg_reaches_both_a_live_chat_session_and_a_non_chat_session(
-    db, hub, presence, mailbox, alice, bob, channel, other_channel
+    lane, hub, presence, mailbox, alice, bob, channel, other_channel
 ):
     """One chat session plus one main-menu (non-chat) session both
     receive the same /msg -- the live one instantly via ChatHub, the
@@ -223,15 +245,12 @@ def test_msg_reaches_both_a_live_chat_session_and_a_non_chat_session(
         live_session = FakeSession()  # sits in other_channel, never types
         registry.enter(live_session)
         registry.mark_authenticated(live_session, "bob")
-        live_task = asyncio.create_task(
-            chat_flow._chat_loop(live_session, db, hub, presence, mailbox, history, other_channel, bob)
-        )
-        await asyncio.sleep(0)  # let bob's live session actually join first
+        live_task = await _join_and_wait(lane, hub, presence, mailbox, history, other_channel, bob, live_session)
 
         sender_session = FakeSession(["/msg bob hello there", "/quit"])
         await asyncio.wait_for(
             chat_flow._chat_loop(
-                sender_session, db, hub, presence, mailbox, history, channel, alice,
+                sender_session, lane, hub, presence, mailbox, history, channel, alice,
                 session_registry=registry,
             ),
             timeout=2,
@@ -248,7 +267,7 @@ def test_msg_reaches_both_a_live_chat_session_and_a_non_chat_session(
 
 
 def test_msg_is_never_written_to_scrollback_or_moderation_log(
-    db, hub, presence, mailbox, alice, bob, channel
+    db, lane, hub, presence, mailbox, alice, bob, channel
 ):
     # The `channel` fixture itself now logs a `create_channel` audit
     # entry (design doc -- channel management round), so the baseline
@@ -258,7 +277,7 @@ def test_msg_is_never_written_to_scrollback_or_moderation_log(
     before = list_actions_for_object(db, "channel", channel.id)
 
     presence.enter("bob")
-    asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/msg bob hello", "/quit"]))
+    asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/msg bob hello", "/quit"]))
 
     scrollback = get_scrollback(db, channel)
     assert all(m.kind in ("join", "leave") for m in scrollback)
@@ -268,15 +287,15 @@ def test_msg_is_never_written_to_scrollback_or_moderation_log(
 # -- /private, /close --------------------------------------------------
 
 
-def test_private_to_offline_user_is_refused(db, hub, presence, mailbox, alice, bob, channel):
+def test_private_to_offline_user_is_refused(lane, hub, presence, mailbox, alice, bob, channel):
     session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/private bob", "/quit"])
+        _run(lane, hub, presence, mailbox, channel, alice, ["/private bob", "/quit"])
     )
     assert "not currently online" in _written(session)
 
 
 def test_private_enters_conversation_mode_and_routes_plain_lines(
-    db, hub, presence, mailbox, alice, bob, channel
+    db, lane, hub, presence, mailbox, alice, bob, channel
 ):
     presence.enter("bob")
     registry = ActiveSessionRegistry()
@@ -286,7 +305,7 @@ def test_private_enters_conversation_mode_and_routes_plain_lines(
         registry.enter(bob_session)  # requires a running event loop
         registry.mark_authenticated(bob_session, "bob")
         return await _run(
-            db,
+            lane,
             hub,
             presence,
             mailbox,
@@ -308,13 +327,13 @@ def test_private_enters_conversation_mode_and_routes_plain_lines(
 
 
 def test_commands_still_dispatch_normally_while_in_private_mode(
-    db, hub, presence, mailbox, alice, bob, channel
+    lane, hub, presence, mailbox, alice, bob, channel
 ):
     presence.enter("bob")
 
     session = asyncio.run(
         _run(
-            db,
+            lane,
             hub,
             presence,
             mailbox,
@@ -331,12 +350,12 @@ def test_commands_still_dispatch_normally_while_in_private_mode(
     assert mailbox.flush("bob") == []
 
 
-def test_close_returns_to_channel_input(db, hub, presence, mailbox, alice, bob, channel):
+def test_close_returns_to_channel_input(db, lane, hub, presence, mailbox, alice, bob, channel):
     presence.enter("bob")
 
     session = asyncio.run(
         _run(
-            db,
+            lane,
             hub,
             presence,
             mailbox,
@@ -354,19 +373,19 @@ def test_close_returns_to_channel_input(db, hub, presence, mailbox, alice, bob, 
 
 
 def test_close_without_being_in_private_mode_shows_message(
-    db, hub, presence, mailbox, alice, channel
+    lane, hub, presence, mailbox, alice, channel
 ):
-    session = asyncio.run(_run(db, hub, presence, mailbox, channel, alice, ["/close", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/close", "/quit"]))
     assert "You are not in a private conversation." in _written(session)
 
 
-def test_query_is_no_longer_a_command(db, hub, presence, mailbox, alice, bob, channel):
+def test_query_is_no_longer_a_command(lane, hub, presence, mailbox, alice, bob, channel):
     # design doc round 54: removed as a bare, value-free alias for
     # /private -- the only command that ever had two names.
     presence.enter("bob")
 
     session = asyncio.run(
-        _run(db, hub, presence, mailbox, channel, alice, ["/query bob", "/quit"])
+        _run(lane, hub, presence, mailbox, channel, alice, ["/query bob", "/quit"])
     )
 
     assert "Unknown command: /query" in _written(session)
@@ -397,7 +416,7 @@ class _SessionThatDropsBobAfterEnteringPrivateMode(FakeSession):
 
 
 def test_private_target_going_offline_mid_conversation_is_handled(
-    db, hub, presence, mailbox, alice, bob, channel
+    lane, hub, presence, mailbox, alice, bob, channel
 ):
     presence.enter("bob")
     session = _SessionThatDropsBobAfterEnteringPrivateMode(
@@ -406,7 +425,7 @@ def test_private_target_going_offline_mid_conversation_is_handled(
 
     asyncio.run(
         asyncio.wait_for(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, InputHistory(), channel, alice), timeout=2
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice), timeout=2
         )
     )
 

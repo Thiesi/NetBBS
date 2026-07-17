@@ -10,6 +10,15 @@ isolation) and `tests/test_chat_nick.py` (`/nick`'s own alias mechanics,
 untouched by this round) — these drive the real `_chat_loop` dispatcher
 end to end, the same way `tests/test_chat_action.py`/
 `tests/test_terminal_sanitization.py` do.
+
+`netbbs.net.chat_flow` is the third module migrated onto design doc
+round 91's two-lane database execution model (issue #57/round 114) --
+`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
+`_chat_author_label`/`_message_author_label`/`_render_channel_message`/
+`_meets_live_participation_requirements` are leaf functions dispatched
+*through* the lane elsewhere, unchanged here -- still called directly
+with `db`, since these tests exercise them in isolation, not through
+`_chat_loop`.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.rendering import MUTED_COLOR, VERIFIED_COLOR, fg
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -38,6 +48,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -79,14 +96,27 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, channel, user, lines):
+async def _run(lane, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
     history = InputHistory()
     action = await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session, action
+
+
+async def _join_and_wait(lane, hub, presence, channel, user, session):
+    """Same polled-join reasoning as every other migrated chat test file
+    (design doc round 114)."""
+    mailbox = MessageMailbox()
+    history = InputHistory()
+    task = asyncio.create_task(
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user)
+    )
+    while hub.participant_count(channel.name) < 1:
+        await asyncio.sleep(0)
+    return task, mailbox, history
 
 
 # -- _chat_author_label composition -------------------------------------------
@@ -136,22 +166,17 @@ def test_unresolvable_author_never_gets_verified_styling(db, gated_channel):
 # -- live self / live other / scrollback replay parity ------------------------
 
 
-def test_live_message_shows_verified_unit_to_sender_and_recipient(db, hub, presence, gated_channel, alice, bob, sysop):
+def test_live_message_shows_verified_unit_to_sender_and_recipient(db, lane, hub, presence, gated_channel, alice, bob, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
     set_nick(db, alice, "ali")
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, gated_channel, bob)
-        )
-        await asyncio.sleep(0)  # let bob actually join before alice speaks
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, gated_channel, bob, watcher)
 
         actor = FakeSession(["hello everyone", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, gated_channel, alice), timeout=2
+            chat_flow._chat_loop(actor, lane, hub, presence, mailbox, history, gated_channel, alice), timeout=2
         )
         watcher_task.cancel()
         await asyncio.gather(watcher_task, return_exceptions=True)
@@ -164,41 +189,36 @@ def test_live_message_shows_verified_unit_to_sender_and_recipient(db, hub, prese
         assert "hello everyone" in text
 
 
-def test_scrollback_replay_matches_live_rendering(db, hub, presence, gated_channel, alice, bob, sysop):
+def test_scrollback_replay_matches_live_rendering(db, lane, hub, presence, gated_channel, alice, bob, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
     set_nick(db, alice, "ali")
 
-    asyncio.run(_run(db, hub, presence, gated_channel, alice, ["hello everyone", "/quit"]))
+    asyncio.run(_run(lane, hub, presence, gated_channel, alice, ["hello everyone", "/quit"]))
 
-    late_session, _ = asyncio.run(_run(db, hub, presence, gated_channel, bob, ["/quit"]))
+    late_session, _ = asyncio.run(_run(lane, hub, presence, gated_channel, bob, ["/quit"]))
     replay_text = _written(late_session)
     assert f"{NICK_MARKER}ali{NICK_MARKER}" in replay_text
     assert "(=Alice Smith=)" in replay_text
     assert "hello everyone" in replay_text
 
 
-def test_me_action_shows_verified_unit(db, hub, presence, gated_channel, alice, sysop):
+def test_me_action_shows_verified_unit(db, lane, hub, presence, gated_channel, alice, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
-    session, _ = asyncio.run(_run(db, hub, presence, gated_channel, alice, ["/me waves", "/quit"]))
+    session, _ = asyncio.run(_run(lane, hub, presence, gated_channel, alice, ["/me waves", "/quit"]))
     text = _written(session)
     assert "(=Alice Smith=)" in text
     assert "waves" in text
 
 
-def test_join_notice_shows_verified_unit_to_other_participant(db, hub, presence, gated_channel, alice, bob, sysop):
+def test_join_notice_shows_verified_unit_to_other_participant(db, lane, hub, presence, gated_channel, alice, bob, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, gated_channel, bob)
-        )
-        await asyncio.sleep(0)
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, gated_channel, bob, watcher)
         await asyncio.wait_for(
             chat_flow._chat_loop(
-                FakeSession(["/quit"]), db, hub, presence, mailbox, history, gated_channel, alice
+                FakeSession(["/quit"]), lane, hub, presence, mailbox, history, gated_channel, alice
             ),
             timeout=2,
         )
@@ -259,14 +279,14 @@ def _tighten_to_verified_and_displayed(db, channel, *, changed_by):
     )
 
 
-def test_message_refused_once_channel_becomes_gated_mid_session(db, hub, presence, open_channel, alice, sysop):
+def test_message_refused_once_channel_becomes_gated_mid_session(db, lane, hub, presence, open_channel, alice, sysop):
     # alice's session "joined" (entered _chat_loop) while the channel was
     # still open -- the channel is tightened *after* that, simulating a
     # long-lived session whose entry-time authorization has gone stale.
     stale_channel = open_channel
     _tighten_to_verified_and_displayed(db, open_channel, changed_by=sysop)
 
-    session, action = asyncio.run(_run(db, hub, presence, stale_channel, alice, ["still here", "/quit"]))
+    session, action = asyncio.run(_run(lane, hub, presence, stale_channel, alice, ["still here", "/quit"]))
 
     assert isinstance(action, chat_flow._ToPicker)
     assert "no longer meet" in _written(session)
@@ -274,11 +294,11 @@ def test_message_refused_once_channel_becomes_gated_mid_session(db, hub, presenc
     assert "message" not in kinds  # the refused send was never recorded
 
 
-def test_me_action_refused_once_channel_becomes_gated_mid_session(db, hub, presence, open_channel, alice, sysop):
+def test_me_action_refused_once_channel_becomes_gated_mid_session(db, lane, hub, presence, open_channel, alice, sysop):
     stale_channel = open_channel
     _tighten_to_verified_and_displayed(db, open_channel, changed_by=sysop)
 
-    session, action = asyncio.run(_run(db, hub, presence, stale_channel, alice, ["/me waves", "/quit"]))
+    session, action = asyncio.run(_run(lane, hub, presence, stale_channel, alice, ["/me waves", "/quit"]))
 
     assert isinstance(action, chat_flow._ToPicker)
     assert "no longer meet" in _written(session)
@@ -286,8 +306,8 @@ def test_me_action_refused_once_channel_becomes_gated_mid_session(db, hub, prese
     assert "action" not in kinds
 
 
-def test_message_still_accepted_when_requirements_still_met(db, hub, presence, gated_channel, alice, sysop):
+def test_message_still_accepted_when_requirements_still_met(db, lane, hub, presence, gated_channel, alice, sysop):
     attest_name(db, alice, "Alice Smith", verifier=sysop)
-    session, action = asyncio.run(_run(db, hub, presence, gated_channel, alice, ["hi there", "/quit"]))
+    session, action = asyncio.run(_run(lane, hub, presence, gated_channel, alice, ["hi there", "/quit"]))
     assert isinstance(action, chat_flow._Quit)
     assert "hi there" in _written(session)

@@ -31,6 +31,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 
 
 class FakeSession(Session):
@@ -91,6 +92,13 @@ def db(tmp_path):
 
 
 @pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
+
+
+@pytest.fixture
 def hub():
     return ChatHub()
 
@@ -117,17 +125,17 @@ def _grant_manage_members(db, user, channel):
     )
 
 
-async def _run(db, hub, presence, user, inputs):
+async def _run(lane, hub, presence, user, inputs):
     session = FakeSession(inputs)
     history = InputHistory()
     mailbox = MessageMailbox()
     await asyncio.wait_for(
-        chat_flow.browse_channels(session, db, hub, presence, mailbox, history, user), timeout=2
+        chat_flow.browse_channels(session, lane, hub, presence, mailbox, history, user), timeout=2
     )
     return session
 
 
-def test_selecting_a_members_only_channel_without_access_is_refused(db, hub, presence, alice, bob):
+def test_selecting_a_members_only_channel_without_access_is_refused(db, lane, hub, presence, alice, bob):
     """The core bug: picking a visible members_only channel directly
     from the browse list -- never typing /join -- used to grant entry
     with no check at all."""
@@ -136,13 +144,13 @@ def test_selecting_a_members_only_channel_without_access_is_refused(db, hub, pre
     # "01" selects the (only) channel on the picker's first page; the
     # loop must land back at the picker (never entering chat), and "b"
     # backs all the way out.
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "b"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "b"]))
 
     assert "not authorized" in _written_text(session)
     assert is_member(db, channel, bob) is False
 
 
-def test_selecting_a_hidden_invited_channel_from_the_picker_accepts_and_enters(db, hub, presence, alice, bob):
+def test_selecting_a_hidden_invited_channel_from_the_picker_accepts_and_enters(db, lane, hub, presence, alice, bob):
     """The invited-user path: selecting the channel directly from the
     picker (not /join) must still atomically accept the invitation,
     create real persistent membership, and actually enter chat."""
@@ -150,7 +158,7 @@ def test_selecting_a_hidden_invited_channel_from_the_picker_accepts_and_enters(d
     _grant_manage_members(db, alice, channel)
     create_invitation(db, channel, bob, invited_by=alice)
 
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/quit"]))
 
     assert "not authorized" not in _written_text(session)
     assert "Joined" in _written_text(session)
@@ -158,17 +166,17 @@ def test_selecting_a_hidden_invited_channel_from_the_picker_accepts_and_enters(d
     assert has_pending_invitation(db, channel, bob) is False  # consumed, not left dangling
 
 
-def test_hidden_channel_with_no_invitation_is_invisible_to_an_unrelated_user(db, hub, presence, alice):
+def test_hidden_channel_with_no_invitation_is_invisible_to_an_unrelated_user(db, lane, hub, presence, alice):
     carol = create_user(db, "carol", password="hunter2", user_level=10)
     create_channel(db, "secret-club", creator=alice, members_only=True, hidden=True)
 
     # Nothing to select -- the picker has no channels at all for carol.
-    session = asyncio.run(_run(db, hub, presence, carol, []))
+    session = asyncio.run(_run(lane, hub, presence, carol, []))
 
     assert "No chat channels are available" in _written_text(session)
 
 
-def test_leaving_and_reselecting_via_the_picker_succeeds_from_persistent_membership(db, hub, presence, alice, bob):
+def test_leaving_and_reselecting_via_the_picker_succeeds_from_persistent_membership(db, lane, hub, presence, alice, bob):
     """Matches the original bug report's exact leave-then-rejoin
     scenario, but through the picker end-to-end instead of the
     library-level accept_invitation() call test_channel_membership.py
@@ -181,19 +189,19 @@ def test_leaving_and_reselecting_via_the_picker_succeeds_from_persistent_members
     # to the picker, then re-select the same channel again -- must
     # succeed purely from the now-persistent membership, no invitation
     # left to consume the second time.
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/leave", "0", "1", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/leave", "0", "1", "/quit"]))
 
     assert _written_text(session).count("not authorized") == 0
     assert is_member(db, channel, bob) is True
 
 
-def test_selecting_an_open_channel_still_works_unaffected(db, hub, presence, alice, bob):
+def test_selecting_an_open_channel_still_works_unaffected(db, lane, hub, presence, alice, bob):
     """Regression guard: an ordinary, non-members_only channel must
     still be enterable directly from the picker exactly as before --
     _authorize_channel_entry must not accidentally tighten this path."""
     create_channel(db, "lobby", creator=alice)
 
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/quit"]))
 
     assert "not authorized" not in _written_text(session)
     assert "Joined" in _written_text(session)
@@ -202,17 +210,17 @@ def test_selecting_an_open_channel_still_works_unaffected(db, hub, presence, ali
 # -- identity attestation: age/name gating on channel entry (design doc §18, round 103) --
 
 
-def test_min_age_gate_hides_the_channel_from_the_picker(db, hub, presence, alice, bob):
+def test_min_age_gate_hides_the_channel_from_the_picker(db, lane, hub, presence, alice, bob):
     create_channel(db, "adults", creator=alice, min_age=18)
 
     # No birthdate on file for bob -- meets_age fails closed, so the
     # channel never even appears in the picker's list.
-    session = asyncio.run(_run(db, hub, presence, bob, []))
+    session = asyncio.run(_run(lane, hub, presence, bob, []))
 
     assert "No chat channels are available" in _written_text(session)
 
 
-def test_min_age_gate_allows_entry_once_met(db, hub, presence, alice, bob):
+def test_min_age_gate_allows_entry_once_met(db, lane, hub, presence, alice, bob):
     from datetime import date
 
     from netbbs.attestation import set_birthdate
@@ -220,26 +228,26 @@ def test_min_age_gate_allows_entry_once_met(db, hub, presence, alice, bob):
     set_birthdate(db, bob, date(1990, 1, 1))
     create_channel(db, "adults", creator=alice, min_age=18)
 
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/quit"]))
 
     assert "not authorized" not in _written_text(session)
     assert "Joined" in _written_text(session)
 
 
-def test_name_requirement_denies_entry_without_attestation(db, hub, presence, alice, bob):
+def test_name_requirement_denies_entry_without_attestation(db, lane, hub, presence, alice, bob):
     channel = create_channel(db, "verified-only", creator=alice, name_requirement="verified")
 
     # Age-gating hides a channel from the picker entirely (fails
     # closed), but name_requirement is a participation gate, not a
     # content restriction -- the channel stays visible/selectable, and
     # entry itself is refused with a specific message.
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "b"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "b"]))
 
     assert "requires a verified real name" in _written_text(session)
     assert is_member(db, channel, bob) is False
 
 
-def test_name_requirement_allows_entry_once_attested(db, hub, presence, alice, bob):
+def test_name_requirement_allows_entry_once_attested(db, lane, hub, presence, alice, bob):
     from netbbs.attestation import attest_name
     from netbbs.auth.users import set_can_verify_identity
 
@@ -247,7 +255,7 @@ def test_name_requirement_allows_entry_once_attested(db, hub, presence, alice, b
     attest_name(db, bob, "Bob Smith", verifier=alice)
     create_channel(db, "verified-only", creator=alice, name_requirement="verified")
 
-    session = asyncio.run(_run(db, hub, presence, bob, ["0", "1", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, bob, ["0", "1", "/quit"]))
 
     assert "requires a verified real name" not in _written_text(session)
     assert "Joined" in _written_text(session)

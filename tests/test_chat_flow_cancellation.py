@@ -30,6 +30,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 
@@ -38,6 +39,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -50,7 +58,7 @@ def channel(db, alice):
     return create_channel(db, "general", creator=alice)
 
 
-def test_cancelling_the_outer_task_does_not_orphan_child_tasks(db, alice, channel):
+def test_cancelling_the_outer_task_does_not_orphan_child_tasks(lane, alice, channel):
     """
     Checks the actual mechanism directly via `asyncio.all_tasks()`
     rather than trying to reproduce the exact "Task exception was never
@@ -75,7 +83,7 @@ def test_cancelling_the_outer_task_does_not_orphan_child_tasks(db, alice, channe
 
         tasks_before = asyncio.all_tasks()
         outer = asyncio.create_task(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice)
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, alice)
         )
         await asyncio.sleep(0)  # let _chat_loop start and create its two child tasks
 
@@ -92,7 +100,7 @@ def test_cancelling_the_outer_task_does_not_orphan_child_tasks(db, alice, channe
     asyncio.run(scenario())
 
 
-def test_cancelling_the_outer_task_still_runs_leave_cleanup(db, alice, channel):
+def test_cancelling_the_outer_task_still_runs_leave_cleanup(lane, alice, channel):
     """The `finally:` block's own cleanup (hub.leave, the "has left the
     channel" broadcast) must still run on this path -- confirms the fix
     re-raises CancelledError rather than swallowing it or returning
@@ -106,9 +114,10 @@ def test_cancelling_the_outer_task_still_runs_leave_cleanup(db, alice, channel):
         session = FakeSession()
 
         outer = asyncio.create_task(
-            chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, alice)
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, alice)
         )
-        await asyncio.sleep(0)
+        while hub.participant_count(channel.name) < 1:
+            await asyncio.sleep(0)
         assert hub.participant_count(channel.name) == 1
 
         outer.cancel()

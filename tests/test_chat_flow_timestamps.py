@@ -6,6 +6,13 @@ behavior (`timestamps_enabled`/`set_timestamps_enabled`/
 `format_with_preference`) is exercised indirectly here, through the
 real command and chat loop -- mirroring tests/test_chat_flow_away.py's
 structure for the sibling `/away` preference command.
+
+`netbbs.net.chat_flow` is the third module migrated onto design doc
+round 91's two-lane database execution model (issue #57/round 114) --
+`_chat_loop` now takes a `DatabaseLane` instead of a `Database`, so
+`_run` and every direct call here uses `lane`. `db` stays for setup/
+assertion calls (`timestamps_enabled`, `set_timestamps_enabled`),
+unchanged.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.storage.database import Database
+from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
 #: Time-only (design doc round 77) -- format_with_preference dropped
@@ -37,6 +45,13 @@ def db(tmp_path):
     database = Database(tmp_path / "node.db")
     yield database
     database.close()
+
+
+@pytest.fixture
+def lane(db):
+    database_lane = DatabaseLane(db.path)
+    yield database_lane
+    database_lane.close()
 
 
 @pytest.fixture
@@ -68,49 +83,67 @@ def _written_text(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(db, hub, presence, channel, user, lines):
+async def _run(lane, hub, presence, channel, user, lines):
     session = FakeSession(lines)
     mailbox = MessageMailbox()
     history = InputHistory()
     await asyncio.wait_for(
-        chat_flow._chat_loop(session, db, hub, presence, mailbox, history, channel, user), timeout=2
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user), timeout=2
     )
     return session
+
+
+async def _join_and_wait(lane, hub, presence, channel, user, session):
+    """Starts `_chat_loop` as a background task and waits until it has
+    actually joined `channel`'s hub roster before returning -- polled,
+    not a fixed `asyncio.sleep(0)` (design doc round 114): joining now
+    involves real `ThreadPoolExecutor` round trips (the lane dispatch
+    for the ban check, scrollback fetch, and join record), with genuine
+    wall-clock latency a single zero-duration sleep can no longer
+    reliably outlast."""
+    mailbox = MessageMailbox()
+    history = InputHistory()
+    task = asyncio.create_task(
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user)
+    )
+    while hub.participant_count(channel.name) < 1:
+        await asyncio.sleep(0)
+    return task, mailbox, history
 
 
 # -- /timestamps command itself ---------------------------------------------
 
 
-def test_timestamps_defaults_to_off(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps", "/quit"]))
+def test_timestamps_defaults_to_off(lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
     assert "Chat timestamps are off." in _written_text(session)
 
 
-def test_timestamps_on_enables_the_preference(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps on", "/quit"]))
+def test_timestamps_on_enables_the_preference(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps on", "/quit"]))
     assert "Chat timestamps are now on." in _written_text(session)
     assert timestamps_enabled(db, alice) is True
 
 
-def test_timestamps_off_disables_the_preference(db, hub, presence, alice, channel):
+def test_timestamps_off_disables_the_preference(db, lane, hub, presence, alice, channel):
     set_timestamps_enabled(db, alice, True)
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps off", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps off", "/quit"]))
     assert "Chat timestamps are now off." in _written_text(session)
     assert timestamps_enabled(db, alice) is False
 
 
-def test_timestamps_toggle_flips_the_state(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
+def test_timestamps_toggle_flips_the_state(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
     assert "Chat timestamps are now on." in _written_text(session)
     assert timestamps_enabled(db, alice) is True
 
-    session2 = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
+    session2 = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
     assert "Chat timestamps are now off." in _written_text(session2)
     assert timestamps_enabled(db, alice) is False
 
 
-def test_timestamps_invalid_argument_shows_usage(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/timestamps bogus", "/quit"]))
+def test_timestamps_invalid_argument_shows_usage(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps bogus", "/quit"]))
     assert "Usage: /timestamps" in _written_text(session)
     assert timestamps_enabled(db, alice) is False
 
@@ -118,16 +151,16 @@ def test_timestamps_invalid_argument_shows_usage(db, hub, presence, alice, chann
 # -- rendering: own live message ---------------------------------------------
 
 
-def test_own_message_is_prefixed_when_enabled(db, hub, presence, alice, channel):
+def test_own_message_is_prefixed_when_enabled(db, lane, hub, presence, alice, channel):
     set_timestamps_enabled(db, alice, True)
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["hello there", "/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
     text = _written_text(session)
     assert _TIMESTAMP_PATTERN.search(text) is not None
     assert "hello there" in text
 
 
-def test_own_message_is_not_prefixed_by_default(db, hub, presence, alice, channel):
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["hello there", "/quit"]))
+def test_own_message_is_not_prefixed_by_default(lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
     text = _written_text(session)
     assert _TIMESTAMP_PATTERN.search(text) is None
     assert "hello there" in text
@@ -136,7 +169,7 @@ def test_own_message_is_not_prefixed_by_default(db, hub, presence, alice, channe
 # -- rendering: per-recipient, not per-sender --------------------------------
 
 
-def test_timestamp_preference_is_per_recipient_for_broadcast_messages(db, hub, presence, alice, bob, channel):
+def test_timestamp_preference_is_per_recipient_for_broadcast_messages(db, lane, hub, presence, alice, bob, channel):
     """The real payoff of the per-recipient envelope design: the same
     live message is shown timestamped to a recipient who opted in and
     unstamped to the sender who didn't -- proving each session applies
@@ -146,17 +179,12 @@ def test_timestamp_preference_is_per_recipient_for_broadcast_messages(db, hub, p
     # alice (sender) leaves the default (off)
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
-        )
-        await asyncio.sleep(0)
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, channel, bob, watcher)
 
         sender = FakeSession(["hello there", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(sender, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(sender, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -169,24 +197,26 @@ def test_timestamp_preference_is_per_recipient_for_broadcast_messages(db, hub, p
 
 
 def test_timestamp_preference_applies_to_join_and_leave_notices_for_an_opted_in_recipient(
-    db, hub, presence, alice, bob, channel
+    db, lane, hub, presence, alice, bob, channel
 ):
     set_timestamps_enabled(db, bob, True)
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
-        )
-        await asyncio.sleep(0)
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, channel, bob, watcher)
 
         actor = FakeSession(["/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(actor, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
-        await asyncio.sleep(0)
+        # The leave event is already recorded/broadcast by the time
+        # _chat_loop returns above (its own finally block awaits that),
+        # but the watcher's receive_loop still needs a scheduling turn
+        # to pull it off its queue *and* render it via a lane.run call
+        # of its own (design doc round 114) before it's actually written
+        # to watcher's output -- a single asyncio.sleep(0) tick is no
+        # longer reliably enough wall-clock time for that round trip.
+        await asyncio.sleep(0.05)
 
         watcher_task.cancel()
         await asyncio.gather(watcher_task, return_exceptions=True)
@@ -200,22 +230,17 @@ def test_timestamp_preference_applies_to_join_and_leave_notices_for_an_opted_in_
 
 
 def test_timestamp_preference_applies_to_me_action_for_an_opted_in_recipient(
-    db, hub, presence, alice, bob, channel
+    db, lane, hub, presence, alice, bob, channel
 ):
     set_timestamps_enabled(db, bob, True)
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
-        )
-        await asyncio.sleep(0)
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, channel, bob, watcher)
 
         actor = FakeSession(["/me waves", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(actor, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -232,20 +257,20 @@ def test_timestamp_preference_applies_to_me_action_for_an_opted_in_recipient(
 # -- rendering: scrollback replay ---------------------------------------------
 
 
-def test_scrollback_replay_is_prefixed_for_a_recipient_with_the_preference_on(db, hub, presence, alice, channel):
-    asyncio.run(_run(db, hub, presence, channel, alice, ["hello there", "/quit"]))
+def test_scrollback_replay_is_prefixed_for_a_recipient_with_the_preference_on(db, lane, hub, presence, alice, channel):
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
 
     set_timestamps_enabled(db, alice, True)
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
     text = _written_text(session)
     assert "hello there" in text
     assert _TIMESTAMP_PATTERN.search(text) is not None
 
 
-def test_scrollback_replay_is_not_prefixed_by_default(db, hub, presence, alice, channel):
-    asyncio.run(_run(db, hub, presence, channel, alice, ["hello there", "/quit"]))
+def test_scrollback_replay_is_not_prefixed_by_default(lane, hub, presence, alice, channel):
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["hello there", "/quit"]))
 
-    session = asyncio.run(_run(db, hub, presence, channel, alice, ["/quit"]))
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
     text = _written_text(session)
     assert "hello there" in text
     assert _TIMESTAMP_PATTERN.search(text) is None
@@ -254,22 +279,17 @@ def test_scrollback_replay_is_not_prefixed_by_default(db, hub, presence, alice, 
 # -- rendering: private messages ---------------------------------------------
 
 
-def test_online_private_message_is_prefixed_for_an_opted_in_recipient(db, hub, presence, alice, bob, channel):
+def test_online_private_message_is_prefixed_for_an_opted_in_recipient(db, lane, hub, presence, alice, bob, channel):
     set_timestamps_enabled(db, bob, True)
     presence.enter("bob")
 
     async def scenario():
-        mailbox = MessageMailbox()
-        history = InputHistory()
         watcher = FakeSession()
-        watcher_task = asyncio.create_task(
-            chat_flow._chat_loop(watcher, db, hub, presence, mailbox, history, channel, bob)
-        )
-        await asyncio.sleep(0)
+        watcher_task, mailbox, history = await _join_and_wait(lane, hub, presence, channel, bob, watcher)
 
         actor = FakeSession(["/msg bob hi there", "/quit"])
         await asyncio.wait_for(
-            chat_flow._chat_loop(actor, db, hub, presence, mailbox, history, channel, alice), timeout=2
+            chat_flow._chat_loop(actor, lane, hub, presence, mailbox, history, channel, alice), timeout=2
         )
 
         watcher_task.cancel()
@@ -282,7 +302,7 @@ def test_online_private_message_is_prefixed_for_an_opted_in_recipient(db, hub, p
     assert _TIMESTAMP_PATTERN.search(text) is not None
 
 
-def test_mailbox_queued_private_message_carries_a_timestamp(db, hub, presence, alice, bob, channel):
+def test_mailbox_queued_private_message_carries_a_timestamp(lane, hub, presence, alice, bob, channel):
     """Offline delivery doesn't render anything itself (that happens at
     netbbs.net.login_flow._draw_main_menu's next flush, covered in
     tests/test_login_mailbox_flush.py) -- this just confirms the queued
@@ -300,7 +320,7 @@ def test_mailbox_queued_private_message_carries_a_timestamp(db, hub, presence, a
         registry.mark_authenticated(bob_session, "bob")
         await asyncio.wait_for(
             chat_flow._chat_loop(
-                session, db, hub, presence, mailbox, history, channel, alice, session_registry=registry
+                session, lane, hub, presence, mailbox, history, channel, alice, session_registry=registry
             ),
             timeout=2,
         )
