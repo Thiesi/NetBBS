@@ -21,7 +21,7 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
-from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, load_or_bootstrap_node_identity
+from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
@@ -90,7 +90,7 @@ async def _start_servers(
     session_handler,
     ssh_session_handler,
     throttle: LoginThrottle,
-    node_identity: NodeIdentity,
+    link_node: LinkNode | None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -115,10 +115,11 @@ async def _start_servers(
     Telnet/web handler, which unconditionally prompts for a
     username/password a second time.
 
-    `node_identity` builds this node's `LinkNode` (design doc round
-    118) when `config.link.enabled` -- a fresh one each `run()`, since
-    nothing yet persists Link peer state across a restart (round 117's
-    own scope note).
+    `link_node`, non-`None` exactly when `config.link.enabled` (`run()`
+    constructs it, not this function -- design doc round 119: the
+    background sync task needs to share this *same* `LinkNode`
+    instance, not a second one with its own independent, diverging
+    peer table), is what `LinkServer` answers inbound traffic through.
     """
     started: list = []
     any_interactive_started = False
@@ -198,7 +199,7 @@ async def _start_servers(
                 "skipping Link listener (pip install netbbs[web])"
             )
         else:
-            link_node = LinkNode(identity=node_identity)
+            assert link_node is not None  # run() constructs it exactly when config.link.enabled
             await _start_one(
                 "link",
                 LinkServer(
@@ -215,7 +216,7 @@ async def _start_servers(
             # every actual interactive transport having failed to bind.
             _logger.info(
                 "NetBBS Link listening on %s:%d (fingerprint %s, %s)",
-                config.link.host, config.link.port, node_identity.fingerprint,
+                config.link.host, config.link.port, link_node.identity.fingerprint,
                 "outgoing-only" if config.link.outgoing_only else "full peer",
             )
 
@@ -368,23 +369,30 @@ async def run(
         )
 
     servers: list = []
+    link_sync_task: asyncio.Task | None = None
+    link_sync_session = None
     try:
         # Design doc round 89/111: a node's Link identity (root key +
         # signing/transport operational keys) auto-generates silently on
         # first-ever startup and just loads on every one after that -- no
         # separate "init" step. Always loaded regardless of whether
         # config.link.enabled -- it must exist and be verified sound
-        # before anything that signs with it does, and _start_servers
-        # below needs it to build a LinkNode even when Link itself ends
-        # up not starting this run. Checked inside this try/finally, not
-        # before it, so a failure here still goes through the same
-        # db.close()/daybreak_task cleanup as every other startup
-        # failure below.
+        # before anything that signs with it does. Checked inside this
+        # try/finally, not before it, so a failure here still goes
+        # through the same db.close()/daybreak_task cleanup as every
+        # other startup failure below.
         try:
             node_identity = load_or_bootstrap_node_identity(config.identity_dir, label=config.node_name)
         except NodeIdentityError as exc:
             raise StartupError(f"could not load or bootstrap this node's Link identity: {exc}") from exc
         _logger.info("node Link identity %r: fingerprint %s", config.node_name, node_identity.fingerprint)
+
+        # Design doc round 119: constructed here, once, rather than
+        # inside _start_servers -- the background sync task below needs
+        # to share this *same* LinkNode instance (its peer table, its
+        # tracked transitions-per-peer), not a second one that would
+        # silently diverge from what LinkServer sees.
+        link_node = LinkNode(identity=node_identity) if config.link.enabled else None
 
         if count_sysops(db) == 0:
             raise StartupError(
@@ -394,8 +402,53 @@ async def run(
                 "never be administered once it's running"
             )
         servers = await _start_servers(
-            config, db, session_handler, ssh_session_handler, throttle, node_identity
+            config, db, session_handler, ssh_session_handler, throttle, link_node
         )
+
+        # Design doc round 119: the piece that makes this node
+        # *originate* outbound Link activity, not just answer it (round
+        # 118) -- only worth starting if there's actually somewhere to
+        # dial. A separate try/except ImportError from LinkServer's own,
+        # since this runs here in run(), not inside _start_servers,
+        # after _start_servers may have already decided (independently)
+        # whether aiohttp was available for the inbound listener.
+        if config.link.enabled and config.link.seeds and link_node is not None:
+            try:
+                import aiohttp
+
+                from netbbs.link.sync import run_link_sync
+            except ImportError:
+                _logger.warning(
+                    "Link seeds are configured but aiohttp is not installed — "
+                    "skipping the Link sync task (pip install netbbs[web])"
+                )
+            else:
+                link_sync_session = aiohttp.ClientSession()
+                link_sync_task = asyncio.create_task(
+                    run_link_sync(
+                        link_node, link_sync_session, config.link.seeds,
+                        _build_own_hello_provider(link_node, config.link),
+                        interval_seconds=config.link.sync_interval_seconds,
+                    )
+                )
+
+                def _log_link_sync_failure(task: asyncio.Task) -> None:
+                    if task.cancelled():
+                        return
+                    exc = task.exception()
+                    if exc is not None:
+                        _logger.error(
+                            "Link sync task failed -- outbound Link activity will not "
+                            "resume this node uptime (inbound Link, if enabled, is "
+                            "unaffected)",
+                            exc_info=exc,
+                        )
+
+                link_sync_task.add_done_callback(_log_link_sync_failure)
+                _logger.info(
+                    "NetBBS Link sync started: %d seed(s), every %.0fs",
+                    len(config.link.seeds), config.link.sync_interval_seconds,
+                )
 
         await shutdown_event.wait()
     finally:
@@ -412,6 +465,20 @@ async def run(
             pass
         except Exception:
             pass
+        # Design doc round 119: same cancel-await-swallow shape as
+        # daybreak_task just above, for the same reason (issue #48) --
+        # already logged by _log_link_sync_failure if it failed on its
+        # own, so safe to swallow here too.
+        if link_sync_task is not None:
+            link_sync_task.cancel()
+            try:
+                await link_sync_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        if link_sync_session is not None:
+            await link_sync_session.close()
         for server in reversed(servers):
             await server.stop()
         foreground_lane.close()

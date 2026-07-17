@@ -193,6 +193,12 @@ port = 7862
 outgoing_only = true
 # advertised_host = "203.0.113.5"
 # advertised_port = 7862
+# seeds -- operator-configured bootstrap peers this node dials on its
+# own (design doc §12, round 119); empty by default, meaning Link
+# answers inbound traffic (if enabled) but never originates any.
+seeds = []
+# seeds = ["http://198.51.100.7:7862", "http://203.0.113.9:7862"]
+sync_interval_seconds = 300
 
 [throttle]
 # All optional -- shown here with their built-in defaults.

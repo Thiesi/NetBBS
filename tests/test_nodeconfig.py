@@ -419,3 +419,89 @@ def test_cli_overrides_toml_link_settings(tmp_path):
     config = load_config(["--config", str(config_file), "--link-port", "2222"])
     assert config.link.port == 2222
     assert config.link.enabled is True  # untouched by CLI, still from file
+
+
+# -- Link seeds / sync interval (design doc §12, round 119) -------------------
+
+
+def test_default_link_config_has_no_seeds():
+    config = NodeConfig()
+    assert config.link.seeds == []
+    assert config.link.sync_interval_seconds == 300.0
+
+
+def test_link_seed_with_empty_entry_fails_validation():
+    config = NodeConfig(link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, seeds=["", "http://x"]))
+    with pytest.raises(ConfigError, match="link.seeds"):
+        config.validate()
+
+
+def test_link_nonpositive_sync_interval_fails_validation():
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, sync_interval_seconds=0)
+    )
+    with pytest.raises(ConfigError, match="link.sync_interval_seconds"):
+        config.validate()
+
+
+def test_link_disabled_skips_seed_and_sync_interval_validation():
+    config = NodeConfig(
+        link=LinkConfig(enabled=False, host="127.0.0.1", port=7862, seeds=[""], sync_interval_seconds=-1)
+    )
+    config.validate()  # must not raise -- disabled means unvalidated, same as host/port
+
+
+def test_cli_can_add_link_seeds():
+    config = load_config(
+        ["--enable-telnet", "--enable-link", "--link-seed", "http://a:7862", "--link-seed", "http://b:7862"]
+    )
+    assert config.link.seeds == ["http://a:7862", "http://b:7862"]
+
+
+def test_cli_can_set_link_sync_interval():
+    config = load_config(["--enable-telnet", "--enable-link", "--link-sync-interval-seconds", "42"])
+    assert config.link.sync_interval_seconds == 42.0
+
+
+def test_toml_link_seeds_and_sync_interval(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        seeds = ["http://a:7862", "http://b:7862"]
+        sync_interval_seconds = 42
+        """
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.link.seeds == ["http://a:7862", "http://b:7862"]
+    assert config.link.sync_interval_seconds == 42.0
+
+
+def test_toml_link_seeds_must_be_a_list_of_strings(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text("[telnet]\nenabled = true\n\n[link]\nseeds = [1, 2]\n")
+    with pytest.raises(ConfigError, match="link.seeds"):
+        load_config(["--config", str(config_file)])
+
+
+def test_cli_link_seed_replaces_toml_seeds_entirely(tmp_path):
+    """CLI --link-seed replaces the file's [link] seeds list wholesale,
+    matching every other setting's "CLI wins, full override" behavior
+    in this module -- not merged/appended."""
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        seeds = ["http://from-file:7862"]
+        """
+    )
+    config = load_config(["--config", str(config_file), "--link-seed", "http://from-cli:7862"])
+    assert config.link.seeds == ["http://from-cli:7862"]

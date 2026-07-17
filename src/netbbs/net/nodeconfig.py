@@ -94,11 +94,22 @@ class LinkConfig:
     port` defaults to `port` when unset; `advertised_host` has no
     default -- see `NodeConfig.validate`.
 
+    `seeds` (design doc §12, round 119) is this node's operator-
+    configured seed list -- a plain list of base URLs (e.g.
+    `"http://198.51.100.7:7862"`) `netbbs.link.sync`'s background loop
+    dials every `sync_interval_seconds`. Deliberately just the fixed/
+    operator-configured half of §12's bootstrap model -- the self-
+    updating supplementary list (round 97, fetched over the same
+    channel `netbbs.selfupdate` uses) is not implemented yet; round
+    97's own design already frames the fetched list as "a supplement
+    to -- never a replacement for -- the operator-configured and
+    shipped-fallback seeds," so this piece was never optional scope to
+    begin with. Empty by default -- Link can run accepting inbound
+    traffic (round 118) with nothing configured here at all.
+
     Defaults to disabled, matching §15's "Phase 3 is explicitly
     private/experimental federation" framing -- an operator opts in.
-    Automatic seed bootstrapping/relay selection (§12, rounds 95/97)
-    are not implemented yet (round 117's own scope note); this config
-    only governs the inbound listener itself.
+    Automatic relay selection (§12, round 95) is not implemented yet.
     """
 
     enabled: bool = False
@@ -107,6 +118,8 @@ class LinkConfig:
     outgoing_only: bool = True
     advertised_host: str | None = None
     advertised_port: int | None = None
+    seeds: list[str] = field(default_factory=list)
+    sync_interval_seconds: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +213,14 @@ class NodeConfig:
                     raise ConfigError(
                         f"link.advertised_port must be between 1 and 65535, got {advertised_port}"
                     )
+            if self.link.sync_interval_seconds <= 0:
+                raise ConfigError(
+                    "link.sync_interval_seconds must be greater than 0, got "
+                    f"{self.link.sync_interval_seconds}"
+                )
+            for seed in self.link.seeds:
+                if not seed.strip():
+                    raise ConfigError("link.seeds must not contain an empty entry")
 
         t = self.throttle
         _require_positive = {
@@ -309,6 +330,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--link-advertised-host", dest="link_advertised_host", default=None)
     parser.add_argument("--link-advertised-port", dest="link_advertised_port", type=int, default=None)
+    # Round 119: --link-seed is repeatable (netbbs --link-seed
+    # http://a:7862 --link-seed http://b:7862 ...) -- when given at all,
+    # it *replaces* the config file's [link] seeds list entirely,
+    # matching every other setting's "CLI wins, full override" behavior
+    # in this module (see _apply_cli_overrides) rather than merging.
+    parser.add_argument("--link-seed", dest="link_seeds", action="append", default=None)
+    parser.add_argument(
+        "--link-sync-interval-seconds", dest="link_sync_interval_seconds", type=float, default=None
+    )
     return parser
 
 
@@ -374,6 +404,9 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
     unknown = set(table) - set(LinkConfig.__dataclass_fields__)
     if unknown:
         raise ConfigError(f"[link] has unknown setting(s): {', '.join(sorted(unknown))}")
+    seeds = table.get("seeds", current.seeds)
+    if not isinstance(seeds, list) or not all(isinstance(item, str) for item in seeds):
+        raise ConfigError("link.seeds must be a list of strings")
     return LinkConfig(
         enabled=bool(table.get("enabled", current.enabled)),
         host=str(table.get("host", current.host)),
@@ -381,6 +414,8 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         outgoing_only=bool(table.get("outgoing_only", current.outgoing_only)),
         advertised_host=table.get("advertised_host", current.advertised_host),
         advertised_port=table.get("advertised_port", current.advertised_port),
+        seeds=list(seeds),
+        sync_interval_seconds=float(table.get("sync_interval_seconds", current.sync_interval_seconds)),
     )
 
 
@@ -443,6 +478,8 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_outgoing_only,
         args.link_advertised_host,
         args.link_advertised_port,
+        args.link_seeds,
+        args.link_sync_interval_seconds,
     )
     if any(value is not None for value in link_overrides):
         config = replace(
@@ -459,6 +496,12 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                 ),
                 advertised_port=(
                     link.advertised_port if args.link_advertised_port is None else args.link_advertised_port
+                ),
+                seeds=link.seeds if args.link_seeds is None else args.link_seeds,
+                sync_interval_seconds=(
+                    link.sync_interval_seconds
+                    if args.link_sync_interval_seconds is None
+                    else args.link_sync_interval_seconds
                 ),
             ),
         )

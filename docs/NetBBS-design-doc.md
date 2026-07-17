@@ -7152,3 +7152,94 @@ discovery. The node integration this round delivers is purely the
 inbound half. See `docs/NetBBS-worklog.md` round 118 for the full test
 count and suite re-run result.
 
+## Sign-off notes, round 119 (node integration completed: a running node originates outbound Link activity)
+
+Fills round 118's own named gap: a running node can now *originate*
+Link activity, not just answer it. `netbbs.link.sync.run_link_sync`
+periodically dials every configured seed and pushes this node's own
+`key_transition`s to whichever ones respond.
+
+**Operator-configured seeds land first, deliberately, not the self-
+updating supplementary list (§12, round 97).** Round 97's own design
+already frames the fetched list as "a supplement to — never a
+replacement for — the operator-configured and shipped-fallback
+seeds," which means the operator-configured list was never optional
+scope to begin with — it's the foundation the self-updating one would
+sit on top of, not an alternative to it. `LinkConfig.seeds` is exactly
+that foundation: a plain operator-supplied list of base URLs. The
+GitHub-raw-content fetch mechanism round 97 designed remains
+unimplemented, named explicitly as still-open scope below, not
+silently folded into "seeds are done."
+
+**Pushes *all* of a node's own transitions every pass, not just what's
+new since the last successful push to a given peer — a deliberate
+simplicity choice, not an oversight.** Tracking "what has peer X
+already accepted from me" would need new per-peer state this module
+would then own the correctness of; `handle_events`'s own dedup
+(`known_event_ids`, round 116) already makes re-pushing an already-
+known transition a harmless no-op on the receiving end, and at this
+project's declared scale (§14) a handful of transitions is the
+realistic ceiling, not thousands. Revisit if that stops being true —
+not before.
+
+**Also gossips `"transport"`-purpose transitions, which `build_hello`'s
+own bundle deliberately excludes (round 116).** Two different
+concerns, easy to conflate: round 116 excluded the transport-key
+chain from the *hello* bundle specifically because live transport-key
+*authentication* is Noise's own job (§11) — a hello doesn't need to
+carry it for the handshake itself to work. But the `key_transition`
+*record* is still an ordinary event under round 90's model, and other
+nodes may still have a legitimate reason to verify a claimed transport
+key against its authorizing chain (auditing, or a future feature that
+needs it) independent of whether they ever speak Noise to this node
+directly. `push_events` gossips the whole `identity.transitions`
+tuple, both purposes, correctly extending this scope rather than
+silently inheriting `build_hello`'s narrower one.
+
+**A single unreachable or rejecting seed never aborts the pass.**
+`_sync_one_seed` catches `LinkTransportError`/`LinkProtocolError`
+around the hello and `LinkTransportError` around the push,
+independently, logs a warning, and moves on — matching the daybreak
+announcer's own "log and keep going, never take the node down for a
+non-critical background task" policy (design doc round 78/issue #48),
+applied here to a background task that's explicitly optional
+(nothing about accepting inbound Link traffic depends on outbound
+sync succeeding).
+
+**`netbbs.__main__.run()` constructs exactly one `LinkNode` and shares
+it between `LinkServer` and the sync task** — a real correctness
+requirement, not a style preference: two separately-constructed
+`LinkNode`s would maintain two independent, silently-diverging peer
+tables (inbound hellos updating one, outbound sync reading/writing the
+other), defeating the entire point of both talking to the same peers.
+`_start_servers` was changed to take the already-constructed
+`LinkNode` (`link_node: LinkNode | None`) instead of building its own
+from a bare `NodeIdentity`, specifically so `run()` can hand the same
+instance to both.
+
+**A test-only timing issue, not a design or logic bug**: the "an
+unreachable seed doesn't block a later reachable one in the same pass"
+test needed a longer settle window than first tried — real "connection
+refused" to a privileged port took longer to surface at the OS level
+on the sandbox this was verified on than the initial guess assumed.
+Fixed by widening the test's own timing margin; `run_link_sync`'s
+actual behavior (catch, log, continue) was correct from the first
+implementation and never in question.
+
+**What's still open, named explicitly**: the self-updating
+supplementary seed list (§12, round 97) remains unimplemented;
+automatic relay selection (§12, round 95) remains unimplemented;
+persistent on-disk event/dedup storage remains unimplemented; a node
+still never re-contacts a peer that has only ever dialed *it* (no
+peer-list exchange, round 118's own flagged gap, still not closed);
+and there is still no "pull" request — a node only ever learns what a
+peer chooses to push during that peer's own dial, never what it asks
+for. Every piece of the pipeline described in §12/§7 (bootstrap →
+gossip → dedup → propagation) now has *a* working, tested
+implementation end to end for the one event type that exists
+(`key_transition`) — narrow but real, and the foundation the next
+event type (a board post, a Community membership change, whatever
+Phase 3 tackles next) plugs into rather than re-deriving. See
+`docs/NetBBS-worklog.md` round 119 for the full test count and suite
+re-run result.
+

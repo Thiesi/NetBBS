@@ -204,6 +204,59 @@ def test_configured_link_listener_completes_a_real_hello(tmp_path):
     asyncio.run(scenario())
 
 
+def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
+    """design doc round 119: a real running node with [link] seeds
+    configured actually *originates* a hello to that seed on its own,
+    unprompted -- not just answering one (the test above). Drives a
+    bare LinkServer as the "seed" (not a second full netbbs node --
+    tests/test_link_sync.py already covers the sync loop's own
+    behavior in isolation; this test's job is only confirming run()
+    actually wires it up and starts it for real)."""
+    from netbbs.link.transport import LinkServer
+
+    async def scenario():
+        seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+        seed_server = LinkServer(
+            host="127.0.0.1", port=0, node=seed_node,
+            own_hello_provider=lambda: seed_node.build_hello(
+                addresses=None, outgoing_only=True, created_at="2026-01-01T00:00:00+00:00"
+            ),
+        )
+        await seed_server.start()
+
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12403),
+            link=LinkConfig(
+                enabled=True, host="127.0.0.1", port=12404,
+                seeds=[f"http://127.0.0.1:{seed_server.port}"], sync_interval_seconds=60.0,
+            ),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12403)  # node fully up
+
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while not seed_node.peers:
+                if asyncio.get_event_loop().time() >= deadline:
+                    raise AssertionError("the running node's sync task never dialed the seed")
+                await asyncio.sleep(0.05)
+
+            from netbbs.link.node_identity import load_or_bootstrap_node_identity
+
+            real_identity = load_or_bootstrap_node_identity(
+                config.identity_dir, label=config.node_name
+            )
+            assert real_identity.fingerprint in seed_node.peers
+        finally:
+            shutdown_event.set()
+            await task
+            await seed_server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_link_alone_does_not_count_as_an_interactive_listener(tmp_path):
     """A node configured with only Link enabled (no telnet/ssh/web) has
     nothing a *user* can connect to -- must still raise StartupError,

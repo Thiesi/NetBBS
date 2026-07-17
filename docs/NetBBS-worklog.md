@@ -7756,3 +7756,83 @@ background sync task: a seed list (design doc §12, rounds 95/97 — not
 yet implemented at all), and a periodic loop that dials known peers and
 calls `dial_hello`/`push_events`.
 
+## Sign-off notes, round 119 (node integration completed: a running node originates outbound Link activity)
+
+Fills round 118's own named gap. See `docs/NetBBS-design-doc.md` round
+119 for the design decisions (operator-configured seeds landing before
+the self-updating list, pushing all transitions every pass rather than
+tracking per-peer deltas, gossiping `"transport"`-purpose transitions
+despite `build_hello` excluding them, the shared-`LinkNode` requirement)
+— this entry is implementation/testing narrative.
+
+**`netbbs/link/sync.py`** (new): `run_link_sync(node, session, seeds,
+own_hello_provider, *, interval_seconds)` — an infinite loop (dial
+every seed, then sleep) that only ever exits via cancellation, same
+contract the daybreak announcer already established. `_sync_one_seed`
+does one seed's hello-then-push, catching and logging
+`LinkTransportError`/`LinkProtocolError` independently around each
+half so one failure mode doesn't mask or block the other.
+
+**`netbbs/net/nodeconfig.py`**: `LinkConfig` gained `seeds: list[str]`
+and `sync_interval_seconds: float = 300.0`. `validate()` extended:
+non-empty seed entries, positive `sync_interval_seconds`, both only
+checked when `link.enabled` (same "don't validate what's off" shape
+the rest of `LinkConfig` already follows). `--link-seed` (repeatable,
+`action="append"`) and `--link-sync-interval-seconds` CLI args, `[link]
+seeds`/`sync_interval_seconds` TOML keys — `--link-seed`, when given
+at all, *replaces* the file's `seeds` list wholesale, matching this
+module's existing "CLI wins, full override" precedent rather than
+merging (documented explicitly in a code comment, since a list field
+makes "replace vs. append" a real ambiguity none of the existing
+scalar fields had).
+
+**`netbbs/__main__.py`**: `LinkNode` construction moved out of
+`_start_servers` into `run()` itself (right after `node_identity`
+loads), specifically so the sync task and `LinkServer` share one
+instance — `_start_servers`'s signature changed from `node_identity:
+NodeIdentity` to `link_node: LinkNode | None`. The sync task follows
+the exact same create-task/done-callback-logs-failure/cancel-await-
+swallow-in-finally shape the daybreak announcer already established
+(issue #48's pattern), including its own `aiohttp.ClientSession`
+opened alongside the task and closed in the same `finally`. Only
+started when `config.link.enabled and config.link.seeds` — no seeds
+configured means nothing to dial, so no task to run.
+
+**Tests**: `tests/test_link_sync.py` (new, 5 tests) — a real hello-
+then-push against a real seed server, dialing multiple configured
+seeds in one pass, an unreachable seed not blocking a later reachable
+one, a second pass actually happening after a short interval (proving
+the loop repeats, not just runs once), and clean cancellation mid-
+sleep. `tests/test_nodeconfig.py` (+9) — defaults, validation (empty
+seed entry, non-positive interval, both skipped when disabled), CLI
+overrides (including the seed-list-replaces-not-merges case), TOML
+parsing (including a non-string-list rejection). `tests/test_main_
+lifecycle.py` (+1) — a real running `netbbs` node, started via `run()`
+with a configured seed, actually dialing that seed's `LinkServer` on
+its own within the sync task's window, unprompted — the true end-to-
+end proof this round exists to deliver, distinct from `test_link_sync.
+py`'s own isolated-loop tests.
+
+**One test-timing fix, not a design bug** — see design doc round 119's
+own note on the unreachable-seed test needing a wider settle window
+than first tried; `run_link_sync`'s actual catch/log/continue behavior
+was correct from the start.
+
+**Testing**: full suite: **2013 passed, 4 skipped** (15 net new — 5 in
+`test_link_sync.py`, 9 in `test_nodeconfig.py`, 1 in `test_main_
+lifecycle.py` — up from round 118's 1998/4).
+
+**Also touched**: `README.md`'s `[link]` example gains `seeds`/
+`sync_interval_seconds`.
+
+**What's still open**: the self-updating supplementary seed list
+(round 97), automatic relay selection (round 95), persistent event/
+dedup storage, peer-list exchange (re-contacting a peer that only ever
+dialed *this* node), and pull-based catch-up ("what am I missing") all
+remain unimplemented, named individually rather than left implicit.
+The full bootstrap → gossip → dedup → propagation pipeline described
+in §7/§12 now has one working, tested, end-to-end implementation for
+`key_transition` — narrow (one event type, seed-list-only discovery,
+push-only propagation) but real, and the shape the next event type
+plugs into.
+
