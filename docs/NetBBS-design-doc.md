@@ -23,8 +23,19 @@ implementation and bugfix history, see
   casual conversation, the same way "FidoNet" got called just "Fido" —
   but the written/official form stays "NetBBS Link" everywhere it's
   introduced or referenced formally.
-- **Linked boards** — message boards distributed/synced across NetBBS Link.
-- **Link messages** — personal messages routed across NetBBS Link.
+- **The "Link X" naming rule (settled round 87, resolving issue #62;
+  re-confirmed after later external review — see round 123's sign-off
+  note):** "Link" prefixes *named features that only exist because of
+  NetBBS Link* — **Link message**, **Link Community**, **NetBBS Link**
+  itself, **Link-wide** as a scope descriptor for something that
+  already exists locally (chat, presence) extended network-wide. An
+  *ordinary local resource merely participating* in NetBBS Link keeps
+  its existing name with the plain adjective **linked** — **linked
+  board**, **linked channel**, **linked file area** — never renamed
+  into a distinct proper noun just because it's carried across the
+  network. Not a blanket "capitalize every 'Link X'" convention; get
+  this wrong and re-derive it correctly rather than guessing per
+  instance.
 - **Board vs. Area (strict terminology, borrowed from the first attempt):**
   "Board" always means *message* board. "Area" always means *file* area.
   Never use "board" for files. So: **linked file areas**, not "linked file
@@ -857,7 +868,7 @@ what caused the original rewrite.
 - Local invitations may be delivered immediately to online users and retained as pending invitations for offline users, with configurable expiry. Membership persists until revoked unless explicitly configured otherwise.
 - Default invitation policy is moderators/SysOp only; channels may opt into ordinary members being allowed to invite.
 - Linked-channel membership is Phase 6 scope: invitations, acceptances, grants, removals, and revocations become signed governance events.
-- Access-restricted Linked channels are not described as end-to-end confidential from participating node operators. True encrypted group confidentiality requires a separate future design covering group keys, rotation, history access, and compromised members.
+- Access-restricted linked channels are not described as end-to-end confidential from participating node operators. True encrypted group confidentiality requires a separate future design covering group keys, rotation, history access, and compromised members.
 
 **Moderator scope tiers** (four levels, each reusing the same underlying
 permission primitives — a "global" moderator is just "moderator of every
@@ -871,7 +882,7 @@ object in a category," not a different mechanism):
    application of the existing one at a narrower scope. Added round 83,
    specced for local Communities only; extending it to Link Communities
    is Phase 6 scope, wired up against real signed grants the same way
-   Link-blanket already is for Linked boards/channels.
+   Link-blanket already is for linked boards/channels.
 3. **Local-blanket** — authority over every *local-only* board/area/channel
    on a given node (i.e., content not carried on NetBBS Link).
 4. **Link-blanket ("global")** — authority over every Link-participating
@@ -899,7 +910,7 @@ grants both explicitly.
 **Privilege separation, SysOp vs. global moderator (revised round 87 to
 resolve a standing self-contradiction — see round 87 sign-off note):**
 SysOp remains root — the only role that can grant/revoke *any* moderator
-tier or change node configuration. **Originating** a Linked board/channel
+tier or change node configuration. **Originating** a linked board/channel
 (below) is deliberately carved out as a narrower capability: a global
 board/channel moderator may also initiate creation, but this is
 **initiating creation, not the same thing as being the signed origin
@@ -910,7 +921,7 @@ authority.** The distinction that matters:
 - The **initiating human actor** is recorded separately, for audit —
   who actually asked for this board/channel to be created is knowable
   without conflating it with node-level origin authority.
-- Creating a Linked board/channel gives the initiator ordinary/per-object
+- Creating a linked board/channel gives the initiator ordinary/per-object
   moderation rights over the new object (matching the grant-authority
   model below), but explicitly **not** the ability to appoint further
   blanket moderators, alter node configuration, or govern pre-existing
@@ -919,21 +930,21 @@ authority.** The distinction that matters:
 This prevents a compromised or bad-acting moderator identity from
 escalating or self-perpetuating — directly informed by the Master Node
 lesson in §2/§6 — while still letting a global moderator do the narrow,
-useful thing (spin up a new Linked board/channel for their area) without
+useful thing (spin up a new linked board/channel for their area) without
 waiting on the SysOp for every one.
 
-**Moderation authority on Linked boards/channels — deferred, scoped for
+**Moderation authority on linked boards/channels — deferred, scoped for
 later.** Ships **local-only first** (Phase 2, alongside local moderator
-tooling per §15); Linked-board/channel moderation is explicitly scoped out
+tooling per §15); linked-board/channel moderation is explicitly scoped out
 as a Phase 2/3-boundary sub-problem once §7's Link core actually exists to
 build on. Design direction already settled so it doesn't need to be
-rediscovered later: a moderator grant for a Linked board is a **signed
+rediscovered later: a moderator grant for a linked board is a **signed
 event that propagates as part of that board's own DAG history** (§7),
 issued by the node that **originated** the board (same trust logic as a
-repo owner adding collaborators). A moderator *edit* to a Linked post
+repo owner adding collaborators). A moderator *edit* to a linked post
 can't mutate the immutable original — it's a new, signed event that
 references and amends it, verified against the granting event before other
-nodes trust it. Other nodes accept this because choosing to sync a Linked
+nodes trust it. Other nodes accept this because choosing to sync a linked
 board already means trusting its provenance chain — same trust decision
 already being made for every post on it, not a new category of trust.
 
@@ -941,7 +952,7 @@ already being made for every post on it, not a new category of trust.
 (confirmed):**
 
 - **Creation:** global board/channel moderators and the SysOp can
-  *initiate* creation of new Linked boards/channels — the node identity
+  *initiate* creation of new linked boards/channels — the node identity
   becomes the signed *origin* (see the privilege-separation note above
   for why "who initiated it" and "what the origin authority is" are kept
   distinct), which is a narrow, self-contained power, not a blanket
@@ -959,7 +970,7 @@ already being made for every post on it, not a new category of trust.
   though the stakes here are lower than that original failure.
 - **Origin succession, transfer, and orphan/fork policy (round 94 —
   resolves issue #53's remaining scope).** Since origin authority for a
-  Linked resource *is* its originating node's identity, most of
+  linked resource *is* its originating node's identity, most of
   succession is already solved by round 89's key-lifecycle model applied
   here rather than invented fresh: **routine rotation and compromise-
   with-root-intact** need nothing new — verification already walks the
@@ -987,7 +998,7 @@ already being made for every post on it, not a new category of trust.
   whether to carry the frozen original, the fork, both, or neither,
   exactly like today's default-carry-with-visible-opt-out.
 - **Default-carry policy for Link participation:** joining NetBBS Link
-  **carries every Linked board/channel by default** — this gives "same
+  **carries every linked board/channel by default** — this gives "same
   content available on any node" as the **default availability/behavior**,
   with zero configuration, for the overwhelming majority of SysOps who'll
   never want to deviate from it. A SysOp retains the ability to **explicitly exclude**
@@ -1005,7 +1016,7 @@ already being made for every post on it, not a new category of trust.
   cheap insurance against an overly aggressive age setting. Moderators can
   **exempt** specific posts from expiry and **pin** posts to the top of a
   board/area. Expiry/deletion remains a purely local decision even for
-  Linked boards — content-addressing means a pruned post is simply
+  linked boards — content-addressing means a pruned post is simply
   re-fetchable via the DAG from another node if anyone later needs it, no
   network-wide coordination required.
 - **Pin/exempt permission mapping:** both fold under the existing `edit`
@@ -1284,7 +1295,7 @@ tiers which don't actually depend on each other:**
   fault-injection seams it needs — not the
   harness's full end state; that grows in lockstep with later features,
   per the next bullet, rather than needing to be complete up front.
-- *Before the first end-to-end Linked feature is treated as complete:*
+- *Before the first end-to-end linked feature is treated as complete:*
   issue #59's harness expanded to cover at least 3 nodes, duplicate/
   reordered delivery, restart, partition, and convergence.
 - *Before deployment beyond a controlled local/private harness:*
@@ -1301,7 +1312,7 @@ tiers which don't actually depend on each other:**
   prerequisite before **Link messages** specifically (issue #52 — design
   chosen round 93, §7's "Personal mail" subsection; implementation still
   pending); the minimum signed lifecycle/succession model before
-  **Linked resource creation, carry, and closure** specifically
+  **linked resource creation, carry, and closure** specifically
   (issue #53 — succession/orphan/fork policy chosen round 94, §13's
   board/channel lifecycle bullets; implementation still pending).
 - Seed-node bootstrapping
@@ -1312,7 +1323,7 @@ tiers which don't actually depend on each other:**
 - Store-and-forward for offline nodes
 - Linked boards (distribution across NetBBS Link) — any **structural**
   message-threading/revision semantics that affect event IDs or
-  propagation must be settled here, before Linked boards ship, not left
+  propagation must be settled here, before linked boards ship, not left
   for Phase 7 (see Phase 7's note, below)
 - Link messages (cross-Link PMs)
 - Remote file-area catalogue discovery and on-demand chunk transfer
@@ -1372,12 +1383,12 @@ risk profile.
   events do? how does it interact with the Phase 6 Link activity feed?).
   Not decided now; flagged so the question doesn't need rediscovering.
 
-**Phase 6 — Linked governance & lifecycle**
+**Phase 6 — Link governance & lifecycle**
 The most structurally novel part of the whole design — nothing like it
 existed in the first attempt. Isolated here specifically because everything
 it depends on (trust system, chat) is already proven by this point.
 **Scope boundary vs. Phase 3, clarified round 87 (issue #53):** the
-*minimum* signed genesis/carry/closure machinery needed for a Linked
+*minimum* signed genesis/carry/closure machinery needed for a linked
 resource to exist without inventing temporary authority rules is a
 Phase 3 gate (see that phase's note) — what stays here is the *advanced*
 delegated governance below (Link-blanket moderator grants, membership
@@ -1386,7 +1397,7 @@ transfer, and orphan/fork policy — the other half of issue #53 — was
 designed round 94 (§13's board/channel lifecycle bullets, built on issue
 #51's key-transition primitives) and doesn't wait on this phase either;
 implementation of both halves is still pending.
-- **Link-blanket ("global") moderator tier and Linked board/channel
+- **Link-blanket ("global") moderator tier and linked board/channel
   moderation** (§13): signed grant/edit events, verified against the
   granting event
 - **Global-moderator board/channel creation & closure** (§13): signed
@@ -1401,12 +1412,12 @@ implementation of both halves is still pending.
   and moderator grants from earlier in this phase). Two complementary
   views over the same underlying governance/activity data, not two
   separate features:
-  - A **Linked board** (uses existing board infrastructure, no new
+  - A **linked board** (uses existing board infrastructure, no new
     mechanism — just a convention of posting governance events as
     content) serving as the **curated, persistent audit trail**:
     board/channel creation and closure, moderator grants, quarantine
     flags. Worth reading days later, not just in the moment.
-  - A **Linked, Link-wide chat channel** (uses existing Phase 1 chat
+  - A **linked, Link-wide chat channel** (uses existing Phase 1 chat
     infrastructure, extended by Phase 5's Link-wide transport) serving as
     a **live, ephemeral "tail -f" feed** of Link activity — including
     automatic/mechanical events with no human intervention, not just the
@@ -1432,7 +1443,7 @@ implementation of both halves is still pending.
 - Message board threading refinements — **UI-only by this point**
   (round 87, resolving issue #61): any *structural* threading/revision
   semantics that would affect event IDs or propagation were required to
-  land back in Phase 3, before Linked boards shipped, specifically so
+  land back in Phase 3, before linked boards shipped, specifically so
   nothing structural was left this late
 - Classic DOS door compatibility (legacy game support) — per issue #63's
   recommended direction, this should be a later adapter that receives the
@@ -1492,7 +1503,7 @@ Status: **local Communities confirmed and fully specced; Link
 Communities directionally specced (round 86)** — behavior and reuse of
 existing patterns are settled, exact wire/signed-event schema deferred
 until Phase 3's DAG substrate actually exists, matching how §13 already
-treats Linked-board moderation. See round 71 for the original
+treats linked-board moderation. See round 71 for the original
 directional discussion, round 83 for local Communities' full spec, and
 round 86 for Link Communities. **Implementation status (round 105,
 first slice): the data model and core logic are built and tested** --
@@ -1610,7 +1621,7 @@ selectively enters the Community whose topic interests them, a SysOp
 can selectively decide which Link Communities to carry on their node,
 and in turn receives everything the Link has to offer about that
 topic. This is the same "default-carry-with-visible-opt-out" shape
-already documented for Phase 6's Linked board/channel creation (§15).
+already documented for Phase 6's linked board/channel creation (§15).
 
 **Data model: zero-or-one, confirmed.** A board/channel/file-area has at
 most one Community (`community_id`, nullable FK), never several. "No
@@ -1775,10 +1786,10 @@ Phase 2's existing admin tooling), not a migration wizard.
 
 **Link Communities — directional design, round 86 (behavior settled;
 exact wire/event schema deferred to Phase 3, matching §13's existing
-treatment of Linked-board moderation).**
+treatment of linked-board moderation).**
 - **Not a separate object type.** A Community becomes Link-participating
   the moment its origin node announces it via a signed event — the same
-  mechanism §13 already specifies for Linked board/channel creation,
+  mechanism §13 already specifies for linked board/channel creation,
   applied unchanged. No separate `link_communities` table; Link-
   participation is a property layered onto the same `communities` row,
   exactly how a board doesn't become a structurally different thing by
@@ -1805,13 +1816,13 @@ treatment of Linked-board moderation).**
   Community") as a single action — a convenient grouping unit is the
   whole point of a Community.
 - **Moderator grants need no new design.** Community-blanket→Link-
-  blanket is §13's existing Linked-board-moderator-grant mechanism
+  blanket is §13's existing linked-board-moderator-grant mechanism
   (signed DAG event from the origin node, verified against the granting
   event by receivers), applied to a Community instead of a board —
   already specified, not new.
 - **Cascading scalar defaults: origin sets the recommendation, carrying
   node's local override always wins** — same node-sovereignty principle
-  already governing every other piece of Linked content (expiry,
+  already governing every other piece of linked content (expiry,
   exclusion, moderation boundaries; §6, §13). A Link Community's
   `default_min_age` etc. propagates as a suggested starting point; a
   carrying SysOp can override it locally on their own carried copy
@@ -1834,12 +1845,12 @@ mechanism: an addendum pointer in §15 rather than inserting a new
 numbered phase, since the existing 7-phase numbering is referenced by
 number throughout this document. **Link Communities remain Phase 6
 scope for actual implementation** — the signed-event/DAG governance
-machinery Linked board/channel creation already needs doesn't exist
+machinery linked board/channel creation already needs doesn't exist
 before then — but their behavior is now directionally specced (round
 86, above), not just named. The Community-blanket moderator tier is
 specced and built now for local Communities only; extending it to Link
 Communities needs no new design, only Phase 6's real signed grants to
-run against — the mechanism itself (§13's Linked-board-moderator-grant
+run against — the mechanism itself (§13's linked-board-moderator-grant
 model) already covers it.
 
 ---
@@ -7531,4 +7542,70 @@ list. Per §15's dependency matrix, `key_transition` propagation can now
 be treated as complete per issue #59's own gate — the next event type
 (a board post, a Community membership change) is real, unblocked Phase
 3 scope, not a prerequisite fix.
+
+## Sign-off notes, round 123 (naming-convention consistency pass — re-confirms round 87/issue #62, doesn't change it)
+
+An external reviewer, before this document was checked, independently
+raised the same naming concern round 87 already resolved (issue #62):
+"Link X" isn't a blanket capitalization rule, and — per this round's
+own audit — the document had drifted from its own already-decided
+answer in dozens of places since round 87 recorded it. No new decision
+was made this round; this is a consistency fix, not a re-litigation.
+
+**The rule itself, unchanged from round 87**: "Link" prefixes *named
+features that only exist because of NetBBS Link* — **Link message**,
+**Link Community**, **NetBBS Link** itself, **Link-wide** as a scope
+descriptor for an existing local feature (chat, presence) extended
+network-wide. An *ordinary local resource merely participating* in
+NetBBS Link keeps its existing name with the plain adjective
+**linked** — **linked board**, **linked channel**, **linked file
+area** — never promoted into its own proper noun just because it's
+carried across the network.
+
+**§1 ("Naming") now states this rule directly**, rather than just
+listing "linked boards"/"Link messages" as if they were two
+independently-defined terms with no stated relationship between them —
+the actual governing rule previously lived only in §16's Communities
+section (where round 87 originally recorded the correction, in the
+course of fixing "Link Communities" specifically), which meant a
+reader checking the section literally titled "Naming" wouldn't find
+the general rule at all. §16 keeps its own text — it's Community-
+specific historical context (why "Link Communities," not "Linked
+Communities"), not a duplicate of the general rule, and still
+cross-references §1.
+
+**Scope of the fix: living reference sections only (§1, §13, §15,
+§16), not this document's own historical "Sign-off notes, round N"
+entries.** Those are a dated, chronological log of what was decided
+and discussed at each point in time — rewriting a round-4 note's
+wording to match a convention round 87 hadn't decided yet would be
+revisionist in the same way editing git history would be, even for a
+pure terminology fix with no substantive change. `docs/NetBBS-
+worklog.md` was left untouched for the same reason — it's entirely
+historical narrative, no living-reference content at all. A reader
+encountering "Linked board" inside an old dated note should read it as
+an unfixed inconsistency against the round-87 convention where
+relevant, not as a later reversal of this round's decision.
+
+**One real miss found and fixed separately from the bulk pass**: two
+occurrences (§13's moderator-edit-trust paragraph, §15's Phase 6 scope-
+boundary paragraph) had "Linked" and its following noun split across a
+line wrap in the source file, which a plain line-scoped search-and-
+replace pass doesn't catch — found by a second, whitespace-normalized
+sweep specifically to check for this, not assumed absent.
+
+**Also fixed while in §1**: three list bullets that landed with
+"linked"/"Linked-channel" as the literal first word after the bulk fix
+were restored to sentence-initial capitalization (`Linked-channel
+membership is Phase 6 scope`, `Linked-channel membership governance`,
+`Linked-channel topic changes`, `Linked boards (distribution...`) —
+ordinary orthographic sentence-capitalization, not a reversal of the
+semantic rule; "linked" stays lowercase everywhere it isn't the literal
+first word of a sentence or bulleted item.
+
+**Going forward**: round 124 onward (linked boards design/
+implementation) uses this convention from the start — **linked board**
+for the ordinary participating resource, reserving capitalized "Link
+X" strictly for genuinely new named features the board work
+introduces, if any turn out to be needed.
 
