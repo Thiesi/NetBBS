@@ -84,20 +84,29 @@ already has.
 **Round 97: the per-pass seed list is operator-configured `seeds` plus
 whatever `netbbs.link.seedlist.run_scheduled_seed_refresh` has most
 recently cached**, re-merged every pass (not just once at startup) so a
-live-fetched seed takes effect without a restart. This is the one piece
-of §12's bootstrap model this module actually *consumes* live -- unlike
-the peer-list candidates two paragraphs up, still sitting unused.
+live-fetched seed takes effect without a restart.
+
+**Candidate fallback**: if every seed in a given pass fails (or none
+were configured/cached at all), `_try_candidate_fallback` tries a small
+random sample of `node.candidate_descriptors` (peer-list-discovered,
+unverified addresses) before giving up for that pass -- closing the gap
+earlier rounds' own docstrings named as still open ("not yet consumed
+by anything"). Never a first resort: the normal seed list is always
+tried first, every pass, regardless of whether the previous pass had to
+fall back.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Callable
 
 from aiohttp import ClientSession
 
 from netbbs.link.boards import load_own_board_events
+from netbbs.link.events import EndpointDescriptor
 from netbbs.link.mail import (
     load_pending_link_mail,
     load_pending_link_mail_acknowledgements,
@@ -109,6 +118,13 @@ from netbbs.link.transport import LinkTransportError, dial_hello, push_events, r
 from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
+
+# Round 95: how many discovered-but-unverified candidates to try, at
+# most, when every configured/cached seed has failed for a pass -- a
+# small, bounded number matching relay selection's own "pick a small
+# number" precedent (no reliability ranking exists yet to pick more
+# cleverly), not every entry in node.candidate_descriptors.
+_MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
 
 
 async def run_link_sync(
@@ -149,8 +165,19 @@ async def run_link_sync(
         supplementary = await lane.run(get_cached_supplementary_seeds)
         # De-duplicated, order-preserving: operator-configured first.
         pass_seeds = list(dict.fromkeys(seeds + supplementary))
+        reached_network = False
         for seed_url in pass_seeds:
-            await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
+            succeeded = await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
+            reached_network = reached_network or succeeded
+        if not reached_network:
+            # Round 95's own-stated resilience path: every configured/
+            # cached seed failed this pass (or none were configured at
+            # all) -- fall back to a discovered candidate rather than
+            # sitting isolated until the next pass tries the same seeds
+            # again. Never a first resort: an operator's explicit seed
+            # configuration and a genuinely live supplementary list
+            # always take priority when either actually works.
+            await _try_candidate_fallback(node, session, own_hello_provider, lane)
         await _push_pending_link_mail(node, session, lane)
         await asyncio.sleep(interval_seconds)
 
@@ -161,12 +188,18 @@ async def _sync_one_seed(
     seed_url: str,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
-) -> None:
+) -> bool:
+    """Returns whether the hello itself succeeded -- the bar `run_link_
+    sync` uses to decide "did this node reach the network at all this
+    pass" (round 95's candidate-fallback trigger). A failed push/peer-
+    list-request afterward doesn't downgrade a successful hello back to
+    failure; those are secondary, independently-tolerated steps, not
+    the "are we isolated" signal."""
     try:
         seed_peer = await dial_hello(node, session, seed_url, own_hello_provider(), lane)
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
-        return
+        return False
 
     own_events = list(node.identity.transitions) + await lane.run(load_own_board_events)
     try:
@@ -174,32 +207,92 @@ async def _sync_one_seed(
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
 
-    # Round 95: also ask this seed who else it knows -- the resilience
-    # path for when every *configured* seed is eventually unavailable
-    # (not yet consumed anywhere; see module docstring's own note on
-    # what this round deliberately doesn't build yet).
+    # Round 95: also ask this seed who else it knows -- feeds the
+    # candidate pool `_try_candidate_fallback` (below) draws from.
     try:
         await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
+    return True
 
-def _dialable_address(node: LinkNode, target_fingerprint: str) -> str | None:
-    """The first advertised address on file for `target_fingerprint`
-    (§12: "peers try them in order" -- multi-address fallback isn't
+
+def _first_address_url(descriptor: EndpointDescriptor) -> str | None:
+    """The first advertised address in `descriptor`, as a dialable base
+    URL (§12: "peers try them in order" -- multi-address fallback isn't
     built anywhere in this transport layer yet, for any caller, so this
-    doesn't attempt it either), or `None` if this node has never said
-    hello to that fingerprint, or that peer is outgoing-only (round 12:
-    it publishes no address at all, by design -- this node genuinely
-    cannot dial it)."""
-    peer = node.peers.get(target_fingerprint)
-    if peer is None:
-        return None
-    addresses = peer.descriptor.payload.get("addresses")
+    doesn't attempt it either), or `None` if it has none (an outgoing-
+    only descriptor, round 12: by design, genuinely undialable)."""
+    addresses = descriptor.payload.get("addresses")
     if not addresses:
         return None
     first = addresses[0]
     return f"{first['protocol']}://{first['address']}:{first['port']}"
+
+
+def _dialable_address(node: LinkNode, target_fingerprint: str) -> str | None:
+    """The first advertised address on file for `target_fingerprint`,
+    or `None` if this node has never said hello to that fingerprint (or
+    it's outgoing-only)."""
+    peer = node.peers.get(target_fingerprint)
+    if peer is None:
+        return None
+    return _first_address_url(peer.descriptor)
+
+
+async def _try_candidate_fallback(
+    node: LinkNode,
+    session: ClientSession,
+    own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
+) -> None:
+    """
+    Round 95's own-stated resilience path, closing the gap named in
+    earlier rounds' own docstrings: "a node isn't perpetually dependent
+    on the seed list." Only ever called once every configured/cached
+    seed has already failed this pass (see `run_link_sync`'s own
+    caller). Tries a small, randomly-sampled subset of `node.candidate_
+    descriptors` -- round 95's own "pick a small number" precedent for
+    relay selection, reused here for the same reason: no reliability
+    ranking exists yet to pick more cleverly (that's automatic relay
+    selection's own still-open reliability-metric question, not
+    answered by this round), and trying every known candidate every
+    pass would be excessive at this project's declared scale (§14).
+    Random rather than insertion order, so a consistently-unreachable
+    early candidate doesn't get retried every single pass at the
+    expense of ones never tried at all.
+
+    Stops at the first successful hello -- one reconnection is enough
+    to end this pass's isolation; the next pass tries the normal seed
+    list again first, as always. On success, `LinkNode.handle_hello`
+    already promotes the candidate out of `candidate_descriptors` into
+    a real peer (see that method's own docstring), so there is no
+    separate bookkeeping to do here. A candidate with no dialable
+    address (outgoing-only, or a malformed entry) is skipped without
+    counting against the sample size, the same "genuinely cannot dial
+    it" reasoning `_dialable_address` already documents.
+    """
+    candidates = list(node.candidate_descriptors.items())
+    if not candidates:
+        return
+    random.shuffle(candidates)
+
+    attempted = 0
+    for fingerprint, descriptor in candidates:
+        if attempted >= _MAX_CANDIDATE_FALLBACK_ATTEMPTS:
+            return
+        base_url = _first_address_url(descriptor)
+        if base_url is None:
+            continue
+        attempted += 1
+        succeeded = await _sync_one_seed(node, session, base_url, own_hello_provider, lane)
+        if succeeded:
+            _logger.info(
+                "Link sync: every configured seed failed this pass -- reached the network "
+                "via fallback candidate %s instead",
+                fingerprint,
+            )
+            return
 
 
 async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: DatabaseLane) -> None:

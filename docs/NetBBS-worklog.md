@@ -109,9 +109,11 @@ infrastructure rather than only placeholders:
   decrypt/deliver/bounce, acknowledgement round trip, targeted per-recipient
   sync delivery (not the configured-seed flood-fill model boards use), and
   convergence coverage;
-- peer-list exchange (unverified candidate discovery, nothing auto-dials a
-  candidate yet) and live supplementary seed-list refresh, merged into the
-  configured-seed list every sync pass;
+- peer-list exchange (unverified candidate discovery) and live supplementary
+  seed-list refresh, both merged into the sync loop every pass -- the
+  configured/cached seed list first, falling back to a small random sample of
+  discovered candidates only when every one of those fails (or none are
+  configured) for that pass, never as a first resort;
 - a scheduled background release-check task, closing a gap where the admin
   menu's "daily automatic check" switch previously had nothing behind it.
 
@@ -724,10 +726,14 @@ Configured-seed sync currently sends the complete supported outbound event set
 on each pass. This is deliberately simple and relies on idempotent acceptance.
 
 Peer-list exchange exists (a node shares its own verified peers' endpoint
-descriptors with anyone it has itself completed a hello with) but only feeds
-an unverified candidate pool (`LinkNode.candidate_descriptors`); nothing
-auto-dials a candidate yet. There is still no generic inventory/pull protocol,
-automatic relay selection, or multi-hop propagation. A node which learned data
+descriptors with anyone it has itself completed a hello with), feeding an
+unverified candidate pool (`LinkNode.candidate_descriptors`). `run_link_sync`
+falls back to a small random sample of it (bounded,
+`_MAX_CANDIDATE_FALLBACK_ATTEMPTS`) only when every configured/cached seed
+fails a given pass -- never a first resort, and never more than one
+successful reconnection per pass. There is still no generic inventory/pull
+protocol, automatic relay selection, or multi-hop propagation. A node which
+learned data
 from another peer does not automatically relay that board state to a third
 node.
 
@@ -880,8 +886,8 @@ Near-term Phase 3 work includes:
 - automatic relay selection for outgoing-only nodes (needs its own reliability-
   metric scope decision: a narrow Phase-3 tracker, or genuinely gated on
   Phase 4's real reputation system) and pull-based catch-up; peer-list
-  exchange and live supplementary seed-list refresh are done, but nothing yet
-  auto-dials a discovered candidate;
+  exchange, live supplementary seed-list refresh, and a bounded candidate-
+  fallback dial when every configured/cached seed fails a pass are done;
 - Link messages: tier1_home_node_key only (server-side decryption; tier2
   needs a real client-side decryption story first) -- send/receive/read,
   bounce, and acknowledgement are done; link_message_expired and active

@@ -24,6 +24,7 @@ from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
 from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
+from netbbs.link.events import build_endpoint_descriptor
 from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import LinkNode
@@ -199,6 +200,180 @@ def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tm
     finally:
         dialer.close()
         seed.close()
+
+
+# -- candidate fallback (design doc round 95) --------------------------------
+
+
+def _seed_candidate(dialer_node: LinkNode, candidate_identity, *, port: int) -> None:
+    """Directly populates a candidate descriptor for a real running
+    server, as if an earlier peer-list exchange had already discovered
+    it -- no protocol round trip needed to set up this test state."""
+    descriptor = build_endpoint_descriptor(
+        signing_identity=candidate_identity.signing_key,
+        subject_fingerprint=candidate_identity.fingerprint,
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": port}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    dialer_node.candidate_descriptors[candidate_identity.fingerprint] = descriptor
+
+
+def test_sync_falls_back_to_a_candidate_when_the_only_seed_fails(tmp_path):
+    dialer_identity = bootstrap_node_identity("dialer")
+    candidate_identity = bootstrap_node_identity("candidate")
+    dialer_node = LinkNode(identity=dialer_identity)
+    candidate_node = LinkNode(identity=candidate_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    candidate = _NodeDb(tmp_path, "candidate")
+
+    async def scenario():
+        candidate_server = await _run_server(candidate_node, candidate.lane)
+        _seed_candidate(dialer_node, candidate_identity, port=candidate_server.port)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, ["http://127.0.0.1:1"],  # the only seed, dead
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=3.0)
+        finally:
+            await candidate_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert candidate_identity.fingerprint in dialer_node.peers  # reached via fallback
+        assert candidate_identity.fingerprint not in dialer_node.candidate_descriptors  # promoted, not left behind
+        assert dialer_identity.fingerprint in candidate_node.peers  # the dial really landed
+    finally:
+        dialer.close()
+        candidate.close()
+
+
+def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
+    """The brand-new-node case round 97/95 both name as the one this
+    resilience path matters most for."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    candidate_identity = bootstrap_node_identity("candidate")
+    dialer_node = LinkNode(identity=dialer_identity)
+    candidate_node = LinkNode(identity=candidate_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    candidate = _NodeDb(tmp_path, "candidate")
+
+    async def scenario():
+        candidate_server = await _run_server(candidate_node, candidate.lane)
+        _seed_candidate(dialer_node, candidate_identity, port=candidate_server.port)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [],  # zero seeds, zero cached supplementary seeds
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=3.0)
+        finally:
+            await candidate_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert candidate_identity.fingerprint in dialer_node.peers
+    finally:
+        dialer.close()
+        candidate.close()
+
+
+def test_sync_does_not_fall_back_when_a_seed_succeeds(tmp_path):
+    """A candidate must never be dialed just because it's known -- only
+    when every seed this pass genuinely failed."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    candidate_identity = bootstrap_node_identity("candidate")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    candidate_node = LinkNode(identity=candidate_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+    candidate = _NodeDb(tmp_path, "candidate")
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        candidate_server = await _run_server(candidate_node, candidate.lane)
+        _seed_candidate(dialer_node, candidate_identity, port=candidate_server.port)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+            await candidate_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert dialer_identity.fingerprint in seed_node.peers  # the real seed was reached
+        assert candidate_identity.fingerprint not in dialer_node.peers  # candidate never dialed
+        assert dialer_identity.fingerprint not in candidate_node.peers
+    finally:
+        dialer.close()
+        seed.close()
+        candidate.close()
+
+
+def test_sync_respects_the_fallback_attempt_cap(tmp_path, monkeypatch):
+    import netbbs.link.sync as sync_module
+
+    monkeypatch.setattr(sync_module, "_MAX_CANDIDATE_FALLBACK_ATTEMPTS", 1)
+
+    dialer_identity = bootstrap_node_identity("dialer")
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+
+    # Two candidates, both genuinely undialable (dead ports) -- with the
+    # cap patched to 1, only one of the two should ever be attempted.
+    # Since neither can succeed, the observable proxy here is that the
+    # pass completes and returns (proven by _run_sync_briefly not
+    # timing out) rather than hanging trying every candidate forever --
+    # a weak assertion on its own, strengthened by counting attempts
+    # via a wrapped dial.
+    first_identity = bootstrap_node_identity("first")
+    second_identity = bootstrap_node_identity("second")
+    _seed_candidate(dialer_node, first_identity, port=1)
+    _seed_candidate(dialer_node, second_identity, port=2)
+
+    attempted_urls: list[str] = []
+    original_dial_hello = sync_module.dial_hello
+
+    async def counting_dial_hello(node, session, base_url, *args, **kwargs):
+        attempted_urls.append(base_url)
+        return await original_dial_hello(node, session, base_url, *args, **kwargs)
+
+    monkeypatch.setattr(sync_module, "dial_hello", counting_dial_hello)
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            task = asyncio.create_task(
+                run_link_sync(
+                    dialer_node, session, ["http://127.0.0.1:1"],  # the only "seed", also dead
+                    lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                )
+            )
+            await _run_sync_briefly(task, settle=3.0)
+
+    try:
+        asyncio.run(scenario())
+        # One call for the dead seed itself, plus at most one fallback
+        # candidate attempt (the cap) -- never both candidates.
+        candidate_urls = [u for u in attempted_urls if u != "http://127.0.0.1:1"]
+        assert len(candidate_urls) <= 1
+    finally:
+        dialer.close()
 
 
 def test_sync_pushes_own_linked_board_genesis_and_post_to_a_real_seed(tmp_path):
