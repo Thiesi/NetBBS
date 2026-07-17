@@ -1026,19 +1026,56 @@ async def _prompt_name_requirement(session: Session, *, current: str | None) -> 
     return None, False
 
 
-async def _pick_optional_category(session: Session, db: Database, *, list_top_level, list_subcategories, title: str):
-    """Optional category picker shared by board/area create+edit
+async def _pick_optional_category(
+    session: Session,
+    db: Database,
+    *,
+    list_top_level,
+    list_subcategories,
+    title: str,
+    community_id: int | None = None,
+    resources: list | None = None,
+):
+    """Optional category picker shared by board/channel/area create+edit
     screens. Top-level categories are shown first; picking one that has
     sub-categories offers picking one of those instead, matching the
-    two-level design (`netbbs.boards.categories`/`netbbs.files.
-    categories`). Returns the chosen category's id, or `None` if
-    declined or none exist."""
+    two-level design (`netbbs.boards.categories`/`netbbs.chat.categories`/
+    `netbbs.files.categories`). Returns the chosen category's id, or
+    `None` if declined or none exist.
+
+    `community_id`/`resources` (design doc §16, round 84's category
+    leak-prevention, admin-side half -- see
+    `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
+    the browse-side half, which this mirrors) narrow the offered
+    categories to those already used by ≥1 same-type resource in this
+    Community, but only once a Community was actually just assigned
+    (`community_id` not `None`) and the caller supplies its full,
+    unfiltered same-type resource list via `resources` (e.g.
+    `list_boards(db)`) for this function to filter internally. Left
+    completely unfiltered -- today's original behavior -- when no
+    Community was assigned, since the leak this guards against is
+    specifically cross-Community, not a concern for an Uncategorized
+    resource's own category choice.
+    """
     await session.write("Assign a category? [y/N]: ")
     answer = (await session.read_key()).lower()
     await session.write_line("")
     if answer != "y":
         return None
+
+    used_category_ids: set[int] | None = None
+    if community_id is not None and resources is not None:
+        in_community = [r for r in resources if r.community_id == community_id]
+        used_category_ids = {r.category_id for r in in_community if r.category_id is not None}
+
     top_level = list_top_level(db)
+    if used_category_ids is not None:
+        top_level = [
+            c for c in top_level
+            if c.id in used_category_ids
+            or any(sub.id in used_category_ids for sub in list_subcategories(db, c.id))
+        ]
+
     selected = await pick_item(
         session, top_level,
         name_of=lambda c: c.name,
@@ -1049,6 +1086,8 @@ async def _pick_optional_category(session: Session, db: Database, *, list_top_le
     if selected is None:
         return None
     subs = list_subcategories(db, selected.id)
+    if used_category_ids is not None:
+        subs = [c for c in subs if c.id in used_category_ids]
     if not subs:
         return selected.id
     await session.write(f"Use a sub-category of {selected.name!r} instead? [y/N]: ")
@@ -1336,6 +1375,7 @@ async def _create_board_screen(session: Session, db: Database, actor: User) -> N
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_board_categories,
         list_subcategories=list_board_subcategories, title="Board category",
+        community_id=community_id, resources=list_boards(db),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -1471,6 +1511,7 @@ async def _edit_board_screen(session: Session, db: Database, actor: User, board:
         category_id = await _pick_optional_category(
             session, db, list_top_level=list_top_level_board_categories,
             list_subcategories=list_board_subcategories, title="Board category",
+            community_id=community_id, resources=list_boards(db),
         )
     await session.write(f"Pinned? [{'y' if board.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()
@@ -1711,6 +1752,7 @@ async def _create_area_screen(session: Session, db: Database, actor: User) -> No
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_file_categories,
         list_subcategories=list_file_subcategories, title="File-area category",
+        community_id=community_id, resources=list_file_areas(db),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -1846,6 +1888,7 @@ async def _edit_area_screen(session: Session, db: Database, actor: User, area: F
         category_id = await _pick_optional_category(
             session, db, list_top_level=list_top_level_file_categories,
             list_subcategories=list_file_subcategories, title="File-area category",
+            community_id=community_id, resources=list_file_areas(db),
         )
     await session.write(f"Pinned? [{'y' if area.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()
@@ -2031,6 +2074,7 @@ async def _create_channel_screen(session: Session, db: Database, actor: User) ->
     category_id = await _pick_optional_category(
         session, db, list_top_level=list_top_level_channel_categories,
         list_subcategories=list_channel_subcategories, title="Channel category",
+        community_id=community_id, resources=list_channels(db),
     )
     await session.write("Pinned? [y/N]: ")
     pinned = (await session.read_key()).lower() == "y"
@@ -2161,6 +2205,7 @@ async def _edit_channel_screen(session: Session, db: Database, actor: User, chan
         category_id = await _pick_optional_category(
             session, db, list_top_level=list_top_level_channel_categories,
             list_subcategories=list_channel_subcategories, title="Channel category",
+            community_id=community_id, resources=list_channels(db),
         )
     await session.write(f"Pinned? [{'y' if channel.pinned else 'N'}]: ")
     pinned_answer = (await session.read_key()).lower()

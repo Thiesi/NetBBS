@@ -1529,26 +1529,43 @@ leak-prevention filtering at the query layer exactly as specced.
 original spec assumed `[E]nter a Community`, written before round 104
 claimed `E` for `-mail`; resolved by reusing `[C]` (freed when Chat
 moved one level into the sub-menu) rather than disturbing the already-
-shipped mail binding. **Not yet built**: no board/chat/file-area
-enforcement call site (post read/write, channel entry, file-area
-read/write) actually resolves levels/age/name-requirement through a
-Community yet -- `get_effective_*` (round 105) exist and are now
-assignable via the admin UI (round 106), but nothing reads them back
-at the actual gate points; and the admin-side category-assignment
-picker (`_pick_optional_category` in `netbbs.net.admin_flow`) doesn't
-apply the same community-scoped existence filter the end-user browse
-path now does -- explicitly named in round 84's own text but left for
-a later pass given its lower practical impact (a curation-quality
-question, not a leak, since nothing stops an admin creating a
-mis-scoped category manually either way). See the round 105/106/107
-worklog entries for the full writeups, including the one scope note
-worth flagging from round 105: this implementation deliberately does
-*not* give `channels.min_level` a Community-inheritable default
+shipped mail binding. **Round 108 (fourth slice, closing out local
+Communities): enforcement wiring + admin-side leak prevention** --
+every board/channel/file-area gate point (`_has_visible_boards`/
+`_browse_boards_in_category`/`_show_board`'s `can_post` in
+login_flow.py; `_visible_channels_for`/`_authorize_channel_entry` in
+chat_flow.py; `has_visible_areas`/`_browse_areas_in_category`/
+`_show_area`'s `can_write` in file_flow.py) now resolves through
+`get_effective_min_read_level`/`get_effective_min_write_level`/
+`get_effective_min_age`/`get_effective_name_requirement` instead of
+reading a resource's own possibly-`None` field directly; the same
+resolved value now also drives verified-name display, not just the
+gate itself. `_pick_optional_category` (admin_flow.py) gained the
+community-scoped existence filter round 84 named alongside the browse-
+side one, applied only when a Community was actually just assigned
+(leaves the Uncategorized case, and every existing caller, unfiltered
+exactly as before). **A real crash bug was caught and fixed as part of
+this same pass, not a hypothetical**: round 105 made
+`min_read_level`/`min_write_level` nullable and round 106 gave the
+admin UI a real way to set one to `None`, but every enforcement call
+site was still passing that field straight into
+`netbbs.permissions.meets_level`, which does `user.user_level >=
+minimum_level` -- `TypeError` the instant the threshold is `None`.
+Any board/area a SysOp actually opted into Community inheritance would
+have crashed the moment anyone tried to browse or post to it; this
+was live and reachable via the admin UI built in round 106, not a
+theoretical gap. Local Communities (design doc §16) are now feature-
+complete end to end -- data model, admin tooling, navigation, and
+enforcement all wired together. See the round 105/106/107/108 worklog
+entries for the full writeups, including the one scope note worth
+flagging from round 105: this implementation deliberately does *not*
+give `channels.min_level` a Community-inheritable default
 (`default_min_level`) -- the design doc's own round 84 Community
 edit-screen spec names exactly four inheritable fields, none of them
 channel-level-shaped, so extending the model to a fifth field it never
 specified would have been scope creep rather than implementation of
-what was agreed.
+what was agreed. Link Communities (round 86) remain Phase 6
+implementation scope, unaffected by any of this.
 
 **The idea:** users navigate NetBBS by topic first, not by resource
 type first. Instead of a main menu offering "[M]essage Boards /

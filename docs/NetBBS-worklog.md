@@ -6837,3 +6837,88 @@ filter treatment as boards.
 **Testing**: full suite re-run: **1871 passed, 4 skipped** (up from
 round 106's 1856 -- 15 net new tests, no regressions elsewhere).
 
+## Sign-off notes, round 108 (Communities -- enforcement wiring + admin-side leak prevention; closes out local Communities)
+
+Fourth and final implementation slice of design doc §16 for local
+Communities: the two pieces explicitly deferred at the end of round
+107 (enforcement wiring, admin-side category leak prevention). With
+this round, local Communities are feature-complete end to end -- data
+model (105), admin tooling (106), navigation (107), and enforcement
+(108) all actually wired together, not just each piece existing in
+isolation.
+
+**A real crash bug caught and fixed, not a hypothetical**: before
+touching enforcement, checked what `netbbs.permissions.meets_level`
+actually does with a `None` threshold -- `user.user_level >=
+minimum_level` raises `TypeError` immediately, since Python 3 doesn't
+support `int >= None`. Round 105 made `boards.min_read_level`/
+`min_write_level` and `file_areas.min_read_level`/`min_write_level`
+nullable; round 106 gave the admin UI (`_prompt_optional_int`) a real
+way to actually set one to `None`. But every single enforcement call
+site was still reading `board.min_read_level`/`area.min_write_level`
+etc. directly and passing that possibly-`None` value straight into
+`meets_level` -- meaning any board or file area a SysOp opted into
+Community inheritance via round 106's own UI would crash with an
+unhandled `TypeError` the instant anyone tried to browse or post to
+it. This was live and reachable, not theoretical -- caught by
+deliberately checking `meets_level`'s exact behavior with `None`
+before writing any fix, the same "verify the failure mode before
+patching" discipline the mail deletion bug (round 104) and the
+`_prompt_optional_int` gap (round 106) were both caught with.
+
+**Every board/channel/file-area gate point now resolves through
+`get_effective_*` instead of a resource's own raw field**:
+- `netbbs/net/login_flow.py`: `_has_visible_boards`,
+  `_browse_boards_in_category`'s visibility filter, and `_show_board`'s
+  `can_post` all now call `get_effective_min_read_level`/
+  `get_effective_min_write_level`/`get_effective_min_age`/
+  `get_effective_name_requirement` rather than reading
+  `board.min_read_level` etc. directly. The six `_render_board_page`
+  call sites (one per Older/Newer/Recent navigation branch) also now
+  pass the *resolved* `name_requirement` through for verified-name
+  display, not the raw field -- previously, a board inheriting
+  `verified_and_displayed` from its Community would have enforced the
+  gate correctly (once `can_post` was fixed) but never actually shown
+  the verified-name color, a display/enforcement inconsistency worth
+  closing in the same pass rather than leaving half-fixed.
+- `netbbs/net/chat_flow.py`: `_visible_channels_for` and
+  `_authorize_channel_entry` resolve `min_age`/`name_requirement`
+  through `get_effective_min_age`/`get_effective_name_requirement`.
+  `min_level` is untouched (not nullable, not Community-inheritable --
+  see round 105's own scope note, still true here).
+- `netbbs/net/file_flow.py`: `has_visible_areas`,
+  `_browse_areas_in_category`'s visibility filter, and `_show_area`'s
+  `can_write` mirror the board treatment exactly, including the same
+  resolved-value-for-display fix across all four `_render_area_page`
+  call sites.
+
+**Admin-side category leak prevention** (`_pick_optional_category`,
+`netbbs.net.admin_flow`): gained optional `community_id`/`resources`
+parameters. When a Community was actually just assigned to the
+resource being created/edited (`community_id` not `None`) and the
+caller supplies its full same-type resource list (`list_boards(db)`/
+`list_channels(db)`/`list_file_areas(db)`), the offered categories are
+filtered to those already used by ≥1 resource *in that Community* --
+mirrors the browse-side filter built in round 107, applied to the
+admin's own category picker at all six board/channel/area create+edit
+call sites. Left completely unfiltered when no Community was assigned
+(today's original behavior, unchanged) -- the leak this guards against
+is specifically cross-Community, not a concern for an Uncategorized
+resource's own category choice.
+
+**Tests**: 9 new -- `tests/test_communities_enforcement.py` (8: the
+crash-bug regression itself for both boards and file areas with an
+inherited, unset read/write level and no Community at all; read-level
+inheritance actually gating board and file-area visibility by user
+level; age and name-requirement inheritance actually gating channel
+entry; and a control case confirming inheritance resolving to `None`
+all the way down still means no gate at all, not an accidental
+lock-out) and `tests/test_admin_flow.py` (1:
+`test_admin_category_picker_leak_prevention` -- a category used only by
+a board in a different Community is not offered when creating a board
+in this one, reporting "No categories exist yet." rather than leaking
+it).
+
+**Testing**: full suite re-run: **1880 passed, 4 skipped** (up from
+round 107's 1871 -- 9 net new tests, no regressions elsewhere).
+

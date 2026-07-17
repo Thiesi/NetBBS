@@ -20,6 +20,12 @@ from __future__ import annotations
 
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
+from netbbs.communities import (
+    get_effective_min_age,
+    get_effective_min_read_level,
+    get_effective_min_write_level,
+    get_effective_name_requirement,
+)
 from netbbs.config import get_max_upload_bytes
 from netbbs.files import (
     FileArea,
@@ -69,7 +75,10 @@ def has_visible_areas(
     resource-type sub-menu, same convention as `_has_visible_boards`/
     `netbbs.net.chat_flow.has_visible_channels` (design doc §16, round
     84)."""
-    areas = [a for a in list_file_areas(db) if meets_level(user, a.min_read_level) and meets_age(db, user, a.min_age)]
+    areas = [
+        a for a in list_file_areas(db)
+        if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
+    ]
     if community_scoped:
         areas = [a for a in areas if a.community_id == community_id]
     return bool(areas)
@@ -100,7 +109,7 @@ async def _browse_areas_in_category(
     # see the upload check below for where it actually applies.
     all_areas = [
         a for a in list_file_areas(db)
-        if meets_level(user, a.min_read_level) and meets_age(db, user, a.min_age)
+        if meets_level(user, get_effective_min_read_level(db, a)) and meets_age(db, user, get_effective_min_age(db, a))
     ]
     if community_scoped:
         all_areas = [a for a in all_areas if a.community_id == community_id]
@@ -243,16 +252,17 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
     """
     area_name = sanitize_text(area.name)
     page = list_files_page(db, area, user)
+    effective_name_requirement = get_effective_name_requirement(db, area)
     can_write = (
-        meets_level(user, area.min_write_level)
-        and meets_age(db, user, area.min_age)
-        and meets_name_requirement(db, user, area.name_requirement)
+        meets_level(user, get_effective_min_write_level(db, area))
+        and meets_age(db, user, get_effective_min_age(db, area))
+        and meets_name_requirement(db, user, effective_name_requirement)
     )
 
     if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
+        await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
         while True:
             await session.write("Choice or command: ")
             choice = (await session.read_line()).strip()
@@ -262,14 +272,14 @@ async def _show_area(session: Session, db: Database, area: FileArea, user: User)
             elif choice.lower() == "o" and page.has_older:
                 oldest = page.entries[0]
                 page = list_files_page(db, area, user, before=(oldest.created_at, oldest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
             elif choice.lower() == "n" and page.has_newer:
                 newest = page.entries[-1]
                 page = list_files_page(db, area, user, after=(newest.created_at, newest.file_id))
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
             elif choice.lower() == "r" and page.has_newer:
                 page = list_files_page(db, area, user)
-                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=area.name_requirement)
+                await _render_area_page(session, db, area_name, page, can_write=can_write, name_requirement=effective_name_requirement)
             elif choice.lower() == "/upload" and can_write:
                 await _handle_upload(session, db, area, user)
                 return

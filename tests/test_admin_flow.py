@@ -926,6 +926,38 @@ def test_create_board_assigns_a_community(db, sysop):
     assert board.community_id == community.id
 
 
+def test_admin_category_picker_leak_prevention(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.categories import create_category
+    from netbbs.communities import create_community
+
+    politics = create_community(db, "Politics", creator=sysop)
+    create_community(db, "Vintage Computing", creator=sysop)  # #02, alphabetically after Politics
+    hardware = create_category(db, "Hardware", created_by=sysop)
+    create_board(db, "elections", community_id=politics.id, category_id=hardware.id, creator=sysop)
+
+    # content menu -> boards -> create: name, description, read/write
+    # levels, assign a Community (yes, pick Vintage Computing, #02),
+    # assign a category (yes) -- "Hardware" is only used by a Politics
+    # board, so it must not be offered here (design doc §16, round 84's
+    # admin-side leak prevention): the picker reports no categories
+    # exist for this Community rather than showing Hardware.
+    inputs = [
+        "m", "m", "c",
+        "Amiga", "Old computers", "0", "0",
+        "y", "0", "2",
+        "y",
+        "n", "n", "", "", "",
+        "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, db, sysop)
+
+    text = _written_text(session)
+    assert "No categories exist yet." in text
+    assert "Hardware" not in text
+
+
 def test_grant_blanket_scoped_to_a_community(db, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.communities import create_community

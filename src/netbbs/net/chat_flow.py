@@ -66,6 +66,7 @@ from netbbs.chat import (
     unmute_user,
 )
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
+from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.directory import VCard, get_vcard
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer
@@ -208,7 +209,7 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     """
     visible = []
     for channel in list_channels(db):
-        if not meets_level(user, channel.min_level) or not meets_age(db, user, channel.min_age):
+        if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
             continue
         if channel.hidden and not (
             is_member(db, channel, user)
@@ -373,9 +374,9 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     that), so entry itself is the one point where both age content-
     restriction and name-verification participation-requirement apply.
     """
-    if not meets_level(user, channel.min_level) or not meets_age(db, user, channel.min_age):
+    if not meets_level(user, channel.min_level) or not meets_age(db, user, get_effective_min_age(db, channel)):
         return False, "You are not authorized to enter that channel."
-    if not meets_name_requirement(db, user, channel.name_requirement):
+    if not meets_name_requirement(db, user, get_effective_name_requirement(db, channel)):
         return False, "This channel requires a verified real name to participate."
     if not channel.members_only:
         return True, None

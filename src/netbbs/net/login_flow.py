@@ -79,7 +79,14 @@ from netbbs.chat import (
     format_with_preference,
     list_pending_invitations_for_user,
 )
-from netbbs.communities import Community, list_communities
+from netbbs.communities import (
+    Community,
+    get_effective_min_age,
+    get_effective_min_read_level,
+    get_effective_min_write_level,
+    get_effective_name_requirement,
+    list_communities,
+)
 from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.directory import (
     MAX_BIO_BYTES,
@@ -1253,7 +1260,10 @@ def _has_visible_boards(db: Database, user: User, *, community_id: int | None, c
     Community filter -- backs the shared resource-type sub-menu's
     "only offer what currently applies" conditional visibility (design
     doc §16, round 84), same convention as `[I]nvitations`."""
-    boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level) and meets_age(db, user, b.min_age)]
+    boards = [
+        b for b in list_boards(db)
+        if meets_level(user, get_effective_min_read_level(db, b)) and meets_age(db, user, get_effective_min_age(db, b))
+    ]
     if community_scoped:
         boards = [b for b in boards if b.community_id == community_id]
     return bool(boards)
@@ -1314,7 +1324,10 @@ async def _browse_boards_in_category(
     # "mutual visible accountability" among people posting), not a
     # content-restriction the way min_age is; see can_post's own check,
     # below, for where it actually applies.
-    all_boards = [b for b in list_boards(db) if meets_level(user, b.min_read_level) and meets_age(db, user, b.min_age)]
+    all_boards = [
+        b for b in list_boards(db)
+        if meets_level(user, get_effective_min_read_level(db, b)) and meets_age(db, user, get_effective_min_age(db, b))
+    ]
     if community_scoped:
         all_boards = [b for b in all_boards if b.community_id == community_id]
     boards_here = [b for b in all_boards if b.category_id == category_id]
@@ -1443,9 +1456,9 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     """
     board_name = sanitize_text(board.name)
     can_post = (
-        meets_level(user, board.min_write_level)
-        and meets_age(db, user, board.min_age)
-        and meets_name_requirement(db, user, board.name_requirement)
+        meets_level(user, get_effective_min_write_level(db, board))
+        and meets_age(db, user, get_effective_min_age(db, board))
+        and meets_name_requirement(db, user, get_effective_name_requirement(db, board))
     )
 
     def _refetch_current_page() -> PostPage:
@@ -1494,7 +1507,7 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             await _compose_new_post()
         return
 
-    await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+    await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1503,29 +1516,29 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             oldest = page.posts[0]
             page_anchor = ("before", (oldest.created_at, oldest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "n" and page.has_newer:
             await session.write_line("")
             newest = page.posts[-1]
             page_anchor = ("after", (newest.created_at, newest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "r" and page.has_newer:
             await session.write_line("")
             page_anchor = None
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
             await session.write_line("")
             await _edit_existing_post(session, db, board, page, user)
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "p" and can_post:
             await session.write_line("")
             await _compose_new_post()
             page_anchor = None  # a freshly-created post always lands on the newest page
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=board.name_requirement)
+            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "b":
             await session.write_line("")
             return
