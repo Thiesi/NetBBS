@@ -16,6 +16,9 @@ from netbbs.link.events import (
     build_board_post_edit,
     build_endpoint_descriptor,
     build_key_transition,
+    build_link_message,
+    build_link_message_accepted,
+    build_link_message_bounced,
 )
 from netbbs.link.node_identity import rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
@@ -878,3 +881,384 @@ def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
         bob_node.handle_events(alice.fingerprint, [fake_event])
 
     alice.close()
+
+
+# -- events: gossiping link_message (design doc round 93) -------------------
+
+
+def _link_message(alice, bob, clock, *, tier="tier1_home_node_key"):
+    return build_link_message(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        recipient_home_node_fingerprint=bob.fingerprint,
+        recipient_local_user_id="bob",
+        confidentiality_tier=tier,
+        ciphertext=b"opaque sealed bytes",
+        created_at=clock.now_iso(),
+    )
+
+
+def test_handle_events_accepts_a_valid_link_message_addressed_to_this_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    bob_node = LinkNode(identity=bob.identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    message = _link_message(alice, bob, clock)
+    accepted = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    assert accepted == [message.content_id]
+    assert bob_node.events[message.content_id] == message.to_dict()
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_addressed_to_a_different_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=bob.identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    # addressed to carol, delivered to bob -- bob is not the recipient
+    # and must refuse it outright, not store it on carol's behalf.
+    message = _link_message(alice, carol, clock)
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_events_rejects_link_message_with_unsupported_sender_kind(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    bob_node = LinkNode(identity=bob.identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    message = _link_message(alice, bob, clock)
+    raw = message.to_dict()
+    raw["envelope"]["payload"]["sender"] = {"kind": "user_key", "fingerprint": "some-user-fingerprint"}
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [raw])
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_vouching_for_a_different_home_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=bob.identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    # mallory's own valid message, relayed as if it came from alice --
+    # mallory has no completed hello with bob at all, so this must be
+    # refused even though alice (the actual sender) does.
+    forged = build_link_message(
+        signing_identity=mallory.identity.signing_key,
+        home_node_fingerprint=mallory.fingerprint,
+        local_user_id="wanderer",
+        recipient_home_node_fingerprint=bob.fingerprint,
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [forged.to_dict()])
+
+    alice.close()
+    bob.close()
+    mallory.close()
+
+
+def test_handle_events_link_message_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    bob_node = LinkNode(identity=bob.identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    message = _link_message(alice, bob, clock)
+    first = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    assert first == [message.content_id]
+    assert second == []  # already seen -- silently skipped
+
+    alice.close()
+    bob.close()
+
+
+# -- events: gossiping link_message_accepted/link_message_bounced (round 93) --
+
+
+def _seed_own_link_message(alice_node, alice, bob, clock):
+    """A message alice_node itself originated and already knows about --
+    self-originated events never pass through handle_events (same as
+    board_genesis/board_post local origination, round 128), so a test
+    exercising the *acknowledgement* path seeds this directly rather
+    than round-tripping it through some other node's handle_events
+    first."""
+    message = _link_message(alice, bob, clock)
+    alice_node.known_event_ids.add(message.content_id)
+    alice_node.events[message.content_id] = message.to_dict()
+    return message
+
+
+def test_handle_events_accepts_a_valid_link_message_accepted(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+    accepted = alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+
+    assert accepted == [ack.content_id]
+    assert alice_node.events[ack.content_id] == ack.to_dict()
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_accepted_for_unknown_message(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    # No link_message with this content_id was ever originated by alice_node.
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id="never-sent-content-id",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_accepted_for_a_message_this_node_did_not_send(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    # A message carol sent (not alice) happens to be known to alice_node
+    # (e.g. it observed it some other way) -- alice_node must refuse an
+    # acknowledgement about a message it didn't itself originate.
+    carols_message = build_link_message(
+        signing_identity=carol.identity.signing_key,
+        home_node_fingerprint=carol.fingerprint,
+        local_user_id="carol",
+        recipient_home_node_fingerprint=bob.fingerprint,
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at=clock.now_iso(),
+    )
+    alice_node.known_event_ids.add(carols_message.content_id)
+    alice_node.events[carols_message.content_id] = carols_message.to_dict()
+
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=carols_message.content_id,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_events_rejects_link_message_accepted_vouching_for_a_different_recipient_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    # bob signs an ack claiming a different recipient_node_fingerprint
+    # than himself -- the field-level vouching check must catch this
+    # even though bob is genuinely the one who sent it.
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint="some-other-node-fingerprint",
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_accepted_from_a_node_the_message_was_not_addressed_to(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    mallory = spawn_node(tmp_path, "mallory")
+    alice_node = LinkNode(identity=alice.identity)
+
+    mallory_hello = _hello_bytes(LinkNode(identity=mallory.identity), clock=clock)
+    alice_node.handle_hello(mallory_hello)
+    # the message was addressed to bob, not mallory
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    # mallory legitimately signs this herself, honestly naming herself
+    # as the (wrong) recipient -- still refused, since the original
+    # message was never addressed to her.
+    ack = build_link_message_accepted(
+        signing_identity=mallory.identity.signing_key,
+        recipient_node_fingerprint=mallory.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_events(mallory.fingerprint, [ack.to_dict()])
+
+    alice.close()
+    bob.close()
+    mallory.close()
+
+
+def test_handle_events_link_message_accepted_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    ack = build_link_message_accepted(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        created_at=clock.now_iso(),
+    )
+    first = alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+    second = alice_node.handle_events(bob.fingerprint, [ack.to_dict()])
+
+    assert first == [ack.content_id]
+    assert second == []  # already seen -- silently skipped
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_accepts_a_valid_link_message_bounced(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    bounced = build_link_message_bounced(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        reason="mailbox_full",
+        created_at=clock.now_iso(),
+    )
+    accepted = alice_node.handle_events(bob.fingerprint, [bounced.to_dict()])
+
+    assert accepted == [bounced.content_id]
+    assert alice_node.events[bounced.content_id] == bounced.to_dict()
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_link_message_bounced_for_unknown_message(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+
+    bounced = build_link_message_bounced(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id="never-sent-content-id",
+        reason="unknown_recipient",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_events(bob.fingerprint, [bounced.to_dict()])
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_link_message_bounced_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)
+    message = _seed_own_link_message(alice_node, alice, bob, clock)
+
+    bounced = build_link_message_bounced(
+        signing_identity=bob.identity.signing_key,
+        recipient_node_fingerprint=bob.fingerprint,
+        message_content_id=message.content_id,
+        reason="blocked_sender",
+        created_at=clock.now_iso(),
+    )
+    first = alice_node.handle_events(bob.fingerprint, [bounced.to_dict()])
+    second = alice_node.handle_events(bob.fingerprint, [bounced.to_dict()])
+
+    assert first == [bounced.content_id]
+    assert second == []  # already seen -- silently skipped
+
+    alice.close()
+    bob.close()

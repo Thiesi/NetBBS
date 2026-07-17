@@ -3,6 +3,8 @@ doc rounds 27/90/110) and the key_transition event specifically."""
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from netbbs.identity.keys import Identity, IdentityKind
@@ -13,17 +15,26 @@ from netbbs.link.events import (
     BoardPostEdit,
     EventError,
     KeyTransition,
+    LinkMessage,
+    LinkMessageAccepted,
+    LinkMessageBounced,
     build_board_genesis,
     build_board_post,
     build_board_post_edit,
     build_envelope,
     build_key_transition,
+    build_link_message,
+    build_link_message_accepted,
+    build_link_message_bounced,
     canonical_bytes,
     event_content_id,
     verify_board_genesis,
     verify_board_post,
     verify_board_post_edit,
     verify_key_transition,
+    verify_link_message,
+    verify_link_message_accepted,
+    verify_link_message_bounced,
 )
 
 
@@ -523,3 +534,251 @@ def test_board_post_edit_to_dict_from_dict_roundtrip(home_node_signing):
     assert restored.envelope == original.envelope
     assert restored.signature == original.signature
     assert verify_board_post_edit(restored, home_node_signing.verify_key)
+
+
+# -- link_message construction (design doc round 93) ---------------------------
+
+
+def test_build_link_message_is_signed_by_senders_home_nodes_signing_key(home_node_signing):
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert verify_link_message(message, home_node_signing.verify_key)
+
+
+def test_link_message_rejects_wrong_signing_key(home_node_signing):
+    other = Identity.generate(IdentityKind.NODE, "someplace-else")
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert not verify_link_message(message, other.verify_key)
+
+
+def test_link_message_sender_is_node_vouched_user_tagged_union(home_node_signing):
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert message.payload["sender"] == {
+        "kind": "node_vouched_user",
+        "home_node_fingerprint": "sender-home-fp",
+        "local_user_id": "alice",
+    }
+
+
+def test_link_message_recipient_fields(home_node_signing):
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier2_personal_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert message.payload["recipient"] == {
+        "home_node_fingerprint": "recipient-home-fp",
+        "local_user_id": "bob",
+    }
+    assert message.payload["confidentiality_tier"] == "tier2_personal_key"
+
+
+def test_link_message_rejects_invalid_confidentiality_tier(home_node_signing):
+    with pytest.raises(EventError):
+        build_link_message(
+            signing_identity=home_node_signing,
+            home_node_fingerprint="sender-home-fp",
+            local_user_id="alice",
+            recipient_home_node_fingerprint="recipient-home-fp",
+            recipient_local_user_id="bob",
+            confidentiality_tier="not-a-real-tier",
+            ciphertext=b"opaque sealed bytes",
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+
+def test_link_message_ciphertext_round_trips_through_the_payload(home_node_signing):
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert base64.b64decode(message.payload["ciphertext"]) == b"opaque sealed bytes"
+
+
+def test_link_message_has_no_nonce_field(home_node_signing):
+    """Unlike board_post, no nonce is needed -- a real ciphertext already
+    differs on every call (SealedBox's own ephemeral sender key), which
+    this test's fixed literal ciphertext doesn't itself exercise, but the
+    payload shape (no nonce key at all) is what's being confirmed here."""
+    message = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert "nonce" not in message.payload
+
+
+def test_link_message_to_dict_from_dict_roundtrip(home_node_signing):
+    original = build_link_message(
+        signing_identity=home_node_signing,
+        home_node_fingerprint="sender-home-fp",
+        local_user_id="alice",
+        recipient_home_node_fingerprint="recipient-home-fp",
+        recipient_local_user_id="bob",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque sealed bytes",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    restored = LinkMessage.from_dict(original.to_dict())
+    assert restored.envelope == original.envelope
+    assert restored.signature == original.signature
+    assert verify_link_message(restored, home_node_signing.verify_key)
+
+
+# -- link_message_accepted construction (design doc round 93) ------------------
+
+
+@pytest.fixture
+def recipient_node_signing():
+    return Identity.generate(IdentityKind.NODE, "far-away-node")
+
+
+def test_build_link_message_accepted_is_signed_by_recipient_nodes_signing_key(recipient_node_signing):
+    accepted = build_link_message_accepted(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert verify_link_message_accepted(accepted, recipient_node_signing.verify_key)
+
+
+def test_link_message_accepted_rejects_wrong_signing_key(recipient_node_signing):
+    other = Identity.generate(IdentityKind.NODE, "someplace-else")
+    accepted = build_link_message_accepted(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert not verify_link_message_accepted(accepted, other.verify_key)
+
+
+def test_link_message_accepted_fields(recipient_node_signing):
+    accepted = build_link_message_accepted(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert accepted.payload["recipient_node_fingerprint"] == "recipient-home-fp"
+    assert accepted.payload["message_content_id"] == "the-link-message-content-id"
+
+
+def test_link_message_accepted_to_dict_from_dict_roundtrip(recipient_node_signing):
+    original = build_link_message_accepted(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    restored = LinkMessageAccepted.from_dict(original.to_dict())
+    assert restored.envelope == original.envelope
+    assert restored.signature == original.signature
+    assert verify_link_message_accepted(restored, recipient_node_signing.verify_key)
+
+
+# -- link_message_bounced construction (design doc round 93) -------------------
+
+
+def test_build_link_message_bounced_is_signed_by_recipient_nodes_signing_key(recipient_node_signing):
+    bounced = build_link_message_bounced(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        reason="mailbox_full",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert verify_link_message_bounced(bounced, recipient_node_signing.verify_key)
+
+
+def test_link_message_bounced_rejects_wrong_signing_key(recipient_node_signing):
+    other = Identity.generate(IdentityKind.NODE, "someplace-else")
+    bounced = build_link_message_bounced(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        reason="unknown_recipient",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert not verify_link_message_bounced(bounced, other.verify_key)
+
+
+def test_link_message_bounced_rejects_invalid_reason(recipient_node_signing):
+    with pytest.raises(EventError):
+        build_link_message_bounced(
+            signing_identity=recipient_node_signing,
+            recipient_node_fingerprint="recipient-home-fp",
+            message_content_id="the-link-message-content-id",
+            reason="not-a-real-reason",
+            created_at="2026-01-01T00:05:00Z",
+        )
+
+
+def test_link_message_bounced_fields(recipient_node_signing):
+    bounced = build_link_message_bounced(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        reason="blocked_sender",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    assert bounced.payload["recipient_node_fingerprint"] == "recipient-home-fp"
+    assert bounced.payload["message_content_id"] == "the-link-message-content-id"
+    assert bounced.payload["reason"] == "blocked_sender"
+
+
+def test_link_message_bounced_to_dict_from_dict_roundtrip(recipient_node_signing):
+    original = build_link_message_bounced(
+        signing_identity=recipient_node_signing,
+        recipient_node_fingerprint="recipient-home-fp",
+        message_content_id="the-link-message-content-id",
+        reason="mailbox_full",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    restored = LinkMessageBounced.from_dict(original.to_dict())
+    assert restored.envelope == original.envelope
+    assert restored.signature == original.signature
+    assert verify_link_message_bounced(restored, recipient_node_signing.verify_key)

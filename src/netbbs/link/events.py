@@ -18,6 +18,16 @@ types) — see each type's own docstring below for the design doc round
 self-authored edits only this round; moderator edits and tombstones
 stay deferred to Phase 6 (design doc round 129).
 
+Design doc round 93 adds `link_message`, `link_message_accepted`, and
+`link_message_bounced` (Link's extension of local mail, §7). This
+implementation slice covers building/signing/verifying the three
+envelope shapes only — protocol-level acceptance rules
+(`netbbs.link.protocol.LinkNode.handle_events`), the delivery/routing
+mechanism that actually reaches a specific recipient node, and
+`link_message_expired` (which depends on that same routing/retry
+design not yet settled) are deliberately not part of this slice; see
+each class's own docstring for the boundary.
+
 No other event type (moderator grants, tombstones, etc.) is specified
 here yet — each gets its own payload-shape decision when it's actually
 being built, following this same envelope pattern (round 110's own
@@ -54,14 +64,33 @@ BOARD_POST_OBJECT_TYPE = "board_post"
 # moderator edit or a tombstone this round (design doc round 129).
 BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
 
+# Design doc round 93: Link's extension of local mail. A signed message
+# to one specific recipient node, and the two acknowledgement shapes the
+# recipient's node sends back toward the sender's. `link_message_expired`
+# is named in round 93 but not built yet -- see module docstring.
+LINK_MESSAGE_OBJECT_TYPE = "link_message"
+LINK_MESSAGE_ACCEPTED_OBJECT_TYPE = "link_message_accepted"
+LINK_MESSAGE_BOUNCED_OBJECT_TYPE = "link_message_bounced"
+
 _VALID_PURPOSES = ("signing", "transport")
 _VALID_ACTIONS = ("authorize", "revoke")
 _VALID_NAME_REQUIREMENTS = ("verified", "verified_and_displayed")
 
 # Round 124: the only `board_post` author tag with a real build/verify
 # path this round — see `build_board_post`'s docstring for why
-# `user_key`/`node` are named in the design but not built yet.
+# `user_key`/`node` are named in the design but not built yet. Round 93's
+# `link_message` sender reuses the same tag for the same reason.
 _NODE_VOUCHED_USER_AUTHOR_KIND = "node_vouched_user"
+
+# Design doc round 93's two confidentiality tiers -- which key a
+# `link_message`'s ciphertext is sealed to. See `netbbs.identity.
+# encryption` for the actual derive-and-seal mechanism.
+_TIER1_HOME_NODE_KEY = "tier1_home_node_key"
+_TIER2_PERSONAL_KEY = "tier2_personal_key"
+_VALID_CONFIDENTIALITY_TIERS = (_TIER1_HOME_NODE_KEY, _TIER2_PERSONAL_KEY)
+
+# Design doc round 93's named bounce reasons.
+_VALID_BOUNCE_REASONS = ("mailbox_full", "blocked_sender", "unknown_recipient")
 
 
 class EventError(Exception):
@@ -620,3 +649,252 @@ def verify_board_post_edit(edit: BoardPostEdit, signing_verify_key: nacl.signing
     events`), since it needs the root post's own payload, not just this
     edit's."""
     return verify_signature(signing_verify_key, canonical_bytes(edit.envelope), edit.signature)
+
+
+@dataclass(frozen=True)
+class LinkMessage:
+    """
+    One signed `link_message` event (design doc §7, round 93): Link's
+    extension of local mail, addressed to exactly one recipient node —
+    not gossiped to "everyone carrying this board" the way `board_post`
+    is. Always signed by the sender's *home node's* current signing key
+    (round 89), matching `build_board_post`'s own precedent exactly:
+    `payload["sender"]` is the same `node_vouched_user` tagged union,
+    since a password-only user has no personal signing key of their own
+    to sign with either.
+
+    `payload["ciphertext"]` is opaque here — this class and its
+    `build_link_message`/`verify_link_message` only sign/verify the
+    envelope; deciding which confidentiality tier applies and actually
+    sealing the plaintext (`netbbs.identity.encryption.encrypt_for`) is
+    the caller's job (`netbbs.link.mail`, not yet built). Unlike
+    `board_post`, no `nonce` field: `SealedBox` embeds a fresh ephemeral
+    sender key on every call, so the ciphertext -- and therefore this
+    event's own content_id -- already differs between two otherwise-
+    identical messages without one.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LinkMessage":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_link_message(
+    *,
+    signing_identity: Identity,
+    home_node_fingerprint: str,
+    local_user_id: str,
+    recipient_home_node_fingerprint: str,
+    recipient_local_user_id: str,
+    confidentiality_tier: str,
+    ciphertext: bytes,
+    created_at: str,
+) -> LinkMessage:
+    """
+    Build and sign one `link_message` event, per design doc round 93.
+
+    `ciphertext` must already be sealed by the caller (`netbbs.identity.
+    encryption.encrypt_for`, called against whichever key
+    `confidentiality_tier` names) — this function has no opinion on
+    which tier applies to a given recipient, only on producing a validly
+    shaped, signed envelope around whatever ciphertext it's handed.
+    `confidentiality_tier` is one of `"tier1_home_node_key"` (the
+    ciphertext is sealed to the recipient's *home node's* derived
+    encryption key) or `"tier2_personal_key"` (sealed to the recipient's
+    own personal key) — recorded so the receiving node knows which of
+    its own identities to decrypt with, without guessing.
+
+    Always signed by `signing_identity` — the sending user's home node's
+    current signing key (round 89), never the user's own key, matching
+    `build_board_post`'s identical reasoning.
+    """
+    if confidentiality_tier not in _VALID_CONFIDENTIALITY_TIERS:
+        raise EventError(f"invalid confidentiality_tier: {confidentiality_tier!r}")
+
+    payload = {
+        "sender": {
+            "kind": _NODE_VOUCHED_USER_AUTHOR_KIND,
+            "home_node_fingerprint": home_node_fingerprint,
+            "local_user_id": local_user_id,
+        },
+        "recipient": {
+            "home_node_fingerprint": recipient_home_node_fingerprint,
+            "local_user_id": recipient_local_user_id,
+        },
+        "confidentiality_tier": confidentiality_tier,
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "created_at": created_at,
+    }
+
+    envelope = build_envelope(LINK_MESSAGE_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return LinkMessage(envelope=envelope, signature=signature)
+
+
+def verify_link_message(message: LinkMessage, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `message`'s signature against the claimed sender's home
+    node's *current signing key* — resolving which key that currently is
+    (walking `payload["sender"]["home_node_fingerprint"]`'s
+    `key_transition` chain) is the caller's job, same division of
+    responsibility as `verify_board_post`."""
+    return verify_signature(signing_verify_key, canonical_bytes(message.envelope), message.signature)
+
+
+@dataclass(frozen=True)
+class LinkMessageAccepted:
+    """
+    One signed `link_message_accepted` event (design doc §7, round 93):
+    the recipient's node vouching that it placed a specific
+    `link_message` (`payload["message_content_id"]`) into that user's
+    local mailbox. A transport-level HTTP ACK only means the bytes
+    arrived (round 93's own distinction) — this is the separate,
+    explicit, user-level delivery confirmation the sender's node can
+    show the sending user.
+
+    Always signed by the *recipient's own* current signing key, never
+    the original sender's — this event originates on the opposite side
+    of the exchange from `LinkMessage` itself.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LinkMessageAccepted":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_link_message_accepted(
+    *,
+    signing_identity: Identity,
+    recipient_node_fingerprint: str,
+    message_content_id: str,
+    created_at: str,
+) -> LinkMessageAccepted:
+    """
+    Build and sign one `link_message_accepted` event, per design doc
+    round 93. `recipient_node_fingerprint` is included explicitly (not
+    merely implied by "whoever signed this") so a verifier can cross-
+    check it against whichever peer's transition chain it resolved the
+    signing key from — same reasoning `build_board_genesis`'s own
+    `origin_fingerprint` field already documents.
+    """
+    payload = {
+        "recipient_node_fingerprint": recipient_node_fingerprint,
+        "message_content_id": message_content_id,
+        "created_at": created_at,
+    }
+    envelope = build_envelope(LINK_MESSAGE_ACCEPTED_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return LinkMessageAccepted(envelope=envelope, signature=signature)
+
+
+def verify_link_message_accepted(
+    accepted: LinkMessageAccepted, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `accepted`'s signature against the claimed recipient
+    node's *current signing key* — same division of responsibility as
+    `verify_link_message`."""
+    return verify_signature(signing_verify_key, canonical_bytes(accepted.envelope), accepted.signature)
+
+
+@dataclass(frozen=True)
+class LinkMessageBounced:
+    """
+    One signed `link_message_bounced` event (design doc §7, round 93):
+    the recipient's node explicitly refusing a specific `link_message`
+    (`payload["message_content_id"]`) with a named `payload["reason"]`
+    (`"mailbox_full"`, `"blocked_sender"`, or `"unknown_recipient"`) —
+    round 93's own requirement that a rejection is a distinct, explicit
+    signed event rather than silence, so the sender gets a specific
+    reason instead of an ambiguous timeout.
+
+    Always signed by the *recipient's own* current signing key, same as
+    `LinkMessageAccepted`.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "LinkMessageBounced":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_link_message_bounced(
+    *,
+    signing_identity: Identity,
+    recipient_node_fingerprint: str,
+    message_content_id: str,
+    reason: str,
+    created_at: str,
+) -> LinkMessageBounced:
+    """Build and sign one `link_message_bounced` event, per design doc
+    round 93. `reason` must be one of the three named in this class's
+    own docstring."""
+    if reason not in _VALID_BOUNCE_REASONS:
+        raise EventError(f"invalid bounce reason: {reason!r}")
+
+    payload = {
+        "recipient_node_fingerprint": recipient_node_fingerprint,
+        "message_content_id": message_content_id,
+        "reason": reason,
+        "created_at": created_at,
+    }
+    envelope = build_envelope(LINK_MESSAGE_BOUNCED_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return LinkMessageBounced(envelope=envelope, signature=signature)
+
+
+def verify_link_message_bounced(
+    bounced: LinkMessageBounced, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `bounced`'s signature against the claimed recipient
+    node's *current signing key* — same division of responsibility as
+    `verify_link_message`."""
+    return verify_signature(signing_verify_key, canonical_bytes(bounced.envelope), bounced.signature)

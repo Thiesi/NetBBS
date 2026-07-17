@@ -68,16 +68,25 @@ from netbbs.link.events import (
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
+    LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
+    LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
+    LINK_MESSAGE_OBJECT_TYPE,
     BoardGenesis,
     BoardPost,
     BoardPostEdit,
     EndpointDescriptor,
     KeyTransition,
+    LinkMessage,
+    LinkMessageAccepted,
+    LinkMessageBounced,
     build_endpoint_descriptor,
     verify_board_genesis,
     verify_board_post,
     verify_board_post_edit,
     verify_endpoint_descriptor,
+    verify_link_message,
+    verify_link_message_accepted,
+    verify_link_message_bounced,
 )
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
 
@@ -98,7 +107,13 @@ class LinkProtocolError(Exception):
     board_post_edit whose previous_event_id doesn't match the current
     head of its chain (round 129: reordering is refused outright, the
     same push-and-retry recovery model round 122 already established
-    for key_transition)."""
+    for key_transition); a link_message not addressed to this node
+    (design doc round 93: strictly point-to-point, never speculatively
+    stored on behalf of a different intended recipient), a link_message
+    whose sender doesn't match who actually sent it, or a link_message_
+    accepted/link_message_bounced referencing a message this node never
+    actually sent, or vouching for a recipient node other than whoever
+    actually sent the acknowledgement."""
 
 
 def _signing_transitions(transitions: tuple[KeyTransition, ...], fingerprint: str) -> tuple[KeyTransition, ...]:
@@ -283,6 +298,27 @@ class LinkNode:
             raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
         return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 
+    def _resolve_own_link_message(self, message_content_id: str | None) -> LinkMessage:
+        """Shared by the `link_message_accepted`/`link_message_bounced`
+        branches below: an acknowledgement is only meaningful about a
+        `link_message` this node itself actually originated -- not an
+        arbitrary content_id a peer could otherwise use to smuggle an
+        acknowledgement for someone else's message past this node's own
+        acceptance rules."""
+        original_raw = self.events.get(message_content_id)
+        if original_raw is None or original_raw["envelope"]["object_type"] != LINK_MESSAGE_OBJECT_TYPE:
+            raise LinkProtocolError(
+                f"received an acknowledgement for {message_content_id!r}, which is not a "
+                "link_message this node knows about -- refusing"
+            )
+        original_message = LinkMessage.from_dict(original_raw)
+        if original_message.payload.get("sender", {}).get("home_node_fingerprint") != self.identity.fingerprint:
+            raise LinkProtocolError(
+                f"received an acknowledgement for {message_content_id!r}, which this node "
+                "did not originate -- refusing"
+            )
+        return original_message
+
     def handle_events(self, sender_fingerprint: str, raw_events: list[dict]) -> list[str]:
         """
         Accept zero or more incoming signed events from a peer that has
@@ -295,20 +331,40 @@ class LinkNode:
         idempotency for an already-applied one no longer depends solely
         on `known_event_ids` still holding the entry, see below).
 
-        Four recognized `object_type`s: `key_transition` (round 116),
+        Seven recognized `object_type`s: `key_transition` (round 116),
         `board_genesis`/`board_post` (design doc round 124, wired up
-        here in round 125/126), and `board_post_edit` (design doc round
-        129/130). `board_genesis`/`board_post` have no per-object chain
-        to self-heal against (`board_genesis` has no lifecycle chain
-        built yet; `board_post` is immutable content per round 90,
-        nothing to project beyond "does it exist") -- for both, `known_
-        event_ids` dedup alone is what's built so far, which is already
-        correct for content that's never resent as a *candidate
-        extension* of anything. `board_post_edit` *is* a candidate
-        extension (a single linear chain per root post, round 129) and
-        gets the same chain-membership self-heal `key_transition` has
-        had since round 121, just against `self.post_edits` instead of
-        a peer's own `transitions`.
+        here in round 125/126), `board_post_edit` (design doc round
+        129/130), and `link_message`/`link_message_accepted`/
+        `link_message_bounced` (design doc round 93). `board_genesis`/
+        `board_post` have no per-object chain to self-heal against
+        (`board_genesis` has no lifecycle chain built yet; `board_post`
+        is immutable content per round 90, nothing to project beyond
+        "does it exist") -- for both, `known_event_ids` dedup alone is
+        what's built so far, which is already correct for content that's
+        never resent as a *candidate extension* of anything.
+        `board_post_edit` *is* a candidate extension (a single linear
+        chain per root post, round 129) and gets the same chain-
+        membership self-heal `key_transition` has had since round 121,
+        just against `self.post_edits` instead of a peer's own
+        `transitions`.
+
+        `link_message`/`link_message_accepted`/`link_message_bounced`
+        are immutable, single-shot content like `board_post` -- `known_
+        event_ids` dedup alone, no chain. Their acceptance rule is
+        stricter than any board event's, though: a `link_message` is
+        accepted only when `recipient.home_node_fingerprint` names
+        *this* node specifically (round 93's point-to-point framing,
+        never "anyone carrying this board"); an accepted/bounced
+        acknowledgement is accepted only when it references a
+        `link_message` this node itself actually originated, from the
+        node that message's own recipient names. Mailbox delivery,
+        ciphertext decryption, and building the reply acknowledgement
+        are deliberately **not** done here -- see this module's own
+        docstring on why this layer stays pure/synchronous/in-memory;
+        that's `netbbs.link.mail`'s job, called by whichever transport
+        handler persists what `handle_events` accepted (the same
+        division `LinkServer._handle_events` already applies to board
+        events).
         """
         sender = self.peers.get(sender_fingerprint)
         if sender is None:
@@ -489,6 +545,116 @@ class LinkNode:
                 self.known_event_ids.add(edit.content_id)
                 self.events[edit.content_id] = raw
                 accepted.append(edit.content_id)
+
+            elif object_type == LINK_MESSAGE_OBJECT_TYPE:
+                message = LinkMessage.from_dict(raw)
+                if message.content_id in self.known_event_ids:
+                    continue
+
+                recipient = message.payload.get("recipient", {})
+                if recipient.get("home_node_fingerprint") != self.identity.fingerprint:
+                    raise LinkProtocolError(
+                        f"received a link_message addressed to "
+                        f"{recipient.get('home_node_fingerprint')!r}, not this node "
+                        f"({self.identity.fingerprint!r}) -- refusing (round 93: strictly "
+                        "point-to-point, no relay on behalf of a different recipient)"
+                    )
+
+                sender_info = message.payload.get("sender", {})
+                sender_kind = sender_info.get("kind")
+                if sender_kind != "node_vouched_user":
+                    raise LinkProtocolError(
+                        f"link_message sender kind {sender_kind!r} is not yet supported "
+                        "(design doc round 93: only node_vouched_user is built)"
+                    )
+                home_node_fingerprint = sender_info.get("home_node_fingerprint")
+                if home_node_fingerprint != sender_fingerprint:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a link_message vouching for a different "
+                        f"home node ({home_node_fingerprint!r}) -- refusing (no relay from a "
+                        "stranger yet)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "link_message")
+                if not verify_link_message(message, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"link_message from {sender_fingerprint} does not verify against its "
+                        "current signing key"
+                    )
+
+                self.known_event_ids.add(message.content_id)
+                self.events[message.content_id] = raw
+                accepted.append(message.content_id)
+
+            elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
+                accepted_ack = LinkMessageAccepted.from_dict(raw)
+                if accepted_ack.content_id in self.known_event_ids:
+                    continue
+
+                message_content_id = accepted_ack.payload.get("message_content_id")
+                original_message = self._resolve_own_link_message(message_content_id)
+
+                recipient_node_fingerprint = accepted_ack.payload.get("recipient_node_fingerprint")
+                if recipient_node_fingerprint != sender_fingerprint:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a link_message_accepted vouching for a "
+                        f"different recipient node ({recipient_node_fingerprint!r}) -- refusing"
+                    )
+                expected_recipient = original_message.payload.get("recipient", {}).get("home_node_fingerprint")
+                if sender_fingerprint != expected_recipient:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a link_message_accepted for "
+                        f"{message_content_id!r}, but that message was addressed to a "
+                        f"different recipient node ({expected_recipient!r}) -- refusing"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    sender, sender_fingerprint, "link_message_accepted"
+                )
+                if not verify_link_message_accepted(accepted_ack, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"link_message_accepted from {sender_fingerprint} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.known_event_ids.add(accepted_ack.content_id)
+                self.events[accepted_ack.content_id] = raw
+                accepted.append(accepted_ack.content_id)
+
+            elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
+                bounced = LinkMessageBounced.from_dict(raw)
+                if bounced.content_id in self.known_event_ids:
+                    continue
+
+                message_content_id = bounced.payload.get("message_content_id")
+                original_message = self._resolve_own_link_message(message_content_id)
+
+                recipient_node_fingerprint = bounced.payload.get("recipient_node_fingerprint")
+                if recipient_node_fingerprint != sender_fingerprint:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a link_message_bounced vouching for a "
+                        f"different recipient node ({recipient_node_fingerprint!r}) -- refusing"
+                    )
+                expected_recipient = original_message.payload.get("recipient", {}).get("home_node_fingerprint")
+                if sender_fingerprint != expected_recipient:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a link_message_bounced for "
+                        f"{message_content_id!r}, but that message was addressed to a "
+                        f"different recipient node ({expected_recipient!r}) -- refusing"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    sender, sender_fingerprint, "link_message_bounced"
+                )
+                if not verify_link_message_bounced(bounced, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"link_message_bounced from {sender_fingerprint} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.known_event_ids.add(bounced.content_id)
+                self.events[bounced.content_id] = raw
+                accepted.append(bounced.content_id)
 
             else:
                 raise LinkProtocolError(f"unrecognized event object_type: {object_type!r}")

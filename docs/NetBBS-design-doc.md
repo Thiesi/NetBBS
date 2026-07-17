@@ -540,9 +540,11 @@ recipient node — not "everyone carrying this board."**
   X25519 keypair per subject (its own new storage, generation trigger,
   and rotation lifecycle — for a node, also a new `EndpointDescriptor`
   field so peers can learn it), or derive the X25519 key from the
-  Ed25519 key already on file via libsodium's conversion functions
-  (`crypto_sign_ed25519_{pk,sk}_to_curve25519`, exposed in PyNaCl only
-  at the low-level `nacl.bindings` layer). **Confirmed with Thiesi,
+  Ed25519 key already on file via PyNaCl's own supported conversion —
+  `nacl.signing.SigningKey.to_curve25519_private_key()`/`VerifyKey.
+  to_curve25519_public_key()` (a documented high-level wrapper around
+  libsodium's `crypto_sign_ed25519_{sk,pk}_to_curve25519`, not a
+  low-level escape hatch). **Confirmed with Thiesi,
   deliberately overriding the assistant's own recommendation to mint
   separately: derive.** The known tradeoff — one secret now backs two
   cryptographic roles, coupling their rotation and widening the blast
