@@ -530,6 +530,40 @@ recipient node — not "everyone carrying this board."**
   ever introduce one) is limited to what's needed for routing: recipient
   node fingerprint, coarse expiry, size — never subject/body, which stay
   encrypted per the tier above.
+- **Encryption mechanism, settled rather than left implicit: derive the
+  X25519 keypair each tier needs from the existing Ed25519 key,
+  never mint/store/rotate a separate encryption keypair.** Every key in
+  the system today (round 89's node root/signing/transport keys, and a
+  tier-2 user's personal keypair) is Ed25519 — a signature scheme, not
+  an encryption one; nothing here can be handed to `nacl.public.Box`/
+  `SealedBox` as-is. Two options were weighed: mint a genuinely separate
+  X25519 keypair per subject (its own new storage, generation trigger,
+  and rotation lifecycle — for a node, also a new `EndpointDescriptor`
+  field so peers can learn it), or derive the X25519 key from the
+  Ed25519 key already on file via libsodium's conversion functions
+  (`crypto_sign_ed25519_{pk,sk}_to_curve25519`, exposed in PyNaCl only
+  at the low-level `nacl.bindings` layer). **Confirmed with Thiesi,
+  deliberately overriding the assistant's own recommendation to mint
+  separately: derive.** The known tradeoff — one secret now backs two
+  cryptographic roles, coupling their rotation and widening the blast
+  radius of a compromise — was weighed and accepted as proportionate
+  effort-to-risk, not overlooked; a genuinely separate keypair remains
+  available later if that tradeoff ever stops looking acceptable, since
+  nothing about the wire format below depends on which derivation a
+  given node/user chose. Practical upside beyond less code: a peer's
+  encryption key needs no separate exchange at all — it derives directly
+  from whichever signing verify key the existing transition-chain
+  resolution already produces, so no `EndpointDescriptor` change is
+  needed for a peer to become encryptable to.
+- **Known, disclosed limitation shared by either option, not fixed by
+  this decision:** these are static long-term keys, not per-session
+  ephemeral ones. `SealedBox` gives sender-side anonymity (an ephemeral
+  key per message on the sender's end) but not forward secrecy on the
+  recipient's end — if a recipient's key is ever compromised, every
+  message ever sent to that recipient becomes retroactively readable.
+  Acceptable for Phase 3's own "private/experimental federation" framing
+  (round 87); revisit if Link messages are ever positioned as offering
+  stronger guarantees than that.
 
 **Explicitly still open:** the exact schema/table names and command
 surface (menu placement, etc.) are implementation detail for whenever
