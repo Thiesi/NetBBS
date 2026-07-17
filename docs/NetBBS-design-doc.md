@@ -736,10 +736,30 @@ the common NAT/residential case — only ever connect out).
   node learns and remembers further peers directly via signed peer-list
   exchange, so it isn't perpetually dependent on the seed list — the
   resilience path when every configured seed is unavailable.
-- **Duplicate simultaneous connections** (both sides dial each other at
-  once): resolved by a deterministic tiebreak comparing fingerprints —
-  the lower one stays the dialer, the other accepts inbound and drops its
-  own outbound attempt.
+- **Duplicate simultaneous dials (both sides dial each other at once) —
+  no tiebreak needed, corrected from this section's own earlier
+  wording.** The original bullet here specified a deterministic
+  fingerprint-comparison tiebreak ("the lower one stays the dialer, the
+  other accepts inbound and drops its own outbound attempt") — a
+  correct answer for a stateful, connection-oriented transport where a
+  dial creates a persistent connection object that becomes wasted if
+  both sides connect. That was never what got built: round 89 confirmed
+  Link's actual transport is plain HTTP+JSON, stateless request/
+  response, with no persistent connection anywhere to contend over.
+  Traced through the real code (`dial_hello`/`LinkServer._handle_hello`/
+  `LinkNode.handle_hello`) rather than assumed: both sides dialing
+  "at once" is just two independent HTTP round trips, each landing on
+  `handle_hello`, which is already idempotent by construction —
+  "existing descriptor wins only if newer" (`created_at` comparison) —
+  so two redundant/overlapping calls always resolve to whichever
+  genuinely is newest, never wrong or conflicting state. Python's
+  single-threaded event loop means there is not even a true data race
+  on `node.peers[fingerprint] = record` (coroutines interleave at
+  `await` points, never execute literally simultaneously). The only
+  actual cost of both sides dialing is two redundant HTTP round trips
+  instead of one, negligible at this project's declared scale (§14).
+  This spec line predated — or was simply never revisited after — the
+  HTTP+JSON transport choice; nothing needs building for it.
 
 **Automatic relay selection for outgoing-only nodes (round 95).** A
 sender can never dial an outgoing-only recipient directly, which round
