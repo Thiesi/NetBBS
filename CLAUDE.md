@@ -1,104 +1,116 @@
-# NetBBS — Claude Code project notes
+# NetBBS — developer project notes
 
-A modern, TCP/IP-native BBS with an ad-hoc mesh network ("NetBBS Link").
-Phases 1–2 of the 7-phase roadmap are complete; Phase 3 (Link
-connectivity & sync core) has not started yet — see below.
+NetBBS is a modern, TCP/IP-native BBS with an ad-hoc mesh network
+(**NetBBS Link**). Phases 1–2 are complete; Phase 3 is active and already
+includes working Link identity, transport, persistence, seed synchronization,
+and linked-board event propagation.
 
-## Start here, every session
+## Start here
 
-**Read `docs/NetBBS-design-doc.md` before implementing anything.** It is
-the actual source of truth for this project, not this file and not any
-chat history — every real design decision, including the reasoning
-behind it and what was considered and rejected, is recorded there as a
-dated, numbered "sign-off note." If something seems ambiguous or you're
-about to make an architectural call, check whether it's already been
-decided before deciding it again. Section §15 has the full phase
-breakdown; the sign-off notes at the end are in roughly chronological
-order and are the design doc's most information-dense part.
+Read these in order before substantial work:
 
-The full round-by-round implementation/bugfix history (what actually
-got built, bugs found and fixed, "N tests passing" confirmations) lives
-separately in `docs/NetBBS-worklog.md`, not in the design doc — that
-split happened specifically so the design doc stays a design doc rather
-than reading like a work log. Round numbers are shared/consistent
-across both files, so a sign-off note in one may reference a round that
-only exists in the other.
+1. `docs/NetBBS-design-doc.md` — current product and architecture decisions.
+2. Current GitHub issues — active work, dependencies, and acceptance criteria.
+3. `docs/NetBBS-worklog.md` — curated engineering invariants, implementation
+   traps, operational constraints, and durable lessons.
+4. Relevant source, tests, and migrations.
 
-## Working conventions established so far
+Git history is the archive for old round-by-round implementation narratives.
+Do not recreate that chronology in the worklog.
 
-- **Design-before-code for anything non-trivial.** Significant decisions
-  (data model choices, protocol behavior, UX mechanisms) get discussed
-  and confirmed before implementation, not decided unilaterally mid-code.
-  If a request bundles several genuinely separable pieces, it's fine —
-  encouraged, even — to flag that explicitly and propose tackling one
-  piece at a time rather than attempting all of it in one pass. Thiesi
-  has explicitly said he prefers correctness over speed and is fine with
-  a task spanning multiple sessions.
-- **Every real design decision gets a sign-off note** appended to
-  `docs/NetBBS-design-doc.md`, following the existing numbered-round
-  format. Include: what was decided, why, what alternatives were
-  rejected and why, and anything left deliberately open/deferred. Pure
-  implementation narrative and bugfix writeups — "implemented X,
-  N tests passing," a bug found and fixed with no lasting design
-  implication — go to `docs/NetBBS-worklog.md` instead, same
-  numbered-round format, so the design doc doesn't drift back into
-  being a work log.
-- **Modular package structure, not a monolithic script** — see design
-  doc §3 for why (the first attempt at this project became an
-  unmaintainable single file). Each subsystem (`boards`, `chat`,
-  `moderation`, `rendering`, etc.) is its own package.
-- **Actually run the tests, don't just syntax-check.** This is the one
-  place Claude Code has a real advantage over the chat interface this
-  project was largely built in: that environment's sandbox didn't have
-  PyNaCl installed, so anything touching `netbbs.auth` (most of the
-  codebase, transitively) could only ever be syntax-checked, not
-  executed. If PyNaCl is available in this environment, actually run
-  `pytest` — several real bugs were only caught this way (see the sign-
-  off notes for examples: a `RuntimeError` from mutating a dict during
-  iteration, a `goto` command silently resolving against the wrong list,
-  password masking that silently did nothing). Assume other latent bugs
-  of that shape exist wherever something was only syntax-checked.
-- **Write tests alongside new code**, following the existing style in
-  `tests/` — real integration tests against loopback sockets for
-  anything touching the network/telnet layer, straightforward unit tests
-  elsewhere.
+## Documentation policy
 
-## Environment specifics
+### Design document
 
-- Primary deployment target: **NetBSD**, via pkgsrc.
-- Python 3.11+, asyncio-based.
-- **PyNaCl was deliberately chosen over `cryptography`** specifically
-  because `cryptography`'s recent versions pull in a Rust toolchain,
-  which is a tier-3 target on NetBSD (more build friction). PyNaCl wraps
-  libsodium (C), no Rust anywhere in the dependency chain.
-- SQLite (WAL mode), one file per node, no separate DB server.
+Record a decision in the design document when it changes what the system means,
+what users or nodes may rely on, or how a future protocol must behave. Keep one
+current normative answer per topic. Explain important rationale and rejected
+alternatives, but replace superseded wording rather than piling corrections
+under it.
 
-## Where things stand
+### Engineering record
 
-Check `docs/NetBBS-design-doc.md` §15 for the authoritative phase
-breakdown and current status — it will be more current than anything
-written here. As of this update, **Phase 1 and Phase 2 are both
-complete** — a genuinely full-featured standalone single-node BBS with
-no NetBBS Link dependency yet: boards (including post editing), chat,
-file areas with real Zmodem upload/download, permissions and full
-moderation tooling, expiry/maintenance, a user directory, SysOp admin
-tooling, ANSI/TUI rendering including a fullscreen nano-keybound
-editor, and all three planned connectivity methods (Telnet, SSH,
-web/xterm.js). Phase 3 (Link connectivity & sync core) has not started.
-For how any of that got built — which round did what, bugs found along
-the way — see `docs/NetBBS-worklog.md` rather than duplicating that
-history here.
+Update `docs/NetBBS-worklog.md` only for durable engineering knowledge:
 
-Flagged, not blocking further work: real third-party-client/browser
-verification still hasn't been done from this sandboxed dev
-environment for three things — interactive SSH sessions, real
-Zmodem-client interop (SyncTERM/lrzsz), and actual browser rendering of
-the xterm.js terminal (no browser-automation tool available here). All
-three are worth a direct check from Thiesi's own machine, or a future
-session with the right tooling, before considering this fully verified
-end-to-end.
+- non-obvious invariants;
+- platform/protocol/SQLite behavior which constrains future changes;
+- migration or compatibility requirements;
+- current subsystem implementation boundaries;
+- unresolved operational or verification limitations;
+- testing methods needed to prove a class of behavior.
 
-A "Communities" (local) / "Link Communities" (federated) concept — a
-topic-oriented navigation layer sitting above boards/chat/file areas —
-is directionally agreed but not yet phase-assigned or fully specced;
-see design doc §16 for what's decided and what's still open.
+Do not append:
+
+- passing-test totals;
+- round or commit narratives;
+- exhaustive changed-file/test lists;
+- transient “next step” status;
+- debugging transcripts once the lesson is extracted;
+- closed bugs with no lasting implementation consequence.
+
+### Issues and commits
+
+Use GitHub issues for outstanding work and acceptance criteria. Use commit and
+PR descriptions for the implementation narrative of the change being made.
+
+## Working conventions
+
+- **Design before code for non-trivial choices.** Check existing decisions
+  before reopening them. Ask when a change would create a new product,
+  protocol, security, or long-lived UX decision.
+- **Preserve subsystem boundaries.** Domain functions remain synchronous and
+  `db`-first. Async network/UI flows dispatch through `DatabaseLane` where
+  required. Rendering, storage, protocol, and transport concerns stay
+  separated.
+- **Treat migrations as immutable.** Never edit a shipped migration. Test
+  migrations against realistic related data, especially before rebuilding a
+  table which is a foreign-key parent.
+- **Actually run tests.** Prefer regression tests which demonstrably fail
+  without the fix. Confirm scripted UI tests still reach the path their name
+  claims after signature/menu changes.
+- **Use real boundaries.** Real SQLite files/connections for transactions,
+  real loopback sockets for transports, serialization and restart for Link
+  state, and the deterministic multi-node harness for ordering/partition
+  behavior.
+- **Bound remotely influenced resources.** Queues, transfers, retained events,
+  retries, and mailboxes need explicit limits and visible failure behavior.
+- **Own async tasks.** The creator cancels, gathers, and retrieves failures on
+  every exit path. Cleanup failures must not mask the original error.
+- **Sanitize before styling.** Sanitize untrusted segments before adding ANSI;
+  never sanitize a completed trusted ANSI string. Compose nested colored
+  segments independently because SGR reset does not restore an outer color.
+- **Fail clearly.** Administrative lockout, identity ambiguity, incompatible
+  databases, protocol rejection, and resource exhaustion should not degrade
+  silently.
+
+## Environment
+
+- Primary target: NetBSD via pkgsrc.
+- Python 3.11+, asyncio.
+- SQLite in WAL mode.
+- PyNaCl/libsodium rather than a Rust-dependent crypto stack.
+- User transports: Telnet, SSH, web/xterm.js.
+- NetBBS Link transport: signed HTTP+JSON for asynchronous federation; Noise
+  remains planned for later real-time Link chat.
+
+## Current scope summary
+
+The local BBS includes boards, files, chat, mail, Communities, permissions,
+moderation, identity attestation, SysOp tools, ANSI/TUI editors, registration,
+and update infrastructure.
+
+Current Phase 3 includes:
+
+- root and operational node keys with signed transitions;
+- canonical Link event bytes;
+- hello/endpoint protocol and `aiohttp` adapter;
+- configured-seed background synchronization;
+- persistent peers/events and restart reconstruction;
+- foreground/background database lanes;
+- deterministic multi-node fault injection;
+- linked-board genesis, posts, and self-authored edit propagation.
+
+It does **not** yet imply public federation, general relay, inventory/pull
+catch-up, Link messages, linked-resource succession, advanced governance, or
+trust/quarantine. Check the design document and open issues for the current
+roadmap rather than extending this summary.
