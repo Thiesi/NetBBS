@@ -7420,3 +7420,115 @@ consistent practice of not silently folding a prerequisite fix into
 the feature it unblocks. See `docs/NetBBS-worklog.md` round 121 for
 the implementation narrative and test counts.
 
+## Sign-off notes, round 122 (Link test harness expanded to close issue #59's remaining gate)
+
+Closes the second half of issue #59's own dependency-matrix requirement
+(§15): "issue #59's harness expanded to cover at least 3 nodes,
+duplicate/reordered delivery, restart, partition, and convergence...
+before the first end-to-end Linked feature is treated as complete."
+Round 92 built the *minimal* half (isolated node identities/databases,
+a fake clock, `ScriptedTransport`'s controlled send/deliver); this
+round is deliberately test-only — no production code changes were
+needed to satisfy the gate itself.
+
+**Scoped to what's actually built, not an idealized future state.** No
+relay/flood-fill gossip exists yet (round 116's "no relay from a
+stranger," still open in every round's own gap list since). "Convergence"
+in this round's tests therefore means: N nodes that each sync *directly*
+with every other one reach consistent state despite duplication,
+reordering, and restarts — not multi-hop propagation via an
+intermediate node. Testing for genuine relay convergence now would
+either trivially fail (correctly, since it isn't built) or require
+inventing scope this round doesn't own. The partition/heal scenario
+below exists specifically to turn that boundary into a tested,
+executable fact rather than leaving it as prose in a gap list.
+
+**`ScriptedTransport` needed exactly one new primitive: `drop(index)`.**
+Duplicate delivery needs no new mechanism (`send()` the same payload
+twice — two independent messages, not one replayed); reordering was
+already fully expressible via the existing `deliver(index)`. `drop()`
+exists purely for a test's own readability — discarding a pending
+message without delivering it was already possible by simply never
+calling `deliver()` for it, but that reads identically to "not yet
+delivered this pass" to someone reading the test later; `drop()` makes
+"never delivering this one, on purpose" a named, intentional action in
+a partition scenario's own script.
+
+**Five scenarios, `tests/test_link_convergence.py` (new)**, all driven
+through `ScriptedTransport` at the `netbbs.link.protocol` layer
+(no real socket, matching `tests/test_link_protocol.py`'s own
+convention, not `tests/test_link_transport.py`'s real-HTTP one — this
+round is about protocol-logic correctness under fault injection, not
+transport plumbing):
+
+1. **3-node convergence** — alice, bob, and carol each complete a
+   direct pairwise hello with the other two, then alice's key rotation
+   is pushed to both bob and carol separately; both resolve to the same
+   current signing key. Uses `resolve_current_operational_key` directly
+   for the correctness check, not tuple position — round 121's own
+   lesson applied from the start here rather than re-learned.
+2. **Duplicate delivery** — the same event message sent twice (two
+   independent `ScriptedTransport.send()` calls with identical bytes);
+   the second delivery is confirmed to be a pure no-op, not a re-
+   application or an error.
+3. **Reordered delivery** — revoke and authorize sent as two *separate*
+   messages, delivered authorize-first: the out-of-order one is safely
+   rejected (`LinkProtocolError`, its `previous_transition_id` pointing
+   at a revoke bob doesn't have yet), not silently corrupted. A later
+   resend of both together, in order — round 119's actual "push
+   everything every pass" behavior — converges correctly. This is a
+   deliberate documentation-by-test of what this project's real
+   recovery model is: push-and-retry, not reorder-tolerant single-
+   message delivery. Directly exercises round 121's chain-membership
+   fix for the revoke half (already accepted, now a no-op on resend).
+4. **Partition then heal** — a and c never exchange a message directly
+   while both sync fine with b; confirms b does *not* relay a's events
+   to c (`a.fingerprint not in c_node.peers`, checked explicitly, not
+   assumed) — turning the "no relay" boundary into a tested fact. a and
+   c then complete a direct hello and converge on the correct current
+   state via that fresh hello's own transitions bundle (not the
+   individual rotation events, which c never received and never needs
+   to, given no relay).
+5. **Restart mid-sequence** — the one genuinely new integration point
+   rounds 116–121 didn't individually cover: round 120's real
+   persistence (`netbbs.link.store`'s plain `db`-first functions,
+   called directly — no `DatabaseLane`/asyncio needed, since this
+   harness is in-process and synchronous) combined with harness-level
+   fault injection *after* the restart. bob accepts alice's first
+   rotation, "restarts" (a fresh `LinkNode` from `load_link_node`
+   against the same on-disk database — `restarted_bob_node is not
+   bob_node`, checked explicitly), then a *second* rotation arrives
+   duplicated and reordered; the restarted node still converges
+   correctly.
+
+**Two real bugs caught in the test-writing itself, both in the tests,
+not in production code** — worth recording since both are the same
+shape of mistake and both would have silently produced a false pass or
+a misleading failure otherwise: (1) the duplicate-delivery test's
+inbox filter matched by sender alone, which also matched the earlier
+hello message from the same sender, breaking a 2-item tuple-unpack;
+fixed by also filtering on the exact payload bytes. (2) three of the
+five tests reassigned `alice.identity`/`a.identity` (the `HarnessNode`
+field) after a rotation but initially forgot to also reassign
+`alice_node.identity`/`a_node.identity` (the actual `LinkNode` object
+`build_hello` reads from) — harmless where that node object was never
+asked to build another hello afterward, but a real bug in the
+partition/heal test specifically, where the healed hello silently
+carried the *stale*, pre-rotation transitions, and the test's own
+final assertion caught it immediately as a resolved-key mismatch
+rather than a false pass. Fixed by keeping both assignments together
+everywhere, matching `tests/test_link_protocol.py`'s own established
+"identity and node reassigned together" pattern.
+
+**Testing**: full suite: **2027 passed, 4 skipped** (5 net new, all in
+`tests/test_link_convergence.py` — up from round 121's 2022/4).
+
+**What's still open**: nothing production-code-shaped changed this
+round. The self-updating supplementary seed list, automatic relay
+selection, peer-list exchange, pull-based catch-up, and retention-
+window purging all remain unimplemented, unchanged from round 121's
+list. Per §15's dependency matrix, `key_transition` propagation can now
+be treated as complete per issue #59's own gate — the next event type
+(a board post, a Community membership change) is real, unblocked Phase
+3 scope, not a prerequisite fix.
+

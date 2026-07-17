@@ -1,12 +1,13 @@
 """
 Deterministic scaffolding for NetBBS Link protocol tests.
 
-Design doc round 92, resolving the *minimal* half of issue #59 (a full
-multi-node convergence/fault-injection harness is explicitly a later gate
--- see round 88/61 -- not attempted here). This module provides three
-primitives: isolated node identities/databases created in one test
-process, a controllable fake clock, and a scripted transport that only
-ever delivers a message when a test explicitly says so.
+Design doc round 92, resolving the *minimal* half of issue #59: isolated
+node identities/databases created in one test process, a controllable
+fake clock, and a scripted transport that only ever delivers a message
+when a test explicitly says so. Round 122 closes the rest of that gate
+(the full multi-node convergence/fault-injection harness round 88/61
+named as a later requirement) -- see `ScriptedTransport.drop()`'s own
+docstring and `tests/test_link_convergence.py`.
 
 `HarnessNode` originally wrapped a bare `Identity` keypair, since no
 NetBBS Link protocol code existed yet to exercise round 89's key-
@@ -124,14 +125,17 @@ class ScriptedTransport:
     its recipient's inbox, so ordering, timing, and even non-delivery are
     entirely under test control.
 
-    This is the "minimal" half of issue #59's ask. Duplicate/reorder/drop/
-    partition *fault injection* on top of this same primitive, and
-    multi-node convergence assertions, are explicitly deferred to the
-    later gate named in round 88/61 ("before the first end-to-end Linked
-    feature is treated as complete") -- not built here. Delivering
-    messages out of send order via an explicit index is enough, at this
-    stage, to prove code behaves correctly regardless of arrival order
-    once there's real Phase 3 code to test.
+    Round 92 built the "minimal" half of issue #59's ask -- `send()`/
+    `deliver(index)`/`deliver_all()`, enough to script out-of-order
+    delivery by hand. Round 122 closes the rest of that gate ("before
+    the first end-to-end Linked feature is treated as complete," round
+    88/61): duplicate delivery needs no new primitive (`send()` the same
+    payload twice), reordering was already possible via `deliver(index)`,
+    and `drop()` (below) makes an intentional non-delivery a named action
+    rather than a test simply never calling `deliver()` for a message.
+    Multi-node convergence, partition/heal, and restart-mid-sequence
+    scenarios built on these primitives live in `tests/test_link_
+    convergence.py`, not in this module.
     """
 
     def __init__(self) -> None:
@@ -175,6 +179,19 @@ class ScriptedTransport:
     def deliver_all(self) -> None:
         while self._pending:
             self.deliver(0)
+
+    def drop(self, index: int = 0) -> PendingMessage:
+        """
+        Discard the pending message at `index` without delivering it to
+        any inbox (round 122, issue #59's harness-gate fault injection)
+        -- the explicit-intent counterpart to `deliver()`. A test could
+        already express "drop" by simply never calling `deliver()` for a
+        given message, but that reads identically to "not yet delivered
+        this pass" -- `drop()` makes "never delivering this one, on
+        purpose" a distinct, named action in a partition scenario's own
+        script, not an omission a reader has to infer.
+        """
+        return self._pending.pop(index)
 
     def inbox(self, node: HarnessNode) -> list[PendingMessage]:
         return list(self._inboxes.get(node.label, []))

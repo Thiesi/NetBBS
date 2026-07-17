@@ -8030,3 +8030,60 @@ own gate, design doc §15 — "before the first end-to-end Linked feature
 is treated as complete") — now able to exercise a `push_events` that
 actually works, rather than one that silently failed on every pass.
 
+## Round 122 (Link test harness expanded: 3+ nodes, duplicate/reordered delivery, restart, partition/convergence — closes issue #59's harness gate)
+
+See `docs/NetBBS-design-doc.md` round 122 for the design decisions (why
+scope is "direct pairwise sync converges," not multi-hop relay; why
+`ScriptedTransport` only needed one new primitive) — this entry is
+implementation/testing narrative.
+
+**`tests/link_harness.py`**: `ScriptedTransport.drop(index)` (new) —
+discards a pending message without delivering it, for a partition
+scenario's own readability. Both the module docstring and `Scripted
+Transport`'s own docstring updated; they previously stated duplicate/
+reorder/drop/partition fault injection and multi-node convergence were
+"explicitly deferred to the later gate... not built here," which this
+round closes.
+
+**`tests/test_link_convergence.py`** (new, 5 tests): 3-node convergence,
+duplicate delivery, reordered delivery (rejected, then recovers via a
+full resend), partition-then-heal (explicitly asserts the no-relay
+boundary: `a.fingerprint not in c_node.peers` after b has already
+accepted events from a), and restart-mid-sequence (round 120's real
+`netbbs.link.store` functions called directly, no `DatabaseLane`/
+asyncio, combined with duplicate+reordered delivery arriving after a
+simulated restart). All driven through `ScriptedTransport` at the
+`netbbs.link.protocol` layer, matching `tests/test_link_protocol.py`'s
+convention (no real socket).
+
+**Two bugs caught while writing the tests, both in the tests
+themselves**: (1) the duplicate-delivery test's inbox filter matched by
+sender alone, which also caught the earlier hello message from the
+same sender and broke a 2-item tuple-unpack (`ValueError: too many
+values to unpack`) — fixed by also filtering on exact payload bytes.
+(2) three tests reassigned `alice.identity`/`a.identity` after a
+rotation without also reassigning `alice_node.identity`/`a_node.
+identity` — harmless in two of the three (that `LinkNode` was never
+asked to build another hello afterward), but a real bug in the
+partition/heal test: the healed hello silently carried the *stale*
+pre-rotation transitions, and the test's own final assertion (checking
+the resolved signing key, not tuple position — round 121's lesson
+applied) caught the mismatch immediately rather than producing a false
+pass. Fixed by reassigning both together everywhere, matching `tests/
+test_link_protocol.py`'s existing pattern.
+
+**Testing**: full suite: **2027 passed, 4 skipped** (5 net new, all in
+`tests/test_link_convergence.py` — up from round 121's 2022/4).
+
+**What's still open**: no production code changed this round, so
+nothing on the feature-gap list moved except the harness gate itself,
+which is now closed. Per §15's dependency matrix, `key_transition`
+propagation is the first Phase 3 feature to actually clear issue #59's
+"before the first end-to-end Linked feature is treated as complete"
+bar. The self-updating supplementary seed list, automatic relay
+selection, peer-list exchange, pull-based catch-up, and retention-
+window purging remain unimplemented, unchanged from round 121's list.
+The natural next round is a second event type (a board post, a
+Community membership change) — real, unblocked Phase 3 feature work,
+not another prerequisite fix.
+
