@@ -1327,4 +1327,19 @@ MIGRATIONS = [
         CREATE INDEX idx_link_events_sender ON link_events(sender_fingerprint);
         """,
     ),
+    Migration(
+        description=(
+            "Local-origination columns for linked boards (design doc round 124/"
+            "125/126, round 128 wiring): NULL means 'not Linked yet' / 'no board_"
+            "post built yet' -- an explicit value means this row's own signed "
+            "board_genesis/board_post envelope (netbbs.link.events.BoardGenesis/"
+            "BoardPost .to_dict()), built and stored once, then pushed to peers "
+            "every sync pass same as a key_transition (round 119's own 'harmless "
+            "no-op resend' model) rather than tracked as delivered per-peer."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN link_genesis_json TEXT;
+        ALTER TABLE posts ADD COLUMN link_event_json TEXT;
+        """,
+    ),
 ]

@@ -113,6 +113,7 @@ from netbbs.files.entries import (
     set_file_pinned,
 )
 from netbbs.identity.keys import IdentityError, parse_verify_key
+from netbbs.link.boards import LinkBoardsError, LinkContext, is_board_linked, link_board, queue_board_post_if_linked
 from netbbs.moderation.log import list_actions_for_target_user, record_action
 from netbbs.moderation.roles import (
     BoardPermission,
@@ -122,6 +123,7 @@ from netbbs.moderation.roles import (
     list_grants_for_community,
     revoke_permissions,
 )
+from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
@@ -150,7 +152,12 @@ from netbbs.timeutil import format_for_display, resolve_display_preferences
 
 
 async def admin_menu(
-    session: Session, lane: DatabaseLane, user: User, *, node_controls: NodeControls | None = None
+    session: Session,
+    lane: DatabaseLane,
+    user: User,
+    *,
+    node_controls: NodeControls | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Top-level SysOp admin menu. Callers are responsible for their own
@@ -159,14 +166,81 @@ async def admin_menu(
     selection only" precedent.
 
     `node_controls` (design doc -- node management round), if given,
-    unlocks the `[N]ode` submenu (list/disconnect sessions, trigger
-    shutdown) -- present when called from within a live session
-    (`netbbs.net.login_flow`), absent (`None`) when called from the
-    standalone `python -m netbbs.admin` CLI, which has no access to a
-    running node's live in-memory state at all (confirmed design
-    decision, not an oversight -- see that module's docstring).
+    unlocks the `[N]ode` command nested inside the `[S]ystem` submenu
+    (list/disconnect sessions, trigger shutdown) -- present when called
+    from within a live session (`netbbs.net.login_flow`), absent
+    (`None`) when called from the standalone `python -m netbbs.admin`
+    CLI, which has no access to a running node's live in-memory state
+    at all (confirmed design decision, not an oversight -- see that
+    module's docstring).
+
+    `link_context` (design doc round 124/128), if given, unlocks the
+    `[L]ink this board` command inside the board-management screens --
+    same presence/absence reasoning as `node_controls`: absent for the
+    standalone CLI and for any node with Link disabled.
+
+    Grouped into three submenus by what they act on (Thiesi's own
+    observation that the previous flat 9-option layout mixed user-
+    account actions and node-wide settings side by side with no
+    grouping at all, "Welcome banner" sitting next to "Create user"):
+    `[U]sers` (create/list/registration/promote/enable-disable/delete),
+    `[M]anage content` (boards/areas/channels, already its own submenu
+    since before this reorganization), and `[S]ystem` (welcome banner,
+    update, and -- Thiesi's own call -- `[N]ode` nested one level
+    further in, rather than sitting at this top level as its own
+    sibling the way it used to).
     """
-    await _draw_admin_menu(session, node_controls)
+    await _draw_admin_menu(session)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "u":
+            await session.write_line("")
+            await _users_menu(session, lane, user, node_controls=node_controls)
+            await _draw_admin_menu(session)
+        elif choice == "m":
+            await session.write_line("")
+            await _content_menu(session, lane, user, link_context=link_context)
+            await _draw_admin_menu(session)
+        elif choice == "s":
+            await session.write_line("")
+            await _system_menu(session, lane, user, node_controls=node_controls)
+            await _draw_admin_menu(session)
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _draw_admin_menu(session: Session) -> None:
+    header = colored("SysOp admin menu:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join(
+        [
+            menu_key("U", "sers"),
+            menu_key("M", "anage boards/areas/channels"),
+            menu_key("S", "ystem"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"\r\n{header} {options}")
+    await session.write("Choice: ")
+
+
+# -- users submenu ---------------------------------------------------------
+
+
+async def _users_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+) -> None:
+    """Every user-account action, grouped together (design doc -- admin
+    menu reorganization round): create, list/detail, registration
+    policy, promote/demote, enable/disable, delete. `node_controls` is
+    threaded straight through to the screens that need it
+    (`_disable_enable_screen`/`_delete_user_screen`, for the live-
+    session-revocation guard) -- this submenu itself doesn't use it
+    directly."""
+    await _draw_users_menu(session)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -175,66 +249,90 @@ async def admin_menu(
             return
         elif choice == "c":
             await session.write_line("")
-            await _create_user_screen(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
+            await _create_user_screen(session, lane, actor)
+            await _draw_users_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_users_screen(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
+            await _list_users_screen(session, lane, actor)
+            await _draw_users_menu(session)
         elif choice == "r":
             await session.write_line("")
-            await _registration_settings_screen(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
+            await _registration_settings_screen(session, lane, actor)
+            await _draw_users_menu(session)
         elif choice == "p":
             await session.write_line("")
-            await _change_level_screen(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
+            await _change_level_screen(session, lane, actor)
+            await _draw_users_menu(session)
         elif choice == "e":
             await session.write_line("")
-            await _disable_enable_screen(session, lane, user, node_controls)
-            await _draw_admin_menu(session, node_controls)
+            await _disable_enable_screen(session, lane, actor, node_controls)
+            await _draw_users_menu(session)
         elif choice == "d":
             await session.write_line("")
-            await _delete_user_screen(session, lane, user, node_controls)
-            await _draw_admin_menu(session, node_controls)
-        elif choice == "n" and node_controls is not None:
-            await session.write_line("")
-            await _node_menu(session, lane, user, node_controls)
-            await _draw_admin_menu(session, node_controls)
-        elif choice == "w":
-            await session.write_line("")
-            await _welcome_banner_menu(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
-        elif choice == "m":
-            await session.write_line("")
-            await _content_menu(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
-        elif choice == "u":
-            await session.write_line("")
-            await _update_settings_screen(session, lane, user)
-            await _draw_admin_menu(session, node_controls)
+            await _delete_user_screen(session, lane, actor, node_controls)
+            await _draw_users_menu(session)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_admin_menu(session: Session, node_controls: NodeControls | None) -> None:
-    header = colored("SysOp admin menu:", fg_color=HEADER_COLOR, bold=True)
-    option_list = [
-        menu_key("C", "reate user"),
-        menu_key("L", "ist users"),
-        menu_key("R", "egistration"),
-        menu_key("P", "romote/demote"),
-        menu_key("E", "nable/disable"),
-        menu_key("D", "elete user"),
-        menu_key("M", "anage boards/areas/channels"),
-        menu_key("W", "elcome banner"),
-        menu_key("U", "pdate"),
-    ]
+async def _draw_users_menu(session: Session) -> None:
+    header = colored("\r\nUsers:", fg_color=HEADER_COLOR, bold=True)
+    options = "  ".join(
+        [
+            menu_key("C", "reate user"),
+            menu_key("L", "ist users"),
+            menu_key("R", "egistration"),
+            menu_key("P", "romote/demote"),
+            menu_key("E", "nable/disable"),
+            menu_key("D", "elete user"),
+            menu_key("B", "ack"),
+        ]
+    )
+    await session.write_line(f"{header} {options}")
+    await session.write("Choice: ")
+
+
+# -- system submenu ----------------------------------------------------------
+
+
+async def _system_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+) -> None:
+    """Node-wide settings, grouped together (design doc -- admin menu
+    reorganization round): welcome banner, self-update, and -- Thiesi's
+    own call -- `[N]ode` (sessions/shutdown) nested here rather than
+    sitting at the top level, since it's a node-wide concern too."""
+    await _draw_system_menu(session, node_controls)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "w":
+            await session.write_line("")
+            await _welcome_banner_menu(session, lane, actor)
+            await _draw_system_menu(session, node_controls)
+        elif choice == "u":
+            await session.write_line("")
+            await _update_settings_screen(session, lane, actor)
+            await _draw_system_menu(session, node_controls)
+        elif choice == "n" and node_controls is not None:
+            await session.write_line("")
+            await _node_menu(session, lane, actor, node_controls)
+            await _draw_system_menu(session, node_controls)
+        else:
+            await session.write(reject_keystroke())
+
+
+async def _draw_system_menu(session: Session, node_controls: NodeControls | None) -> None:
+    header = colored("\r\nSystem:", fg_color=HEADER_COLOR, bold=True)
+    option_list = [menu_key("W", "elcome banner"), menu_key("U", "pdate")]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
     options = "  ".join(option_list)
-    await session.write_line(f"\r\n{header} {options}")
+    await session.write_line(f"{header} {options}")
     await session.write("Choice: ")
 
 
@@ -287,10 +385,7 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
 
 
 async def _prompt_optional_password(session: Session) -> str | None:
-    await session.write("Set a password? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, "Set a password?", default=False):
         return None
     await session.write("Password: ")
     first = await session.read_line(echo=False)
@@ -305,10 +400,7 @@ async def _prompt_optional_password(session: Session) -> str | None:
 
 
 async def _prompt_optional_pubkey(session: Session) -> nacl.signing.VerifyKey | None:
-    await session.write("Add a public key? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, "Add a public key?", default=False):
         return None
     await session.write("Paste the public key (base64, or an ssh-ed25519 line): ")
     text = (await session.read_line()).strip()
@@ -374,10 +466,7 @@ async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, t
             await session.write_line(f"  {when}: {sanitize_text(entry.action)}{detail}")
 
     if target.pending_approval:
-        await session.write("\r\nApprove this account so it can log in? [y/N]: ")
-        answer = (await session.read_key()).lower()
-        await session.write_line("")
-        if answer == "y":
+        if await prompt_yes_no(session, "\r\nApprove this account so it can log in?", default=False):
             updated = await lane.run(approve_pending_user, target, approved_by=actor)
             await session.write_line(f"{updated.username!r} approved.")
 
@@ -390,10 +479,7 @@ async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, t
         f"{'yes' if target.can_verify_identity else 'no'}"
     )
     new_state = "revoke" if target.can_verify_identity else "grant"
-    await session.write(f"{new_state.capitalize()} identity-verification permission? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer == "y":
+    if await prompt_yes_no(session, f"{new_state.capitalize()} identity-verification permission?", default=False):
         updated = await lane.run(set_can_verify_identity, target, not target.can_verify_identity, changed_by=actor)
         await session.write_line(
             f"{updated.username!r} can now verify identity: {'yes' if updated.can_verify_identity else 'no'}."
@@ -505,9 +591,7 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
     else:
         await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
 
-    await session.write("\r\nCheck for a new release now? [y/N]: ")
-    if (await session.read_key()).lower() == "y":
-        await session.write_line("")
+    if await prompt_yes_no(session, "\r\nCheck for a new release now?", default=False):
         try:
             release = await check_latest_release()
         except UpdateError as exc:
@@ -531,10 +615,7 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
                 await session.write_line(f"Already up to date ({current_version}).")
 
     new_state = "off" if auto_enabled else "ON"
-    await session.write(f"\r\nTurn daily automatic check {new_state}? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, f"\r\nTurn daily automatic check {new_state}?", default=False):
         return
 
     def _apply(db: Database) -> None:
@@ -589,10 +670,7 @@ async def _disable_enable_screen(
         return
     currently_disabled = target.disabled_at is not None
     action_word = "Enable" if currently_disabled else "Disable"
-    await session.write(f"{action_word} {target.username!r}? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, f"{action_word} {target.username!r}?", default=False):
         return
     try:
         updated = await lane.run(set_user_disabled, target, not currently_disabled, changed_by=actor)
@@ -737,10 +815,7 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         )
         return
 
-    await session.write(f"Disconnect {_session_name(selected)!r}? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, f"Disconnect {_session_name(selected)!r}?", default=False):
         return
 
     target_user_id: int | None = None
@@ -771,8 +846,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         )
     )
     await session.write("Graceful (wait, then disconnect) or immediate? [G/i]: ")
-    mode_answer = (await session.read_key()).lower()
-    await session.write_line("")
+    mode_answer = (await session.read_line()).strip().lower()
     graceful = mode_answer != "i"
 
     await session.write("Custom broadcast message (leave blank for the default): ")
@@ -780,10 +854,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
     message = message_raw or None
 
     mode_label = "graceful" if graceful else "immediate"
-    await session.write(f"Confirm {mode_label} shutdown? [y/N]: ")
-    confirm = (await session.read_key()).lower()
-    await session.write_line("")
-    if confirm != "y":
+    if not await prompt_yes_no(session, f"Confirm {mode_label} shutdown?", default=False):
         await session.write_line("Cancelled.")
         return
 
@@ -957,7 +1028,9 @@ async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, acto
 # building a shared abstraction for just two call sites.
 
 
-async def _content_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _content_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     await _draw_content_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -967,7 +1040,7 @@ async def _content_menu(session: Session, lane: DatabaseLane, actor: User) -> No
             return
         elif choice == "m":
             await session.write_line("")
-            await _board_menu(session, lane, actor)
+            await _board_menu(session, lane, actor, link_context=link_context)
             await _draw_content_menu(session)
         elif choice == "a":
             await session.write_line("")
@@ -1131,10 +1204,7 @@ async def _pick_optional_category(
     specifically cross-Community, not a concern for an Uncategorized
     resource's own category choice.
     """
-    await session.write("Assign a category? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, "Assign a category?", default=False):
         return None
 
     used_category_ids: set[int] | None = None
@@ -1168,10 +1238,7 @@ async def _pick_optional_category(
         subs = [c for c in subs if c.id in used_category_ids]
     if not subs:
         return selected.id
-    await session.write(f"Use a sub-category of {selected.name!r} instead? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, f"Use a sub-category of {selected.name!r} instead?", default=False):
         return selected.id
     sub_selected = await pick_item(
         session, subs,
@@ -1191,10 +1258,7 @@ async def _pick_optional_community(session: Session, lane: DatabaseLane) -> int 
     the existing category prompt at every call site -- Community is the
     outer layer, chosen first. Returns the chosen Community's id, or
     `None` if declined or none exist yet."""
-    await session.write("Assign a Community? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, "Assign a Community?", default=False):
         return None
     selected = await pick_item(
         session, await lane.run(list_communities),
@@ -1339,10 +1403,7 @@ async def _edit_community_screen(
     name = (await session.read_line()).strip() or community.name
     await session.write(f"Description [{community.description or '(none)'}]: ")
     description = (await session.read_line()).strip() or community.description
-    await session.write(f"Hidden? [{'y' if community.hidden else 'N'}]: ")
-    hidden_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    hidden = hidden_answer == "y" if hidden_answer in ("y", "n") else community.hidden
+    hidden = await prompt_yes_no_or_keep(session, "Hidden?", current=community.hidden)
 
     default_min_read_level, ok = await _prompt_optional_int(
         session, "Default minimum read level", current=community.default_min_read_level
@@ -1413,7 +1474,9 @@ async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: 
 # -- message boards ----------------------------------------------------
 
 
-async def _board_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _board_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     await _draw_board_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -1427,7 +1490,7 @@ async def _board_menu(session: Session, lane: DatabaseLane, actor: User) -> None
             await _draw_board_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_boards_screen(session, lane, actor)
+            await _list_boards_screen(session, lane, actor, link_context=link_context)
             await _draw_board_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -1461,12 +1524,8 @@ async def _create_board_screen(session: Session, lane: DatabaseLane, actor: User
         list_subcategories=list_board_subcategories, title="Board category",
         community_id=community_id, resources=await lane.run(list_boards),
     )
-    await session.write("Pinned? [y/N]: ")
-    pinned = (await session.read_key()).lower() == "y"
-    await session.write_line("")
-    await session.write("Moderated (posts need approval)? [y/N]: ")
-    moderated = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    pinned = await prompt_yes_no(session, "Pinned?", default=False)
+    moderated = await prompt_yes_no(session, "Moderated (posts need approval)?", default=False)
     await session.write("Max post age in days (blank = unlimited): ")
     max_age_raw = (await session.read_line()).strip()
     max_post_age_days = None
@@ -1498,7 +1557,9 @@ async def _create_board_screen(session: Session, lane: DatabaseLane, actor: User
     await session.write_line(f"Created board {board.name!r}.")
 
 
-async def _list_boards_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _list_boards_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     boards = await lane.run(list_boards, order_by="alphabetical")
     selected = await pick_item(
         session, boards,
@@ -1509,7 +1570,7 @@ async def _list_boards_screen(session: Session, lane: DatabaseLane, actor: User)
         empty_message="No boards yet.",
     )
     if selected is not None:
-        await _board_detail_screen(session, lane, actor, selected)
+        await _board_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
 def _board_description(board: Board) -> str:
@@ -1519,8 +1580,11 @@ def _board_description(board: Board) -> str:
     return f"read {read_level}/write {write_level}, {status}"
 
 
-async def _board_detail_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> None:
-    await _draw_board_detail(session, lane, board)
+async def _board_detail_screen(
+    session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
+) -> None:
+    linked = await lane.run(is_board_linked, board) if link_context is not None else False
+    await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1532,22 +1596,117 @@ async def _board_detail_screen(session: Session, lane: DatabaseLane, actor: User
             updated = await _edit_board_screen(session, lane, actor, board)
             if updated is not None:
                 board = updated
-            await _draw_board_detail(session, lane, board)
+            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_board_screen(session, lane, actor, board)
             if deleted:
                 return
-            await _draw_board_detail(session, lane, board)
+            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
         elif choice == "p":
             await session.write_line("")
-            await _pending_posts_screen(session, lane, actor, board)
-            await _draw_board_detail(session, lane, board)
+            await _pending_posts_screen(session, lane, actor, board, link_context=link_context)
+            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+        elif choice == "l" and link_context is not None and not linked:
+            await session.write_line("")
+            await _link_board_screen(session, lane, board, link_context)
+            linked = await lane.run(is_board_linked, board)
+            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_board_detail(session: Session, lane: DatabaseLane, board: Board) -> None:
+async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext) -> None:
+    """
+    `[L]ink this board` (design doc round 124/128): puts `board` into
+    Link scope via a signed `board_genesis` event referencing its
+    existing `board_id` -- never a fresh one (round 124's "promote an
+    existing local board" case, the normal one, not a special one).
+
+    The six `default_*` cascading-scalar-default fields (round 124)
+    are pre-filled from `board`'s own *current* local settings (the
+    obvious starting recommendation, matching `_edit_board_screen`'s
+    own prefill-then-edit convention). For the four fields sharing
+    `_prompt_optional_int`/`_prompt_min_age`/`_prompt_name_requirement`
+    with `_edit_board_screen`, blank keeps that prefilled value as the
+    recommendation and typing `none` clears it to send no
+    recommendation at all for that field -- their own existing
+    "blank = keep, 'none' = clear" convention, reused rather than
+    special-cased here. `default_moderated`/`default_max_post_age_days`
+    have no such prior art to reuse (`_edit_board_screen` reads them as
+    plain required fields, never optional) -- blank means no
+    recommendation directly for both.
+
+    Building/signing/persisting the genesis is a plain, synchronous
+    `db`-first call (`link_board`), dispatched through `lane` like
+    every other board-admin mutation here. Registering the result with
+    the *live* `LinkNode` is deliberately done here, directly, on the
+    event loop -- never inside the lane-dispatched call itself (see
+    `link_board`'s own docstring for why that split matters: `LinkNode`
+    mutation and `DatabaseLane` dispatch must never share a thread).
+    """
+    await session.write_line(colored("\r\nLink this board", fg_color=HEADER_COLOR, bold=True))
+    default_min_read_level, ok = await _prompt_optional_int(
+        session, "Recommended minimum read level", current=board.min_read_level
+    )
+    if not ok:
+        return
+    default_min_write_level, ok = await _prompt_optional_int(
+        session, "Recommended minimum write level", current=board.min_write_level
+    )
+    if not ok:
+        return
+    await session.write(f"Recommend moderated? [{'y' if board.moderated else 'N'}/blank=no recommendation]: ")
+    moderated_answer = (await session.read_line()).strip().lower()
+    default_moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else None
+    current_age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
+    await session.write(f"Recommended max post age in days [{current_age}] (blank = no recommendation): ")
+    max_age_raw = (await session.read_line()).strip()
+    default_max_post_age_days = None
+    if max_age_raw:
+        try:
+            default_max_post_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+    default_min_age, ok = await _prompt_min_age(session, current=board.min_age)
+    if not ok:
+        return
+    default_name_requirement, ok = await _prompt_name_requirement(session, current=board.name_requirement)
+    if not ok:
+        return
+
+    try:
+        genesis = await lane.run(
+            link_board,
+            board,
+            node_identity=link_context.node_identity,
+            default_min_read_level=default_min_read_level,
+            default_min_write_level=default_min_write_level,
+            default_moderated=default_moderated,
+            default_max_post_age_days=default_max_post_age_days,
+            default_min_age=default_min_age,
+            default_name_requirement=default_name_requirement,
+        )
+    except LinkBoardsError as exc:
+        await session.write_line(colored(f"Could not Link board: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.boards[board.board_id] = genesis
+    link_context.link_node.known_event_ids.add(genesis.content_id)
+    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+
+    await session.write_line(f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+
+
+async def _draw_board_detail(
+    session: Session,
+    lane: DatabaseLane,
+    board: Board,
+    *,
+    linked: bool = False,
+    link_context: LinkContext | None = None,
+) -> None:
     header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
@@ -1564,10 +1723,13 @@ async def _draw_board_detail(session: Session, lane: DatabaseLane, board: Board)
         f"Minimum age: {board.min_age if board.min_age is not None else 'none'}  "
         f"Name requirement: {board.name_requirement or 'none'}"
     )
-    options = "  ".join(
-        [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts"), menu_key("B", "ack")]
-    )
-    await session.write_line(f"\r\n{options}")
+    if link_context is not None:
+        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+    options = [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts")]
+    if link_context is not None and not linked:
+        options.append(menu_key("L", "ink this board"))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
 
 
@@ -1582,15 +1744,11 @@ async def _edit_board_screen(session: Session, lane: DatabaseLane, actor: User, 
     min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=board.min_write_level)
     if not ok:
         return None
-    await session.write("Change Community? [y/N]: ")
-    change_community = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_community = await prompt_yes_no(session, "Change Community?", default=False)
     community_id = board.community_id
     if change_community:
         community_id = await _pick_optional_community(session, lane)
-    await session.write("Change category? [y/N]: ")
-    change_category = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_category = await prompt_yes_no(session, "Change category?", default=False)
     category_id = board.category_id
     if change_category:
         category_id = await _pick_optional_category(
@@ -1598,14 +1756,8 @@ async def _edit_board_screen(session: Session, lane: DatabaseLane, actor: User, 
             list_subcategories=list_board_subcategories, title="Board category",
             community_id=community_id, resources=await lane.run(list_boards),
         )
-    await session.write(f"Pinned? [{'y' if board.pinned else 'N'}]: ")
-    pinned_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else board.pinned
-    await session.write(f"Moderated? [{'y' if board.moderated else 'N'}]: ")
-    moderated_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else board.moderated
+    pinned = await prompt_yes_no_or_keep(session, "Pinned?", current=board.pinned)
+    moderated = await prompt_yes_no_or_keep(session, "Moderated?", current=board.moderated)
     current_age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
     await session.write(f"Max post age in days [{current_age}] (blank = keep, 'none' = unlimited): ")
     max_age_raw = (await session.read_line()).strip()
@@ -1659,7 +1811,9 @@ async def _delete_board_screen(session: Session, lane: DatabaseLane, actor: User
     return True
 
 
-async def _pending_posts_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> None:
+async def _pending_posts_screen(
+    session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
+) -> None:
     while True:
         posts = await lane.run(list_pending_posts, board, requesting_user=actor)
         selected = await pick_item(
@@ -1672,7 +1826,7 @@ async def _pending_posts_screen(session: Session, lane: DatabaseLane, actor: Use
         )
         if selected is None:
             return
-        await _post_action_screen(session, lane, actor, selected)
+        await _post_action_screen(session, lane, actor, selected, board, link_context=link_context)
 
 
 async def _draw_post_action(session: Session, post: Post) -> None:
@@ -1693,7 +1847,15 @@ async def _draw_post_action(session: Session, post: Post) -> None:
     await session.write("Choice: ")
 
 
-async def _post_action_screen(session: Session, lane: DatabaseLane, actor: User, post: Post) -> None:
+async def _post_action_screen(
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    post: Post,
+    board: Board,
+    *,
+    link_context: LinkContext | None = None,
+) -> None:
     await _draw_post_action(session, post)
     while True:
         choice = (await session.read_key()).lower()
@@ -1703,7 +1865,11 @@ async def _post_action_screen(session: Session, lane: DatabaseLane, actor: User,
             return
         elif choice == "a":
             await session.write_line("")
-            await lane.run(approve_post, post, approved_by=actor)
+            approved = await lane.run(approve_post, post, approved_by=actor)
+            if link_context is not None:
+                await lane.run(
+                    queue_board_post_if_linked, approved, board, node_identity=link_context.node_identity
+                )
             await session.write_line("Approved.")
             return
         elif choice == "r":
@@ -1777,10 +1943,7 @@ async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
     await _write_gc_report(session, preview)
     if preview.reclaimable_blobs == 0:
         return
-    await session.write("Reclaim this space now? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(session, "Reclaim this space now?", default=False):
         return
     result = await lane.run(reclaim_orphaned_blobs, dry_run=False)
     await _write_gc_report(session, result)
@@ -1840,12 +2003,8 @@ async def _create_area_screen(session: Session, lane: DatabaseLane, actor: User)
         list_subcategories=list_file_subcategories, title="File-area category",
         community_id=community_id, resources=await lane.run(list_file_areas),
     )
-    await session.write("Pinned? [y/N]: ")
-    pinned = (await session.read_key()).lower() == "y"
-    await session.write_line("")
-    await session.write("Moderated (uploads need approval)? [y/N]: ")
-    moderated = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    pinned = await prompt_yes_no(session, "Pinned?", default=False)
+    moderated = await prompt_yes_no(session, "Moderated (uploads need approval)?", default=False)
     await session.write("Max file age in days (blank = unlimited): ")
     max_age_raw = (await session.read_line()).strip()
     max_file_age_days = None
@@ -1961,15 +2120,11 @@ async def _edit_area_screen(session: Session, lane: DatabaseLane, actor: User, a
     min_write_level, ok = await _prompt_optional_int(session, "Minimum write level", current=area.min_write_level)
     if not ok:
         return None
-    await session.write("Change Community? [y/N]: ")
-    change_community = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_community = await prompt_yes_no(session, "Change Community?", default=False)
     community_id = area.community_id
     if change_community:
         community_id = await _pick_optional_community(session, lane)
-    await session.write("Change category? [y/N]: ")
-    change_category = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_category = await prompt_yes_no(session, "Change category?", default=False)
     category_id = area.category_id
     if change_category:
         category_id = await _pick_optional_category(
@@ -1977,14 +2132,8 @@ async def _edit_area_screen(session: Session, lane: DatabaseLane, actor: User, a
             list_subcategories=list_file_subcategories, title="File-area category",
             community_id=community_id, resources=await lane.run(list_file_areas),
         )
-    await session.write(f"Pinned? [{'y' if area.pinned else 'N'}]: ")
-    pinned_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else area.pinned
-    await session.write(f"Moderated? [{'y' if area.moderated else 'N'}]: ")
-    moderated_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else area.moderated
+    pinned = await prompt_yes_no_or_keep(session, "Pinned?", current=area.pinned)
+    moderated = await prompt_yes_no_or_keep(session, "Moderated?", current=area.moderated)
     current_age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
     await session.write(f"Max file age in days [{current_age}] (blank = keep, 'none' = unlimited): ")
     max_age_raw = (await session.read_line()).strip()
@@ -2164,20 +2313,12 @@ async def _create_channel_screen(session: Session, lane: DatabaseLane, actor: Us
         list_subcategories=list_channel_subcategories, title="Channel category",
         community_id=community_id, resources=await lane.run(list_channels),
     )
-    await session.write("Pinned? [y/N]: ")
-    pinned = (await session.read_key()).lower() == "y"
-    await session.write_line("")
-    await session.write("Hidden (omitted from listings)? [y/N]: ")
-    hidden = (await session.read_key()).lower() == "y"
-    await session.write_line("")
-    await session.write("Members-only (invite-only access)? [y/N]: ")
-    members_only = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    pinned = await prompt_yes_no(session, "Pinned?", default=False)
+    hidden = await prompt_yes_no(session, "Hidden (omitted from listings)?", default=False)
+    members_only = await prompt_yes_no(session, "Members-only (invite-only access)?", default=False)
     allow_member_invites = False
     if members_only:
-        await session.write("Allow members to invite others? [y/N]: ")
-        allow_member_invites = (await session.read_key()).lower() == "y"
-        await session.write_line("")
+        allow_member_invites = await prompt_yes_no(session, "Allow members to invite others?", default=False)
     min_age, ok = await _prompt_min_age(session, current=None)
     if not ok:
         return
@@ -2280,15 +2421,11 @@ async def _edit_channel_screen(session: Session, lane: DatabaseLane, actor: User
     min_level = await _read_int(session, default=channel.min_level)
     if min_level is None:
         return None
-    await session.write("Change Community? [y/N]: ")
-    change_community = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_community = await prompt_yes_no(session, "Change Community?", default=False)
     community_id = channel.community_id
     if change_community:
         community_id = await _pick_optional_community(session, lane)
-    await session.write("Change category? [y/N]: ")
-    change_category = (await session.read_key()).lower() == "y"
-    await session.write_line("")
+    change_category = await prompt_yes_no(session, "Change category?", default=False)
     category_id = channel.category_id
     if change_category:
         category_id = await _pick_optional_category(
@@ -2296,23 +2433,11 @@ async def _edit_channel_screen(session: Session, lane: DatabaseLane, actor: User
             list_subcategories=list_channel_subcategories, title="Channel category",
             community_id=community_id, resources=await lane.run(list_channels),
         )
-    await session.write(f"Pinned? [{'y' if channel.pinned else 'N'}]: ")
-    pinned_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    pinned = pinned_answer == "y" if pinned_answer in ("y", "n") else channel.pinned
-    await session.write(f"Hidden? [{'y' if channel.hidden else 'N'}]: ")
-    hidden_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    hidden = hidden_answer == "y" if hidden_answer in ("y", "n") else channel.hidden
-    await session.write(f"Members-only? [{'y' if channel.members_only else 'N'}]: ")
-    members_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    members_only = members_answer == "y" if members_answer in ("y", "n") else channel.members_only
-    await session.write(f"Allow member invites? [{'y' if channel.allow_member_invites else 'N'}]: ")
-    invites_answer = (await session.read_key()).lower()
-    await session.write_line("")
-    allow_member_invites = (
-        invites_answer == "y" if invites_answer in ("y", "n") else channel.allow_member_invites
+    pinned = await prompt_yes_no_or_keep(session, "Pinned?", current=channel.pinned)
+    hidden = await prompt_yes_no_or_keep(session, "Hidden?", current=channel.hidden)
+    members_only = await prompt_yes_no_or_keep(session, "Members-only?", current=channel.members_only)
+    allow_member_invites = await prompt_yes_no_or_keep(
+        session, "Allow member invites?", current=channel.allow_member_invites
     )
     min_age, ok = await _prompt_min_age(session, current=channel.min_age)
     if not ok:
@@ -2457,11 +2582,8 @@ async def _create_category_screen(
         return
     await session.write("Description (optional): ")
     description = (await session.read_line()).strip() or None
-    await session.write("Make this a sub-category of an existing one? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
     parent_category_id = None
-    if answer == "y":
+    if await prompt_yes_no(session, "Make this a sub-category of an existing one?", default=False):
         parent = await pick_item(
             session, await lane.run(list_top_level),
             name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
@@ -2586,10 +2708,9 @@ async def _pick_optional_community_blanket_scope(session: Session, lane: Databas
     adding new ones, per that round's own decision. Returns the chosen
     Community's id, or `None` for an ordinary node-wide (local-)blanket
     grant."""
-    await session.write("Scope this blanket grant to one Community instead of the whole node? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    if answer != "y":
+    if not await prompt_yes_no(
+        session, "Scope this blanket grant to one Community instead of the whole node?", default=False
+    ):
         return None
     selected = await pick_item(
         session, await lane.run(list_communities),
@@ -2641,10 +2762,9 @@ async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: U
             await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
             return
 
-    await session.write(f"Grant {preset_label!r} on {label} to {target.username!r}? [y/N]: ")
-    confirm = (await session.read_key()).lower()
-    await session.write_line("")
-    if confirm != "y":
+    if not await prompt_yes_no(
+        session, f"Grant {preset_label!r} on {label} to {target.username!r}?", default=False
+    ):
         await session.write_line("Cancelled.")
         return
 
@@ -2676,10 +2796,7 @@ async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: 
         await session.write_line(colored(f"{target.username!r} has no grant on {label}.", fg_color=MUTED_COLOR))
         return
 
-    await session.write(f"Revoke all permissions for {target.username!r} on {label}? [y/N]: ")
-    confirm = (await session.read_key()).lower()
-    await session.write_line("")
-    if confirm != "y":
+    if not await prompt_yes_no(session, f"Revoke all permissions for {target.username!r} on {label}?", default=False):
         await session.write_line("Cancelled.")
         return
 

@@ -20,6 +20,10 @@ import asyncio
 import aiohttp
 import pytest
 
+from netbbs.auth.users import create_user
+from netbbs.boards.boards import create_board
+from netbbs.boards.posts import create_post, edit_post
+from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import LinkNode
 from netbbs.link.sync import run_link_sync
@@ -110,6 +114,92 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
         peer_content_ids = {t.content_id for t in peer_record.transitions}
         for transition in dialer_node.identity.transitions:
             assert transition.content_id in peer_content_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_pushes_own_linked_board_genesis_and_post_to_a_real_seed(tmp_path):
+    """Round 128: `_sync_one_seed` also pushes this node's own `board_
+    genesis`/`board_post` events, read fresh off the `boards`/`posts`
+    tables (`netbbs.link.boards.load_own_board_events`) via the same
+    `lane` already used for `dial_hello`'s own persistence -- proves
+    they actually reach a real peer over a real socket, not just that
+    the query returns the right rows."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    genesis = link_board(dialer.db, board, node_identity=dialer_identity)
+    post = create_post(dialer.db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(dialer.db, post, board, node_identity=dialer_identity)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert genesis.content_id in seed_node.known_event_ids
+        assert board.board_id in seed_node.boards
+        assert board_post.content_id in seed_node.known_event_ids
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_pushes_a_self_authored_board_post_edit_to_a_real_seed(tmp_path):
+    """Round 130: `load_own_board_events` also gathers this node's own
+    `board_post_edit` events (stored on the edited revision's own
+    `posts.link_event_json` column) -- proves one actually reaches a
+    real peer and lands correctly in `seed_node.post_edits`."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    post = create_post(dialer.db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(dialer.db, post, board, node_identity=dialer_identity)
+    edited = edit_post(dialer.db, post, board, subject="hello (edited)", body="world, edited", edited_by=creator)
+    edit = queue_board_post_edit_if_linked(dialer.db, edited, board, node_identity=dialer_identity, edited_by=creator)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert board_post.content_id in seed_node.known_event_ids
+        assert edit.content_id in seed_node.known_event_ids
+        assert seed_node.post_edits[board_post.content_id][-1].content_id == edit.content_id
     finally:
         dialer.close()
         seed.close()

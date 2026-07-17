@@ -11,7 +11,17 @@ isolation.
 
 from __future__ import annotations
 
-from netbbs.link.events import build_endpoint_descriptor, build_key_transition
+from netbbs.auth.users import create_user
+from netbbs.boards.boards import create_board
+from netbbs.boards.posts import create_post, edit_post
+from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
+from netbbs.link.events import (
+    build_board_genesis,
+    build_board_post,
+    build_board_post_edit,
+    build_endpoint_descriptor,
+    build_key_transition,
+)
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import load_link_node, save_event, save_peer
@@ -44,6 +54,7 @@ def test_load_link_node_with_empty_tables_returns_an_empty_node(tmp_path):
     assert node.peers == {}
     assert node.known_event_ids == set()
     assert node.events == {}
+    assert node.boards == {}
     db.close()
 
 
@@ -147,4 +158,174 @@ def test_save_event_on_conflict_does_nothing(tmp_path):
         "SELECT envelope_json FROM link_events WHERE content_id = ?", (transition.content_id,)
     ).fetchone()
     assert "tampered" not in row["envelope_json"]
+    db.close()
+
+
+def test_save_board_genesis_event_then_load_link_node_reconstructs_boards(tmp_path):
+    """Round 126: `LinkServer._handle_events` already persists any
+    accepted event generically, board_genesis included -- proves the
+    other half actually works: a restarted node reconstructs `node.
+    boards` from those rows too, not just `known_event_ids`/`events`,
+    so a resent board_post for that board_id isn't wrongly rejected
+    after a restart as having no verified genesis on file."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    origin_identity = bootstrap_node_identity("bob")
+
+    genesis = build_board_genesis(
+        signing_identity=origin_identity.signing_key,
+        origin_fingerprint=origin_identity.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    save_event(
+        db,
+        sender_fingerprint=origin_identity.fingerprint,
+        content_id=genesis.content_id,
+        object_type="board_genesis",
+        envelope=genesis.to_dict(),
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert genesis.content_id in node.known_event_ids
+    assert "existing-local-board-id" in node.boards
+    assert node.boards["existing-local-board-id"].content_id == genesis.content_id
+    db.close()
+
+
+def test_save_board_post_event_then_load_link_node_does_not_populate_boards(tmp_path):
+    """A board_post is content, not a board announcement -- only
+    board_genesis rows should ever populate `node.boards`."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    author_identity = bootstrap_node_identity("bob")
+
+    post = build_board_post(
+        signing_identity=author_identity.signing_key,
+        home_node_fingerprint=author_identity.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="world",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    save_event(
+        db,
+        sender_fingerprint=author_identity.fingerprint,
+        content_id=post.content_id,
+        object_type="board_post",
+        envelope=post.to_dict(),
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert post.content_id in node.known_event_ids
+    assert node.boards == {}
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_board_genesis(tmp_path):
+    """Round 128: a board this node itself originated (`netbbs.link.
+    boards.link_board`) never goes through `handle_events`/`link_
+    events` at all -- its genesis lives only on the local `boards`
+    row's own `link_genesis_json` column. Proves `load_link_node`
+    reconstructs `node.boards` from *that* source too, not just from
+    peer-received `link_events` rows (the other half tested above) --
+    without this, a restarted node would forget its own Linked boards
+    and wrongly reject a remote user's legitimate board_post on one."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=creator)
+    genesis = link_board(db, board, node_identity=own_identity)
+
+    node = load_link_node(db, own_identity)
+
+    assert board.board_id in node.boards
+    assert node.boards[board.board_id].content_id == genesis.content_id
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_board_post_edit(tmp_path):
+    """Round 130: a self-authored edit (`netbbs.link.boards.queue_
+    board_post_edit_if_linked`) also never goes through `handle_events`
+    -- it lives only on the edited revision's own `posts.link_event_
+    json` column. Proves `load_link_node` reconstructs `node.post_
+    edits` from that source too."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=creator)
+    link_board(db, board, node_identity=own_identity)
+    post = create_post(db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=own_identity)
+    edited = edit_post(db, post, board, subject="hello (edited)", body="world, edited", edited_by=creator)
+    edit = queue_board_post_edit_if_linked(db, edited, board, node_identity=own_identity, edited_by=creator)
+
+    node = load_link_node(db, own_identity)
+
+    assert board_post.content_id in node.post_edits
+    assert [e.content_id for e in node.post_edits[board_post.content_id]] == [edit.content_id]
+    db.close()
+
+
+def test_load_link_node_reconstructs_peer_received_board_post_edit_chain_in_order(tmp_path):
+    """Round 130: peer-received board_post_edit rows must reconstruct
+    in the order they were originally accepted, or the chain's own
+    'does previous_event_id match the current head' invariant would be
+    violated the moment it's used again."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    sender_identity = bootstrap_node_identity("bob")
+    post = build_board_post(
+        signing_identity=sender_identity.signing_key,
+        home_node_fingerprint=sender_identity.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="world",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    save_event(
+        db, sender_fingerprint=sender_identity.fingerprint, content_id=post.content_id,
+        object_type="board_post", envelope=post.to_dict(),
+    )
+
+    first_edit = build_board_post_edit(
+        signing_identity=sender_identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (v2)",
+        body="world v2",
+        created_at="2026-01-01T00:01:00+00:00",
+    )
+    save_event(
+        db, sender_fingerprint=sender_identity.fingerprint, content_id=first_edit.content_id,
+        object_type="board_post_edit", envelope=first_edit.to_dict(),
+    )
+    second_edit = build_board_post_edit(
+        signing_identity=sender_identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=first_edit.content_id,
+        subject="hello (v3)",
+        body="world v3",
+        created_at="2026-01-01T00:02:00+00:00",
+    )
+    save_event(
+        db, sender_fingerprint=sender_identity.fingerprint, content_id=second_edit.content_id,
+        object_type="board_post_edit", envelope=second_edit.to_dict(),
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert [e.content_id for e in node.post_edits[post.content_id]] == [
+        first_edit.content_id,
+        second_edit.content_id,
+    ]
     db.close()

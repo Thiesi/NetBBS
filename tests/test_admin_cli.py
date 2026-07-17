@@ -5,17 +5,21 @@ logic (design doc -- SysOp foundation round): `_resolve_actor`,
 scripted `FakeSession` `tests/test_admin_flow.py` already defines
 (single ordered input queue serving both `read_key`/`read_line`).
 `main()` itself (argument parsing, real terminal wiring) is
-deliberately not exercised here -- see that module's docstring for why
-credential-based auth is intentionally absent from this whole path.
+deliberately not exercised here, with one narrow exception: the
+database-open failure path, which raises `SystemExit` before ever
+touching a real terminal or `asyncio.run` -- see that module's
+docstring for why credential-based auth is intentionally absent from
+the rest of this whole path.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
 
-from netbbs.admin.__main__ import _bootstrap_first_sysop, _resolve_actor, run_admin_session
+from netbbs.admin.__main__ import _bootstrap_first_sysop, _resolve_actor, main, run_admin_session
 from netbbs.auth.users import SYSOP_LEVEL, create_user, list_users
 from netbbs.moderation.log import list_actions_for_target_user
 from netbbs.storage.database import Database
@@ -118,3 +122,23 @@ def test_resolve_actor_shows_a_picker_with_multiple_sysops(db, lane):
     session = FakeSession(["0", "1"])
     actor = asyncio.run(_resolve_actor(session, lane, None))
     assert actor.username == "root"
+
+
+# -- main(): database-open failure path ---------------------------------------
+
+
+def test_main_exits_cleanly_on_a_database_from_a_newer_build(tmp_path, capsys):
+    """The concrete scenario this closes: pointing --db at a database
+    file that doesn't match this build (e.g. switching between
+    checkouts for a before/after comparison and grabbing the wrong
+    one). Without this, `Database._apply_migrations`' own version-
+    mismatch `RuntimeError` propagated straight out of `main()` as a
+    raw traceback instead of a clean, actionable exit."""
+    db_path = tmp_path / "node.db"
+    Database(db_path).close()  # create it at the current, real version
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA user_version = 999999")
+    conn.close()
+
+    with pytest.raises(SystemExit, match="could not open the database"):
+        main(["--db", str(db_path)])

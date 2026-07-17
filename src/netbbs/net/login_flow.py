@@ -98,10 +98,12 @@ from netbbs.directory import (
     set_bio,
     set_bio_visible,
 )
+from netbbs.link.boards import LinkContext, queue_board_post_edit_if_linked, queue_board_post_if_linked
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.chat_flow import browse_channels, has_visible_channels
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.file_flow import browse_file_areas, has_visible_areas
@@ -171,6 +173,7 @@ async def handle_session(
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Top-level per-connection entry point.
@@ -232,6 +235,15 @@ async def handle_session(
     shutdown needs to reach and reject connections regardless of
     whether they ever authenticate at all, unlike `presence`, which
     only ever needs to know about accounts.
+
+    `link_context` (design doc round 124/128), if given, is threaded
+    straight through to both the ordinary board-browsing path (so
+    composing a new post on a Linked board can queue its `board_post`
+    event) and to `admin_menu` (the `[L]ink this board` command) — same
+    optional/defaulted-to-`None` shape as `node_controls`: every
+    existing caller of this function needs no changes, and `netbbs.
+    __main__.run()` is the only caller that passes a real one, only
+    when `config.link.enabled`.
     """
     if maintenance.is_active():
         await session.write_line(MAINTENANCE_MESSAGE)
@@ -248,7 +260,7 @@ async def handle_session(
     try:
         await _run_authenticated_session(
             session, db, hub, presence, mailbox, throttle, throttle_config,
-            node_controls=node_controls, lane=lane,
+            node_controls=node_controls, lane=lane, link_context=link_context,
         )
     finally:
         session_registry.leave(session)
@@ -271,6 +283,7 @@ async def _run_authenticated_session(
     *,
     node_controls: NodeControls | None = None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """The login-through-logoff body of a *Telnet/web* connection,
     wrapped by `handle_session`'s maintenance-mode check and session-
@@ -330,7 +343,8 @@ async def _run_authenticated_session(
         return
 
     await run_authenticated_session(
-        session, db, hub, presence, mailbox, login_result, node_controls=node_controls, lane=lane
+        session, db, hub, presence, mailbox, login_result,
+        node_controls=node_controls, lane=lane, link_context=link_context,
     )
 
 
@@ -406,6 +420,7 @@ async def run_authenticated_session(
     *,
     node_controls: NodeControls | None = None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     The authenticated-through-logoff body of a connection (GitHub issue
@@ -451,7 +466,8 @@ async def run_authenticated_session(
         )
     try:
         await _main_menu(
-            session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+            session, db, hub, presence, mailbox, history, user,
+            node_controls=node_controls, lane=lane, link_context=link_context,
         )
     finally:
         presence.leave(user.username)
@@ -520,6 +536,7 @@ async def handle_ssh_session(
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     SSH-specific top-level entry point (GitHub issue #25) — the
@@ -579,7 +596,8 @@ async def handle_ssh_session(
         if isinstance(result, LoginOutcome):
             return
         await run_authenticated_session(
-            session, db, hub, presence, mailbox, result, node_controls=node_controls, lane=lane
+            session, db, hub, presence, mailbox, result,
+            node_controls=node_controls, lane=lane, link_context=link_context,
         )
     finally:
         session_registry.leave(session)
@@ -748,6 +766,7 @@ async def _main_menu(
     *,
     node_controls: NodeControls | None = None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     The main menu, now dispatching immediately on a single keystroke
@@ -798,19 +817,22 @@ async def _main_menu(
         elif choice == "c" and _has_visible_communities(db, user):
             await session.write_line("")
             await _enter_communities(
-                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+                session, db, hub, presence, mailbox, history, user,
+                node_controls=node_controls, lane=lane, link_context=link_context,
             )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "u" and _has_uncategorized_resources(db, user):
             await session.write_line("")
             await _enter_uncategorized(
-                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+                session, db, hub, presence, mailbox, history, user,
+                node_controls=node_controls, lane=lane, link_context=link_context,
             )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "j":
             await session.write_line("")
             await _jump_to(
-                session, db, hub, presence, mailbox, history, user, node_controls=node_controls, lane=lane
+                session, db, hub, presence, mailbox, history, user,
+                node_controls=node_controls, lane=lane, link_context=link_context,
             )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
@@ -852,7 +874,7 @@ async def _main_menu(
             # the "e" (mail) branch above for the identical lane-is-None
             # degrade-gracefully reasoning.
             if lane is not None:
-                await admin_menu(session, lane, user, node_controls=node_controls)
+                await admin_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
             else:
                 await session.write_line(
                     colored("Admin is not available in this context.", fg_color=MUTED_COLOR)
@@ -1136,6 +1158,7 @@ async def _resource_type_menu(
     menu_header: str,
     title_prefix: str | None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Shared sub-menu for `[C]ommunities`/`[U]ncategorized`/`[J]ump to...`
@@ -1191,6 +1214,7 @@ async def _resource_type_menu(
             await _browse_boards(
                 session, db, user,
                 community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                link_context=link_context,
             )
         elif choice == "c" and show_channels:
             await session.write_line("")
@@ -1238,6 +1262,7 @@ async def _enter_communities(
     *,
     node_controls: NodeControls | None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """`[C]ommunities` entry point -- pick one via the shared picker,
     then the shared resource-type sub-menu scoped to it."""
@@ -1255,7 +1280,7 @@ async def _enter_communities(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=selected.id, community_scoped=True,
-        menu_header=selected.name, title_prefix=selected.name, lane=lane,
+        menu_header=selected.name, title_prefix=selected.name, lane=lane, link_context=link_context,
     )
 
 
@@ -1270,6 +1295,7 @@ async def _enter_uncategorized(
     *,
     node_controls: NodeControls | None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """`[U]ncategorized` entry point -- straight into the shared
     resource-type sub-menu, no picker needed (there's only one
@@ -1277,7 +1303,7 @@ async def _enter_uncategorized(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=None, community_scoped=True,
-        menu_header="Uncategorized", title_prefix="Uncategorized", lane=lane,
+        menu_header="Uncategorized", title_prefix="Uncategorized", lane=lane, link_context=link_context,
     )
 
 
@@ -1292,6 +1318,7 @@ async def _jump_to(
     *,
     node_controls: NodeControls | None,
     lane: DatabaseLane | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """`[J]ump to...` entry point -- the shared resource-type sub-menu
     with no Community filter at all (`community_scoped=False`), reusing
@@ -1303,7 +1330,7 @@ async def _jump_to(
     await _resource_type_menu(
         session, db, hub, presence, mailbox, history, user, node_controls=node_controls,
         community_id=None, community_scoped=False,
-        menu_header="Jump to...", title_prefix=None, lane=lane,
+        menu_header="Jump to...", title_prefix=None, lane=lane, link_context=link_context,
     )
 
 
@@ -1315,11 +1342,13 @@ async def _browse_boards(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
     await _browse_boards_in_category(
         session, db, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        link_context=link_context,
     )
 
 
@@ -1346,6 +1375,7 @@ async def _browse_boards_in_category(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Browse boards within a category (or the top level, if `category_id`
@@ -1427,7 +1457,7 @@ async def _browse_boards_in_category(
             empty_message="No message boards are available to you yet.",
         )
         if board is not None:
-            await _show_board(session, db, board, user)
+            await _show_board(session, db, board, user, link_context=link_context)
         return
 
     mixed: list[Category | Board] = [*categories_here, *boards_here]
@@ -1459,9 +1489,10 @@ async def _browse_boards_in_category(
         await _browse_boards_in_category(
             session, db, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            link_context=link_context,
         )
     else:
-        await _show_board(session, db, selected, user)
+        await _show_board(session, db, selected, user, link_context=link_context)
 
 
 def _can_edit_post(db: Database, post: Post, user: User) -> bool:
@@ -1506,7 +1537,9 @@ async def _render_board_page(
     await session.write("Choice: ")
 
 
-async def _show_board(session: Session, db: Database, board: Board, user: User) -> None:
+async def _show_board(
+    session: Session, db: Database, board: Board, user: User, *, link_context: LinkContext | None = None
+) -> None:
     """
     Show `board`, one bounded page of posts at a time (design doc round
     30, issue #10) — never the whole board, however large its history.
@@ -1521,6 +1554,12 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
     the browsing loop (GitHub issue #40), not something a `[B]ack`
     choice used to silently fall through into on its way out (GitHub
     issue #39) -- `[B]ack` now always means back, nothing else.
+
+    `link_context` (design doc round 124/128), if given, is used by
+    `_compose_new_post` to queue a `board_post` event when `board` is
+    Linked -- `None` (Link disabled on this node, or a direct test call
+    site) simply means a new post here never propagates over Link,
+    same degrade-gracefully shape every other optional context uses.
     """
     board_name = sanitize_text(board.name)
     can_post = (
@@ -1558,6 +1597,8 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
         except PostError as exc:
             await session.write_line(colored(f"Could not create post: {exc}", fg_color=MUTED_COLOR))
             return
+        if link_context is not None:
+            queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
         await session.write_line(f"Posted (id {post.post_id[:12]}...).")
 
     page_anchor: tuple[str, tuple[str, str]] | None = None
@@ -1598,7 +1639,7 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
             await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
             await session.write_line("")
-            await _edit_existing_post(session, db, board, page, user)
+            await _edit_existing_post(session, db, board, page, user, link_context=link_context)
             page = _refetch_current_page()
             await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
         elif choice == "p" and can_post:
@@ -1615,7 +1656,13 @@ async def _show_board(session: Session, db: Database, board: Board, user: User) 
 
 
 async def _edit_existing_post(
-    session: Session, db: Database, board: Board, page: PostPage, user: User
+    session: Session,
+    db: Database,
+    board: Board,
+    page: PostPage,
+    user: User,
+    *,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Edit one of the posts currently on screen -- selected by the
@@ -1628,6 +1675,14 @@ async def _edit_existing_post(
     (`_can_edit_post`, the same rule `edit_post` itself enforces) so a
     SysOp who picks a post they can't actually edit finds out
     immediately, not after composing a whole revision.
+
+    `link_context` (design doc round 129/130), if given, queues a
+    `board_post_edit` for a Linked board right after a successful
+    `edit_post` -- but only when `user` is the post's own original
+    author; a moderator's edit (someone else holding `BoardPermission.
+    EDIT`) is silently not propagated, since that needs grant
+    verification this round deliberately doesn't build (design doc
+    round 129).
     """
     await session.write(f"Edit which post number [1-{len(page.posts)}]? ")
     choice = (await session.read_key()).strip()
@@ -1656,10 +1711,12 @@ async def _edit_existing_post(
         return
 
     try:
-        edit_post(db, post, board, subject=subject, body=body, edited_by=user)
+        edited = edit_post(db, post, board, subject=subject, body=body, edited_by=user)
     except PostError as exc:
         await session.write_line(colored(f"Could not save edit: {exc}", fg_color=MUTED_COLOR))
         return
+    if link_context is not None:
+        queue_board_post_edit_if_linked(db, edited, board, node_identity=link_context.node_identity, edited_by=user)
     await session.write_line("Post updated.")
 
 
@@ -2061,10 +2118,7 @@ async def _edit_display_name(session: Session, db: Database, user: User) -> None
             await session.write_line(colored(f"Could not save display name: {exc}", fg_color=MUTED_COLOR))
             return
         await session.write_line("Display name updated.")
-    await session.write("Show it publicly? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    set_display_name_visible(db, user, answer == "y")
+    set_display_name_visible(db, user, await prompt_yes_no(session, "Show it publicly?", default=False))
 
 
 async def _edit_location(session: Session, db: Database, user: User) -> None:
@@ -2078,10 +2132,7 @@ async def _edit_location(session: Session, db: Database, user: User) -> None:
             await session.write_line(colored(f"Could not save location: {exc}", fg_color=MUTED_COLOR))
             return
         await session.write_line("Location updated.")
-    await session.write("Show it publicly? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    set_location_visible(db, user, answer == "y")
+    set_location_visible(db, user, await prompt_yes_no(session, "Show it publicly?", default=False))
 
 
 async def _edit_birthdate(session: Session, db: Database, user: User) -> None:
@@ -2103,10 +2154,7 @@ async def _edit_birthdate(session: Session, db: Database, user: User) -> None:
             await session.write_line(colored(f"Could not save birthdate: {exc}", fg_color=MUTED_COLOR))
             return
         await session.write_line("Birthdate updated.")
-    await session.write("Show it publicly? [y/N]: ")
-    answer = (await session.read_key()).lower()
-    await session.write_line("")
-    set_birthdate_visible(db, user, answer == "y")
+    set_birthdate_visible(db, user, await prompt_yes_no(session, "Show it publicly?", default=False))
 
 
 # -- identity attestation: the [V]erify main-menu screen (design doc §18) --
@@ -2163,9 +2211,7 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
     if existing_name is not None:
         await session.write_line(f"Currently attested real name: {sanitize_text(existing_name.attested_value)}")
 
-    await session.write("\r\nAttest a birthdate? [y/N]: ")
-    if (await session.read_key()).lower() == "y":
-        await session.write_line("")
+    if await prompt_yes_no(session, "\r\nAttest a birthdate?", default=False):
         await session.write("Attested birthdate (YYYY-MM-DD): ")
         raw = (await session.read_line()).strip()
         try:
@@ -2175,12 +2221,8 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
             await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
         else:
             await session.write_line("Age attested.")
-    else:
-        await session.write_line("")
 
-    await session.write("Attest a real name? [y/N]: ")
-    if (await session.read_key()).lower() == "y":
-        await session.write_line("")
+    if await prompt_yes_no(session, "Attest a real name?", default=False):
         await session.write("Attested real name: ")
         raw = (await session.read_line()).strip()
         try:

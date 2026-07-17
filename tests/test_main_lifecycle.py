@@ -145,6 +145,27 @@ def test_startup_fails_cleanly_on_corrupted_node_identity(tmp_path):
     asyncio.run(scenario())
 
 
+def test_startup_fails_cleanly_on_a_database_from_a_newer_build(tmp_path):
+    """The concrete scenario this closes: pairing a database file with
+    the wrong build/version of NetBBS (e.g. switching between checkouts
+    for a before/after comparison and grabbing the wrong db). Without
+    this, `Database._apply_migrations`' own version-mismatch `RuntimeError`
+    propagated straight out of `run()` as a raw traceback -- now it's
+    wrapped into the one exception type `main()` already knows how to
+    report cleanly."""
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12405))
+    conn = sqlite3.connect(str(config.db_path))
+    conn.execute("PRAGMA user_version = 999999")
+    conn.close()
+
+    async def scenario():
+        shutdown_event = asyncio.Event()
+        with pytest.raises(StartupError, match="could not open the database"):
+            await run(config, shutdown_event=shutdown_event)
+
+    asyncio.run(scenario())
+
+
 # -- listeners actually start and are reachable ------------------------------
 
 
@@ -307,7 +328,10 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
 
     captured: dict = {}
 
-    async def spy(session, db, hub, presence, mailbox, throttle, throttle_config, *, node_controls=None, lane=None):
+    async def spy(
+        session, db, hub, presence, mailbox, throttle, throttle_config,
+        *, node_controls=None, lane=None, link_context=None,
+    ):
         captured["node_controls"] = node_controls
 
     monkeypatch.setattr(login_flow, "_run_authenticated_session", spy)

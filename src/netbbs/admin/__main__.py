@@ -178,7 +178,20 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    db = Database(args.db)
+    try:
+        db = Database(args.db)
+    except Exception as exc:
+        # A clear, actionable message instead of a raw sqlite3.Error/
+        # RuntimeError traceback -- the concrete failure this closes:
+        # pointing --db at a database file that doesn't match this
+        # build (e.g. one a newer or older version last migrated).
+        raise SystemExit(
+            f"could not open the database at {args.db}: {exc} -- this usually means "
+            "the database file doesn't match this build of NetBBS (e.g. it was last migrated "
+            "by a newer or older version). If you're testing multiple NetBBS versions side by "
+            "side, make sure each one is paired with its own separate database file."
+        ) from exc
+
     try:
         with raw_terminal():
             asyncio.run(run_admin_session(LocalCLISession(), db, args.as_username))

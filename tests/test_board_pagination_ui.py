@@ -237,4 +237,91 @@ def test_empty_board_never_enters_the_navigation_loop(tmp_path):
     asyncio.run(_show_board(session, db, board, user))
 
     assert "has no posts yet" in session.output
+
+
+def test_composing_a_post_on_a_linked_board_queues_a_board_post(tmp_path):
+    """Design doc round 124/128: `_compose_new_post` calls `queue_
+    board_post_if_linked` right after a successful `create_post` when
+    `link_context` is given -- proves this reaches the real interactive
+    posting flow, not just the library function in isolation."""
+    from netbbs.link.boards import LinkContext, link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=user)
+    node_identity = bootstrap_node_identity("roanoke")
+    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_board(db, board, node_identity=node_identity)
+    session = FakeSession(lines=["Hello", "World"])
+
+    asyncio.run(_show_board(session, db, board, user, link_context=link_context))
+
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE subject = ?", ("Hello",)
+    ).fetchone()
+    assert row["link_event_json"] is not None
+    db.close()
+
+
+def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
+    """Design doc round 129/130: `_edit_existing_post` calls `queue_
+    board_post_edit_if_linked` right after a successful `edit_post`
+    when `link_context` is given -- proves this reaches the real
+    interactive editing flow, not just the library function in
+    isolation."""
+    from netbbs.link.boards import LinkContext, link_board, queue_board_post_if_linked
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=user)
+    node_identity = bootstrap_node_identity("roanoke")
+    link_context = LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, user, "Hello", "World")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    session = FakeSession(keys=["e", "1", "b"], lines=["Hello (edited)", "World, edited"])
+    asyncio.run(_show_board(session, db, board, user, link_context=link_context))
+
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE subject = ?", ("Hello (edited)",)
+    ).fetchone()
+    assert row is not None
+    assert row["link_event_json"] is not None
+    db.close()
+
+
+def test_editing_a_post_without_link_context_never_queues_one(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=user)
+    post = create_post(db, board, user, "Hello", "World")
+
+    session = FakeSession(keys=["e", "1", "b"], lines=["Hello (edited)", "World, edited"])
+    asyncio.run(_show_board(session, db, board, user))
+
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE subject = ?", ("Hello (edited)",)
+    ).fetchone()
+    assert row is not None
+    assert row["link_event_json"] is None
+    db.close()
+
+
+def test_composing_a_post_without_link_context_never_queues_one(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=user)
+    session = FakeSession(lines=["Hello", "World"])
+
+    asyncio.run(_show_board(session, db, board, user))
+
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE subject = ?", ("Hello",)
+    ).fetchone()
+    assert row["link_event_json"] is None
     db.close()

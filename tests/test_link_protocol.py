@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from netbbs.link.events import build_endpoint_descriptor, build_key_transition
+from netbbs.link.events import (
+    build_board_genesis,
+    build_board_post,
+    build_board_post_edit,
+    build_endpoint_descriptor,
+    build_key_transition,
+)
 from netbbs.link.node_identity import rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
@@ -346,6 +352,515 @@ def test_handle_events_still_rejects_a_genuine_fork_when_dedup_is_gone(tmp_path,
     alice.close()
 
 
+
+# -- events: gossiping board_genesis/board_post (design doc round 124/125) --
+
+
+def test_handle_events_accepts_a_valid_board_genesis(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.boards["existing-local-board-id"].content_id == genesis.content_id
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_genesis_with_mismatched_origin(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    # mallory's own valid genesis, relayed as if it came from alice.
+    forged = build_board_genesis(
+        signing_identity=mallory.identity.signing_key,
+        origin_fingerprint=mallory.fingerprint,
+        board_id="existing-local-board-id",
+        name="Mallory's Board",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [forged.to_dict()])
+
+    alice.close()
+    mallory.close()
+
+
+def test_handle_events_rejects_conflicting_board_genesis_for_same_board_id(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    first = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [first.to_dict()])
+
+    # A different genesis (different name -> different content_id) for
+    # the exact same board_id -- must be rejected, not silently replace
+    # what's on file.
+    clock.advance(hours=1)
+    conflicting = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="A Different Name",
+        created_at=clock.now_iso(),
+    )
+    assert conflicting.content_id != first.content_id
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [conflicting.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_board_genesis_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert first == [genesis.content_id]
+    assert second == []  # already seen -- silently skipped
+
+    alice.close()
+
+
+def test_handle_events_accepts_a_valid_board_post_after_genesis(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    assert accepted == [post.content_id]
+    assert bob_node.events[post.content_id] == post.to_dict()
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_post_for_unknown_board_id(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    # No board_genesis for this board_id was ever received.
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="never-announced-board-id",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_post_with_unsupported_author_kind(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+    # user_key/node aren't built this round (design doc round 124) --
+    # splice in an unsupported author kind and confirm it's refused
+    # rather than silently accepted or crashing.
+    raw = post.to_dict()
+    raw["envelope"]["payload"]["author"] = {"kind": "user_key", "fingerprint": "some-user-fingerprint"}
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [raw])
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_post_vouching_for_a_different_home_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    # mallory's own valid post, relayed as if it came from alice --
+    # mallory has no completed hello with bob at all, so this must be
+    # refused even though alice (the actual sender) does.
+    forged = build_board_post(
+        signing_identity=mallory.identity.signing_key,
+        home_node_fingerprint=mallory.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [forged.to_dict()])
+
+    alice.close()
+    mallory.close()
+
+
+def test_handle_events_board_post_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    assert first == [post.content_id]
+    assert second == []  # already seen -- silently skipped
+
+    alice.close()
+
+
+
+# -- events: gossiping board_post_edit (design doc round 129/130) -----------
+
+
+def _linked_board_with_post(alice, bob_node, clock, *, board_id="existing-local-board-id"):
+    """Sets up bob_node with alice's board_genesis and one board_post
+    already accepted -- the common setup every board_post_edit test
+    needs."""
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id=board_id,
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id=board_id,
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+    return post
+
+
+def test_handle_events_accepts_a_valid_board_post_edit(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    assert accepted == [edit.content_id]
+    assert bob_node.post_edits[post.content_id][-1].content_id == edit.content_id
+
+    alice.close()
+
+
+def test_handle_events_accepts_a_second_chained_board_post_edit(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    first_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [first_edit.to_dict()])
+
+    second_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=first_edit.content_id,
+        subject="hello (edited again)",
+        body="first post, edited again",
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(alice.fingerprint, [second_edit.to_dict()])
+
+    assert accepted == [second_edit.content_id]
+    assert [e.content_id for e in bob_node.post_edits[post.content_id]] == [
+        first_edit.content_id,
+        second_edit.content_id,
+    ]
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_post_edit_for_unknown_root_post(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author={"kind": "node_vouched_user", "home_node_fingerprint": alice.fingerprint, "local_user_id": "wanderer"},
+        board_id="existing-local-board-id",
+        root_post_id="never-accepted-root-content-id",
+        previous_event_id="never-accepted-root-content-id",
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_board_post_edit_with_mismatched_author(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    # Same node relaying the edit, but claiming a different author than
+    # the root post's own -- the mechanical expression of "moderator
+    # edits aren't supported this round" (design doc round 129).
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author={"kind": "node_vouched_user", "home_node_fingerprint": alice.fingerprint, "local_user_id": "someone-else"},
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    alice.close()
+    mallory.close()
+
+
+def test_handle_events_rejects_board_post_edit_vouching_for_a_different_home_node(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    # Author matches the root post's *fingerprint* claim, but that
+    # claimed fingerprint isn't the actual sender (mallory relaying as
+    # if from alice) -- refused the same way a forged board_post is.
+    forged = build_board_post_edit(
+        signing_identity=mallory.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(mallory.fingerprint, [forged.to_dict()])
+
+    alice.close()
+    mallory.close()
+
+
+def test_handle_events_rejects_out_of_order_board_post_edit(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    # previous_event_id points at a made-up content_id, not the actual
+    # current head (post.content_id) -- refused outright, not queued
+    # waiting for the "missing" predecessor to arrive later (round 129:
+    # same push-and-retry model as key_transition, round 122).
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id="some-other-edit-that-was-never-sent",
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_board_post_edit_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    assert first == [edit.content_id]
+    assert second == []  # already seen -- silently skipped, not re-applied or errored
+
+    alice.close()
+
+
 def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
     alice = spawn_node(tmp_path, "alice")
     bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
@@ -353,8 +868,10 @@ def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
     alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
     bob_node.handle_hello(alice_hello)
 
+    # board_post is now a recognized type (design doc round 124/125) --
+    # use a genuinely bogus one instead.
     fake_event = {
-        "envelope": {"netbbs_protocol": 1, "object_type": "board_post", "payload": {}},
+        "envelope": {"netbbs_protocol": 1, "object_type": "not_a_real_object_type", "payload": {}},
         "signature": "",
     }
     with pytest.raises(LinkProtocolError):

@@ -340,9 +340,10 @@ netbbs.db` reaches the same menu without a network connection at all.
 toggle "Fullscreen editor" on, then composing a board post or editing
 your bio opens the nano-keybound prose editor (Ctrl+O save, Ctrl+X
 quit) instead of the plain line prompt. A welcome-banner WYSIWYG ANSI
-art editor is reachable from `[A]dmin` → `[W]elcome banner` → `[X]
-edit`; see `examples/README.md` for two ready-made placeholder banners
-to drop in and try it against instead of starting from a blank canvas.
+art editor is reachable from `[A]dmin` → `[S]ystem` → `[W]elcome
+banner` → `[X] edit`; see `examples/README.md` for two ready-made
+placeholder banners to drop in and try it against instead of starting
+from a blank canvas.
 
 **File transfer** uses real Zmodem — `/upload`/`/download` inside a
 file area work with any Zmodem-capable terminal (SyncTERM, `lrzsz`'s

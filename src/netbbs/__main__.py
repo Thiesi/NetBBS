@@ -21,6 +21,7 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
+from netbbs.link.boards import LinkContext
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.link.store import load_link_node
@@ -39,9 +40,13 @@ _logger = logging.getLogger(__name__)
 
 
 class StartupError(Exception):
-    """Raised when one or more enabled listeners fail to start.
-    Whatever did start is already stopped again by the time this is
-    raised — see `run`'s partial-start cleanup."""
+    """Raised for any startup failure `main()` should report as one
+    clear, actionable message rather than a raw traceback: one or more
+    enabled listeners failing to start (whatever did start is already
+    stopped again by the time this is raised — see `run`'s partial-
+    start cleanup), the database failing to open (wrong build/version
+    paired with this database file, or a genuinely corrupt one), a
+    missing/unloadable Link identity, or no SysOp account existing yet."""
 
 
 def _build_throttle(config: NodeConfig) -> LoginThrottle:
@@ -270,7 +275,25 @@ async def run(
     for warning in config.describe_insecure_bindings():
         _logger.warning(warning)
 
-    db = Database(config.db_path)
+    try:
+        db = Database(config.db_path)
+    except Exception as exc:
+        # Wrapped into StartupError, not left as a raw sqlite3.Error/
+        # RuntimeError, so main() has exactly one exception type to
+        # catch for a clear, actionable message -- the concrete failure
+        # this closes: opening a database file against the wrong build
+        # (e.g. a database a newer version already migrated, opened by
+        # an older one -- Database._apply_migrations' own version check
+        # raises a plain RuntimeError for that specific case, but a
+        # corrupted or genuinely foreign file raises a raw sqlite3.Error
+        # instead) used to surface as a multi-frame traceback rather
+        # than a message actually pointing at the mismatch.
+        raise StartupError(
+            f"could not open the database at {config.db_path}: {exc} -- this usually means "
+            "the database file doesn't match this build of NetBBS (e.g. it was last migrated "
+            "by a newer or older version). If you're testing multiple NetBBS versions side by "
+            "side, make sure each one is paired with its own separate database file."
+        ) from exc
 
     # Design doc round 91/issue #57: the foreground DatabaseLane -- a
     # second, independent connection to the same database file (WAL
@@ -366,6 +389,14 @@ async def run(
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
             lane=foreground_lane,
+            # Design doc round 124/128: None whenever this node has Link
+            # disabled (round 87: Phase 3 is opt-in/experimental) --
+            # `link_node` is only ever non-None in that same condition
+            # (see its own construction below), so this mirrors it
+            # directly rather than re-checking config.link.enabled here.
+            link_context=(
+                LinkContext(node_identity=node_identity, link_node=link_node) if link_node is not None else None
+            ),
         )
 
     async def ssh_session_handler(session):
@@ -379,6 +410,9 @@ async def run(
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
             lane=foreground_lane,
+            link_context=(
+                LinkContext(node_identity=node_identity, link_node=link_node) if link_node is not None else None
+            ),
         )
 
     servers: list = []

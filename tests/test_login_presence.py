@@ -138,7 +138,9 @@ def test_presence_left_even_if_main_menu_raises(db, monkeypatch):
     async def fake_auth(db, username, password):
         return user
 
-    async def broken_main_menu(session, db, hub, presence, mailbox, history, user, *, node_controls=None, lane=None):
+    async def broken_main_menu(
+        session, db, hub, presence, mailbox, history, user, *, node_controls=None, lane=None, link_context=None
+    ):
         raise RuntimeError("simulated failure")
 
     monkeypatch.setattr(login_flow, "authenticate_password_async", fake_auth)

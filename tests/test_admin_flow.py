@@ -130,7 +130,7 @@ def _run(session, lane, user):
 
 
 def test_create_user_with_password_only(db, lane, sysop):
-    session = FakeSession(["c", "alice", "y", "hunter2", "hunter2", "n", "10", "b"])
+    session = FakeSession(["u", "c", "alice", "y", "hunter2", "hunter2", "n", "10", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "alice")
     assert created.user_level == 10
@@ -140,7 +140,7 @@ def test_create_user_with_password_only(db, lane, sysop):
 def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["c", "bob", "n", "y", raw_b64, "0", "b"])
+    session = FakeSession(["u", "c", "bob", "n", "y", raw_b64, "0", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "bob")
     assert created.fingerprint is not None
@@ -148,7 +148,7 @@ def test_create_user_with_pubkey_only_raw_base64(db, lane, sysop):
 
 def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
-    session = FakeSession(["c", "carol", "n", "y", _openssh_line(verify_key), "0", "b"])
+    session = FakeSession(["u", "c", "carol", "n", "y", _openssh_line(verify_key), "0", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "carol")
     assert created.fingerprint is not None
@@ -157,21 +157,21 @@ def test_create_user_with_pubkey_only_openssh_line(db, lane, sysop):
 def test_create_user_with_both_password_and_pubkey(db, lane, sysop):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
-    session = FakeSession(["c", "dave", "y", "hunter2", "hunter2", "y", raw_b64, "0", "b"])
+    session = FakeSession(["u", "c", "dave", "y", "hunter2", "hunter2", "y", raw_b64, "0", "b", "b"])
     _run(session, lane, sysop)
     created = next(u for u in list_users(db) if u.username == "dave")
     assert created.fingerprint is not None
 
 
 def test_create_user_with_neither_is_cancelled(db, lane, sysop):
-    session = FakeSession(["c", "eve", "n", "n", "b"])
+    session = FakeSession(["u", "c", "eve", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert not any(u.username == "eve" for u in list_users(db))
     assert "needs a password" in _written_text(session)
 
 
 def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
-    session = FakeSession(["c", "", "b"])
+    session = FakeSession(["u", "c", "", "b", "b"])
     _run(session, lane, sysop)
     assert "cannot be blank" in _written_text(session)
 
@@ -180,7 +180,7 @@ def test_create_user_with_blank_username_is_cancelled(db, lane, sysop):
 
 
 def test_list_users_and_select_shows_detail(db, lane, sysop):
-    session = FakeSession(["l", "0", "1", "n", "b"])
+    session = FakeSession(["u", "l", "0", "1", "n", "b", "b"])
     _run(session, lane, sysop)
     assert "sysop" in _written_text(session)
     assert "Level: 255" in _written_text(session)
@@ -192,7 +192,7 @@ def test_list_users_and_select_shows_detail(db, lane, sysop):
 def test_promote_demote_changes_level(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     # alice sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["p", "0", "1", "20", "b"])
+    session = FakeSession(["u", "p", "0", "1", "20", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.user_level == 20
@@ -202,7 +202,7 @@ def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
     # sysop is the only user, and the only active SysOp -- demoting
     # them must be refused, with the message shown on screen, not a
     # crash.
-    session = FakeSession(["p", "0", "1", "10", "b"])
+    session = FakeSession(["u", "p", "0", "1", "10", "b", "b"])
     _run(session, lane, sysop)
     assert "only active SysOp-level account" in _written_text(session)
     assert count_sysops(db) == 1
@@ -213,7 +213,7 @@ def test_promote_demote_shows_lockout_guard_message(db, lane, sysop):
 
 def test_disable_enable_toggles_status(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["e", "0", "1", "y", "b"])
+    session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -221,14 +221,14 @@ def test_disable_enable_toggles_status(db, lane, sysop):
 
 def test_disable_declining_confirmation_leaves_account_active(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["e", "0", "1", "n", "b"])
+    session = FakeSession(["u", "e", "0", "1", "n", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is None
 
 
 def test_disable_shows_lockout_guard_message(db, lane, sysop):
-    session = FakeSession(["e", "0", "1", "y", "b"])
+    session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
     _run(session, lane, sysop)
     assert "only active SysOp-level account" in _written_text(session)
 
@@ -238,7 +238,7 @@ def test_disable_shows_lockout_guard_message(db, lane, sysop):
 
 def test_delete_with_correct_username_confirmation_deletes(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["d", "0", "1", "alice", "b"])
+    session = FakeSession(["u", "d", "0", "1", "alice", "b", "b"])
     _run(session, lane, sysop)
     assert not any(u.username == "alice" for u in list_users(db))
     assert "deleted" in _written_text(session)
@@ -246,7 +246,7 @@ def test_delete_with_correct_username_confirmation_deletes(db, lane, sysop):
 
 def test_delete_with_mismatched_confirmation_does_not_delete(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["d", "0", "1", "not-alice", "b"])
+    session = FakeSession(["u", "d", "0", "1", "not-alice", "b", "b"])
     _run(session, lane, sysop)
     assert any(u.username == "alice" for u in list_users(db))
     assert "Cancelled" in _written_text(session)
@@ -254,7 +254,7 @@ def test_delete_with_mismatched_confirmation_does_not_delete(db, lane, sysop):
 
 def test_delete_with_blank_confirmation_does_not_delete(db, lane, sysop):
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["d", "0", "1", "", "b"])
+    session = FakeSession(["u", "d", "0", "1", "", "b", "b"])
     _run(session, lane, sysop)
     assert any(u.username == "alice" for u in list_users(db))
 
@@ -272,7 +272,7 @@ def test_disable_disconnects_the_targets_live_session(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -298,7 +298,7 @@ def test_re_enabling_does_not_disconnect_anyone(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -324,7 +324,7 @@ def test_delete_disconnects_the_targets_live_session(db, lane, sysop):
         await asyncio.sleep(0)
         registry.mark_authenticated(alice_session, "alice")
 
-        admin_session = FakeSession(["d", "0", "1", "alice", "b"])
+        admin_session = FakeSession(["u", "d", "0", "1", "alice", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -342,7 +342,7 @@ def test_disable_without_node_controls_does_not_raise(db, lane, sysop):
     state (node_controls=None) -- disabling a user there must still
     work, just without anything to disconnect."""
     create_user(db, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["e", "0", "1", "y", "b"])
+    session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
     _run(session, lane, sysop)  # must not raise
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.disabled_at is not None
@@ -359,7 +359,7 @@ def test_disabling_your_own_account_excludes_your_own_session(db, lane, sysop):
     async def scenario():
         node_controls = _node_controls()
         registry = node_controls.session_registry
-        admin_session = FakeSession(["e", "0", "1", "y", "b"])
+        admin_session = FakeSession(["u", "e", "0", "1", "y", "b", "b"])
         registry.enter(admin_session)
         registry.mark_authenticated(admin_session, sysop.username)
         try:
@@ -401,7 +401,7 @@ def _node_controls() -> NodeControls:
 
 
 def test_node_option_hidden_without_node_controls(db, lane, sysop):
-    session = FakeSession(["n", "b"])
+    session = FakeSession(["s", "n", "b", "b"])
     _run(session, lane, sysop)  # _run's admin_menu call passes no node_controls
     bell_index = session.written.index("\b \b\a")
     assert session.written[bell_index] == "\b \b\a"
@@ -415,7 +415,7 @@ def test_who_lists_and_disconnects_another_session(db, lane, sysop):
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)  # let the other session register
 
-        admin_session = FakeSession(["n", "w", "0", "1", "y", "b", "b"])
+        admin_session = FakeSession(["s", "n", "w", "0", "1", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -433,7 +433,7 @@ def test_who_refuses_to_disconnect_own_session(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "w", "0", "1", "b", "b"])
+        admin_session = FakeSession(["s", "n", "w", "0", "1", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -480,7 +480,7 @@ def test_shutdown_screen_triggers_the_sequence_as_a_background_task(db, lane, sy
         # afterward -- "does disconnect_all() reach a still-mid-read
         # session" is already covered thoroughly in tests/test_shutdown.py
         # (via a session that genuinely blocks), not re-proven here.
-        admin_session = FakeSession(["n", "s", "i", "", "y", "b", "b"])
+        admin_session = FakeSession(["s", "n", "s", "i", "", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -505,7 +505,7 @@ def test_shutdown_screen_with_custom_message_replaces_the_default(db, lane, syso
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b"]
+            ["s", "n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -525,7 +525,7 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "s", "g", "", "n", "b", "b"])
+        admin_session = FakeSession(["s", "n", "s", "g", "", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -608,6 +608,84 @@ def test_sysop_approves_a_pending_post_with_zero_grants(db, lane, sysop):
     _run(session, lane, sysop)
     assert "Approved" in _written_text(session)
     assert get_post(db, post.post_id).status == "approved"
+
+
+# -- linked boards (design doc round 124/128) --------------------------------
+
+
+def _link_context():
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    node_identity = bootstrap_node_identity("roanoke")
+    return LinkContext(node_identity=node_identity, link_node=LinkNode(identity=node_identity))
+
+
+def test_link_this_board_flow(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import is_board_linked
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+
+    inputs = [
+        "m", "m", "l", "0", "1",  # navigate to board detail
+        "l",  # [L]ink this board
+        "", "",  # recommended min read/write level: keep current (0)
+        "",  # recommend moderated? blank = no recommendation
+        "",  # recommended max post age: blank = no recommendation
+        "", "",  # min age / name requirement: keep current (none)
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked 'General'" in text
+    assert is_board_linked(db, board)
+    assert board.board_id in link_context.link_node.boards
+    genesis = link_context.link_node.boards[board.board_id]
+    assert genesis.content_id in link_context.link_node.known_event_ids
+    assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
+
+
+def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked: yes" in text
+    assert "ink this board" not in text  # the [L]ink option itself is hidden
+
+
+def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+    from netbbs.link.boards import link_board
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    post = create_post(db, board, alice, "Hello", "Body text")
+
+    inputs = ["m", "m", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (post.post_id,)
+    ).fetchone()
+    assert row["link_event_json"] is not None
 
 
 def test_create_and_delete_area_flow(db, lane, sysop):
@@ -992,10 +1070,12 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
 # -- welcome banner (design doc -- welcome banner round) -------------------
 
 
-def test_welcome_banner_option_appears_in_admin_menu(db, lane, sysop):
+def test_welcome_banner_option_appears_in_the_system_submenu(db, lane, sysop):
     # menu_key("W", "elcome banner") highlights the "W" separately, so
     # the contiguous literal text is "elcome banner", not "Welcome banner".
-    session = FakeSession(["b"])
+    # Welcome banner now lives in the [S]ystem submenu, not the top-level
+    # admin menu (design doc -- admin menu reorganization round).
+    session = FakeSession(["s", "b", "b"])
     _run(session, lane, sysop)
     assert "elcome banner" in _written_text(session)
 
@@ -1003,7 +1083,7 @@ def test_welcome_banner_option_appears_in_admin_menu(db, lane, sysop):
 def test_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
-    session = FakeSession(["w", "e", "b", "b"])
+    session = FakeSession(["s", "w", "e", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No banner file found" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -1013,7 +1093,7 @@ def test_enable_with_oversized_file_shows_friendly_error_and_leaves_flag_disable
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["w", "e", "b", "b"])
+    session = FakeSession(["s", "w", "e", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "over the" in _written_text(session)
     assert "byte limit" in _written_text(session)
@@ -1024,7 +1104,7 @@ def test_enable_with_valid_file_present_succeeds_and_sets_flag(db, lane, sysop):
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
-    session = FakeSession(["w", "e", "b", "b"])
+    session = FakeSession(["s", "w", "e", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Welcome banner enabled" in _written_text(session)
     assert is_welcome_banner_enabled(db) is True
@@ -1036,7 +1116,7 @@ def test_disable_reverts_flag_without_deleting_file(db, lane, sysop):
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
     set_welcome_banner_enabled(db, True)
 
-    session = FakeSession(["w", "d", "b", "b"])
+    session = FakeSession(["s", "w", "d", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Reverted to the default banner" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -1049,7 +1129,7 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     banner_path(db).write_bytes(b"MY DISTINCTIVE BANNER TEXT")
     set_welcome_banner_enabled(db, True)
 
-    session = FakeSession(["w", "p", "b", "b"])
+    session = FakeSession(["s", "w", "p", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
@@ -1057,7 +1137,7 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
 
 
 def test_preview_screen_when_disabled_shows_default_and_says_so(db, lane, sysop):
-    session = FakeSession(["w", "p", "b", "b"])
+    session = FakeSession(["s", "w", "p", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "showing the DEFAULT banner" in text
@@ -1070,7 +1150,7 @@ def test_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_pa
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["w", "x", "A", "CTRL+O", "b", "b"])
+    session = FakeSession(["s", "w", "x", "A", "CTRL+O", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -1092,7 +1172,7 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
 
     banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["w", "x", "A", "CTRL+X", "d", "b", "b"])
+    session = FakeSession(["s", "w", "x", "A", "CTRL+X", "d", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No changes saved" in _written_text(session)
     assert banner_path(db).read_bytes() == b"ORIGINAL"
@@ -1106,7 +1186,7 @@ def test_list_users_shows_pending_approval_status(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["l", "0", "1", "n", "n", "b"])
+    session = FakeSession(["u", "l", "0", "1", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert "pending approval" in _written_text(session)
 
@@ -1115,7 +1195,7 @@ def test_approving_a_pending_user_clears_the_gate(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["l", "0", "1", "y", "n", "b"])
+    session = FakeSession(["u", "l", "0", "1", "y", "n", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is False
@@ -1126,7 +1206,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
     from netbbs.auth.users import create_user, list_users
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["l", "0", "1", "n", "n", "b"])
+    session = FakeSession(["u", "l", "0", "1", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.pending_approval is True
@@ -1135,7 +1215,7 @@ def test_declining_the_approve_prompt_leaves_it_pending(db, lane, sysop):
 def test_detail_screen_for_a_non_pending_user_has_no_approve_prompt(db, lane, sysop):
     # sysop themselves is the sole (non-pending) user -- picking their
     # own entry must not prompt for approval at all.
-    session = FakeSession(["l", "0", "1", "n", "b"])
+    session = FakeSession(["u", "l", "0", "1", "n", "b", "b"])
     _run(session, lane, sysop)
     assert "Approve this account" not in _written_text(session)
 
@@ -1145,7 +1225,7 @@ def test_detail_screen_can_grant_verify_identity_permission(db, lane, sysop):
 
     create_user(db, "carol", password="hunter2pw")
     # carol sorts before sysop alphabetically -- item 01.
-    session = FakeSession(["l", "0", "1", "y", "b"])
+    session = FakeSession(["u", "l", "0", "1", "y", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is True
@@ -1157,7 +1237,7 @@ def test_detail_screen_can_revoke_verify_identity_permission(db, lane, sysop):
 
     carol = create_user(db, "carol", password="hunter2pw")
     set_can_verify_identity(db, carol, True, changed_by=sysop)
-    session = FakeSession(["l", "0", "1", "y", "b"])
+    session = FakeSession(["u", "l", "0", "1", "y", "b", "b"])
     _run(session, lane, sysop)
     updated = next(u for u in list_users(db) if u.username == "carol")
     assert updated.can_verify_identity is False
@@ -1168,7 +1248,7 @@ def test_registration_settings_screen_defaults_to_open(db, lane, sysop):
     from netbbs.config import RegistrationMode, get_registration_mode
 
     assert get_registration_mode(db) is RegistrationMode.OPEN
-    session = FakeSession(["r", "b", "b"])
+    session = FakeSession(["u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_registration_mode(db) is RegistrationMode.OPEN
     assert "open" in _written_text(session).lower()
@@ -1177,7 +1257,7 @@ def test_registration_settings_screen_defaults_to_open(db, lane, sysop):
 def test_registration_settings_screen_can_switch_to_approval_required(db, lane, sysop):
     from netbbs.config import RegistrationMode, get_registration_mode
 
-    session = FakeSession(["r", "a", "b"])
+    session = FakeSession(["u", "r", "a", "b", "b"])
     _run(session, lane, sysop)
     assert get_registration_mode(db) is RegistrationMode.APPROVAL_REQUIRED
     assert "approval required" in _written_text(session).lower()
@@ -1186,7 +1266,7 @@ def test_registration_settings_screen_can_switch_to_approval_required(db, lane, 
 def test_registration_settings_screen_can_switch_to_closed(db, lane, sysop):
     from netbbs.config import RegistrationMode, get_registration_mode
 
-    session = FakeSession(["r", "c", "b"])
+    session = FakeSession(["u", "r", "c", "b", "b"])
     _run(session, lane, sysop)
     assert get_registration_mode(db) is RegistrationMode.CLOSED
     assert "closed" in _written_text(session).lower()
@@ -1196,13 +1276,13 @@ def test_registration_settings_screen_choosing_back_leaves_mode_unchanged(db, la
     from netbbs.config import RegistrationMode, get_registration_mode, set_registration_mode
 
     set_registration_mode(db, RegistrationMode.APPROVAL_REQUIRED)
-    session = FakeSession(["r", "b", "b"])
+    session = FakeSession(["u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_registration_mode(db) is RegistrationMode.APPROVAL_REQUIRED
 
 
 def test_registration_settings_screen_choosing_current_mode_is_a_no_op(db, lane, sysop):
-    session = FakeSession(["r", "o", "b"])
+    session = FakeSession(["u", "r", "o", "b", "b"])
     _run(session, lane, sysop)
     assert "Already set to that mode." in _written_text(session)
 
@@ -1211,7 +1291,7 @@ def test_registration_settings_screen_shows_pending_count(db, lane, sysop):
     from netbbs.auth.users import create_user
 
     create_user(db, "carol", password="hunter2pw", pending_approval=True)
-    session = FakeSession(["r", "b", "b"])
+    session = FakeSession(["u", "r", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "1 account(s) awaiting approval" in _written_text(session)
 
@@ -1226,7 +1306,7 @@ def _fake_release(tag: str):
 
 
 def test_update_screen_shows_no_prior_check(db, lane, sysop):
-    session = FakeSession(["u", "n", "n", "b"])
+    session = FakeSession(["s", "u", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert "No check has been run on this node yet." in _written_text(session)
 
@@ -1234,7 +1314,7 @@ def test_update_screen_shows_no_prior_check(db, lane, sysop):
 def test_update_screen_declining_check_leaves_state_unchanged(db, lane, sysop):
     from netbbs.selfupdate import get_last_check_summary
 
-    session = FakeSession(["u", "n", "n", "b"])
+    session = FakeSession(["s", "u", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert get_last_check_summary(db) == (None, None)
 
@@ -1249,7 +1329,7 @@ def test_update_screen_reports_up_to_date(db, lane, sysop, monkeypatch):
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["u", "y", "n", "b"])
+    session = FakeSession(["s", "u", "y", "n", "b", "b"])
     _run(session, lane, sysop)
 
     assert f"Already up to date ({__version__})" in _written_text(session)
@@ -1266,7 +1346,7 @@ def test_update_screen_reports_newer_release_without_auto_applying(db, lane, sys
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["u", "y", "n", "b"])
+    session = FakeSession(["s", "u", "y", "n", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
@@ -1285,7 +1365,7 @@ def test_update_screen_handles_check_failure_gracefully(db, lane, sysop, monkeyp
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["u", "y", "n", "b"])
+    session = FakeSession(["s", "u", "y", "n", "b", "b"])
     _run(session, lane, sysop)
     assert "Could not check for updates: could not reach the release API: timed out" in _written_text(session)
 
@@ -1294,7 +1374,7 @@ def test_update_screen_toggles_auto_check(db, lane, sysop):
     from netbbs.selfupdate import get_auto_update_check_enabled
 
     assert get_auto_update_check_enabled(db) is True
-    session = FakeSession(["u", "n", "y", "b"])
+    session = FakeSession(["s", "u", "n", "y", "b", "b"])
     _run(session, lane, sysop)
     assert get_auto_update_check_enabled(db) is False
     assert "off" in _written_text(session)
@@ -1303,6 +1383,6 @@ def test_update_screen_toggles_auto_check(db, lane, sysop):
 def test_update_screen_declining_toggle_leaves_auto_check_unchanged(db, lane, sysop):
     from netbbs.selfupdate import get_auto_update_check_enabled
 
-    session = FakeSession(["u", "n", "n", "b"])
+    session = FakeSession(["s", "u", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert get_auto_update_check_enabled(db) is True

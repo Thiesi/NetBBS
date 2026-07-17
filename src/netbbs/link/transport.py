@@ -49,7 +49,7 @@ from typing import Callable
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from netbbs.link.events import KeyTransition
+from netbbs.link.events import BoardGenesis, BoardPost, KeyTransition
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerRecord
 from netbbs.link.store import save_event, save_peer
 from netbbs.storage.execution import DatabaseLane
@@ -215,16 +215,17 @@ async def push_events(
     node: LinkNode,
     session: ClientSession,
     base_url: str,
-    transitions: list[KeyTransition],
+    events: list[KeyTransition | BoardGenesis | BoardPost],
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """
-    Push `transitions` — this node's *own* `key_transition`s, per
-    round 116's "no relay from a stranger" scope note — to a peer at
-    `base_url`. Returns whichever content_ids the peer newly accepted;
-    purely informational, since the sender's own copies are already
-    known-good on its own side.
+    Push `events` — this node's *own* originated events (`key_
+    transition`s, and since round 128, `board_genesis`/`board_post`),
+    per round 116's "no relay from a stranger" scope note — to a peer
+    at `base_url`. Returns whichever content_ids the peer newly
+    accepted; purely informational, since the sender's own copies are
+    already known-good on its own side.
 
     Raises `LinkTransportError` for a transport-level failure. A
     peer rejecting one of the pushed events (e.g. an inconsistent
@@ -234,7 +235,7 @@ async def push_events(
     nothing on this side re-runs the peer's own verification.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/events/{node.identity.fingerprint}"
-    payload = [t.to_dict() for t in transitions]
+    payload = [e.to_dict() for e in events]
     try:
         async with session.post(
             url, json=payload, timeout=ClientTimeout(total=timeout)

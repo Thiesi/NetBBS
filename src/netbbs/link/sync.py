@@ -3,7 +3,8 @@ NetBBS Link background sync (design doc §12, round 119) — the piece
 that makes a running node *originate* outbound Link activity, not just
 answer it (round 118 wired up the inbound side only). Periodically
 dials every configured seed via `netbbs.link.transport.dial_hello`,
-then pushes this node's own `key_transition`s via `netbbs.link.
+then pushes this node's own `key_transition`s (and, since round 128,
+its own `board_genesis`/`board_post` events) via `netbbs.link.
 transport.push_events`.
 
 Pushes *all* of `node.identity.transitions`, not just the `"signing"`-
@@ -20,6 +21,14 @@ re-pushing everything every interval is simply a harmless no-op for
 whatever a peer has already seen, and keeps this module's own state
 to nothing worth persisting.
 
+**Round 128** extends the same "re-push everything every pass"
+treatment to `netbbs.link.boards.load_own_board_events` — this node's
+own Linked boards' genesis events and its own posts' board_post events,
+read fresh off the `boards`/`posts` tables each pass rather than
+tracked in any in-memory list of "what's pending push," the same
+"nothing here worth persisting separately" reasoning as `identity.
+transitions` above.
+
 Deliberately minimal, matching what this round set out to fill: a
 single interval, no per-seed backoff/retry state, no peer-list
 exchange (a peer that has only ever *dialed this node*, never been
@@ -33,6 +42,9 @@ or the loop itself.
 **Round 120**: `dial_hello` now persists the resulting `PeerRecord`
 via a `DatabaseLane`, so `run_link_sync` takes one and threads it
 through unchanged -- this module has no storage concerns of its own.
+Round 128 reuses the same `lane` to read `load_own_board_events`
+(a plain, synchronous, `db`-first function, dispatched the same way
+every other lane-run function already is).
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ from typing import Callable
 
 from aiohttp import ClientSession
 
+from netbbs.link.boards import load_own_board_events
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.transport import LinkTransportError, dial_hello, push_events
 from netbbs.storage.execution import DatabaseLane
@@ -92,7 +105,8 @@ async def _sync_one_seed(
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return
 
+    own_events = list(node.identity.transitions) + await lane.run(load_own_board_events)
     try:
-        await push_events(node, session, seed_url, list(node.identity.transitions))
+        await push_events(node, session, seed_url, own_events)
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)

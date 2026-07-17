@@ -7609,3 +7609,374 @@ for the ordinary participating resource, reserving capitalized "Link
 X" strictly for genuinely new named features the board work
 introduces, if any turn out to be needed.
 
+## Sign-off notes, round 124 (`board_genesis`/`board_post` event types for linked boards — first concrete application of round 90's canonical event model and round 87/94's board lifecycle design to real payload shapes)
+
+Design-only round, matching round 89/94/95's pattern (a settled design
+recorded here, implementation in a following round) rather than
+round 116/120's design-plus-implementation shape. Applies §7's round 90
+canonical event model and §13's round 87/94 board-lifecycle design
+(genesis/carry/closure, origin succession) to the first two concrete
+board-related event types — `key_transition` and `endpoint_descriptor`
+(round 110/116) remain the only two actually specified before this
+round, per `netbbs.link.events`' own explicit "each gets its own
+payload-shape decision when it's actually being built" scope note.
+
+**`board_genesis` — the signed announcement that puts an existing local
+board into Link scope, not a separate creation act.**
+
+- **Confirmed with Thiesi: `board_genesis` references the board's
+  existing local content-addressed `board_id` (`netbbs.boards.content_
+  id.compute_content_id({"type": "board", name, creator, created_at})`)
+  rather than minting a new one.** This makes *promotion* of an
+  already-existing local board the normal case, not a special one —
+  exactly the shape round 86 already established for Communities
+  (`[L]ink` on an existing local Community, "turning an already-built
+  local Community Link-participating without migrating it to a
+  different object") — applied here to boards for the first time. A
+  board created Linked-from-the-start and a board Linked years into its
+  local life go through the exact same event; only timing differs.
+  This also directly honors `netbbs.boards.content_id`'s own round-7/110
+  docstring promise that "local-only boards/posts never need an
+  ID-scheme migration when a board later becomes Linked" — confirmed
+  still true under this design, not just asserted: nothing about an
+  existing `boards` row's `board_id` column changes when it goes
+  Linked.
+- **A real tension found while tracing this through, resolved rather
+  than papered over: that same docstring's promise does *not* extend to
+  a board's *pre-Link post history* becoming Link-verifiable, and this
+  round says so explicitly rather than leaving it ambiguous.** Round
+  90's canonical event model (after that docstring was written) added a
+  rule the original local content-ID scheme never had to satisfy: "the
+  hash/signature always covers the whole envelope, never just payload."
+  A `board_post` event's content-ID is therefore a hash of `{netbbs_
+  protocol, object_type, payload}`, structurally different from the
+  flat `{"type": "board_post", board_id, parent_post_id, author,
+  subject, body, created_at}` dict `netbbs.boards.posts.create_post`
+  hashes today — even for byte-identical logical content, the two
+  schemes produce different IDs. **Confirmed with Thiesi: no backfill.**
+  A promoted board's Link-visible post history starts genuinely empty
+  at its `board_genesis` event; only posts created *after* promotion
+  become real, signed `board_post` events. Pre-Link posts remain
+  exactly what they always were — ordinary local content, individually
+  stable under their existing local IDs, never retroactively signed or
+  propagated. The alternative (minting synthetic `board_post` envelopes
+  for old posts at promotion time, signed after the fact) would need its
+  own design — mismatched `created_at` semantics, a signature covering
+  content the origin didn't actually sign contemporaneously — and
+  wasn't wanted.
+- **Payload**: `origin_fingerprint` (the origin node's root
+  fingerprint — same role as `endpoint_descriptor`'s `subject_
+  fingerprint`), `board_id` (the existing local ID, per above), `name`,
+  `description` (optional), `created_at` (this event's own timestamp —
+  distinct from, and not required to match, the local board row's own
+  `created_at`, since promotion can happen long after local creation),
+  and six optional **cascading-scalar-default** fields mirroring every
+  field `netbbs.boards.boards.Board` itself already owns as a local
+  setting: `default_min_read_level`, `default_min_write_level`,
+  `default_moderated`, `default_max_post_age_days`, `default_min_age`,
+  `default_name_requirement`. Deliberately a superset of Community's own
+  four `default_*` fields (round 84/86) — Community's list is narrower
+  because a Community doesn't itself own `moderated`/`max_post_age_days`
+  as inheritable concepts, only boards do directly; this is the same
+  "origin sets the recommendation, carrying node's local override always
+  wins" mechanic (round 86), applied to every scalar a board actually
+  has, not a departure from it. Any field omitted (round 110 point 6:
+  omitted, never stored as `null`) means "no recommendation, carrying
+  node's own default applies" — never itself a value a carrying node
+  is bound by. `category_id`/`community_id` are deliberately absent —
+  purely local organizational placement, an origin node has no standing
+  to recommend where a *different* node files this board locally.
+- **No author tagged-union.** Round 90 already names board creation as
+  the canonical example of a `node`-tier authored event; `board_genesis`
+  is always signed by the origin node's current **signing** operational
+  key (round 89's signing/transport split), verified by resolving that
+  key from `origin_fingerprint`'s `key_transition` chain — the identical
+  verification shape `endpoint_descriptor` already established (round
+  116), reused rather than re-derived.
+- **The initiating human actor (SysOp vs. global moderator, §13's
+  privilege-separation note) is deliberately not part of the signed
+  payload** — it's recorded locally on the origin node only, via the
+  existing `netbbs.moderation.log.record_action` mechanism `create_
+  board` already calls, exactly as §13 describes it ("recorded
+  separately, for audit"). A carrying peer has no standing need to know
+  which specific human on the origin node's staff triggered creation —
+  only that the origin node's identity vouches for the board existing.
+- **No `previous_event_id` this round.** `board_genesis` is the head of
+  what round 94 already designed as an eventual lifecycle chain (later
+  closure/transfer entries, "modeled as just another entry in the
+  resource's own event chain"), but closure and transfer aren't being
+  built this round — per `netbbs.link.events`'s own stated convention,
+  each gets its own payload-shape decision, and its own object_type,
+  when it's actually being built, referencing this event's content-ID
+  as whatever it extends. Building the cross-object-type chain-walker
+  those later events will need is explicitly out of scope here — YAGNI
+  against a chain with only one member so far.
+
+**`board_post` — an immutable content-creation event (round 90's other
+event class), not a mutable chain.**
+
+- **Payload**: `board_id` (the board's existing local ID — the same
+  value its `board_genesis` announced, never a separately-minted one),
+  `parent_post_id` (optional — another `board_post` event's own
+  content-ID, for a Link-native reply; never a pre-Link local post's
+  ID, which lives in the incompatible old ID space per the tension
+  resolved above), `author` (tagged union, see below), `subject`,
+  `body`, `created_at`, and `nonce` (round 90's required random field,
+  distinguishing two genuinely identical posting actions submitted in
+  the same instant, which would otherwise hash identically and look
+  like a dedup hit). No separate `post_id` field inside the payload —
+  unlike the local Phase 1/2 scheme, this event's own content-ID (the
+  full-envelope hash) already is its stable identity, the same
+  precedent `key_transition`/`endpoint_descriptor` already set of never
+  storing their own ID inline.
+- **Confirmed with Thiesi: only `node_vouched_user` gets real signing/
+  verification this round; `user_key` and `node` are named in the
+  tagged-union shape but not built.** The server holds no user's
+  private personal key today — `netbbs.auth.users` stores only a
+  public key/fingerprint — and passwordless/keypair *login* itself
+  isn't implemented yet, so there is no session-level signing capacity
+  to hang a genuine `user_key`-tier signature off of; building that
+  now would mean designing an entirely separate, currently-undesigned
+  feature (client-side signing at compose time) just to unblock a
+  payload shape. `node_vouched_user`'s payload is `{"kind": "node_
+  vouched_user", "home_node_fingerprint", "local_user_id"}` —
+  `local_user_id` is the posting user's plain username (already
+  immutable post-creation, per §5's account-lifecycle section, and
+  already the exact opaque local identifier `netbbs.boards.posts.
+  create_post` falls back to today when an author has no personal
+  keypair fingerprint). Always signed by the **posting user's home
+  node's** current signing key — matching round 90's own framing
+  exactly ("their content carries their home node's signature, not a
+  signature of their own") — verified by resolving that key from
+  `home_node_fingerprint`'s `key_transition` chain, identical shape to
+  `board_genesis`'s own verification. `user_key`/`node` remain
+  reserved tag values with no build/verify path, to be wired up
+  whenever their own real prerequisites exist (client-side signing
+  session UX; a concrete node-authored-post use case) — not half-built
+  now against callers that don't exist, matching this project's
+  existing practice of naming a deferred piece explicitly rather than
+  stubbing dead code for it.
+- **Propagation is gated on local `'approved'` status, never
+  `'pending'`.** A moderated board's posts start `'pending'` (`netbbs.
+  boards.posts.create_post`) specifically so a moderator can screen them
+  before anyone else sees them; a `board_post` event is only ever
+  built and signed once a post reaches `'approved'` — instantly, for an
+  unmoderated board's posts, or at `approve_post`'s own moment, for a
+  moderated one — never at raw creation time. Emitting one for a still-
+  `'pending'` post would leak unmoderated content onto the Link before
+  the origin node's own moderation had a chance to act on it, defeating
+  the entire point of the moderated-board approval flow this round
+  otherwise leaves untouched.
+- **A receiving node only accepts a `board_post` for a `board_id` it
+  already holds a verified `board_genesis` for** — the same "no relay
+  from a stranger" boundary round 116 already established for hellos,
+  applied here to boards: an event about a board a node has never heard
+  announced is rejected, not speculatively stored waiting for a genesis
+  that might arrive later.
+
+**What's still open, named explicitly**: implementation of both event
+types (this round is design-only, matching round 89/94/95's pattern);
+the cross-object-type lifecycle chain-walker `board_genesis`'s eventual
+closure/transfer siblings will need; `user_key`/`node`-tier `board_post`
+signing; post-edit/tombstone chains for linked boards (round 90 already
+names "post edit/tombstone history" as its own mutable-chain event
+type, distinct from the immutable `board_post` this round specifies —
+not designed here); linked-board moderator grants (§13, already
+directionally specified, not yet given a concrete payload shape); and
+the Phase 6 governance-log/activity-feed consumption of any of this.
+Every one of these was already named as separately-scoped, later work
+by rounds 87/90/94 — this round doesn't newly discover them, just
+doesn't close them.
+
+## Sign-off notes, round 128 (linked-board local origination — turning an existing local board/post into a signed event, end to end)
+
+Applies round 124's design to real local data: an existing local board
+can now actually be Linked, and its posts actually propagate — the
+first end-to-end path from `netbbs.boards` (Phase 1/2, no Link
+dependency) into the round 125/126/127 protocol/persistence machinery.
+Two decisions confirmed with Thiesi before implementation, plus one
+architectural finding traced through during it.
+
+**Confirmed: `create_post`/`approve_post` trigger `board_post` queuing
+via an explicit second call at each call site, not a Link-aware
+wrapper function.** There are exactly two real call sites in the whole
+codebase (`netbbs.net.login_flow`'s `_compose_new_post`, `netbbs.net.
+admin_flow`'s `_post_action_screen` approve branch) — small enough that
+"a future call site forgets the second call" is a visible, manageable
+risk rather than a hidden one, and it keeps `netbbs.boards.posts`
+itself completely untouched, matching the already-settled "`netbbs.
+boards` stays Link-unaware" boundary (round 124) rather than needing a
+parallel `create_post`-shaped entry point that risks drifting from the
+real one.
+
+**Confirmed: this round builds the whole path end to end** — the
+`netbbs.link.boards` bridge module, `load_link_node`/push-loop
+extensions, *and* the SysOp-facing `[L]ink this board` command plus
+both real call-site edits — rather than stopping at the bridge module
+and leaving menu wiring for a later round (the option initially
+proposed, matching rounds 125/126/127's narrower scope). This turned
+out to need threading a new optional `LinkContext` (mirroring `netbbs.
+net.shutdown.NodeControls`'s existing shape exactly: bundled, `None`-
+defaulted, threaded through `netbbs.net.login_flow`'s whole call chain)
+down two separate paths — ordinary board browsing/posting, and SysOp
+board administration — since both need it for different reasons (queuing
+a post's event; triggering genesis).
+
+**A real thread-safety boundary found while designing `netbbs.link.
+boards.link_board`, not assumed away**: `netbbs.link.protocol.LinkNode`
+mutation has always happened directly on the event loop (`LinkServer.
+_handle_hello`/`_handle_events` call `self._node.handle_hello(...)`
+directly, *then* persist via a separate `await self._lane.run(save_
+peer, ...)` call) — `DatabaseLane.run` dispatches its function onto the
+lane's own separate worker thread, so mutating `LinkNode` state *inside*
+a lane-dispatched function would mutate it from a thread other than the
+one every other code path (the event loop, and this same lane
+mechanism used elsewhere) already assumes exclusive access from — a
+real data race, not a style concern. `link_board` (`netbbs.link.
+boards`) is therefore kept plain and synchronous, doing only the
+signing and the `boards.link_genesis_json` write — the `[L]ink this
+board` command itself (`netbbs.net.admin_flow._link_board_screen`)
+registers the result with the live `LinkNode` directly afterward, on
+the event loop, the same division of responsibility `_handle_hello`/
+`_handle_events` already established.
+
+**Storage: `boards.link_genesis_json`/`posts.link_event_json`, new
+nullable columns on the existing tables — not a new table, not a new
+`LinkNode` field.** 1:1 with the row they describe, queried the same
+way an existing board/post already is; `null` means "not Linked yet" /
+"no board_post built yet" for that row, matching this project's
+established nullable-means-absent convention rather than a sentinel
+value. `netbbs.link.sync`'s push loop reads these two columns fresh
+every pass (`netbbs.link.boards.load_own_board_events`) and pushes
+whatever it finds alongside `node.identity.transitions`, mirroring
+round 119's "re-push everything every pass, receiver dedups" model —
+no per-peer delivery tracking invented for this either.
+
+**A second, related correctness point traced through and closed in the
+same round**: a board this node itself originates never goes through
+`handle_events` (there's no peer to verify a self-signed event
+against), so its genesis was only ever landing in the `boards` table's
+own column — `load_link_node` (round 120/126) needed a *second*
+reconstruction path added, scanning `boards.link_genesis_json`
+directly, alongside its existing `link_events`-table path, or a
+restarted node would forget its own Linked boards and wrongly reject a
+remote user's legitimate `board_post` on one of them (the same shape
+of gap round 126 found and fixed for peer-received genesis events,
+here found again for self-originated ones before it ever shipped).
+
+**`queue_board_post_if_linked`'s `parent_post_id` handling**: a reply's
+Link event only carries `parent_post_id` if its local parent already
+has its *own* queued `board_post` — a reply to a post that predates the
+board going Linked has no Link-native parent to point at (round 124:
+pre-Link history is never backfilled, a different, incompatible ID
+space) and is queued as a Link-native top-level post instead, rather
+than silently dropping the reply relationship or referencing an ID
+nothing else can ever resolve.
+
+**What's still open, unchanged from round 124/125/126's lists**: the
+cross-object-type lifecycle chain-walker for `board_genesis`'s eventual
+closure/transfer siblings; `user_key`/`node`-tier `board_post` signing;
+post-edit/tombstone chains for linked boards; linked-board moderator
+grants; Phase 6's governance-log/activity-feed consumption. This round
+closes the local-origination gap named at the end of round 126/127's
+worklog entries — it doesn't open any of the above.
+
+## Sign-off notes, round 129 (`board_post_edit` event type — self-authored edits only, moderator edits and tombstones explicitly left for Phase 6)
+
+**Confirmed with Thiesi: linked-board moderator grants (§13/§15's Phase
+6 bullet) stay deferred, untouched, in Phase 6 — not pulled forward.**
+Raised because building it now would mean building Phase 6 governance
+machinery while Phase 4 (trust/reputation) and Phase 5 (real-time chat)
+don't exist yet, contradicting round 87's own scope-boundary reasoning
+("what stays [in Phase 6] is the *advanced* delegated governance...
+Link-blanket moderator grants"). Post-edit/tombstone chains, by
+contrast, are genuinely Phase 3 scope (§15: "any structural message-
+threading/revision semantics... must be settled here, before linked
+boards ship") — ordinary content propagation, not delegated authority
+— so this round proceeds with those, in the order confirmed: post-edit
+chains now, the convergence-harness extension after.
+
+**A real scope boundary found by tracing the *local* permission model
+through, not assumed**: `netbbs.boards.posts.edit_post` allows two
+kinds of editor — the post's own original author (no grant needed) or
+anyone holding `BoardPermission.EDIT` (a moderator) — but `delete_post`
+has **no author bypass at all**; it requires `BoardPermission.DELETE`
+unconditionally, full stop. This means a **tombstone** (marking a
+linked post deleted) is *inherently* a moderator action under the
+existing local model — there is no "delete your own post" capability
+to propagate even for the simple case. Tombstone propagation would
+therefore need the exact grant-verification machinery just deferred to
+Phase 6, with no honest simpler slice available — so this round builds
+**only self-authored `board_post_edit` propagation**, explicitly no
+tombstones, rather than inventing a throwaway parallel authority check
+that Phase 6's real mechanism would later have to replace. Moderator
+edits are refused the same way user_key/node-tier `board_post` authors
+were in round 124 — named in the design, no verify path built, because
+the real prerequisite (grant verification) doesn't exist yet.
+
+**Payload**: `board_id`, `root_post_id` (the original `board_post`
+event's content_id — stable across the whole edit chain, mirroring
+`netbbs.boards.posts`' own `root_post_id` concept exactly),
+`previous_event_id` (round 90's head-pointer chain field — **always
+present, never omitted**, unlike `board_genesis`/`key_transition`'s
+first entry: a `board_post_edit` is by definition never the head of
+its own chain, the immutable `board_post` already fills that role),
+`author` (the tagged union — but see below, always copied verbatim
+from the root post, never reconstructed), `subject`, `body`,
+`created_at`, `nonce`.
+
+**Verification requires the edit's `author` to match the root post's
+own `author` *exactly*** (same `home_node_fingerprint`/`local_user_id`)
+— the mechanical expression of "self-authored only." A receiving node
+resolves the root post from its own `LinkNode.events` (already stored
+generically, per round 126) and rejects an edit whose author doesn't
+match, rather than trusting the claim. On the origination side
+(`netbbs.link.boards`, extended this round), the edit's `author` field
+is copied verbatim from the root `board_post`'s own payload, never
+reconstructed from the editor's identity — guarantees an exact match
+by construction rather than by separately re-deriving the same three
+fields and hoping they stay in sync. The actual "is this a self-edit"
+gate lives at origination time: `queue_board_post_edit_if_linked`
+takes the editor's `User` explicitly and silently declines to queue
+anything (no error, no partial event) when `edited_by.id != root_
+author_user_id` — `netbbs.boards.posts.edit_post` itself copies
+`author_user_id` forward unchanged across every revision regardless of
+who actually performed a given edit, so this is the only point where
+"who edited this, this time" is actually known.
+
+**Chain model: simpler than `key_transition`'s, deliberately not a
+generic reusable chain-walker.** Round 90 names a shared per-object
+event-chain shape in the abstract, but nothing generic has actually
+been built yet — `key_transition`'s own chain logic (`node_identity.
+py`) is bespoke to it, not extracted as reusable machinery. A post's
+edit chain is a single linear list (no purpose-splitting the way a
+node's signing/transport chains are two interleaved ones), so this
+round tracks it as `LinkNode.post_edits: dict[str, tuple[BoardPostEdit,
+...]]` keyed by `root_post_id`, with "does `previous_event_id` match
+the current head (the latest known edit, or the root post itself if
+none yet)" as the whole ordering rule — reordering is refused outright
+(`LinkProtocolError`), recoverable only by a full resend, the same
+push-and-retry model round 122 already documented and tested for
+`key_transition`, reused rather than re-derived. An exact resend
+(matching `content_id` already in the chain) is a safe no-op, the same
+idempotency shape every other event type here already has.
+
+**No "resolve current post content" helper built this round** — nothing
+consumes Linked board content for display yet (no Link-side board-
+reading UI exists), so a fold-the-chain-into-current-subject/body
+function would have no real caller to validate its shape against,
+the same reasoning round 87/round 20's "screen-buffer built alongside
+its first real consumer" already applies elsewhere. `LinkNode.post_
+edits` stores the verified chain; resolving "current" content is left
+for whenever a real reader exists to need it.
+
+**What's still open, named explicitly**: moderator-edit propagation and
+tombstones (both Phase 6-gated, per above); the cross-object-type
+lifecycle chain-walker `board_genesis`'s eventual closure/transfer
+siblings still need; `user_key`/`node`-tier `board_post`/`board_post_
+edit` signing; linked-board moderator grants themselves; Phase 6's
+governance-log/activity-feed consumption. Implementation (events.py,
+protocol wiring, persistence, local origination, menu wiring) follows
+in subsequent rounds, matching how `board_genesis`/`board_post` were
+built in stages (rounds 125–128) rather than all at once.
+

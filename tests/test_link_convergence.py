@@ -16,6 +16,26 @@ duplication, reordering, and restarts — not multi-hop propagation via an
 intermediate node, which isn't built. The partition/heal scenario below
 exists specifically to pin that boundary down as a tested fact, not just
 a documented gap.
+
+**Round 134 extends this file's existing `key_transition` coverage to
+`board_genesis`/`board_post`/`board_post_edit`** (design doc rounds
+124/129, implemented rounds 125/130) — named as "still open" in every
+worklog round since 129: those three event types had unit/protocol
+coverage (`tests/test_link_protocol.py`) but had never been run through
+this module's multi-node fault-injection harness the way `key_transition`
+has, so they hadn't actually cleared issue #59's harness gate yet. No
+production code changes this round — `LinkNode.handle_events` and
+`netbbs.link.store` already handled all of this correctly (traced, not
+assumed); this closes a test-coverage gap, not a design or implementation
+one. One real asymmetry worth noting, discovered while writing the
+partition/heal scenario below: a `key_transition` rotation rides along in
+a peer's *hello* (its `transitions` bundle is resent on every hello, round
+89), so a healed partition converges automatically the moment two nodes
+say hello again. `board_genesis`/`board_post`/`board_post_edit` carry no
+such bundle — a hello only ever carries key-lifecycle state — so healing
+a partition for linked-board state requires an explicit resend of the
+board events themselves, not just a fresh hello. The partition/heal test
+below makes that resend explicit rather than leaving it implied.
 """
 
 from __future__ import annotations
@@ -24,6 +44,7 @@ import json
 
 import pytest
 
+from netbbs.link.events import build_board_genesis, build_board_post, build_board_post_edit
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node, save_event, save_peer
@@ -344,3 +365,372 @@ def test_a_restarted_node_continues_converging_after_reordered_and_duplicate_del
 
     alice.close()
     bob.close()
+
+
+# -- linked-board events: 3-node convergence -------------------------------
+
+
+def _board_genesis(node, clock, *, board_id="existing-local-board-id"):
+    return build_board_genesis(
+        signing_identity=node.identity.signing_key,
+        origin_fingerprint=node.fingerprint,
+        board_id=board_id,
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+
+
+def _board_post(node, clock, *, board_id="existing-local-board-id"):
+    return build_board_post(
+        signing_identity=node.identity.signing_key,
+        home_node_fingerprint=node.fingerprint,
+        local_user_id="wanderer",
+        board_id=board_id,
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+
+def test_three_nodes_converge_on_a_linked_board_post_and_edit_via_direct_pairwise_sync(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    transport = ScriptedTransport()
+    for node in (alice, bob, carol):
+        transport.register(node)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    carol_node = LinkNode(identity=carol.identity)
+
+    # Every pair says hello directly -- no relay exists, matching the
+    # key_transition convergence test above.
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    _exchange_hellos(transport, alice, alice_node, carol, carol_node, clock)
+    _exchange_hellos(transport, bob, bob_node, carol, carol_node, clock)
+
+    genesis = _board_genesis(alice, clock)
+    post = _board_post(alice, clock)
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+    payload = json.dumps([genesis.to_dict(), post.to_dict(), edit.to_dict()]).encode()
+
+    transport.send(alice, bob, payload)
+    transport.send(alice, carol, payload)
+    transport.deliver_all()
+
+    [to_bob] = [m for m in transport.inbox(bob) if m.sender == alice.label and m.payload == payload]
+    bob_node.handle_events(alice.fingerprint, json.loads(to_bob.payload))
+    [to_carol] = [m for m in transport.inbox(carol) if m.sender == alice.label and m.payload == payload]
+    carol_node.handle_events(alice.fingerprint, json.loads(to_carol.payload))
+
+    for node in (bob_node, carol_node):
+        assert node.boards["existing-local-board-id"].content_id == genesis.content_id
+        assert node.events[post.content_id] == post.to_dict()
+        assert node.post_edits[post.content_id][-1].content_id == edit.content_id
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+# -- linked-board events: duplicate delivery -------------------------------
+
+
+def test_duplicate_delivery_of_a_board_post_edit_is_a_pure_no_op(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+
+    genesis = _board_genesis(alice, clock)
+    post = _board_post(alice, clock)
+    setup_payload = json.dumps([genesis.to_dict(), post.to_dict()]).encode()
+    transport.send(alice, bob, setup_payload)
+    transport.deliver_all()
+    [setup_msg] = [m for m in transport.inbox(bob) if m.payload == setup_payload]
+    bob_node.handle_events(alice.fingerprint, json.loads(setup_msg.payload))
+
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+    edit_payload = json.dumps([edit.to_dict()]).encode()
+
+    # The network delivers the same edit message twice -- two independent
+    # sends of identical bytes, matching the key_transition duplicate-
+    # delivery scenario above.
+    transport.send(alice, bob, edit_payload)
+    transport.send(alice, bob, edit_payload)
+    transport.deliver_all()
+
+    first, second = [m for m in transport.inbox(bob) if m.payload == edit_payload]
+    accepted_first = bob_node.handle_events(alice.fingerprint, json.loads(first.payload))
+    accepted_second = bob_node.handle_events(alice.fingerprint, json.loads(second.payload))
+
+    assert accepted_first == [edit.content_id]
+    assert accepted_second == []  # pure no-op, not an error, not re-applied
+
+    alice.close()
+    bob.close()
+
+
+# -- linked-board events: reordered delivery --------------------------------
+
+
+def test_reordered_board_post_edit_chain_is_rejected_then_converges_on_a_full_resend(tmp_path, clock):
+    """Two chained edits sent as *separate* messages, delivered out of
+    order: the second-in-chain one arrives first and must be safely
+    rejected (its previous_event_id points at an edit bob doesn't have
+    yet), not silently misapplied. A later resend of *both together, in
+    order* converges correctly -- the same push-and-retry recovery model
+    round 122 already established for key_transition, applied here to
+    board_post_edit's own single-linear-chain shape (design doc round
+    129)."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+
+    genesis = _board_genesis(alice, clock)
+    post = _board_post(alice, clock)
+    setup_payload = json.dumps([genesis.to_dict(), post.to_dict()]).encode()
+    transport.send(alice, bob, setup_payload)
+    transport.deliver_all()
+    [setup_msg] = [m for m in transport.inbox(bob) if m.payload == setup_payload]
+    bob_node.handle_events(alice.fingerprint, json.loads(setup_msg.payload))
+
+    first_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+    second_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=first_edit.content_id,
+        subject="hello (edited again)",
+        body="first post, edited again",
+        created_at=clock.now_iso(),
+    )
+
+    transport.send(alice, bob, json.dumps([first_edit.to_dict()]).encode())
+    transport.send(alice, bob, json.dumps([second_edit.to_dict()]).encode())
+    # Deliver out of send order: second (index 1) before first (index 0).
+    second_message = transport.deliver(1)
+    first_message = transport.deliver(0)
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, json.loads(second_message.payload))
+
+    # The out-of-order rejection didn't corrupt anything -- first (correctly
+    # ordered relative to what bob already has) still applies.
+    accepted = bob_node.handle_events(alice.fingerprint, json.loads(first_message.payload))
+    assert accepted == [first_edit.content_id]
+
+    # Recovery: a full resend of both, in order -- first is now a no-op
+    # (already integrated), second is newly accepted.
+    full_chain = [first_edit.to_dict(), second_edit.to_dict()]
+    accepted = bob_node.handle_events(alice.fingerprint, full_chain)
+    assert accepted == [second_edit.content_id]
+
+    assert [e.content_id for e in bob_node.post_edits[post.content_id]] == [
+        first_edit.content_id,
+        second_edit.content_id,
+    ]
+
+    alice.close()
+    bob.close()
+
+
+# -- linked-board events: restart mid-sequence ------------------------------
+
+
+def test_a_restarted_node_continues_converging_on_linked_board_state_after_reordered_and_duplicate_delivery(
+    tmp_path, clock
+):
+    """Combines round 120's real persistence with harness-level fault
+    injection, the same shape as the key_transition restart test above,
+    applied to board_genesis/board_post/board_post_edit: bob accepts
+    alice's genesis and first post, "restarts" (a fresh LinkNode hydrated
+    from the same on-disk database), then a chained edit arrives
+    duplicated and reordered -- the restarted node must still converge
+    correctly."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    genesis = _board_genesis(alice, clock)
+    post = _board_post(alice, clock)
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict(), post.to_dict()])
+    assert accepted == [genesis.content_id, post.content_id]
+    save_event(
+        bob.db, sender_fingerprint=alice.fingerprint, content_id=genesis.content_id,
+        object_type="board_genesis", envelope=genesis.to_dict(),
+    )
+    save_event(
+        bob.db, sender_fingerprint=alice.fingerprint, content_id=post.content_id,
+        object_type="board_post", envelope=post.to_dict(),
+    )
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    # -- restart: a fresh LinkNode, not the one bob_node object above --
+    restarted_bob_node = load_link_node(bob.db, bob.identity)
+    assert restarted_bob_node is not bob_node
+    assert restarted_bob_node.boards["existing-local-board-id"].content_id == genesis.content_id
+
+    # -- a chained edit, delivered duplicated *and* reordered, after the
+    # restart --
+    first_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at=clock.now_iso(),
+    )
+    second_edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=first_edit.content_id,
+        subject="hello (edited again)",
+        body="first post, edited again",
+        created_at=clock.now_iso(),
+    )
+
+    transport.send(alice, bob, json.dumps([second_edit.to_dict()]).encode())  # sent first, arrives out of order
+    transport.send(alice, bob, json.dumps([first_edit.to_dict()]).encode())
+    transport.send(alice, bob, json.dumps([first_edit.to_dict()]).encode())  # duplicate
+
+    second_msg = transport.deliver(0)
+    first_msg_a = transport.deliver(0)
+    first_msg_b = transport.deliver(0)
+
+    with pytest.raises(LinkProtocolError):
+        restarted_bob_node.handle_events(alice.fingerprint, json.loads(second_msg.payload))
+
+    accepted_a = restarted_bob_node.handle_events(alice.fingerprint, json.loads(first_msg_a.payload))
+    assert accepted_a == [first_edit.content_id]
+    accepted_b = restarted_bob_node.handle_events(alice.fingerprint, json.loads(first_msg_b.payload))
+    assert accepted_b == []  # duplicate, pure no-op
+
+    full_resend = restarted_bob_node.handle_events(
+        alice.fingerprint, [first_edit.to_dict(), second_edit.to_dict()]
+    )
+    assert full_resend == [second_edit.content_id]
+
+    assert [e.content_id for e in restarted_bob_node.post_edits[post.content_id]] == [
+        first_edit.content_id,
+        second_edit.content_id,
+    ]
+
+    alice.close()
+    bob.close()
+
+
+# -- linked-board events: partition, then heal ------------------------------
+
+
+def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_after_a_direct_resend(
+    tmp_path, clock
+):
+    """A and C never exchange a message directly during the "partition"
+    phase, even though both talk fine to B -- the same real boundary the
+    key_transition partition test above already confirms (no relay,
+    round 116), now pinned down for `node.boards`/`node.events` state
+    too, not just `node.peers`. Unlike a key_transition rotation (which
+    rides along in every hello's transitions bundle, per this module's
+    docstring), board_genesis/board_post carry no such bundle -- healing
+    requires an explicit resend of the board events themselves, not just
+    a fresh hello."""
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    c = spawn_node(tmp_path, "c")
+    transport = ScriptedTransport()
+    for node in (a, b, c):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    c_node = LinkNode(identity=c.identity)
+
+    # -- partitioned phase: a<->b and b<->c talk; a and c never do --
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+    _exchange_hellos(transport, b, b_node, c, c_node, clock)
+
+    genesis = _board_genesis(a, clock)
+    post = _board_post(a, clock)
+    payload = json.dumps([genesis.to_dict(), post.to_dict()]).encode()
+
+    transport.send(a, b, payload)
+    transport.deliver_all()
+    [to_b] = [m for m in transport.inbox(b) if m.sender == a.label and m.payload == payload]
+    accepted = b_node.handle_events(a.fingerprint, json.loads(to_b.payload))
+    assert accepted == [genesis.content_id, post.content_id]  # b, talking directly to a, converges fine
+
+    # c never heard from a at all, despite being fully synced with b --
+    # b does not relay a's board state onward. This is the real boundary.
+    assert "existing-local-board-id" not in c_node.boards
+    assert a.fingerprint not in c_node.peers
+
+    # -- heal: a and c finally say hello directly --
+    _exchange_hellos(transport, a, a_node, c, c_node, clock)
+    assert a.fingerprint in c_node.peers
+    # ...but the hello alone carries no board state (unlike key_transition
+    # -- see this test's own docstring) -- c still knows nothing about the
+    # board until a explicitly resends its events.
+    assert "existing-local-board-id" not in c_node.boards
+
+    transport.send(a, c, payload)
+    transport.deliver_all()
+    [to_c] = [m for m in transport.inbox(c) if m.sender == a.label and m.payload == payload]
+    accepted = c_node.handle_events(a.fingerprint, json.loads(to_c.payload))
+    assert accepted == [genesis.content_id, post.content_id]
+    assert c_node.boards["existing-local-board-id"].content_id == genesis.content_id
+
+    a.close()
+    b.close()
+    c.close()

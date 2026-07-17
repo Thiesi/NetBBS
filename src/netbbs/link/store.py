@@ -27,7 +27,14 @@ from __future__ import annotations
 import base64
 import json
 
-from netbbs.link.events import EndpointDescriptor, KeyTransition
+from netbbs.link.events import (
+    BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_POST_EDIT_OBJECT_TYPE,
+    BoardGenesis,
+    BoardPostEdit,
+    EndpointDescriptor,
+    KeyTransition,
+)
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.storage.database import Database
@@ -40,6 +47,38 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     rows -- the round-120 replacement for a bare `LinkNode(identity=
     ...)` construction, so a restarted node doesn't forget its peers or
     reprocess/re-forward events it has already seen.
+
+    Round 126 (found by tracing, not hypothetical): `LinkServer._handle_
+    events` already persists *any* accepted event generically, board_
+    genesis/board_post included, with no type-specific code of its own
+    -- so `link_events` already held board_genesis rows before this
+    function knew to do anything with them. Without also rebuilding
+    `node.boards` here, a restarted node would forget every board_
+    genesis it had already verified, and `handle_events` would then
+    wrongly reject a legitimate resent board_post as having "no
+    verified board_genesis on file" -- exactly the restart-forgets-
+    state shape round 120 already fixed for peers/events, just not yet
+    extended to this newer derived index.
+
+    Round 128: a board this node itself originated (`netbbs.link.
+    boards.link_board`) never goes through `handle_events` at all --
+    there's no peer to verify it against, it's self-signed -- so its
+    genesis lives only on the local `boards` row's own `link_genesis_
+    json` column, a completely different source from `link_events`
+    above. Both are reconstructed into the same `node.boards` index
+    here; without this half too, a restarted node would forget its
+    *own* Linked boards and wrongly reject a remote user's legitimate
+    `board_post` on a board it itself originated.
+
+    Round 130: the same two-source shape, applied to `node.post_edits`
+    -- peer-received `board_post_edit` rows come from `link_events`
+    (queried in `received_at` order, since a chain reconstructed out of
+    order would fail its own "does previous_event_id match the current
+    head" check the moment it's used); self-originated ones
+    (`netbbs.link.boards.queue_board_post_edit_if_linked`) live on the
+    edited revision's own `posts.link_event_json` column instead, same
+    as a self-originated `board_genesis` lives on `boards.link_genesis_
+    json` rather than ever passing through `handle_events`.
     """
     node = LinkNode(identity=identity)
 
@@ -53,9 +92,39 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             descriptor=EndpointDescriptor.from_dict(json.loads(row["descriptor_json"])),
         )
 
-    for row in db.connection.execute("SELECT content_id, envelope_json FROM link_events"):
+    for row in db.connection.execute(
+        "SELECT content_id, object_type, envelope_json FROM link_events ORDER BY received_at ASC"
+    ):
+        envelope = json.loads(row["envelope_json"])
         node.known_event_ids.add(row["content_id"])
-        node.events[row["content_id"]] = json.loads(row["envelope_json"])
+        node.events[row["content_id"]] = envelope
+        if row["object_type"] == BOARD_GENESIS_OBJECT_TYPE:
+            genesis = BoardGenesis.from_dict(envelope)
+            node.boards[genesis.payload["board_id"]] = genesis
+        elif row["object_type"] == BOARD_POST_EDIT_OBJECT_TYPE:
+            edit = BoardPostEdit.from_dict(envelope)
+            root_post_id = edit.payload["root_post_id"]
+            node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (edit,)
+
+    for row in db.connection.execute(
+        "SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"
+    ):
+        genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
+        node.boards[genesis.payload["board_id"]] = genesis
+
+    for row in db.connection.execute(
+        "SELECT link_event_json FROM posts "
+        "WHERE link_event_json IS NOT NULL AND post_id != root_post_id "
+        "ORDER BY created_at ASC"
+    ):
+        envelope = json.loads(row["link_event_json"])
+        if envelope["envelope"]["object_type"] != BOARD_POST_EDIT_OBJECT_TYPE:
+            continue
+        edit = BoardPostEdit.from_dict(envelope)
+        root_post_id = edit.payload["root_post_id"]
+        if edit.content_id in {e.content_id for e in node.post_edits.get(root_post_id, ())}:
+            continue
+        node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (edit,)
 
     return node
 

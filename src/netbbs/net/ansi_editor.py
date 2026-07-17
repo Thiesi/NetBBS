@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering import (
@@ -338,9 +339,7 @@ async def _offer_draft_recovery(session: Session) -> bool:
             fg_color=MUTED_COLOR,
         )
     )
-    await session.write("Resume it? [y/N]: ")
-    answer = (await session.read_line()).strip().lower()
-    return answer == "y"
+    return await prompt_yes_no(session, "Resume it?", default=False)
 
 
 async def _confirm_quit(session: Session) -> str:

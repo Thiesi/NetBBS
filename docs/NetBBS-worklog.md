@@ -8087,3 +8087,670 @@ The natural next round is a second event type (a board post, a
 Community membership change) — real, unblocked Phase 3 feature work,
 not another prerequisite fix.
 
+## Round 125 (`board_genesis`/`board_post` event types built in `netbbs.link.events`)
+
+See `docs/NetBBS-design-doc.md` round 124 for the design decisions
+(referencing an existing local `board_id` rather than minting a new
+one; no pre-Link post-history backfill; only `node_vouched_user` gets
+real signing/verification this round) — this entry is the
+implementation/testing narrative for the round-124 design, matching
+round 89/94/95's design-round-then-implementation-round pattern rather
+than round 116/120's combined shape.
+
+**`src/netbbs/link/events.py`**: two new object types, following the
+exact `EndpointDescriptor` template (frozen dataclass wrapping
+`envelope`/`signature`, `payload`/`content_id` properties, `to_dict`/
+`from_dict`, a `build_*` function, a `verify_*` function that only
+checks the signature and leaves key resolution to the caller).
+
+- `BoardGenesis`/`build_board_genesis`/`verify_board_genesis`:
+  `payload` is `origin_fingerprint`, `board_id` (the existing local
+  ID — never minted here), `name`, `created_at`, plus six optional
+  `default_min_read_level`/`default_min_write_level`/`default_
+  moderated`/`default_max_post_age_days`/`default_min_age`/`default_
+  name_requirement` fields, each omitted when `None` rather than
+  stored as `null` (round 110 point 6) — mirrors `create_board`/
+  `update_board`'s own `default_name_requirement` validation
+  (`EventError` on anything outside `"verified"`/
+  `"verified_and_displayed"`). Always signed by `signing_identity`
+  (the origin's current signing key), matching `build_endpoint_
+  descriptor`'s own choice.
+- `BoardPost`/`build_board_post`/`verify_board_post`: `payload` is
+  `board_id`, `author` (a dict — this round only ever builds `{"kind":
+  "node_vouched_user", "home_node_fingerprint", "local_user_id"}`,
+  matching design doc round 124's decision not to build `user_key`/
+  `node` yet), `subject`, `body`, `created_at`, `nonce` (auto-generated
+  via `secrets.token_hex(16)` if not given explicitly — round 90's
+  anti-duplicate-collision field), and an optional `parent_post_id`.
+  Always signed by `signing_identity` — the posting user's *home
+  node's* current signing key, never a user key.
+
+**`tests/test_link_events.py`** (+16, up from 11 pre-existing):
+signing/verification for both types (including a wrong-key rejection
+each), `board_genesis`'s central "references an existing `board_id`,
+never mints one" property, every optional field's omit-when-`None`/
+include-when-given behavior plus the `default_name_requirement`
+validation, confirmation `board_genesis` carries no `previous_event_
+id` (it's the head of its own not-yet-built lifecycle chain), the
+`node_vouched_user` tagged-union shape landing exactly as designed,
+`parent_post_id`'s optional presence, both auto-generated and
+explicit-`nonce` behavior (including that two otherwise-identical
+`build_board_post` calls get different nonces and therefore different
+`content_id`s), and a `to_dict`/`from_dict` round-trip for each type.
+
+**Testing**: `tests/test_link_events.py` alone: **27 passed**. Full
+suite: **2043 passed, 4 skipped** (16 net new, all in `tests/test_link_
+events.py` — up from round 122's 2027/4, exactly the expected delta;
+nothing outside `netbbs.link.events`/`tests/test_link_events.py` was
+touched this round).
+
+**What's still open, named explicitly (unchanged from design doc round
+124's own list)**: no protocol-layer wiring yet — `netbbs.link.
+protocol` has no `handle_*` path that accepts, verifies, or persists
+either event type (the "no relay from a stranger" board_id-must-
+already-be-known rule and the pending-status propagation gate are both
+still just design, not code); the cross-object-type lifecycle chain-
+walker `board_genesis`'s eventual closure/transfer siblings will need;
+`user_key`/`node`-tier `board_post` signing; post-edit/tombstone chains
+for linked boards; linked-board moderator grants; and Phase 6's
+governance-log/activity-feed consumption of any of this. The natural
+next round is protocol-layer `handle_board_genesis`/`handle_board_
+post` (or whatever they end up named), the same shape `handle_hello`/
+`handle_events` already established for `key_transition`/`endpoint_
+descriptor`.
+
+## Round 126 (`board_genesis`/`board_post` wired into `LinkNode.handle_events`)
+
+No design doc entry — this round applies design doc round 124's
+already-settled decisions and round 125's already-built event types to
+`netbbs.link.protocol`, the same "extend the existing dispatch, don't
+invent a parallel path" move round 116 made for `endpoint_descriptor`
+inside `handle_hello`. No new design decisions were made.
+
+**`src/netbbs/link/protocol.py`**: `handle_events`'s per-event dispatch
+gained two more branches alongside the existing `key_transition` one,
+plus a new `LinkNode.boards: dict[str, BoardGenesis]` field (board_id
+-> the verified genesis on file for it) and a small shared helper,
+`_resolve_sender_signing_key`, factoring out the "resolve this peer's
+current signing key from its own tracked transitions" step both new
+branches need (the same resolution `handle_hello` already does for a
+descriptor, now reused for a gossiped event instead of copy-pasted).
+
+- **`board_genesis`**: rejects unless `origin_fingerprint == sender_
+  fingerprint` (design doc round 124's "no relay from a stranger"
+  boundary, applied to boards — matches `key_transition`'s own
+  `subject_fingerprint` check exactly). A second, different genesis
+  arriving for a `board_id` already on file is rejected as a conflict
+  rather than silently replacing what's there — there's no lifecycle
+  chain built yet (design doc round 124 named this explicitly as
+  deferred) to adjudicate "is this a legitimate update," so the safe
+  default is to refuse ambiguity rather than guess. Once verified, the
+  genesis lands in both `self.boards[board_id]` and `self.events`.
+- **`board_post`**: rejects unless `board_id` is already a key in
+  `self.boards` (no board_post for a board this node has never heard
+  announced) and unless the payload's `author.kind ==
+  "node_vouched_user"` with `author.home_node_fingerprint ==
+  sender_fingerprint` — the same boundary, applied to a post's claimed
+  author rather than a board's claimed origin. `user_key`/`node` author
+  kinds are refused outright (design doc round 124: no verify path
+  exists for them), not silently accepted or crashing on a missing
+  resolution step.
+- **Both are dedup'd purely via `known_event_ids`** (a resend is a
+  no-op before reaching any of the above) — sufficient for now since
+  neither type has the "candidate extension of a chain" shape that
+  made `key_transition` need round 121's extra chain-membership check;
+  `board_genesis` has no lifecycle chain built yet, and `board_post` is
+  immutable content per round 90 with nothing to project.
+
+**One test's original intent was silently invalidated by this round,
+found and fixed rather than left to bit-rot**:
+`test_handle_events_rejects_an_unrecognized_object_type` in `tests/
+test_link_protocol.py` used `"board_post"` as its example of an
+unrecognized `object_type` — accidentally still passed after this
+round (an empty `{}` payload still fails, just now via the new "unknown
+`board_id`" check instead of the "unrecognized type" one), but the test
+name and intent no longer matched what it actually exercised. Fixed by
+swapping in a genuinely bogus `"not_a_real_object_type"` — the same
+shape of test-fragility issue round 121's own worklog entry flagged
+("exposed rather than broken by a fix"), caught here by actually
+tracing what the new code path does to that literal string rather than
+assuming the existing test still meant what it said.
+
+**`tests/test_link_protocol.py`** (+9): valid-genesis acceptance and
+`self.boards` population; mismatched-origin rejection (mallory's
+genesis relayed as if from alice); conflicting-genesis-for-same-
+board_id rejection; genesis idempotency on resend; valid-post
+acceptance after its board's genesis is on file; rejection of a post
+for a never-announced `board_id`; rejection of an unsupported author
+kind (`user_key`, spliced into an otherwise-valid post); rejection of a
+post vouching for a different home node than its actual sender
+(mallory's post relayed as if from alice); post idempotency on resend.
+
+**Testing**: `tests/test_link_protocol.py` + `tests/test_link_events.py`
+together: **49 passed**. Full suite: **2052 passed, 4 skipped** (9 net
+new, all in `tests/test_link_protocol.py` — up from round 125's
+2043/4, exactly the expected delta).
+
+**What's still open, unchanged from design doc round 124's list**: no
+"build a board_post/board_genesis from a local board/post" glue exists
+yet — this round is receive-side verification only, proven against
+directly-constructed events in tests, not against `netbbs.boards`'
+actual local data; the cross-object-type lifecycle chain-walker
+`board_genesis`'s eventual closure/transfer siblings will need;
+`user_key`/`node`-tier `board_post` signing; post-edit/tombstone
+chains; linked-board moderator grants; propagation-on-`'approved'`-
+status gating (a local-origination-side concern, not yet built since
+nothing originates one yet); and Phase 6's governance-log/activity-feed
+consumption of any of this.
+
+## Round 127 (restart-forgets-`board_genesis` gap found and fixed in `netbbs.link.store.load_link_node`)
+
+Found by tracing round 126's new code through the persistence layer
+before moving on to the next feature, not reported or hypothesized:
+`LinkServer._handle_events` (`netbbs.link.transport`, round 120) is
+fully generic — it already calls `save_event` for *any* `handle_
+events`-accepted content_id, board_genesis/board_post included, with
+no object-type-specific code of its own. So `link_events` rows for
+both new types were already landing on disk with zero changes needed
+there. But `load_link_node` (also round 120) only ever rebuilt `known_
+event_ids`/`events` generically from those rows — it never rebuilt
+`LinkNode.boards` (round 126's new board_id -> verified-genesis index).
+A restarted node would therefore forget every board_genesis it had
+already verified, and `handle_events` would then wrongly reject a
+perfectly legitimate resent board_post as "no verified board_genesis
+on file" — the identical restart-forgets-derived-state shape round 120
+itself fixed for peers/events, just not yet extended to this newer
+index that didn't exist when round 120 was written. No design doc
+entry — this is a straightforward correctness fix applying an already-
+settled precedent, not a new decision, the same treatment round 121's
+own bugfix got.
+
+**`src/netbbs/link/store.py`**: `load_link_node`'s event-reconstruction
+loop now also selects `object_type`, and for any row where it's `board_
+genesis`, parses the envelope into a `BoardGenesis` and indexes it into
+`node.boards[genesis.payload["board_id"]]` — exactly mirroring what
+`handle_events` itself does when accepting one live, just replayed from
+disk instead of from a wire message.
+
+**`tests/test_link_store.py`** (+2): a `save_event`-then-`load_link_
+node` round trip proving a persisted `board_genesis` reconstructs `node.
+boards` (not just `known_event_ids`/`events`); a companion test proving
+a persisted `board_post` does *not* populate `node.boards` (only a
+genesis should). The pre-existing empty-tables test also gained an
+`assert node.boards == {}` for the new field.
+
+**Testing**: `tests/test_link_store.py` + `tests/test_link_protocol.py`
++ `tests/test_link_events.py` + `tests/test_link_transport.py`
+together: **65 passed**. Full suite: **2054 passed, 4 skipped** (2 net
+new, both in `tests/test_link_store.py` — up from round 126's 2052/4,
+exactly the expected delta).
+
+**What's still open**: unchanged from round 126's list — no local-
+origination glue, no cross-type lifecycle chain-walker, no `user_key`/
+`node`-tier signing, no post-edit/tombstone chains, no linked-board
+moderator grants, no Phase 6 consumption. The natural next round is
+still the local-origination glue (turning an existing local board/post
+into a signed `board_genesis`/`board_post` and actually calling `handle_
+events`/`save_event` with it) — this round only closed a gap in the
+receive/restart path underneath work already done, it didn't open new
+feature scope.
+
+## Round 128 (linked-board local origination, end to end: bridge module, persistence, push extension, and the `[L]ink this board` SysOp command)
+
+See `docs/NetBBS-design-doc.md` round 128 for the design decisions
+(explicit second call at the 2 real call sites rather than a wrapper;
+building the whole path end to end this round rather than stopping at
+the bridge module; the `LinkNode`-mutation-must-stay-off-the-lane-
+thread finding) — this entry is the implementation/testing narrative.
+
+**`src/netbbs/link/boards.py`** (new): `LinkBoardsError`, `LinkContext`
+(bundles `node_identity`/`link_node`, same shape as `netbbs.net.
+shutdown.NodeControls`), `is_board_linked`, `link_board` (builds+signs
+a `board_genesis` referencing the board's existing `board_id`,
+persists it, refuses a second one for an already-Linked board),
+`queue_board_post_if_linked` (builds+signs a `board_post` for an
+`'approved'` post on a Linked board, idempotent, resolves `parent_
+post_id` only when the local parent is itself already queued), and
+`load_own_board_events` (reads both columns fresh for `netbbs.link.
+sync`'s push loop). Every function plain/synchronous/`db`-first,
+dispatched via `DatabaseLane.run` from async call sites — none mutate
+`LinkNode` directly.
+
+**`src/netbbs/storage/migrations.py`**: one new migration —
+`boards.link_genesis_json`/`posts.link_event_json`, both nullable
+`TEXT`.
+
+**`src/netbbs/link/store.py`**: `load_link_node` gained a second
+reconstruction pass, scanning `boards.link_genesis_json` directly (a
+self-originated genesis never goes through `handle_events`/`link_
+events` at all) alongside its existing `link_events`-table pass.
+
+**`src/netbbs/link/transport.py`**: `push_events`' `transitions:
+list[KeyTransition]` parameter widened to `events: list[KeyTransition |
+BoardGenesis | BoardPost]` — a pure type-hint/doc change, since it
+already called `.to_dict()` generically on each item.
+
+**`src/netbbs/link/sync.py`**: `_sync_one_seed` now pushes `list(node.
+identity.transitions) + await lane.run(load_own_board_events)` in one
+call, instead of just the transitions.
+
+**`src/netbbs/net/login_flow.py`**: new `LinkContext | None =
+None` parameter threaded through `handle_session` → `_run_
+authenticated_session`/`handle_ssh_session` → `run_authenticated_
+session` → `_main_menu` → both the ordinary board-browsing path
+(`_enter_communities`/`_enter_uncategorized`/`_jump_to` →
+`_resource_type_menu` → `_browse_boards` → `_browse_boards_in_category`
+→ `_show_board`) and `admin_menu` — mirrors exactly how `NodeControls`
+is already threaded through this same chain. `_compose_new_post`
+(inside `_show_board`) calls `queue_board_post_if_linked` right after a
+successful `create_post` when `link_context` is given.
+
+**`src/netbbs/net/admin_flow.py`**: `LinkContext` threaded through
+`admin_menu` → `_content_menu` → `_board_menu` → `_list_boards_screen`
+→ `_board_detail_screen`. New `_link_board_screen` (the `[L]ink this
+board` command, only offered when not already Linked): prompts for the
+six `default_*` recommendations, pre-filled from the board's own
+current settings, reusing `_edit_board_screen`'s existing "blank =
+keep, 'none' = clear" prompt helpers where they already exist
+(`_prompt_optional_int`/`_prompt_min_age`/`_prompt_name_requirement`);
+builds+persists via `lane.run(link_board, ...)`, then registers the
+result with the live `LinkNode` directly, on the event loop (see design
+doc round 128's thread-safety finding for why that split is required,
+not stylistic). `_draw_board_detail` now shows a `Linked: yes/no` line.
+`_pending_posts_screen`/`_post_action_screen` gained the same `link_
+context` parameter and `board` (not previously passed to `_post_action_
+screen` at all); the approve branch now captures `approve_post`'s
+return value (previously discarded) and passes it — the post with its
+now-`'approved'` status — to `queue_board_post_if_linked`.
+
+**`src/netbbs/__main__.py`**: constructs `LinkContext(node_identity=
+node_identity, link_node=link_node) if link_node is not None else
+None` in both `session_handler`/`ssh_session_handler` closures, passed
+straight through to `handle_session`/`handle_ssh_session`.
+
+**Two pre-existing tests needed a small signature update, not a real
+fix**: `tests/test_main_lifecycle.py`'s and `tests/test_login_
+presence.py`'s `monkeypatch.setattr`-installed spy functions (standing
+in for `_run_authenticated_session`/`_main_menu`) didn't accept the new
+`link_context` keyword — both updated to accept and ignore it, same as
+they already do for `node_controls`/`lane`.
+
+**Tests**: `tests/test_link_boards.py` (new, 14) — `link_board`'s
+existing-board_id/persistence/refuse-relink/cascading-defaults
+behavior, `queue_board_post_if_linked`'s not-Linked/still-pending/
+idempotent/parent-linking/parent-predates-linking behavior, `load_own_
+board_events`. `tests/test_link_store.py` (+1) — `load_link_node`
+reconstructs a self-originated genesis from the `boards` table.
+`tests/test_link_sync.py` (+1) — a real end-to-end push of a linked
+board's genesis and a post's event to a real seed over a real socket.
+`tests/test_admin_flow.py` (+3) — the full `[L]ink this board` menu
+flow end to end (navigate, link, confirm `LinkNode.boards`/`known_
+event_ids` populated), the option correctly hidden once already
+Linked, and approving a pending post on a Linked board actually
+queuing its `board_post`. `tests/test_board_pagination_ui.py` (+2) —
+composing a new post on a Linked board queues its event through the
+real interactive posting flow (not just the library function), and
+confirms no queuing happens at all without a `link_context`.
+
+**Testing**: full suite: **2075 passed, 4 skipped** (21 net new — 14 in
+`test_link_boards.py`, 1 each in `test_link_store.py`/`test_link_
+sync.py`, 3 in `test_admin_flow.py`, 2 in `test_board_pagination_ui.py`
+— up from round 127's 2054/4).
+
+**What's still open, unchanged from round 124/125/126's lists**: the
+cross-object-type lifecycle chain-walker for `board_genesis`'s eventual
+closure/transfer siblings; `user_key`/`node`-tier `board_post` signing;
+post-edit/tombstone chains for linked boards; linked-board moderator
+grants; Phase 6's governance-log/activity-feed consumption. The
+local-origination gap named at the end of round 126/127 is now closed.
+
+## Round 130 (`board_post_edit` event type + protocol wiring + persistence)
+
+See `docs/NetBBS-design-doc.md` round 129 for the design decisions
+(self-authored edits only, moderator edits/tombstones deliberately left
+in Phase 6, the simpler-than-`key_transition` linear chain model,
+`author` always copied verbatim rather than reconstructed) — this
+entry is the implementation/testing narrative for events.py, protocol.py,
+and store.py together, matching how round 125+126+127 were three
+separate entries for `board_genesis`/`board_post` but folding faster
+here since the shape was already well-understood.
+
+**`src/netbbs/link/events.py`**: `BOARD_POST_EDIT_OBJECT_TYPE`,
+`BoardPostEdit` (same `envelope`/`signature`/`content_id`/`to_dict`/
+`from_dict` shape as `BoardPost`), `build_board_post_edit` (takes
+`author` as a plain dict, copied verbatim by the caller rather than
+reconstructed here; `root_post_id`/`previous_event_id` both always
+required, never omitted — a `board_post_edit` is never a chain's head),
+`verify_board_post_edit` (signature check only, same division of
+responsibility as every other `verify_*` here).
+
+**`src/netbbs/link/protocol.py`**: `LinkNode.post_edits: dict[str,
+tuple[BoardPostEdit, ...]]` (root_post_id -> ordered chain), and a new
+`handle_events` branch: resolves the root post from `self.events`
+(rejects if unknown — "no relay from a stranger," same boundary as
+`board_post`'s `board_id` check), rejects if the edit's `author`
+doesn't exactly match the root's own (the mechanical "self-authored
+only" enforcement), rejects if `home_node_fingerprint != sender_
+fingerprint`, self-heals `known_event_ids` on an exact resend of an
+already-integrated edit (round 121's lesson, reused), and rejects
+outright — no reordering tolerance — if `previous_event_id` doesn't
+match the chain's current head (`existing_chain[-1].content_id` or
+`root_post_id` if no edits yet).
+
+**`src/netbbs/link/store.py`**: `load_link_node`'s main `link_events`
+query gained `ORDER BY received_at ASC` (a chain reconstructed out of
+order would immediately fail its own head-matching invariant) and a new
+branch populating `node.post_edits` for `board_post_edit` rows; a
+second pass reconstructs self-originated edits from `posts.link_event_
+json` (only non-root rows, `ORDER BY created_at ASC`, deduped against
+what the first pass already found) — the same two-source shape round
+128 already established for `board_genesis`.
+
+**Tests**: `tests/test_link_events.py` (+6) — build/verify/wrong-key-
+rejection, author-copied-verbatim, root_post_id/previous_event_id
+always present, nonce distinguishes identical edits, to_dict/from_dict
+round-trip. `tests/test_link_protocol.py` (+7) — valid accept, a second
+chained edit, unknown-root rejection, mismatched-author rejection
+(mallory relaying a different claimed author), wrong-home-node
+rejection (mallory relaying as if from alice), out-of-order rejection,
+idempotent resend. `tests/test_link_store.py` (+2) — a self-originated
+edit reconstructed from `posts.link_event_json`, and a peer-received
+two-edit chain reconstructed in the correct order from `link_events`.
+
+**Testing**: `tests/test_link_events.py` + `tests/test_link_protocol.py`
++ `tests/test_link_store.py` together: **48 passed**. Full suite was
+not independently run for this round alone — verified together with
+round 131 below, since both landed in the same working session; see
+that entry for the combined final count.
+
+**What's still open**: local-origination glue (`netbbs.link.boards`
+extension + `_edit_existing_post` menu wiring) — this round is
+receive/persistence-side only, proven against directly-constructed
+events, not against `netbbs.boards.posts.edit_post`'s actual local
+data. Moderator edits, tombstones, linked-board moderator grants, and
+Phase 6 consumption remain deliberately out of scope, per design doc
+round 129.
+
+## Round 131 (`board_post_edit` local origination + menu wiring, end to end)
+
+See `docs/NetBBS-design-doc.md` round 129 for the design decisions this
+round applies (self-authored-only gate, verbatim-copied author,
+unbroken-local-chain requirement) — this entry is the implementation/
+testing narrative.
+
+**`src/netbbs/link/boards.py`**: `queue_board_post_edit_if_linked` —
+takes the editor's `User` explicitly (`edit_post` itself copies `author_
+user_id` forward unchanged across every revision regardless of who
+actually performed a given edit, so this is the only place "who edited
+this, this time" is knowable) and silently declines (returns `None`,
+no error) for a moderator edit, a not-yet-`'approved'` post, an
+un-Linked board, or a broken local chain (either the root post or the
+immediate local predecessor was never itself queued — an edge case
+accepted rather than solved, same "no backfill" shape round 124 already
+applies elsewhere). Idempotent, same shape as `queue_board_post_if_
+linked`. `load_own_board_events` extended to also gather `posts.link_
+event_json` rows that are `board_post_edit` rather than `board_post`,
+distinguishing by peeking at the stored envelope's own `object_type`
+rather than by which local row it came from.
+
+**`src/netbbs/net/login_flow.py`**: `_edit_existing_post` gained the
+same `link_context` parameter `_show_board`/`_compose_new_post` already
+have, and now captures `edit_post`'s return value (previously
+discarded entirely) to pass to `queue_board_post_edit_if_linked` right
+after a successful edit.
+
+**One small pre-existing bug fixed in passing, not introduced by this
+round**: `tests/test_board_pagination_ui.py`'s `test_composing_a_post_
+without_link_context_never_queues_one` (added round 128) had a
+duplicate `db.close()` call at its end — harmless (closing twice is a
+no-op) but sloppy; removed while adding this round's own tests to the
+same file.
+
+**Tests**: `tests/test_link_boards.py` (+7) — builds/persists, chains a
+second edit, no-ops for a moderator edit, no-ops when the root predates
+Linking, idempotent, author matches the root exactly.
+`tests/test_link_sync.py` (+1) — a self-authored edit actually reaches
+a real seed over a real socket and lands in `seed_node.post_edits`.
+`tests/test_board_pagination_ui.py` (+2) — editing a post on a Linked
+board queues its event through the real interactive editing flow, and
+confirms no queuing happens without a `link_context`.
+
+**Testing**: full suite (covering rounds 130 and 131 together):
+**2100 passed, 4 skipped** (25 net new — 6 in `test_link_events.py`, 7
+in `test_link_protocol.py`, 7 in `test_link_boards.py`, 2 in `test_
+link_store.py`, 2 in `test_board_pagination_ui.py`, 1 in `test_link_
+sync.py` — up from round 128's 2075/4, exactly the expected delta).
+
+**What's still open, unchanged from round 129's list**: moderator-edit
+propagation and tombstones (Phase 6-gated, confirmed with Thiesi not to
+pull forward); the cross-object-type lifecycle chain-walker `board_
+genesis`'s eventual closure/transfer siblings; `user_key`/`node`-tier
+signing; linked-board moderator grants themselves; Phase 6's
+governance-log/activity-feed consumption. Per Thiesi's own stated
+ordering, the convergence-harness extension (exercising `board_genesis`/
+`board_post`/`board_post_edit` under duplicate/reorder/restart/
+partition, the same harness round 122 built for `key_transition`) is
+next.
+
+## Round 132 (two SysOp admin-menu UX fixes: `[y/N]` prompts that swallowed Enter, and a flat menu reorganized into Users/Manage content/System)
+
+Thiesi reported two admin-menu problems directly (not a Link/Phase 3
+round): the self-update screen's `[y/N]` prompts didn't accept Enter
+for the shown default, and the top-level menu mixed user-account
+actions with node-wide settings ("Welcome banner" sitting next to
+"Create user"). No design doc entry — both are UI/UX fixes applying
+requirements Thiesi specified directly, not new architectural
+decisions.
+
+**Root cause, traced before fixing**: `netbbs.net.char_input.read_key`
+deliberately discards CR/LF entirely (by design, for genuine single-
+letter menus with no "Enter" concept) — every `[y/N]`-shaped
+confirmation prompt in the codebase also read via `read_key()`, so
+Enter did nothing on any of them, silently waiting for an actual `y`/
+`n` keystroke no matter what the prompt displayed. Not unique to the
+update screen: found in 38 occurrences across `admin_flow.py`,
+`login_flow.py`, `ansi_editor.py`, and `prose_editor.py`, plus 8 more
+of a related "edit screen, blank = keep current value" shape in
+`admin_flow.py` that had the identical defect under a different
+comparison pattern (`answer in ("y", "n")` else keep current).
+Confirmed with Thiesi to fix all 46, not just the reported one.
+
+**`src/netbbs/net/confirm.py`** (new): `prompt_yes_no(session, prompt,
+*, default)` — the `[Y/n]`/`[y/N]` shape, `read_line()`-based so a bare
+Enter actually returns `default`; `prompt_yes_no_or_keep(session,
+prompt, *, current)` — the edit-screen `[y]`/`[N]` shape, bare Enter
+keeps `current` unchanged. Both lenient on non-`y`/`n` input (falls
+back to default/current rather than stranding the user). `tests/
+test_confirm.py` (new, 14): bare-Enter-selects-default/keeps-current
+for both true and false, explicit y/n override in both directions,
+full words "yes"/"no", case-insensitivity, garbage-input fallback, and
+hint-text-reflects-the-parameter for both functions.
+
+**Every affected call site updated**: `admin_flow.py` (all 31 `[y/N]`
+sites plus all 8 keep-current sites, including one genuine tri-state
+"recommendation" prompt in `_link_board_screen` fixed inline via
+`read_line()` directly rather than forcing it through either shared
+helper, since neither shape fit a three-way yes/no/no-opinion answer);
+`login_flow.py` (5 sites: 3 profile-field "show it publicly?" prompts,
+2 identity-attestation prompts); `ansi_editor.py`/`prose_editor.py` (1
+site each, "Resume it?" — these two already used `read_line()`
+correctly and had no actual bug, standardized onto the shared helper
+anyway for consistency rather than leaving two hand-rolled
+reimplementations sitting next to the new one).
+
+**Menu reorganization**: `admin_flow.py`'s top level is now `[U]sers` /
+`[M]anage boards/areas/channels` (unchanged, already its own submenu)
+/ `[S]ystem` / `[B]ack`, replacing the previous flat 9-option layout.
+New `_users_menu`/`_draw_users_menu` (create/list/registration/
+promote/enable-disable/delete — the exact same six screens, just
+nested one level deeper, unchanged internally) and `_system_menu`/
+`_draw_system_menu` (welcome banner, update, and — Thiesi's own call —
+`[N]ode` nested one level further in rather than sitting at the
+previous top level as `[N]ode`'s own sibling). `_node_menu`/`_draw_
+node_menu` themselves are completely untouched; only what calls them
+changed.
+
+**~50 `tests/test_admin_flow.py` keystroke sequences updated** for the
+new nesting depth — every test that navigated directly to create/list/
+registration/promote/enable-disable/delete/welcome-banner/update/node
+needed a `"u"` or `"s"` prefix keystroke and one additional trailing
+`"b"` to fully exit the extra menu level. Mechanical once the pattern
+was clear: the `FakeSession` here pops one scripted string per `read_
+key()`/`read_line()` call regardless of which method asks, so the
+`prompt_yes_no`/`prompt_yes_no_or_keep` fix itself needed zero test
+changes (an explicit `"y"`/`"n"` still means the same thing; only the
+now-also-possible `""` for "accept the default" is new, and no
+existing test relied on that). One test's intent no longer matched
+what it exercised: `test_welcome_banner_option_appears_in_admin_menu`
+(renamed `..._in_the_system_submenu`) now navigates into `[S]ystem`
+first, since that text no longer appears at the top level at all.
+
+**One stale doc reference fixed in passing**: `README.md` still
+described reaching the welcome-banner editor via `[A]dmin` → `[W]elcome
+banner`; updated to `[A]dmin` → `[S]ystem` → `[W]elcome banner`.
+
+**Testing**: `tests/test_admin_flow.py` alone: **79 passed** (same
+count as before — fixes and keystroke updates, no tests added or
+removed there). Full suite: **2114 passed, 4 skipped** (14 net new, all
+in the new `tests/test_confirm.py` — up from round 131's 2100/4).
+
+**What's still open**: the `[G/i]` graceful-vs-immediate shutdown-mode
+prompt (`_shutdown_screen`) has the same read_key()-swallows-Enter
+shape but isn't a yes/no prompt, so it wasn't in scope for `prompt_yes_
+no`/`prompt_yes_no_or_keep` as built — named here rather than silently
+left unfixed and rediscovered later. Per Thiesi's own stated ordering,
+the convergence-harness extension (rounds 124-131's own "what's still
+open" list) remains the next Link/Phase 3 item.
+
+## Round 133 (shutdown-screen `[G/i]` prompt fixed inline; startup fails cleanly on a database/build mismatch instead of a raw traceback)
+
+Two more issues Thiesi reported directly, no design doc entry (bug
+fixes/error-handling, not new architectural decisions).
+
+**The `[G/i]` graceful-vs-immediate shutdown-mode prompt** (named as
+still-open in round 132's own worklog entry) has the identical `read_
+key()`-swallows-Enter defect, but isn't a yes/no prompt, so neither
+`prompt_yes_no` nor `prompt_yes_no_or_keep` fit its two arbitrarily-
+labeled choices. Thiesi's own instinct, confirmed rather than
+overridden: no third shared helper for one call site, and no forcing
+it through the existing ones by generalizing their parameters. Fixed
+the same way `_link_board_screen`'s one-off tri-state "recommend
+moderated?" prompt already was (round 132) — inline, direct `read_
+line()` instead of `read_key()`, no new abstraction. `tests/test_
+admin_flow.py`'s existing shutdown tests needed no changes (same
+reasoning as round 132: `FakeSession` pops one scripted string per
+read regardless of which method asks).
+
+**Database/build-version mismatch**: Thiesi's own workflow — several
+`netbbs.db` files paired with different checkouts/versions for before-
+after comparisons — occasionally mismatches a database with the wrong
+build, and `netbbs.storage.database.Database._apply_migrations` already
+has a real check for exactly this (`current_version > latest_version`
+-> a plain `RuntimeError` naming both versions), but nothing at either
+process entry point ever caught it — it (or a raw `sqlite3.Error` from
+a genuinely corrupted/foreign file) propagated straight out as a
+multi-frame Python traceback instead of the clear message the check was
+already producing.
+
+**`src/netbbs/__main__.py`**: `db = Database(config.db_path)` in `run()`
+now wrapped in `try/except Exception`, re-raised as `StartupError` —
+reusing the exact idiom `_start_one` already established for listener-
+start failures ("wrapped... so main() has exactly one exception type
+to catch for a clear, actionable message") rather than inventing a
+second convention. Message names the mismatch directly and suggests
+the fix (pair each version/checkout with its own db file). `StartupError`
+itself is a pre-existing class (design doc/issue #15) whose docstring
+undersold what it now covers -- widened to describe the general
+contract ("any startup failure `main()` should report as one clear
+message") rather than just its original listener-specific case.
+
+**`src/netbbs/admin/__main__.py`**: `db = Database(args.db)` in `main()`
+gets the identical treatment, `raise SystemExit(...)` directly (no
+`StartupError`/asyncio machinery needed here -- this is a plain
+synchronous CLI entry point, and the failure happens before `raw_
+terminal()`/`asyncio.run()` are ever reached).
+
+**Tests**: `tests/test_main_lifecycle.py` (+1) —
+`test_startup_fails_cleanly_on_a_database_from_a_newer_build`: bumps
+`user_version` past what the build supports on an otherwise-valid db,
+confirms `run()` raises `StartupError` naming the mismatch rather than
+a raw `RuntimeError`. `tests/test_admin_cli.py` (+1) — the same
+scenario against `main()` directly, confirming a clean `SystemExit`
+before any real terminal/asyncio involvement; that module's own
+docstring updated to name this one narrow exception to its otherwise-
+accurate "`main()` itself is deliberately not exercised here."
+
+**What's still open, named rather than silently assumed solved**: a
+database whose `user_version` matches what this build expects but
+whose *actual* schema has silently diverged (only possible by breaking
+`netbbs.storage.migrations`' own "never edit an already-shipped
+migration" rule) is not detected by this fix or the version check it
+wraps -- an sqlite3.Error from that scenario would surface wherever the
+first mismatched query happens to run, not necessarily at startup, and
+not necessarily with a message pointing at the real cause. Not fixed
+here: doing so honestly would need a schema fingerprint/hash stored
+alongside `user_version`, a real design question of its own, not a
+proportionate response to what was actually reported (mismatched
+version *numbers*, which this fix does fully address).
+
+## Round 134 (convergence harness extended to `board_genesis`/`board_post`/`board_post_edit` — closes issue #59's harness gate for linked boards)
+
+Named as "still open" in every worklog round since 129: `tests/test_
+link_convergence.py` (round 122) exercised `key_transition` under 3+
+nodes, duplicate/reordered delivery, restart, and partition/heal, but
+`board_genesis`/`board_post`/`board_post_edit` (design doc rounds
+124/129, implemented rounds 125/130) had only ever been exercised by
+`tests/test_link_protocol.py`'s single-call unit tests -- never through
+this harness's multi-node fault injection. Per §15's dependency matrix
+("before the first end-to-end linked feature is treated as complete"),
+that gate wasn't actually closed for linked boards until this round.
+No design doc entry -- test-only, no new architectural decision.
+
+**No production code changed.** Traced first, not assumed:
+`LinkNode.handle_events` (round 125/126/130) and `netbbs.link.store`
+(round 120/126/127/130) already handled all five scenarios below
+correctly; this closes a test-coverage gap, not an implementation one.
+
+**`tests/test_link_convergence.py`** (+5, all board-event scenarios,
+mirroring this file's existing `key_transition` tests one-for-one):
+3-node convergence (alice originates genesis+post+edit, bob and carol
+each sync directly with her and land on identical `boards`/`events`/
+`post_edits` state), duplicate delivery of an edit (pure no-op, second
+delivery accepts nothing), reordered edit chain (the second-in-chain
+edit arrives first, rejected outright since its `previous_event_id`
+points at an edit bob doesn't have yet; a later full resend of both, in
+order, converges), restart-mid-sequence (bob accepts genesis+first post,
+persists via `save_event`/`save_peer`, a fresh `LinkNode` reloads via
+`load_link_node`, then a chained edit arrives duplicated *and* reordered
+post-restart and still converges), and partition/heal (a and c never
+exchange directly during the partition phase despite both syncing fine
+with b; b never relays a's board state to c, the same no-relay boundary
+round 122 already pinned down for peer/key state, now confirmed true for
+`node.boards`/`node.events` too).
+
+**One genuine asymmetry found while writing the partition/heal
+scenario, not previously stated anywhere**: a `key_transition` rotation
+rides along in every hello's `transitions` bundle (round 89), so round
+122's key_transition partition test heals the instant a and c say hello
+again -- no separate event resend needed. `board_genesis`/`board_post`
+carry no such bundle; a hello only ever carries key-lifecycle state. The
+new partition/heal test asserts this explicitly (`"existing-local-
+board-id" not in c_node.boards` immediately *after* the healing hello,
+before board events are actually resent) rather than leaving it as an
+implicit consequence a reader would have to work out themselves.
+
+**Testing**: `tests/test_link_convergence.py` alone: **10 passed** (5
+new, 5 pre-existing `key_transition` tests unchanged). Full suite:
+**2121 passed, 4 skipped** (5 net new -- up from round 133's 2116/4).
+
+**What's still open**: this closes issue #59's harness gate for linked
+boards specifically -- the harness itself now covers every event type
+Phase 3 has actually built (`key_transition`, `board_genesis`,
+`board_post`, `board_post_edit`). Unchanged from round 131's list:
+moderator-edit propagation and tombstones (Phase 6-gated); the cross-
+object-type lifecycle chain-walker `board_genesis`'s eventual closure/
+transfer siblings; `user_key`/`node`-tier signing; linked-board
+moderator grants; Phase 6's governance-log/activity-feed consumption.
+No new Phase 3 event type is being proposed here -- extending the
+harness further only makes sense once one exists to extend it to.
+
