@@ -174,6 +174,7 @@ class TelnetSession(Session):
         *,
         live_buffer: char_input.LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
+        list_candidates: char_input.CandidateListPrinter | None = None,
     ) -> str:
         """
         Read one line of input, character by character, echoing (or
@@ -184,11 +185,13 @@ class TelnetSession(Session):
         recall (design doc round 47/Track 5f), and `completer`-driven Tab
         completion (design doc round 49/Track 5g), lives in
         `netbbs.net.char_input`, shared with SSH; this method just
-        supplies the byte source. `live_buffer`/`lock` (design doc round
-        79) pass straight through to `char_input.read_line` unchanged.
+        supplies the byte source. `live_buffer`/`lock`/`list_candidates`
+        (design doc round 79) pass straight through to
+        `char_input.read_line` unchanged.
         """
         return await char_input.read_line(
-            self, self.write, echo, history, completer, live_buffer=live_buffer, lock=lock
+            self, self.write, echo, history, completer,
+            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
         )
 
     async def read_key(self, echo: bool = True) -> str:

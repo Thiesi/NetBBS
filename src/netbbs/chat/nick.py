@@ -59,7 +59,7 @@ class NickError(Exception):
 def set_nick(db: Database, user: User, nick: str) -> None:
     """
     Set `user`'s display alias. An empty string clears it (see
-    `get_nick`) — `/nick off` in the chat command maps to this.
+    `get_nick`) — a bare `/nick` in the chat command maps to this.
 
     Validates length, that `nick` doesn't exactly match another
     account's canonical username, case-insensitively (design doc round

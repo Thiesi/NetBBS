@@ -60,7 +60,8 @@ class FakeSession(Session):
         return self._inputs.pop(0)
 
     async def read_line(
-        self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None
+        self, echo: bool = True, history=None, completer=None, *,
+        live_buffer=None, lock=None, list_candidates=None,
     ) -> str:
         if not self._inputs:
             await asyncio.Event().wait()

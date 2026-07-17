@@ -20,7 +20,7 @@ from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
-from netbbs.chat.nick import set_nick
+from netbbs.chat.nick import get_nick, set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.net import chat_flow
@@ -104,21 +104,30 @@ def test_nick_sets_alias_and_announces_it(lane, hub, presence, alice, channel):
     assert "is now known as DeepParse|alice" in _written_text(session)
 
 
-def test_nick_off_clears_alias_and_announces_it(db, lane, hub, presence, alice, channel):
-    set_nick(db, alice, "DeepParse")
+def test_nick_off_is_a_literal_alias_not_a_magic_clear_keyword(db, lane, hub, presence, alice, channel):
+    # "off" is deliberately not reserved -- unlike /timestamps, whose
+    # only two states really are named "on"/"off", a nick is free-form
+    # text, and reserving any one spelling would block a legitimate
+    # (if unlikely) choice for zero benefit, now that a bare /nick
+    # already clears it.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/nick off", "/quit"]))
-    assert "is no longer using an alias" in _written_text(session)
+    assert "is now known as off|alice" in _written_text(session)
+    assert get_nick(db, alice) == "off"
 
 
-def test_nick_with_no_args_shows_current_alias(db, lane, hub, presence, alice, channel):
+def test_nick_with_no_args_clears_alias_and_announces_it(db, lane, hub, presence, alice, channel):
+    # Same bare-invocation-acts reasoning as /timestamps: the status
+    # line already shows whatever alias is active, so a bare /nick has
+    # nothing useful left to do except clear it.
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/nick", "/quit"]))
-    assert "Your current alias: DeepParse" in _written_text(session)
+    assert "is no longer using an alias" in _written_text(session)
+    assert get_nick(db, alice) is None
 
 
-def test_nick_with_no_args_and_none_set_shows_usage(lane, hub, presence, alice, channel):
+def test_nick_with_no_args_and_none_set_is_a_harmless_no_op_clear(lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/nick", "/quit"]))
-    assert "Usage: /nick" in _written_text(session)
+    assert "is no longer using an alias" in _written_text(session)
 
 
 def test_nick_rejects_invalid_alias(lane, hub, presence, alice, bob, channel):

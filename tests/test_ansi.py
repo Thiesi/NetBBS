@@ -72,6 +72,24 @@ def test_colored_combines_bold_fg_bg():
     assert result.endswith("hello\x1b[0m")
 
 
+def test_colored_with_underline_wraps_and_resets():
+    result = colored("hello", underline=True)
+    assert result.startswith("\x1b[4m")
+    assert result.endswith("\x1b[0m")
+
+
+def test_colored_combines_underline_with_a_distinct_fg_per_call():
+    # The chat status line's own reason for this combination (design
+    # doc round 77's redesign): each field gets its own color, but the
+    # underline must still run continuously once several such calls are
+    # concatenated -- unlike `reverse`, which fights over one shared
+    # background per row.
+    first = colored("alice", fg_color=201, underline=True)
+    second = colored("bob", fg_color=220, underline=True)
+    assert first == "\x1b[4m\x1b[38;5;201malice\x1b[0m"
+    assert second == "\x1b[4m\x1b[38;5;220mbob\x1b[0m"
+
+
 def test_clear_screen_moves_cursor_home():
     result = clear_screen()
     assert result == "\x1b[2J\x1b[H"

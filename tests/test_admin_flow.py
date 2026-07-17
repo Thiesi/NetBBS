@@ -690,7 +690,7 @@ def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane
 
 def test_create_and_delete_area_flow(db, lane, sysop):
     inputs = [
-        "m", "a", "c",
+        "m", "f", "c",
         "Docs", "Documents area", "0", "0",
         "n",  # assign a Community? no
         "n", "n", "n", "",
@@ -725,7 +725,7 @@ def test_gc_screen_reclaims_an_orphaned_blob(db, lane, sysop):
     backdated = time.time() - 7200  # past the default 1-hour safety age
     os.utime(blob_path, (backdated, backdated))
 
-    inputs = ["m", "a", "g", "y", "b", "b", "b"]
+    inputs = ["m", "f", "g", "y", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -750,7 +750,7 @@ def test_gc_screen_declining_confirmation_does_not_delete(db, lane, sysop):
     backdated = time.time() - 7200
     os.utime(blob_path, (backdated, backdated))
 
-    inputs = ["m", "a", "g", "n", "b", "b", "b"]
+    inputs = ["m", "f", "g", "n", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -758,7 +758,7 @@ def test_gc_screen_declining_confirmation_does_not_delete(db, lane, sysop):
 
 
 def test_gc_screen_with_nothing_to_reclaim_skips_the_confirmation_prompt(db, lane, sysop):
-    inputs = ["m", "a", "g", "b", "b", "b"]  # no "y"/"n" needed
+    inputs = ["m", "f", "g", "b", "b", "b"]  # no "y"/"n" needed
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Would reclaim 0 orphaned blob" in _written_text(session)
@@ -773,7 +773,7 @@ def test_sysop_approves_a_pending_file_with_zero_grants(db, lane, sysop):
     entry = upload_file(db, area, alice, "readme.txt", b"hello")
     assert entry.status == "pending"
 
-    inputs = ["m", "a", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
+    inputs = ["m", "f", "l", "0", "1", "p", "0", "1", "a", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Approved" in _written_text(session)
@@ -840,7 +840,7 @@ def test_grant_blanket_across_all_boards(db, lane, sysop):
 
 def test_create_channel_flow(db, lane, sysop):
     inputs = [
-        "m", "h", "c",
+        "m", "n", "c",
         "Lobby", "A general channel", "0",
         "n",  # assign a Community? no
         "n",  # assign category? no
@@ -870,7 +870,7 @@ def test_edit_and_delete_channel_flow(db, lane, sysop):
     # blank(min age), blank(name requirement) -> back to detail ->
     # d(elete) -> retype new name -> back x3
     inputs = [
-        "m", "h", "l", "0", "1", "e",
+        "m", "n", "l", "0", "1", "e",
         "Lobby2", "", "",
         "n", "n", "y", "n", "n", "n",
         "", "",
@@ -889,7 +889,7 @@ def test_create_and_delete_channel_category_flow(db, lane, sysop):
     from netbbs.chat.categories import list_top_level_categories
 
     inputs = [
-        "m", "c", "h", "c",
+        "m", "c", "c", "c",
         "Vintage", "Old radios", "n",  # not a sub-category
         "l", "0", "1", "Vintage",
         "b", "b", "b", "b",
@@ -912,7 +912,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    grant_inputs = ["m", "g", "0", "1", "h", "0", "1", "f", "y", "b", "b"]
+    grant_inputs = ["m", "g", "0", "1", "n", "0", "1", "f", "y", "b", "b"]
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -920,7 +920,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
         db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
     )
 
-    revoke_inputs = ["m", "r", "0", "1", "h", "0", "1", "y", "b", "b"]
+    revoke_inputs = ["m", "r", "0", "1", "n", "0", "1", "y", "b", "b"]
     session2 = FakeSession(revoke_inputs)
     _run(session2, lane, sysop)
     assert "Revoked" in _written_text(session2)

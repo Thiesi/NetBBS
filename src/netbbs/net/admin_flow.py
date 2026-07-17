@@ -1042,11 +1042,11 @@ async def _content_menu(
             await session.write_line("")
             await _board_menu(session, lane, actor, link_context=link_context)
             await _draw_content_menu(session)
-        elif choice == "a":
+        elif choice == "f":
             await session.write_line("")
             await _area_menu(session, lane, actor)
             await _draw_content_menu(session)
-        elif choice == "h":
+        elif choice == "n":
             await session.write_line("")
             await _channel_menu(session, lane, actor)
             await _draw_content_menu(session)
@@ -1075,10 +1075,10 @@ async def _draw_content_menu(session: Session) -> None:
     options = "  ".join(
         [
             menu_key("M", "essage boards"),
-            menu_key("A", "reas"),
-            menu_key("H", "annels"),
+            menu_key("F", "ile areas"),
+            menu_key("N", "nels", prefix="Cha"),
             menu_key("C", "ategories"),
-            menu_key("O", "Communities"),
+            menu_key("O", "mmunities", prefix="C"),
             menu_key("G", "rant moderator"),
             menu_key("R", "evoke moderator"),
             menu_key("B", "ack"),
@@ -2510,7 +2510,7 @@ async def _category_menu(session: Session, lane: DatabaseLane, actor: User) -> N
                 error_type=FileCategoryError, title="File-area categories",
             )
             await _draw_category_menu(session)
-        elif choice == "h":
+        elif choice == "c":
             await session.write_line("")
             await _generic_category_screen(
                 session, lane, actor,
@@ -2529,7 +2529,7 @@ async def _draw_category_menu(session: Session) -> None:
         [
             menu_key("M", "essage board category"),
             menu_key("F", "ile-area category"),
-            menu_key("H", "annel category"),
+            menu_key("C", "hannel category"),
             menu_key("B", "ack"),
         ]
     )
@@ -2648,11 +2648,11 @@ async def _pick_moderator_scope(session: Session, lane: DatabaseLane) -> tuple[s
     blanket grant to one Community's membership (design doc §16, round
     84's Community-blanket tier) instead of the whole node;
     `community_id` is always `None` for a per-object grant (`[B]oard`/
-    `[A]rea`/`[H]annel`), since a specific object's own `community_id`
+    `[A]rea`/`Cha[N]nel`), since a specific object's own `community_id`
     already answers that question without needing it duplicated on the
     grant."""
     await session.write(
-        "Scope: [B]oard, [A]rea, [H]annel, blanket across all boards [X], "
+        "Scope: [B]oard, [A]rea, Cha[N]nel, blanket across all boards [X], "
         "blanket across all areas [Y], blanket across all channels [Z]: "
     )
     scope_key = (await session.read_key()).lower()
@@ -2675,7 +2675,7 @@ async def _pick_moderator_scope(session: Session, lane: DatabaseLane) -> tuple[s
         if area is None:
             return None
         return "file_area", area.id, f"file area {area.name!r}", None
-    elif scope_key == "h":
+    elif scope_key == "n":
         channel = await pick_item(
             session, await lane.run(list_channels),
             name_of=lambda c: c.name, stable_id_of=lambda c: c.id,

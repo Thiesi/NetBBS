@@ -85,7 +85,8 @@ class FakeSession:
         self.written.append(text + "\n")
 
     async def read_line(
-        self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None
+        self, echo: bool = True, history=None, completer=None, *,
+        live_buffer=None, lock=None, list_candidates=None,
     ) -> str:
         # Falls back to "" (an empty Enter-press) once scripted input
         # runs out, rather than raising -- simpler than every test

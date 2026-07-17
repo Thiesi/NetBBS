@@ -578,6 +578,22 @@ Terminal dimensions can change at any moment. Pinned UI state is dynamic:
 Cleanup resets the scroll region and clears the screen best-effort without
 masking the original exception.
 
+Any code that writes to the terminal while the pinned rows are active must go
+through the scroll-region-aware primitives (`_print_and_redraw_input`/
+`_enter_content_region`/`_repaint_*`), never a bare `write("\r\n" + ...)`. A
+raw newline has no idea the cursor may be sitting on a pinned row outside the
+scroll region, and lands whatever it writes on — and overwrites — that row
+instead of scrolling normally above it. `netbbs.net.char_input.
+apply_tab_completion`'s multi-candidate listing hit exactly this: written
+against a bare terminal, predating the pinned-row feature, its raw-newline
+default was still the only path in use once pinned rows shipped, corrupting
+the status line every time completion listed more than one candidate. Fixed
+by giving it an optional `list_candidates` hook (same shape as `live_buffer`/
+`lock`: threaded through `read_line`, `None`/no-op everywhere except chat's
+`send_loop`) that callers with reserved rows can use to redraw correctly
+instead. Any future generic `char_input` primitive that can print more than
+one line needs the same hook, not an assumption that a bare newline is safe.
+
 ### Editors
 
 The ANSI editor and prose editor share a screen-buffer/diff shell but have

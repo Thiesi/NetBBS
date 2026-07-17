@@ -22,6 +22,7 @@ CSI = ESC + "["  # Control Sequence Introducer
 
 RESET = f"{CSI}0m"
 BOLD = f"{CSI}1m"
+UNDERLINE = f"{CSI}4m"
 REVERSE = f"{CSI}7m"
 
 
@@ -45,28 +46,39 @@ def colored(
     bg_color: int | None = None,
     bold: bool = False,
     reverse: bool = False,
+    underline: bool = False,
 ) -> str:
     """
     Wrap `text` in the given SGR codes, always resetting afterward.
 
-    This is the recommended way to apply color/bold/reverse — not
-    calling `fg`/`bg`/`BOLD`/`REVERSE` directly and forgetting to
-    reset — since formatting that bleeds into whatever comes next is
-    probably the single most common real-world bug with raw ANSI
-    codes. Returns `text` unchanged if no formatting is requested,
-    rather than emitting empty escape sequences.
+    This is the recommended way to apply color/bold/reverse/underline —
+    not calling `fg`/`bg`/`BOLD`/`REVERSE`/`UNDERLINE` directly and
+    forgetting to reset — since formatting that bleeds into whatever
+    comes next is probably the single most common real-world bug with
+    raw ANSI codes. Returns `text` unchanged if no formatting is
+    requested, rather than emitting empty escape sequences.
 
     `reverse` (SGR 7, design doc round 77) swaps foreground/background
     at the terminal level rather than picking specific colors for
-    both — the chat status line uses this so it reads as a solid,
-    inverted bar regardless of whatever the client's own default
+    both — the chat status line originally used this so it read as a
+    solid, inverted bar regardless of whatever the client's own default
     foreground/background happen to be, the same reason real terminal
     status lines (tmux, screen, IRC clients) use reverse video rather
     than a hardcoded color pair.
+
+    `underline` (SGR 4) is what the status line redesign replaced that
+    solid reverse-video bar with (Thiesi's own explicit choice, over
+    invented background-color banding) — chosen specifically because,
+    unlike `reverse`, it composes with a *different* `fg_color` per
+    call and still reads as one continuous rule once several `colored()`
+    calls for adjacent fields are concatenated, rather than each field
+    fighting over one shared inverted background.
     """
     prefix = ""
     if bold:
         prefix += BOLD
+    if underline:
+        prefix += UNDERLINE
     if reverse:
         prefix += REVERSE
     if fg_color is not None:

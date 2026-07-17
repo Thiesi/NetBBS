@@ -29,6 +29,7 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import char_input, chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
+from netbbs.rendering import move_cursor, set_scroll_region
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
@@ -200,10 +201,12 @@ class _LiveTypingSession(Session):
         self.written.append(text + "\r\n")
 
     async def read_line(
-        self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None
+        self, echo: bool = True, history=None, completer=None, *,
+        live_buffer=None, lock=None, list_candidates=None,
     ) -> str:
         return await char_input.read_line(
-            self, self.write, echo, history, completer, live_buffer=live_buffer, lock=lock
+            self, self.write, echo, history, completer,
+            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
         )
 
     async def read_key(self, echo: bool = True) -> str:
@@ -300,6 +303,63 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     # specifically, not a bare "hello" substring, which bob's own
     # distinct "hello there" would also satisfy.
     assert "<alice>\x1b[0m hello" in text
+
+
+def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
+    lane, hub, presence, mailbox, channel, alice, bob
+):
+    """
+    Before this fix, `apply_tab_completion`'s multi-candidate branch
+    wrote a bare `"\\r\\n" + candidates + "\\r\\n"` with no idea the
+    terminal's cursor sits on the pinned input row, outside the scroll
+    region -- an unconstrained newline there lands on, and overwrites,
+    the status row directly below instead of scrolling normally above
+    it (this is also what produced garbled-looking candidate text:
+    Thiesi's report of e.g. "Thiesi" showing up as "hiesi" was this same
+    overwrite, not a completion-matching bug). Now the candidate list
+    goes through the exact same "new line in the content region, then
+    redraw the pinned input row" primitive every other pinned-row print
+    already uses.
+    """
+
+    async def scenario():
+        alice_session = _LiveTypingSession()
+        alice_task = asyncio.create_task(
+            chat_flow._chat_loop(
+                alice_session, lane, hub, presence, mailbox, InputHistory(), channel, alice
+            )
+        )
+        await asyncio.sleep(0.05)  # let alice join and reach her first read_line()
+
+        alice_session.feed("/whois ")
+        await asyncio.sleep(0.05)
+        alice_session.feed("\t")  # multiple registered users -> candidate list
+        await asyncio.sleep(0.05)
+
+        alice_task.cancel()
+        try:
+            await alice_task
+        except asyncio.CancelledError:
+            pass
+        return alice_session
+
+    alice_session = asyncio.run(scenario())
+    text = alice_session.output
+
+    # Both registered usernames appear, correctly cased -- and complete,
+    # not truncated as the pre-fix overwrite bug made them look.
+    assert "alice" in text
+    assert "bob" in text
+
+    # The candidate list is printed via the same content-region primitive
+    # every other pinned-row print uses (scroll region + jump to its
+    # bottom row -- row 22 on the default 80x24 terminal, one above the
+    # pinned input row at 23 and the status row at 24), not a bare,
+    # region-unaware "\r\n" that would instead land wherever the cursor
+    # already was (the input row, one row above the status line it then
+    # overwrites).
+    scroll_bottom = alice_session.terminal_height - 2
+    assert set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) in text
 
 
 # -- GitHub issue #45: Enter completion must be one atomic critical section -

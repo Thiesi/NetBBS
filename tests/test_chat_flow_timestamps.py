@@ -114,9 +114,10 @@ async def _join_and_wait(lane, hub, presence, channel, user, session):
 # -- /timestamps command itself ---------------------------------------------
 
 
-def test_timestamps_defaults_to_off(lane, hub, presence, alice, channel):
+def test_timestamps_bare_invocation_toggles_from_default_off(db, lane, hub, presence, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
-    assert "Chat timestamps are off." in _written_text(session)
+    assert "Chat timestamps are now on." in _written_text(session)
+    assert timestamps_enabled(db, alice) is True
 
 
 def test_timestamps_on_enables_the_preference(db, lane, hub, presence, alice, channel):
@@ -132,12 +133,12 @@ def test_timestamps_off_disables_the_preference(db, lane, hub, presence, alice, 
     assert timestamps_enabled(db, alice) is False
 
 
-def test_timestamps_toggle_flips_the_state(db, lane, hub, presence, alice, channel):
-    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
+def test_timestamps_bare_invocation_flips_the_state(db, lane, hub, presence, alice, channel):
+    session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
     assert "Chat timestamps are now on." in _written_text(session)
     assert timestamps_enabled(db, alice) is True
 
-    session2 = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps toggle", "/quit"]))
+    session2 = asyncio.run(_run(lane, hub, presence, channel, alice, ["/timestamps", "/quit"]))
     assert "Chat timestamps are now off." in _written_text(session2)
     assert timestamps_enabled(db, alice) is False
 

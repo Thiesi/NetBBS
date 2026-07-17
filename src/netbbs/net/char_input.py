@@ -293,6 +293,15 @@ class LiveInputBuffer:
 # space) needed to know how much of the buffer to replace.
 Completer = Callable[[str], Sequence[str]]
 
+# Hook for the multi-candidate branch of `apply_tab_completion` (see that
+# function's docstring for why this exists): given the candidate list, the
+# full current line text, and the cursor position, the hook is responsible
+# for displaying the candidates and leaving the terminal ready for further
+# editing. `None` (the default, and every caller except `netbbs.net.
+# chat_flow`) keeps the original plain-scrolling behavior of writing the
+# list with raw newlines.
+CandidateListPrinter = Callable[[Sequence[str], str, int], Awaitable[None]]
+
 
 def _current_word_start(line: list[str], cursor: int) -> int:
     """Start index of the whitespace-delimited token ending at
@@ -316,7 +325,8 @@ def _common_prefix(candidates: Sequence[str]) -> str:
 
 
 async def apply_tab_completion(
-    write: WriteFunc, completer: Completer, line: list[str], cursor: int
+    write: WriteFunc, completer: Completer, line: list[str], cursor: int,
+    *, list_candidates: CandidateListPrinter | None = None,
 ) -> int:
     """
     Handle one Tab keypress in an editable line buffer: ask `completer`
@@ -329,8 +339,7 @@ async def apply_tab_completion(
     candidate: replaces the current word with it plus a trailing space,
     ready to type the next word. Multiple candidates: extends the word
     to their longest shared prefix (bash-style), if that's longer than
-    what's already typed, then lists every candidate on its own line
-    below and reprints the in-progress line.
+    what's already typed, then lists every candidate.
 
     Deliberately reprints only the raw line content after showing a
     candidate list, not any caller-side prompt label ("Choice: ",
@@ -340,6 +349,17 @@ async def apply_tab_completion(
     itself doesn't reappear alongside a multi-candidate list; callers
     without one (chat's `send_loop`, which has no prompt string at all)
     are unaffected.
+
+    `list_candidates`, if given, takes over displaying the multi-
+    candidate list and redrawing the line afterward, instead of this
+    function writing a bare `"\\r\\n" + "  ".join(candidates) + "\\r\\n"`
+    itself. Needed by callers with pinned/reserved screen rows (chat's
+    status and input rows, design doc round 79's scroll region): an
+    unconditional `"\\r\\n"` from here has no idea that the terminal's
+    cursor sits on a row outside the scrolling content region, and lands
+    the candidate list on — and overwrites — whatever's pinned there
+    instead of scrolling normally above it. `None` (every caller besides
+    `netbbs.net.chat_flow`) keeps the original behavior exactly.
     """
     text_before_cursor = "".join(line[:cursor])
     candidates = list(completer(text_before_cursor))
@@ -367,9 +387,12 @@ async def apply_tab_completion(
             write, terminal_col=terminal_col, edit_pos=word_start, line=line, new_cursor=cursor
         )
 
-    await write("\r\n" + "  ".join(candidates) + "\r\n")
-    await write("".join(line))
-    await write(move_cursor(len(line) - cursor, forward=False))
+    if list_candidates is not None:
+        await list_candidates(candidates, "".join(line), cursor)
+    else:
+        await write("\r\n" + "  ".join(candidates) + "\r\n")
+        await write("".join(line))
+        await write(move_cursor(len(line) - cursor, forward=False))
     return cursor
 
 
@@ -411,6 +434,7 @@ async def read_line(
     *,
     live_buffer: LiveInputBuffer | None = None,
     lock: asyncio.Lock | None = None,
+    list_candidates: CandidateListPrinter | None = None,
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
@@ -441,10 +465,16 @@ async def read_line(
     Silently ignored for `echo=False` masked reads — a password prompt
     has no legitimate reason to be visible to a concurrently-redrawing
     pinned row.
+
+    `list_candidates`, also chat-only and also `None` everywhere else,
+    passes straight through to `apply_tab_completion` — see that
+    function's docstring.
     """
     if not echo:
         return await _read_line_masked(source, write)
-    return await _read_line_editable(source, write, history, completer, live_buffer=live_buffer, lock=lock)
+    return await _read_line_editable(
+        source, write, history, completer, live_buffer=live_buffer, lock=lock, list_candidates=list_candidates
+    )
 
 
 async def _read_line_masked(source: ByteSource, write: WriteFunc) -> str:
@@ -497,6 +527,7 @@ async def _read_line_editable(
     *,
     live_buffer: LiveInputBuffer | None = None,
     lock: asyncio.Lock | None = None,
+    list_candidates: CandidateListPrinter | None = None,
 ) -> str:
     line: list[str] = []
     cursor = 0
@@ -557,7 +588,9 @@ async def _read_line_editable(
 
                 if b == _TAB:
                     if completer is not None:
-                        cursor = await apply_tab_completion(write, completer, line, cursor)
+                        cursor = await apply_tab_completion(
+                            write, completer, line, cursor, list_candidates=list_candidates
+                        )
                     continue
 
                 if b == _ESC:

@@ -81,6 +81,15 @@ def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
 
+def _plain(groups) -> str:
+    """Flattens `_render_chat_status_line`'s colored field groups back
+    to plain text for substring assertions -- groups themselves join
+    with `_STATUS_SEPARATOR`, spans within one group concatenate with
+    no gap (see `_StatusSpan`'s own docstring), matching exactly how
+    `_compose_status_line` lays out the same data for real."""
+    return chat_flow._STATUS_SEPARATOR.join("".join(span.text for span in group) for group in groups)
+
+
 async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
     session = FakeSession(lines)
     history = InputHistory()
@@ -98,7 +107,7 @@ async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_re
 
 def test_render_shows_channel_name_and_online_count(db, hub, presence, channel, alice):
     hub.join(channel.name, ParticipantId(username="alice", session_key=1))
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "#lobby" in text
     assert "1 online" in text
 
@@ -107,7 +116,7 @@ def test_render_reflects_the_live_participant_count(db, hub, presence, channel, 
     hub.join(channel.name, ParticipantId(username="alice", session_key=1))
     hub.join(channel.name, ParticipantId(username="bob", session_key=2))
     hub.join(channel.name, ParticipantId(username="carol", session_key=3))
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "3 online" in text
 
 
@@ -115,23 +124,23 @@ def test_render_reflects_the_away_count_among_current_participants(db, hub, pres
     hub.join(channel.name, ParticipantId(username="alice", session_key=1))
     hub.join(channel.name, ParticipantId(username="bob", session_key=2))
     presence.set_away(bob.username, "brb")
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "2 online(1 away)" in text
 
 
 def test_render_shows_channel_type(db, hub, presence, channel, alice):
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "[pub]" in text
 
 
 def test_render_shows_own_username(db, hub, presence, channel, alice):
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "you:alice" in text
 
 
 def test_render_shows_own_nick_when_set(db, hub, presence, channel, alice):
     set_nick(db, alice, "night_owl")
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "you:alice(night_owl)" in text
 
 
@@ -143,18 +152,18 @@ def test_render_shows_topic_when_set(db, hub, presence, channel, alice):
     db.connection.execute("UPDATE channels SET topic = ? WHERE id = ?", ("Welcome to the lounge!", channel.id))
     db.connection.commit()
     channel = get_channel_by_name(db, channel.name)
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert '"Welcome to the lounge!"' in text
 
 
 def test_render_omits_topic_when_unset(db, hub, presence, channel, alice):
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert '"' not in text
 
 
 def test_render_shows_own_privileges(db, hub, presence, channel, alice):
     _grant_moderate(db, alice, channel)
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "you:alice[mod]" in text
 
 
@@ -163,18 +172,18 @@ def test_render_shows_sysop_privilege_label_instead_of_enumerating_bits(db, hub,
 
     sysop_actor = create_user(db, "root", password="hunter2", user_level=255)
     promoted = set_user_level(db, alice, 255, changed_by=sysop_actor)
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, promoted)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, promoted))
     assert "you:alice[sysop]" in text
 
 
 def test_render_shows_no_indicators_by_default(db, hub, presence, channel, alice):
-    assert "[away]" not in chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
-    assert "[muted" not in chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    assert "[away]" not in _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
+    assert "[muted" not in _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
 
 
 def test_render_shows_away_indicator(db, hub, presence, channel, alice):
     presence.set_away(alice.username, "brb")
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "[away]" in text
 
 
@@ -188,7 +197,7 @@ def _grant_moderate(db, user, channel):
 def test_render_shows_indefinite_mute_indicator(db, hub, presence, channel, alice, bob):
     _grant_moderate(db, alice, channel)
     mute_user(db, channel, bob, duration=None, reason=None, muted_by=alice)
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, bob)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, bob))
     assert "[muted]" in text
 
 
@@ -197,7 +206,7 @@ def test_render_shows_timed_mute_indicator_with_expiry(db, hub, presence, channe
 
     _grant_moderate(db, alice, channel)
     mute_user(db, channel, bob, duration=datetime.timedelta(minutes=10), reason=None, muted_by=alice)
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, bob)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, bob))
     assert "muted until" in text
 
 
@@ -207,9 +216,64 @@ def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, a
     wasted width on a bar that only ever shows the current moment."""
     import re
 
-    text = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert re.search(r"\b\d{2}:\d{2}\b", text)
     assert not re.search(r"\d{4}", text)  # no 4-digit year anywhere
+
+
+# -- _compose_status_line (pure function): colors, separators, no reverse --
+
+
+def test_compose_uses_ascii_pipe_separators_between_fields(db, hub, presence, channel, alice):
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=200)
+    assert chat_flow._STATUS_SEPARATOR in line
+
+
+def test_compose_colors_each_field_distinctly_and_never_reverses(db, hub, presence, channel, alice):
+    from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR
+    from netbbs.rendering.ansi import REVERSE, fg
+
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=200)
+    # Channel name and this user's own identity get their own distinct
+    # colors (design doc's status-line redesign) rather than sharing one
+    # inverted background -- and reverse video is gone entirely.
+    assert fg(ACCENT_COLOR) in line
+    assert fg(SELF_COLOR) in line
+    assert fg(MUTED_COLOR) in line
+    assert REVERSE not in line
+
+
+def test_compose_underlines_the_full_row_including_padding(db, hub, presence, channel, alice):
+    import re
+
+    from netbbs.rendering.ansi import RESET, UNDERLINE
+
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=200)
+    # The underline (round 77's original solid reverse-video bar,
+    # replaced here) must still reach the padding at the row's far
+    # right, not just the real field text, so it reads as one
+    # continuous rule the same way the old bar filled the whole row.
+    pattern = re.escape(UNDERLINE) + r" +" + re.escape(RESET) + r"$"
+    assert re.search(pattern, line)
+
+
+def test_compose_drops_whole_groups_from_the_right_on_a_narrow_terminal(db, hub, presence, channel, alice):
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    # Wide enough for the channel name alone, nowhere near enough for
+    # everything -- must drop later (lower-priority) groups whole
+    # rather than character-truncating mid-field.
+    line = chat_flow._compose_status_line(groups, width=10)
+    assert "#lobby" in line
+    assert "you:alice" not in line
+
+
+def test_compose_character_truncates_only_when_even_the_first_group_does_not_fit(db, hub, presence, channel, alice):
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=3)
+    assert "..." in line
 
 
 # -- scroll region setup/teardown, via the real _chat_loop --------------

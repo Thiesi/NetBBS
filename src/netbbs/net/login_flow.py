@@ -938,7 +938,7 @@ async def _login(
     prompt = (
         "\r\nUsername: "
         if registration_mode == RegistrationMode.CLOSED
-        else "\r\nUsername (or 'new' to create an account): "
+        else "\r\nNew here? Type 'new' to create an account.\r\nUsername: "
     )
 
     for attempt in range(max_attempts):

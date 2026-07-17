@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     # already makes every annotation in this file a lazily-evaluated
     # string at runtime; this block exists only so type checkers/IDEs
     # can resolve `InputHistory` by name.
-    from netbbs.net.char_input import Completer, EditorKey, InputHistory, LiveInputBuffer
+    from netbbs.net.char_input import CandidateListPrinter, Completer, EditorKey, InputHistory, LiveInputBuffer
 
 
 # Same numbers as netbbs.rendering.screen_buffer.ScreenBuffer's own
@@ -119,6 +119,7 @@ class Session(ABC):
         *,
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
+        list_candidates: CandidateListPrinter | None = None,
     ) -> str:
         """
         Read one line of input from the client.
@@ -153,11 +154,11 @@ class Session(ABC):
         depends on exactly where it's called from, so there's nothing
         to persist between calls the way recalled history lines are.
 
-        `live_buffer`/`lock` (design doc round 79) are pinned-input-row
-        hooks that only `netbbs.net.chat_flow`'s chat loop uses — every
-        other caller leaves both at their default `None`, a complete
-        no-op. See `netbbs.net.char_input.read_line`'s docstring for
-        what each does.
+        `live_buffer`/`lock`/`list_candidates` (design doc round 79) are
+        pinned-input-row hooks that only `netbbs.net.chat_flow`'s chat
+        loop uses — every other caller leaves all three at their default
+        `None`, a complete no-op. See `netbbs.net.char_input.read_line`'s
+        docstring for what each does.
         """
 
     @abstractmethod

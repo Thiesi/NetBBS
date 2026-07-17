@@ -71,7 +71,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 from netbbs.attestation import (
     format_verified_name_unit,
@@ -144,6 +144,7 @@ from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     MUTED_COLOR,
+    NICK_COLOR,
     SELF_COLOR,
     clear_line,
     clear_screen,
@@ -1464,20 +1465,21 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
 async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
     """
     `/nick <name>` sets a transparent display alias (design doc round
-    32, points 7-10); `/nick off` clears it; `/nick` with no argument
-    shows the current one. Nickname changes are their own typed
-    scrollback event, recorded for the channel this command was run
-    in — announced the same way join/leave/action events are.
+    32, points 7-10). A bare `/nick` clears it -- same reasoning as
+    `/timestamps`'s own bare invocation: the status line already shows
+    whatever alias is currently active, so a query-only bare invocation
+    would just be redundant, and the only useful thing left for it to
+    do is act. Deliberately no magic `"off"`/`"clear"`/etc. keyword --
+    unlike `/timestamps` (whose `on`/`off` are the only two states that
+    exist, so there's nothing real a literal alias named "on" could
+    ever mean), a nick is free-form user-chosen text, and reserving any
+    one spelling would be a real, if narrow, loss for zero gain now
+    that bare `/nick` already covers clearing it. Nickname changes are
+    their own typed scrollback event, recorded for the channel this
+    command was run in — announced the same way join/leave/action
+    events are.
     """
     if not args:
-        current = await ctx.lane.run(get_nick, ctx.user)
-        if current:
-            await ctx.session.write_line(f"Your current alias: {sanitize_text(current)}")
-        else:
-            await _show_usage(ctx.session, "nick")
-        return
-
-    if args.lower() == "off":
         await ctx.lane.run(set_nick, ctx.user, "")
         await _announce_nick_change(ctx, new_nick=None)
         return
@@ -1530,27 +1532,21 @@ async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
 
 async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/timestamps on|off|toggle` (design doc round 32 point 3, round 42
-    point 6): sets the persistent per-user preference controlling
-    whether chat lines show a display timestamp, defaulting to off.
-    `/timestamps` with no argument reports the current state rather
-    than toggling it -- unlike `/away`, this preference has no natural
-    "clear" meaning for a bare invocation, so an explicit `on`/`off`/
-    `toggle` argument is required to change it (design doc's own
-    wording lists exactly these three subcommands).
+    `/timestamps [on|off]`: sets the persistent per-user preference
+    controlling whether chat lines show a display timestamp, defaulting
+    to off. A bare `/timestamps` toggles the current state rather than
+    just reporting it -- querying the state is not useful on its own
+    since the user's screen already shows whether timestamps are
+    present, so a bare invocation's intent is unambiguous the same way
+    `/away` treats one.
     """
-    if not args:
-        state = "on" if await ctx.lane.run(timestamps_enabled, ctx.user) else "off"
-        await ctx.session.write_line(colored(f"Chat timestamps are {state}.", fg_color=MUTED_COLOR))
-        return
-
     choice = args.strip().lower()
-    if choice == "on":
+    if not choice:
+        new_state = not await ctx.lane.run(timestamps_enabled, ctx.user)
+    elif choice == "on":
         new_state = True
     elif choice == "off":
         new_state = False
-    elif choice == "toggle":
-        new_state = not await ctx.lane.run(timestamps_enabled, ctx.user)
     else:
         await _show_usage(ctx.session, "timestamps")
         return
@@ -1887,9 +1883,9 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "close": ("/close", "Leave the current private conversation."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
     "me": ("/me <action>", 'Send an action message (e.g. "* alice waves").'),
-    "nick": ("/nick [name|off]", "Set, view, or clear your display alias."),
+    "nick": ("/nick [name]", "Set your display alias; a bare /nick clears it."),
     "away": ("/away [message]", "Mark yourself away, or clear away status."),
-    "timestamps": ("/timestamps on|off|toggle", "Show, enable, disable, or toggle chat timestamps."),
+    "timestamps": ("/timestamps [on|off]", "Toggle chat timestamps, or set them on/off explicitly."),
     "mute": ("/mute <user> [duration] [reason]", "Silence a user's messages in this channel."),
     "unmute": ("/unmute <user>", "Lift a mute."),
     "ban": ("/ban <user> [duration] [reason]", "Bar a user from this channel."),
@@ -2138,25 +2134,51 @@ def _check_ban(db: Database, channel: Channel, user: User) -> str | None:
     return "indefinitely" if restriction.expires_at is None else f"until {format_for_display(restriction.expires_at, db)}"
 
 
+@dataclass
+class _StatusSpan:
+    """One colored run of text within a status-line field group -- e.g.
+    the identity group splits into a `SELF_COLOR` "you:alice" span, an
+    optional `NICK_COLOR` "(nick)" span, and a `MUTED_COLOR` "[mod]"
+    indicator span, concatenated with no gap between them so they read
+    as one field while still each getting their own color."""
+
+    text: str
+    fg_color: int | None = None
+    bold: bool = False
+
+
+# A "group" is one status-line field: a list of `_StatusSpan`s
+# concatenated with no separator (see `_StatusSpan`'s own docstring for
+# why a field can be more than one span). `_compose_status_line` joins
+# *groups* with `_STATUS_SEPARATOR` and can drop a whole group from the
+# right if the terminal is too narrow -- never splits one mid-span.
+_StatusGroup = list[_StatusSpan]
+
+_STATUS_SEPARATOR = " | "
+
+
 def _render_chat_status_line(
     db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
-) -> str:
+) -> list[_StatusGroup]:
     """
-    The status line's content, as plain formatted text (colored/
-    truncated by the caller) -- design doc round 77's expansion of
-    round 75's original channel-name/count/clock bar.
+    The status line's content, as an ordered list of colored field
+    groups (composed/truncated/underlined by the caller) -- design doc
+    round 77's original channel-name/count/clock bar, redesigned onto
+    per-field color plus a continuous underline rather than one solid
+    reverse-video bar (Thiesi's own explicit choice, over inventing a
+    background-color band).
 
-    Fields are ordered most- to least-important on purpose, not
-    alphabetically or by "how it's stored": `truncate()` (the caller)
-    only ever cuts from the *right* on a too-narrow terminal, never
-    wraps, so whatever's listed last here is what silently disappears
-    first on a narrow screen -- the clock, then this user's own
-    identity/privileges/away/mute state, then the topic, while the
-    channel name and live counts always survive. Deliberately still
-    *not* included: any per-channel "linked vs. local" origin -- that
-    distinction doesn't exist anywhere in the schema yet (NetBBS Link
-    is Phase 3, not started -- see design doc round 77's sign-off
-    note), so there is nothing real to render.
+    Groups are ordered most- to least-important on purpose, not
+    alphabetically or by "how it's stored": `_compose_status_line` (the
+    caller) drops whole groups from the *right* on a too-narrow
+    terminal, so whichever group is listed last here is what silently
+    disappears first -- the clock, then this user's own identity/
+    privileges/away/mute state, then the topic, while the channel name
+    and live counts always survive. Deliberately still *not* included:
+    any per-channel "linked vs. local" origin -- that distinction
+    doesn't exist anywhere in the schema yet (NetBBS Link is Phase 3,
+    not started -- see design doc round 77's sign-off note), so there
+    is nothing real to render.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -2181,17 +2203,19 @@ def _render_chat_status_line(
     away_count = sum(1 for username in roster if presence.is_away(username))
     online = f"{online_count} online({away_count} away)"
 
-    fields = [channel_label, online]
+    groups: list[_StatusGroup] = [
+        [_StatusSpan(channel_label, fg_color=ACCENT_COLOR, bold=True)],
+        [_StatusSpan(online, fg_color=MUTED_COLOR)],
+    ]
 
     if channel.topic:
-        fields.append(f'"{sanitize_text(channel.topic)}"')
+        groups.append([_StatusSpan(f'"{sanitize_text(channel.topic)}"', fg_color=MUTED_COLOR)])
 
     nick = get_nick(db, user)
-    identity = (
-        f"you:{sanitize_text(user.username)}({sanitize_text(nick)})"
-        if nick
-        else f"you:{sanitize_text(user.username)}"
-    )
+    identity: _StatusGroup = [_StatusSpan(f"you:{sanitize_text(user.username)}", fg_color=SELF_COLOR)]
+    if nick:
+        identity.append(_StatusSpan(f"({sanitize_text(nick)})", fg_color=NICK_COLOR))
+
     own_indicators = []
     privileges = _own_channel_privileges(db, channel, user)
     if privileges is not None:
@@ -2202,11 +2226,58 @@ def _render_chat_status_line(
     until = _check_mute(db, channel, user)
     if until is not None:
         own_indicators.append("muted" if until == "indefinitely" else f"muted {until}")
-    identity += "".join(f"[{indicator}]" for indicator in own_indicators)
-    fields.append(identity)
+    if own_indicators:
+        identity.append(
+            _StatusSpan("".join(f"[{indicator}]" for indicator in own_indicators), fg_color=MUTED_COLOR)
+        )
+    groups.append(identity)
 
-    fields.append(format_for_display(utc_now_iso(), db, override_format="%H:%M"))
-    return " ".join(fields)
+    groups.append(
+        [_StatusSpan(format_for_display(utc_now_iso(), db, override_format="%H:%M"), fg_color=MUTED_COLOR)]
+    )
+    return groups
+
+
+def _compose_status_line(groups: list[_StatusGroup], width: int) -> str:
+    """
+    Joins `groups` with a dim `_STATUS_SEPARATOR`, dropping whole groups
+    from the right when the terminal is too narrow to fit them all --
+    the same "least-important field disappears first" priority order
+    `_render_chat_status_line`'s own field ordering establishes, now
+    applied per-group instead of the old raw character `truncate()`
+    (design doc round 77), which could land mid-field. Underlines every
+    span, including the separators and the trailing padding, so the
+    whole row still reads as one continuous rule the way solid reverse
+    video (round 77's original choice) used to read as one continuous
+    inverted bar -- just without needing every field to share one
+    fought-over background color.
+    """
+    kept: list[_StatusGroup] = []
+    running = 0
+    for group in groups:
+        text = "".join(span.text for span in group)
+        sep_len = len(_STATUS_SEPARATOR) if kept else 0
+        if running + sep_len + len(text) > width:
+            break
+        running += sep_len + len(text)
+        kept.append(group)
+
+    if not kept:
+        # Not even the first (most important) group fits -- fall back to
+        # a raw character truncation of just that one.
+        only = truncate("".join(span.text for span in groups[0]), width) if groups else ""
+        return colored(only, underline=True)
+
+    rendered: list[str] = []
+    for index, group in enumerate(kept):
+        if index > 0:
+            rendered.append(colored(_STATUS_SEPARATOR, fg_color=MUTED_COLOR, underline=True))
+        for span in group:
+            rendered.append(colored(span.text, fg_color=span.fg_color, bold=span.bold, underline=True))
+    pad = width - running
+    if pad > 0:
+        rendered.append(colored(" " * pad, underline=True))
+    return "".join(rendered)
 
 
 async def _repaint_status_line(
@@ -2246,21 +2317,17 @@ async def _repaint_status_line(
     `lane`, not `db` (round 114, per Thiesi's explicit choice to
     migrate this hot, cosmetic, repainted-after-nearly-every-message
     path fully rather than leave it on direct `db` access): one
-    `lane.run` call renders the whole line's text on the worker thread
-    (`_render_chat_status_line`), then the actual terminal write stays
-    a plain `await` here, same split as `_resolve_target`/
+    `lane.run` call renders the whole line's fields on the worker
+    thread (`_render_chat_status_line`), then composing/coloring/
+    truncating and the actual terminal write stay plain, synchronous,
+    non-`db`-touching code here, same split as `_resolve_target`/
     `_write_vcard_detail`.
     """
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    rendered = await lane.run(_render_chat_status_line, hub, presence, channel, user)
-    text = truncate(rendered, session.terminal_width)
-    # Padded to the full row width, not just the text's own length --
-    # otherwise reverse video (design doc round 77) would only invert
-    # the characters themselves, leaving a ragged, only-partly-colored
-    # bar rather than one solid inverted row.
-    line = colored(text.ljust(session.terminal_width), reverse=True)
+    groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
+    line = _compose_status_line(groups, session.terminal_width)
     await session.write(
         save_cursor()
         + set_scroll_region(1, height - 2)
@@ -2346,6 +2413,34 @@ async def _print_and_redraw_input(
     scroll_bottom = height - 2
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) + text + "\r\n")
     await _repaint_input_row(session, live_buffer, height)
+
+
+async def _print_candidates_and_redraw_input(
+    session: Session, live_buffer: LiveInputBuffer, height: int,
+    candidates: Sequence[str], line_text: str, cursor: int,
+) -> None:
+    """
+    `apply_tab_completion`'s `list_candidates` hook (design doc round
+    79) for chat's pinned input row: prints the Tab-completion candidate
+    list through the exact same "new line in the scrolling content
+    region, then redraw the pinned input row" shape as everything else
+    that prints while the pinned rows are active (`_print_and_redraw_
+    input`, reused directly here), instead of `apply_tab_completion`'s
+    own default fallback -- an unconditional `"\\r\\n"` that has no idea
+    the terminal's cursor sits on the pinned input row, outside the
+    scroll region, and lands the candidate list on (overwriting) the
+    status row directly below instead of scrolling normally above it.
+
+    `live_buffer` is updated with the completion's own already-applied
+    result *before* `_print_and_redraw_input` reads it to redraw the
+    input row -- `_read_line_editable`'s own per-keystroke update to
+    `live_buffer` only happens once this whole Tab keypress finishes
+    handling, after this hook has already returned, so without this the
+    redraw would show the in-progress text from *before* the completion
+    ran.
+    """
+    live_buffer.update(list(line_text), cursor)
+    await _print_and_redraw_input(session, "  ".join(candidates), live_buffer, height)
 
 
 async def _enter_content_region(session: Session, height: int) -> None:
@@ -2685,11 +2780,17 @@ async def _chat_loop(
             # to the channel.
             private_target: User | None = None
 
+            async def list_candidates(candidates: Sequence[str], line_text: str, cursor: int) -> None:
+                await _print_candidates_and_redraw_input(
+                    session, live_buffer, session.terminal_height, candidates, line_text, cursor
+                )
+
             while True:
                 completer = await _build_completer(lane, presence, channel, user)
                 line = (
                     await session.read_line(
-                        history=history, completer=completer, live_buffer=live_buffer, lock=lock
+                        history=history, completer=completer, live_buffer=live_buffer, lock=lock,
+                        list_candidates=list_candidates if pinned_ui.active else None,
                     )
                 ).strip()
 
@@ -2916,6 +3017,30 @@ async def _chat_loop(
                 outcome = value
         # receive_task finishing (a kick/ban) has no ChatAction of its
         # own -- it always means "exit entirely," same as /quit.
+        if receive_task in done and pinned_ui.active:
+            # `receive_task` completing normally (not cancelled, and the
+            # exception re-raise above already ruled out a dropped
+            # connection) only ever happens via `_KickNotice`'s own
+            # `return` -- receive_loop has no other path out of its
+            # `while True`. The kick/ban notice was just printed above,
+            # but the `finally` block below is about to reset the scroll
+            # region and clear the screen unconditionally (so the next
+            # screen doesn't inherit chat's shrunk region) -- without a
+            # pause here, that clear fires before the user has had any
+            # real chance to read why they were just removed. A genuine
+            # keypress, not a timed sleep, so this doesn't race a slow
+            # reader or make a fast one wait on nothing. Unpins the
+            # scroll region first (the `finally` block below will
+            # harmlessly re-send the same reset) so this prompt lands on
+            # its own fresh line below the notice, not appended straight
+            # onto the pinned input row's now-empty "> ".
+            try:
+                await session.write(
+                    reset_scroll_region() + "\r\n" + colored("Press any key to continue...", fg_color=MUTED_COLOR)
+                )
+                await session.read_key()
+            except SessionClosedError:
+                pass
         return outcome or _Quit()
     finally:
         # `pinned_ui.active` (GitHub issue #46), not the entry-time

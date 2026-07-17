@@ -70,14 +70,16 @@ class LocalCLISession(Session):
         *,
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
+        list_candidates: char_input.CandidateListPrinter | None = None,
     ) -> str:
-        # live_buffer/lock (design doc round 79) are never actually
-        # passed by this session's one caller (the standalone `python -m
-        # netbbs.admin` CLI has no chat feature) -- accepted anyway
-        # purely for signature consistency with the rest of the Session
-        # implementations.
+        # live_buffer/lock/list_candidates (design doc round 79) are
+        # never actually passed by this session's one caller (the
+        # standalone `python -m netbbs.admin` CLI has no chat feature) --
+        # accepted anyway purely for signature consistency with the rest
+        # of the Session implementations.
         return await char_input.read_line(
-            self, self.write, echo, history, completer, live_buffer=live_buffer, lock=lock
+            self, self.write, echo, history, completer,
+            live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
         )
 
     async def read_key(self, echo: bool = True) -> str:

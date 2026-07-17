@@ -1810,9 +1810,11 @@ untouched by any of this; they keep their existing main-menu placement.
 
 **Admin-side management, mirroring existing SysOp tooling rather than
 inventing new patterns — added round 84.**
-- New content-menu entry **`[O]Communities`** (the next free letter in
-  "Communities" after Categories claims "C," same disambiguation rule
-  already used for `[H]annels`), with its own `[C]reate [L]ist [B]ack`
+- New content-menu entry **`C[O]mmunities`** (the next free letter in
+  "Communities" after Categories claims "C," same disambiguation need
+  as the content menu's `Cha[N]nels` entry — a mid-word highlight
+  rather than truncating the word down to a nonsense fragment), with
+  its own `[C]reate [L]ist [B]ack`
   submenu and `[E]dit [D]elete [B]ack` detail screen, mirroring
   `_board_menu`/`_board_detail_screen` exactly — no "pending posts"
   equivalent, a Community holds no content of its own.

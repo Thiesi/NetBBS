@@ -43,6 +43,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSCloseCode, web
 
 from netbbs.net.char_input import (
+    CandidateListPrinter,
     Completer,
     EditorKey,
     EditorKeyKind,
@@ -305,6 +306,7 @@ class WebSession(Session):
         *,
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
+        list_candidates: CandidateListPrinter | None = None,
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
@@ -319,8 +321,8 @@ class WebSession(Session):
         as the Telnet/SSH path and for the same reason -- see that
         module's `read_line` docstring.
 
-        `live_buffer`/`lock` (design doc round 79) mirror
-        `netbbs.net.char_input.read_line`'s own identically-named
+        `live_buffer`/`lock`/`list_candidates` (design doc round 79)
+        mirror `netbbs.net.char_input.read_line`'s own identically-named
         parameters exactly -- see that function's docstring. This
         transport's `_read_line_editable` is a separate reimplementation
         (round 25: a browser already delivers decoded characters, not
@@ -330,7 +332,9 @@ class WebSession(Session):
         """
         if not echo:
             return await self._read_line_masked()
-        return await self._read_line_editable(history, completer, live_buffer=live_buffer, lock=lock)
+        return await self._read_line_editable(
+            history, completer, live_buffer=live_buffer, lock=lock, list_candidates=list_candidates
+        )
 
     async def _read_line_masked(self) -> str:
         line: list[str] = []
@@ -358,6 +362,7 @@ class WebSession(Session):
         *,
         live_buffer: LiveInputBuffer | None = None,
         lock: asyncio.Lock | None = None,
+        list_candidates: CandidateListPrinter | None = None,
     ) -> str:
         line: list[str] = []
         cursor = 0
@@ -457,7 +462,9 @@ class WebSession(Session):
 
                     if char == _TAB:
                         if completer is not None:
-                            cursor = await apply_tab_completion(self.write, completer, line, cursor)
+                            cursor = await apply_tab_completion(
+                                self.write, completer, line, cursor, list_candidates=list_candidates
+                            )
                         continue
 
                     if ord(char) < 0x20:

@@ -27,6 +27,7 @@ from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
+from netbbs.rendering import clear_screen, reset_scroll_region
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -48,12 +49,14 @@ class FakeSession(Session):
         self.written.append(text)
 
     async def read_line(
-        self, echo: bool = True, history=None, completer=None, *, live_buffer=None, lock=None
+        self, echo: bool = True, history=None, completer=None, *,
+        live_buffer=None, lock=None, list_candidates=None,
     ) -> str:
-        # `history`/`completer`/`live_buffer`/`lock` accepted only to
-        # satisfy the Session ABC signature (design doc rounds 47/49/79,
-        # Tracks 5f/5g) -- this fake works from a pre-scripted list of
-        # whole logical lines, not raw terminal bytes/characters, so
+        # `history`/`completer`/`live_buffer`/`lock`/`list_candidates`
+        # accepted only to satisfy the Session ABC signature (design doc
+        # rounds 47/49/79, Tracks 5f/5g) -- this fake works from a
+        # pre-scripted list of whole logical lines, not raw terminal
+        # bytes/characters, so
         # there's no escape-sequence recognition here for Up/Down or Tab
         # to hook into, and no per-keystroke live_buffer updates either
         # (an idle/empty live_buffer is the accurate state for a fake
@@ -68,7 +71,12 @@ class FakeSession(Session):
         raise AssertionError("unreachable")
 
     async def read_key(self, echo: bool = True) -> str:
-        raise NotImplementedError
+        # Real callers here: _chat_loop's own post-kick/ban "press any
+        # key to continue" gate (design doc round 79) -- a real keypress
+        # this fake has no scripted input for, so it stands in with an
+        # immediate no-op keystroke rather than raising or blocking
+        # forever, matching a user who's already reaching for a key.
+        return " "
 
     async def read_editor_key(self):
         raise NotImplementedError
@@ -166,6 +174,43 @@ def test_kick_forces_out_a_present_target(db, lane, hub, presence, mailbox, hist
 
     scrollback = get_scrollback(db, channel)
     assert any(m.kind == "kick" for m in scrollback)
+
+
+def test_kicked_target_can_read_the_notice_before_the_screen_clears(
+    db, lane, hub, presence, mailbox, history, sysop, bob, channel
+):
+    """
+    Before this fix, the pinned-UI screen reset in `_chat_loop`'s
+    `finally` block (design doc round 77) fired unconditionally the
+    instant `receive_task` finished -- for a kicked/banned target, that
+    meant the very next thing after the kick notice was printed was the
+    screen getting wiped, with no chance to actually read it. Now a
+    "press any key to continue" gate sits between the two: the notice,
+    then the prompt, then (only once a key comes back) the reset/clear.
+    """
+    async def scenario():
+        target_session = FakeSession()  # never types anything
+        target_task = asyncio.create_task(
+            chat_flow._chat_loop(target_session, lane, hub, presence, mailbox, history, channel, bob)
+        )
+        await asyncio.sleep(0)  # let target actually join before the kick is issued
+
+        mod_session = FakeSession(["/kick bob disruptive", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(mod_session, lane, hub, presence, mailbox, history, channel, sysop), timeout=2
+        )
+
+        await asyncio.wait_for(target_task, timeout=2)
+        return target_session
+
+    target_session = asyncio.run(scenario())
+    text = _written_text(target_session)
+
+    kicked_index = text.index("kicked")
+    prompt_index = text.index("Press any key to continue")
+    clear_index = text.index(reset_scroll_region() + clear_screen())
+
+    assert kicked_index < prompt_index < clear_index
 
 
 def test_kick_notice_is_broadcast_to_others(db, lane, hub, presence, mailbox, history, sysop, bob, channel):
