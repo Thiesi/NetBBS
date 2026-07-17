@@ -6882,3 +6882,107 @@ everything not yet migrated. Nothing about this recipe is file-specific
 to mail — it should apply directly to boards, channels, file areas, and
 chat when each is migrated in turn.
 
+## Sign-off notes, round 116 (first real Phase 3 protocol code — bootstrap handshake + key_transition gossip, `netbbs.link.protocol`)
+
+Issue #57 (round 112–115) and issue #51/#11 (rounds 89–90/110) closed
+out every dependency gate §15 named for "before continuous sync,
+ingestion, retry queues, or other background Link work is
+implemented" and "before wire schemas... are frozen." This round is
+the first Phase 3 work that actually depends on those gates: real
+node-to-node protocol code, not just the identity/execution-model
+scaffolding underneath it.
+
+**Scope, confirmed with Thiesi over two questions before any code was
+written:** reuse `aiohttp` (already a dependency via `netbbs.net.web`'s
+WebSocket server, so no new dependency for NetBSD/pkgsrc) rather than
+staying `urllib.request`-minimal like self-update; and build the
+*handshake + one real event type flowing end-to-end*, not just a bare
+handshake. **What actually landed this round is narrower than that
+second choice, by design, once the shape of the work became concrete**
+— see "what's deliberately not built yet," below. The two-question
+framing was still the right way to scope the round; the narrowing
+happened during design, not as a silent shortfall discovered after the
+fact.
+
+**New event type: `endpoint_descriptor` (§12), signed by the current
+*signing* key, not root.** Root only ever signs `key_transition`
+(round 89's own scope); a periodically-refreshed reachability claim is
+exactly the kind of day-to-day content the signing key exists for.
+Deliberately **not** a round-90 head-pointer chain, unlike
+`key_transition` — that model exists for state whose *history* matters
+(audit trails, "what did this used to be"); a stale reachability claim
+only ever costs a failed connection attempt (§12: "connecting to the
+wrong address just fails the handshake"), never a safety issue, so
+"newest signed `created_at` wins" is sufficient. Considered and
+rejected chaining it the same way as `key_transition` purely for
+mechanical consistency — rejected because it would import history-
+tracking machinery a fire-and-forget reachability claim has no use
+for, the same "don't build machinery a requirement doesn't ask for"
+reasoning this project applies elsewhere.
+
+**Hello bundle: root public key + full `"signing"`-purpose transition
+history + a descriptor signed by the resolved-current key, all in one
+message, self-authenticating with no prior state required.** A peer
+that doesn't hold the claimed root's private key cannot produce a
+transitions chain that both verifies against that root *and* whose
+resolved current signing key's signature matches the descriptor —
+this is the same "an impostor can't produce the real signing key"
+property §12 already claims for endpoint advertisement generally,
+applied concretely to first contact. The `"transport"`-purpose chain
+is deliberately excluded from the bundle — that's Noise's own
+authentication concern (§11), not this handshake's.
+
+**Message-passing, not request/response — discovered mid-design, after
+an earlier RPC-flavored sketch, once `tests/link_harness.py`'s
+existing `ScriptedTransport` was actually checked against it, not
+before.** The initial framing (proposed to and accepted by Thiesi as
+part of this round's scope) sketched `POST /link/v1/hello` as a
+synchronous call-and-response. Writing the transport-agnostic protocol
+layer against `ScriptedTransport` surfaced that this framing doesn't
+fit: `ScriptedTransport` is fire-and-forget send()/deliver(), with no
+concept of an inline reply, and more fundamentally §7's store-and-
+forward promise ("a node offline for days/weeks... a returning node
+just resumes gossip and catches up") is itself incompatible with any
+model requiring a reply on the same call — an offline peer cannot
+reply synchronously to anything. `netbbs.link.protocol` is therefore
+built as pure message-passing: `handle_hello`/`handle_events` each
+take an incoming message and return/record state, never blocking on a
+peer's response. A real HTTP transport adapter (not built this round)
+can still let a POST's response body carry a reply promptly when the
+peer happens to be online — that stays an implementation detail below
+this layer, not something the protocol logic depends on. Recorded here
+explicitly because it revises this round's own opening framing, not
+because anyone got it wrong at the time — the harness existed
+specifically to catch exactly this kind of mismatch before real wire
+code was built on top of a shape that wouldn't fit it.
+
+**What's deliberately not built yet, flagged rather than silently
+deferred:** (1) the real `aiohttp` client/server adapter translating
+`LinkNode`'s messages into actual HTTP requests — this round is
+protocol *logic* only, proven against `ScriptedTransport`, never a
+real socket; (2) persistent on-disk event/dedup storage (§7:
+"persistent seen-event table, not Bloom filters") — `LinkNode` keeps
+`known_event_ids`/`events`/each peer's `transitions` in memory only
+this round; (3) accepting events relayed from a peer with no direct
+hello on file (real flood-fill gossip) — `handle_events` this round
+requires a completed `handle_hello` for the sender first; (4) seed-list
+bootstrapping, relay selection, and every other §12 mechanism beyond
+the bilateral hello itself. Each is real follow-up scope, not
+abandoned — named individually so "the handshake works" isn't
+mistaken for "Phase 3 transport is done."
+
+**Tests**: `tests/link_harness.py`'s `HarnessNode` updated to wrap a
+full `NodeIdentity` (root + signing + transport keys) instead of a
+bare `Identity` — round 92 built it against a bare keypair specifically
+because no key-lifecycle code existed yet to exercise (that round's own
+note); it does now. `tests/test_link_protocol.py` (new) drives the
+full two-node handshake-then-gossip scenario end to end through
+`ScriptedTransport` — genuinely serialized messages between two
+independent `LinkNode`s, not two Python objects calling each other's
+methods directly — plus targeted rejection tests for a forged
+descriptor signature, a descriptor claiming the wrong subject, an
+event claiming the wrong subject, an unrecognized event type, a
+stranger's events, and a stale repeated hello. See
+`docs/NetBBS-worklog.md` round 116 for the full test count and suite
+re-run result.
+

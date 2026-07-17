@@ -1,5 +1,5 @@
 """
-Canonical NetBBS Link event envelope (design doc §7, rounds 27/90/110).
+Canonical NetBBS Link event envelope (design doc §7, rounds 27/90/110/116).
 
 Round 27 fixed the outer envelope shape (`netbbs_protocol`/
 `object_type`/`payload`); round 90 fixed the semantic model (event
@@ -7,12 +7,15 @@ chains with head pointers, replacing per-feature special-casing); round
 110 fixed the byte-level canonicalization rule (reusing
 `netbbs.boards.content_id.canonical_json_bytes` rather than a second
 implementation) and the one concrete event type needed to unblock round
-89's node key-lifecycle work: `key_transition`.
+89's node key-lifecycle work: `key_transition`. Round 116 adds
+`endpoint_descriptor` (design doc §12), the second concrete event type,
+needed to unblock the first real handshake/gossip protocol code
+(`netbbs.link.protocol`).
 
 No other event type (board posts, moderator grants, etc.) is specified
 here yet — each gets its own payload-shape decision when it's actually
-being built, following this same envelope/head-pointer pattern (round
-110's own scope note).
+being built, following this same envelope pattern (round 110's own
+scope note).
 """
 
 from __future__ import annotations
@@ -30,6 +33,10 @@ NETBBS_PROTOCOL_VERSION = 1
 
 # Round 110: the one event type specified so far.
 KEY_TRANSITION_OBJECT_TYPE = "key_transition"
+
+# Round 116: a node's signed, periodically-refreshed reachability claim
+# (design doc §12).
+ENDPOINT_DESCRIPTOR_OBJECT_TYPE = "endpoint_descriptor"
 
 _VALID_PURPOSES = ("signing", "transport")
 _VALID_ACTIONS = ("authorize", "revoke")
@@ -163,3 +170,94 @@ def verify_key_transition(transition: KeyTransition, root_verify_key: nacl.signi
     `netbbs.link.node_identity.resolve_current_operational_key`'s job,
     since it needs the *set* of transitions for a chain, not one alone."""
     return verify_signature(root_verify_key, canonical_bytes(transition.envelope), transition.signature)
+
+
+@dataclass(frozen=True)
+class EndpointDescriptor:
+    """
+    One signed `endpoint_descriptor` event (design doc §12, round 116):
+    a node's own claim about how to reach it — a list of (protocol,
+    address, port) tuples for a full peer, or an outgoing-only marker —
+    self-authenticated by the node's own *current signing key* (round
+    116), not its root key. Unlike `key_transition`, this is
+    deliberately **not** a head-pointer chain: round 90's chain model
+    exists for state whose *history* matters (audit, "what did this
+    used to be"); a stale reachability claim only ever costs a failed
+    connection attempt (design doc §12: "connecting to the wrong
+    address just fails the handshake"), never a safety issue, so
+    "whichever signed descriptor has the newest `created_at` wins" is
+    sufficient — no chain-walking machinery needed to interpret one.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "EndpointDescriptor":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_endpoint_descriptor(
+    *,
+    signing_identity: Identity,
+    subject_fingerprint: str,
+    addresses: list[dict] | None,
+    outgoing_only: bool,
+    created_at: str,
+) -> EndpointDescriptor:
+    """
+    Build and sign one `endpoint_descriptor` event, per design doc §12/
+    round 116. `addresses` is a list of `{"protocol", "address", "port"}`
+    dicts, tried in order by a peer (§12: "multiple simultaneous
+    addresses... supported; peers try them in order") — required unless
+    `outgoing_only` is true, matching §12's two deployment modes
+    exactly: a full peer *must* publish where it can be reached, an
+    outgoing-only node publishes nothing but the marker itself.
+
+    Always signed by `signing_identity` — the subject's *current*
+    signing key (round 89), never the root key directly (root only ever
+    signs `key_transition`, per that round's own scope). `subject_
+    fingerprint` is the subject's root fingerprint, included explicitly
+    in the payload (not merely implied by "whoever signed this") so a
+    verifier can cross-check it against whichever peer's transition
+    chain it resolved the signing key from.
+    """
+    if not outgoing_only and not addresses:
+        raise EventError("a full peer's endpoint_descriptor must include at least one address")
+
+    payload = {
+        "subject_fingerprint": subject_fingerprint,
+        "outgoing_only": outgoing_only,
+        "created_at": created_at,
+    }
+    if addresses:
+        payload["addresses"] = addresses
+
+    envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return EndpointDescriptor(envelope=envelope, signature=signature)
+
+
+def verify_endpoint_descriptor(
+    descriptor: EndpointDescriptor, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `descriptor`'s signature against the claimed *current
+    signing key* — resolving which key that currently is (walking the
+    subject's `key_transition` chain) is the caller's job
+    (`netbbs.link.protocol.handle_hello`), same division of
+    responsibility as `verify_key_transition`."""
+    return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)

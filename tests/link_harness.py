@@ -1,5 +1,5 @@
 """
-Deterministic scaffolding for future NetBBS Link protocol tests.
+Deterministic scaffolding for NetBBS Link protocol tests.
 
 Design doc round 92, resolving the *minimal* half of issue #59 (a full
 multi-node convergence/fault-injection harness is explicitly a later gate
@@ -8,13 +8,15 @@ primitives: isolated node identities/databases created in one test
 process, a controllable fake clock, and a scripted transport that only
 ever delivers a message when a test explicitly says so.
 
-No NetBBS Link protocol code exists yet (round 86 confirmed this; still
-true as of this harness). `HarnessNode` therefore wraps only what already
-exists in the codebase -- a real `Database` and a real node identity
-keypair -- rather than pretending to exercise round 89's key-transition
-model or round 90's event envelope, neither of which has been implemented
-in code yet. Real Phase 3 feature work plugs into this harness as it
-lands, rather than each feature inventing its own one-off mock.
+`HarnessNode` originally wrapped a bare `Identity` keypair, since no
+NetBBS Link protocol code existed yet to exercise round 89's key-
+transition model (round 86/92's own note, at the time true). Round 116,
+the first real protocol code (`netbbs.link.protocol`), needs a full
+`NodeIdentity` (root + signing + transport keys, `netbbs.link.
+node_identity`) to build a hello bundle at all -- `HarnessNode` was
+updated in that round to wrap one, per this module's own stated intent
+that "real Phase 3 feature work plugs into this harness as it lands,
+rather than each feature inventing its own one-off mock."
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from netbbs.identity.keys import Identity, IdentityKind
+from netbbs.link.node_identity import NodeIdentity, bootstrap_node_identity
 from netbbs.storage.database import Database
 
 
@@ -65,10 +67,12 @@ class FakeClock:
 
 @dataclass
 class HarnessNode:
-    """One isolated node's identity and database, for use inside a test."""
+    """One isolated node's full key-lifecycle identity and database, for
+    use inside a test (round 116: `NodeIdentity`, not a bare `Identity`
+    -- see module docstring)."""
 
     label: str
-    identity: Identity
+    identity: NodeIdentity
     db: Database
 
     @property
@@ -82,18 +86,21 @@ class HarnessNode:
 def spawn_node(tmp_path: Path, label: str) -> HarnessNode:
     """
     Create one isolated, fully independent node: its own SQLite database
-    file (under `tmp_path/{label}/`) and its own freshly generated node
-    identity keypair.
+    file (under `tmp_path/{label}/`) and its own freshly bootstrapped
+    node identity (root + signing + transport keys, round 89/116) --
+    in-memory only, never written to `node_dir` (a test that also needs
+    on-disk persistence round-tripping calls `NodeIdentity.save`/`load`
+    itself; most protocol tests don't need that).
 
     Separate `tmp_path` subdirectories per node (rather than one shared
-    directory) keep on-disk state genuinely isolated, matching real
-    deployment (design doc §5, §14) where every node owns its own SQLite
-    file and its own keys.
+    directory) keep on-disk *database* state genuinely isolated,
+    matching real deployment (design doc §5, §14) where every node owns
+    its own SQLite file and its own keys.
     """
     node_dir = tmp_path / label
     node_dir.mkdir(parents=True, exist_ok=True)
     db = Database(node_dir / "netbbs.db")
-    identity = Identity.generate(IdentityKind.NODE, label)
+    identity = bootstrap_node_identity(label)
     return HarnessNode(label=label, identity=identity, db=db)
 
 
@@ -135,7 +142,12 @@ class ScriptedTransport:
         self._inboxes.setdefault(node.label, [])
 
     def send(self, sender: HarnessNode, recipient: HarnessNode, payload: bytes) -> None:
-        signature = sender.identity.sign(payload)
+        # Signed with the sender's *signing* operational key (round 116)
+        # -- the one actually used for day-to-day content, matching what
+        # a real transport would sign real protocol messages with. The
+        # root key is never used to sign transport-level bytes (round
+        # 89: it only ever signs key_transition events).
+        signature = sender.identity.signing_key.sign(payload)
         self._pending.append(
             PendingMessage(
                 sender=sender.label,

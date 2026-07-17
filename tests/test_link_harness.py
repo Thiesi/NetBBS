@@ -2,10 +2,11 @@
 Smoke tests for the deterministic Link-protocol test harness (design doc
 round 92, issue #59's minimal-harness gate).
 
-No real NetBBS Link protocol code exists yet to exercise (round 86) --
-these tests only prove the harness scaffolding itself (node spawning,
-fake clock, scripted transport) behaves correctly and deterministically,
-so real Phase 3 feature work has something solid to plug into.
+These tests only prove the harness scaffolding itself (node spawning,
+fake clock, scripted transport) behaves correctly and deterministically
+in isolation -- see `tests/test_link_protocol.py` (round 116) for real
+protocol code (`netbbs.link.protocol`) actually plugged into this same
+harness.
 """
 
 from __future__ import annotations
@@ -67,9 +68,9 @@ def test_scripted_transport_delivers_only_when_told_to(tmp_path):
     assert message.payload == b"hello"
     assert message.sender == "alice"
 
-    # Signature verifies against the sender's real identity keypair --
-    # the harness signs with a real Ed25519 key, not a stub.
-    assert verify_signature(alice.identity.verify_key, message.payload, message.signature)
+    # Signature verifies against the sender's real signing operational
+    # key -- the harness signs with a real Ed25519 key, not a stub.
+    assert verify_signature(alice.identity.signing_key.verify_key, message.payload, message.signature)
 
     alice.close()
     bob.close()

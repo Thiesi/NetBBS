@@ -7541,3 +7541,92 @@ lane) was never in scope for this issue and stays on `db` directly, the
 same synchronous-connection model the whole codebase used before round
 91.
 
+## Sign-off notes, round 116 (first real Phase 3 protocol code — bootstrap handshake + key_transition gossip)
+
+With issue #57 (rounds 112–115) closed, every Phase 3 dependency gate
+§15 named ahead of "continuous sync, ingestion, retry queues, or other
+background Link work" is now actually satisfied, alongside issue #51/
+#11's key-lifecycle and event-envelope work (rounds 89/90/110). This
+round is the first Phase 3 work to build on top of that rather than
+underneath it: real node-to-node protocol code. See
+`docs/NetBBS-design-doc.md` round 116 for the design decisions (the
+non-chained `endpoint_descriptor` event type and why, the self-
+authenticating hello bundle shape, and the message-passing-not-request/
+response revision discovered mid-design) — this entry is the
+implementation/testing narrative.
+
+**`netbbs/link/events.py`**: added `EndpointDescriptor` (envelope +
+signature, same shape as `KeyTransition`) plus `build_endpoint_
+descriptor`/`verify_endpoint_descriptor`. Signed by a node's current
+signing key, not root; raises `EventError` if a full peer (`outgoing_
+only=False`) is built with no addresses.
+
+**`netbbs/link/protocol.py`** (new): `HelloMessage` (root public key +
+`"signing"`-purpose transition history + a descriptor, all
+serializable via `to_dict`/`from_dict`), `PeerRecord` (what's been
+learned about one peer from a completed hello, mutable so `handle_
+events` can extend its `transitions` as further key_transitions
+arrive), and `LinkNode` (`build_hello`/`handle_hello`/`handle_events`)
+— the actual protocol logic, with zero imports of anything transport-
+shaped. `handle_hello` treats a repeat hello from an already-known peer
+as a no-op if its descriptor isn't newer than what's on file (round
+116's "latest signed descriptor wins" rule applied to replay/reorder,
+not just first contact).
+
+**`tests/link_harness.py`**: `HarnessNode` updated to wrap a full
+`NodeIdentity` (`bootstrap_node_identity`) instead of a bare `Identity`
+— round 92 built it against a bare keypair specifically because no
+key-lifecycle code existed yet to exercise (that round's own stated
+reason); it does now, and this round's protocol code needs the full
+root/signing/transport structure to build a hello at all. `Scripted
+Transport.send()` updated to sign with the sender's *signing*
+operational key (matching what real protocol messages are actually
+signed with) rather than a bare identity key that no longer exists on
+`HarnessNode`.
+
+**A real bug caught only by tracing the crypto by hand before the test
+suite was runnable** (a genuine safety-classifier outage blocked every
+`pytest`-invoking shell command for several minutes partway through
+this round — see the live back-and-forth earlier in this session; nothing
+wrong with the code itself, an infrastructure availability gap):
+`rotate_operational_key` (round 89/111) produces *two* new transitions
+per rotation — revoke the old key, then authorize the new one — and the
+new "authorize" transition's own `previous_transition_id` points at the
+*revoke*, not at whatever came before it. The first draft of the end-
+to-end gossip test only sent the final "authorize" transition to the
+receiving node, which would have failed `resolve_current_operational_
+key`'s chain-walk with a "broken or disconnected transition chain"
+error — not a bug in `netbbs.link.protocol` itself, but it would have
+been a wrong test asserting the wrong thing (or silently exercising
+only a code path that happens to raise, disguised as "expected to
+succeed" until actually run). Caught by re-reading `rotate_operational_
+key`'s own return value shape against what the test sent, re-confirmed
+once real execution came back online. **Flagged as a pattern**: any
+future test gossiping a rotation must send both halves, in order, not
+just the transition that changes what's "current."
+
+**Tests**: `tests/test_link_protocol.py` (new, 11 tests) — hello
+construction and wire-roundtrip, three rejection cases (forged
+descriptor signature, descriptor for a wrong subject, a stale repeat
+hello ignored), the full two-node handshake-then-key-rotation-gossip
+scenario driven entirely through `ScriptedTransport` (genuinely
+serialized JSON messages between two independent `LinkNode`s, not
+direct method calls), plus event-side rejection/idempotency cases
+(stranger's events refused, wrong-subject event refused, unrecognized
+object_type refused, already-seen event silently skipped). `tests/
+test_link_harness.py` updated in place for the `NodeIdentity` switch.
+
+**Testing**: full suite: **1968 passed, 4 skipped** (11 net new —
+`test_link_protocol.py` — up from round 115's 1957/4).
+
+**What's still open, named explicitly** (see design doc round 116 for
+the full list and reasoning): the real `aiohttp` transport adapter (no
+actual HTTP/socket code exists yet — this round is protocol logic
+only); persistent on-disk event/dedup storage (`LinkNode` is in-memory
+only); accepting events relayed from a peer with no direct hello
+(flood-fill proper); and every other §12 mechanism beyond the
+bilateral hello (seed bootstrapping, relay selection, WAN/NAT
+handling). Next round's natural continuation is the `aiohttp` adapter,
+since the protocol logic it needs to drive already exists and is
+tested.
+
