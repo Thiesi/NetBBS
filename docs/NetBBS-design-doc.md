@@ -438,12 +438,13 @@ Status: **local half fully implemented round 104** (`netbbs.mail` core
 — send/list/read/delete/quota, 22 tests — plus `netbbs.net.mail_flow`'s
 main-menu `[E]-mail` UI: inbox/sent browsing via the shared
 `netbbs.net.picker.pick_item`, compose/reply, and per-side delete, 15
-more tests). **Link messages remain unimplemented** — Phase 3 scope, as
-below; nothing about the local implementation forecloses it, since the
-mailbox schema/module was built with that extension in mind from the
-start (see round 93's own reasoning for why routing turns out simpler
-than boards'). See the round 104 worklog entry for the implementation
-writeup.
+more tests). **Link messages are also implemented, tier 1
+(`tier1_home_node_key`) only** — full send/receive/read, wired through
+transport/sync/UI, extending the same local mailbox exactly as
+anticipated below. Tier 2 (true end-to-end, `tier2_personal_key`) is a
+confirmed, permanent scope exclusion, not a deferral — see this
+section's own confidentiality-tier bullet below for why. See the round
+104 and round-93-implementation worklog entries for the writeups.
 
 Fifth piece of Phase 3 design work, and the first of the two
 feature-specific gates named in round 88's dependency matrix. Two
@@ -526,10 +527,10 @@ recipient node — not "everyone carrying this board."**
   exposure that already exists for all their other local data. Which
   tier applies to a given recipient should be surfaced to the sender at
   compose time where knowable, not silently assumed.
-- **Tier 2 is reserved, not implemented, in this slice — a real gap
-  found while building it, not a hypothetical.** "Unreadable even by
-  their own home node," taken at face value, means the *server* must
-  never hold the decryption key — but `netbbs.auth.users.
+- **Tier 2 is permanently out of scope, not deferred — resolved rather
+  than left open, closing issue #52's remaining half.** "Unreadable
+  even by their own home node," taken at face value, means the
+  *server* must never hold the decryption key — but `netbbs.auth.users.
   authenticate_keypair` (round 89's personal-keypair login) is
   challenge-response specifically so the server never sees, stores, or
   needs a user's private key, and nothing in this codebase performs
@@ -538,15 +539,22 @@ recipient node — not "everyone carrying this board."**
   server-side. Put those two facts together and a tier-2 message, built
   exactly as designed, is **permanently unreadable through this BBS's
   own UI** — the party that has to render it is precisely the party the
-  design says must never be able to. **Confirmed with Thiesi: this
-  implementation slice builds tier 1 (`tier1_home_node_key`) only** —
-  full send/receive/read, since the node's own key already lives
-  server-side with no contradiction. `tier2_personal_key` stays a
-  reserved, named value in `netbbs.link.events` (round 93's original
-  intent, not abandoned) but is not offered as a compose option and has
-  no read path, until a genuine client-side decryption story exists (a
-  future rich client, or a raw-ciphertext download escape hatch) to
-  actually honor what "true E2E" promises.
+  design says must never be able to. Only NetBBS's web/xterm.js
+  transport could ever realistically run client-side decryption
+  (JavaScript in-browser); Telnet has no client-side scripting
+  capability at all, and SSH has no precedent for it either in this
+  codebase — so a real tier-2 feature would permanently be a web-only
+  capability, unusable by Telnet/SSH users regardless of how much
+  client-side crypto work went into it. **Confirmed with Thiesi: not
+  worth building a whole new client-side crypto architecture for
+  partial transport coverage — tier 2 stays unbuilt, permanently, not
+  "for now."** This implementation builds tier 1
+  (`tier1_home_node_key`) only — full send/receive/read, since the
+  node's own key already lives server-side with no contradiction.
+  `tier2_personal_key` stays a reserved, named value in
+  `netbbs.link.events` (harmless forward-compatible wire vocabulary,
+  costs nothing to keep) but is not offered as a compose option, has no
+  read path, and none of that is expected to change.
 - **Metadata visible to any future transport intermediary** (should #58
   ever introduce one) is limited to what's needed for routing: recipient
   node fingerprint, coarse expiry, size — never subject/body, which stay
@@ -588,11 +596,11 @@ recipient node — not "everyone carrying this board."**
   (round 87); revisit if Link messages are ever positioned as offering
   stronger guarantees than that.
 
-**Explicitly still open:** the exact schema/table names and command
-surface (menu placement, etc.) are implementation detail for whenever
-this is actually built, not fixed here. Node/account migration (#51) and
-any relay mechanism (#58) remain separately tracked, not solved by this
-round.
+**Status:** tier 1 is fully built (send/receive/read, wired through
+transport/sync/UI) — see the round 93/#52 implementation commits. Node/
+account key lifecycle (#51) is also resolved. Any relay mechanism (#58)
+remains separately tracked, not solved here — a Link message today can
+only reach a recipient whose node is already known via a prior hello.
 
 ## 8. Real-time chat
 
