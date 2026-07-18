@@ -1305,6 +1305,34 @@ Define process/jail/container boundaries, filesystem/network access, resource
 limits, terminal mediation, session capability API, audit, crash cleanup, and
 DOS adapter behavior.
 
+**Candidate approach, not yet committed — exposing Link to doors.** Rather than
+giving doors raw Link access, mediate it through the session capability API,
+sized per interaction latency:
+
+- real-time move exchange rides the future Phase 5 real-time Link chat
+  channel;
+- turn submission for asynchronous games (chess, TradeWars-style turns) maps
+  onto linked-board events on a shared game board, reusing existing
+  carry-materialization rather than new plumbing;
+- point-to-point in-game mail maps onto tier-1 `link_message`;
+- federated high-score lists fit neither primitive cleanly — they are shared,
+  mergeable state with concurrent writers, so they need an explicit
+  conflict-resolution rule (e.g. monotonic max per player) before they can
+  ride on either.
+
+To keep door-facing boards/channels invisible to ordinary users without new
+schema, consider gating them with an elevated minimum user level (e.g. 245)
+rather than a new visibility flag, since minimum-level is already a resource
+gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
+
+- door processes write under their own capability-scoped service identity
+  minted by the session capability API, not the player's own account level;
+- board/channel listing queries honor the minimum-level gate, not just entry,
+  so gated resources don't appear in listings for users below the threshold;
+- the level band used for infrastructure resources (e.g. 240–254) is a named
+  constant, so a future SysOp level-preset feature cannot hand that range to a
+  real user by accident.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
