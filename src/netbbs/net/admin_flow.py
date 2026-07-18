@@ -36,7 +36,7 @@ lane like `netbbs.net.file_flow`'s `_uploader_display_name` before it
 -- it's a callee, never a caller, of the lane.
 
 Both entry points that share this module now need a real
-`DatabaseLane`: the in-BBS `[A]dmin` menu option
+`DatabaseLane`: the in-BBS `[S]ysOp` menu option
 (`netbbs.net.login_flow`, same `lane is None` degrade-gracefully guard
 as the mail/files/chat branches before it) and the standalone
 `python -m netbbs.admin` CLI (`netbbs.admin.__main__`), which
@@ -158,7 +158,12 @@ from netbbs.net.welcome_banner import (
 from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, reject_keystroke, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from netbbs.timeutil import format_for_display, resolve_display_preferences
+from netbbs.timeutil import (
+    format_for_display,
+    resolve_display_preferences,
+    set_display_format,
+    set_display_timezone,
+)
 
 
 async def admin_menu(
@@ -331,13 +336,17 @@ async def _system_menu(
             await session.write_line("")
             await _node_menu(session, lane, actor, node_controls)
             await _draw_system_menu(session, node_controls)
+        elif choice == "t":
+            await session.write_line("")
+            await _timestamp_settings_screen(session, lane, actor)
+            await _draw_system_menu(session, node_controls)
         else:
             await session.write(reject_keystroke())
 
 
 async def _draw_system_menu(session: Session, node_controls: NodeControls | None) -> None:
     header = colored("\r\nSystem:", fg_color=HEADER_COLOR, bold=True)
-    option_list = [menu_key("W", "elcome banner"), menu_key("U", "pdate")]
+    option_list = [menu_key("W", "elcome banner"), menu_key("U", "pdate"), menu_key("T", "imestamp format")]
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
@@ -634,6 +643,63 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 
     await lane.run(_apply)
     await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
+
+
+# -- node-wide display format/timezone -------------------------------------
+
+
+async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Node-wide display format/timezone (`netbbs.timeutil.set_display_
+    format`/`set_display_timezone`) -- previously reachable only by
+    calling those functions directly, with no UI wired to either one
+    anywhere. That gap is exactly why the chat status line's own clock
+    could read differently from the host system's: `display_timezone`
+    just sat at its hardcoded UTC default forever, with no admin
+    surface to change it (Thiesi's own report).
+
+    Two independent settings, each with its own "show current, prompt
+    for a new value, blank leaves it unchanged" turn -- format controls
+    the *shape* of a displayed timestamp, timezone controls *which
+    instant* it shows (see `format_for_display`'s own docstring for why
+    getting one right without the other still leaves users looking at
+    the wrong wall-clock time, just reshaped) -- so a SysOp who only
+    wants to fix one doesn't have to re-enter the other unchanged.
+    """
+    fmt, tz_name = await lane.run(resolve_display_preferences)
+
+    header = colored("\r\nTimestamp display:", fg_color=HEADER_COLOR, bold=True)
+    await session.write_line(header)
+    await session.write_line(f"Current format: {fmt!r}")
+    await session.write_line(f"Current timezone: {tz_name}")
+
+    await session.write(colored("\r\nNew format (blank to leave unchanged): ", fg_color=MUTED_COLOR))
+    new_fmt = (await session.read_line()).strip()
+    if new_fmt:
+        def _apply_format(db: Database) -> None:
+            set_display_format(db, new_fmt)
+            record_action(db, actor=actor, action="set_display_format", detail=new_fmt)
+
+        try:
+            await lane.run(_apply_format)
+        except ValueError as exc:
+            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        else:
+            await session.write_line(f"Display format is now: {new_fmt!r}")
+
+    await session.write(colored("New timezone (blank to leave unchanged): ", fg_color=MUTED_COLOR))
+    new_tz = (await session.read_line()).strip()
+    if new_tz:
+        def _apply_timezone(db: Database) -> None:
+            set_display_timezone(db, new_tz)
+            record_action(db, actor=actor, action="set_display_timezone", detail=new_tz)
+
+        try:
+            await lane.run(_apply_timezone)
+        except ValueError as exc:
+            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        else:
+            await session.write_line(f"Display timezone is now: {new_tz}")
 
 
 # -- promote/demote, enable/disable ---------------------------------------

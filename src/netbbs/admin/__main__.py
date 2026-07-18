@@ -2,7 +2,7 @@
 `python -m netbbs.admin [--db PATH] [--as USERNAME]` -- the standalone
 local SysOp admin CLI tool (design doc -- SysOp foundation round).
 
-Shares `netbbs.net.admin_flow.admin_menu` with the in-BBS [A]dmin menu
+Shares `netbbs.net.admin_flow.admin_menu` with the in-BBS [S]ysOp menu
 option (`netbbs.net.login_flow`) rather than duplicating any command
 logic -- the only thing genuinely new here is *how* a `Session` and an
 acting `User` get constructed for a bare local terminal instead of a
@@ -27,7 +27,7 @@ concurrently, see `netbbs.storage.database.Database`'s own docstring).
 `run_admin_session` opens its own `DatabaseLane` around the `Database`
 handle it's given (design doc round 91/issue #57, round 115) -- the
 shared `admin_menu` now takes `lane`, not `db`, and this is the
-process's only other caller of it besides the in-BBS `[A]dmin` menu
+process's only other caller of it besides the in-BBS `[S]ysOp` menu
 option. Scoped to this function (opened and closed here, not owned by
 `main()`) so tests that call `run_admin_session` directly still only
 need to hand it a plain `db`, matching this module's own stated reason

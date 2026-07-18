@@ -748,7 +748,7 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     if user.can_verify_identity or meets_level(user, SYSOP_LEVEL):
         option_list.append(menu_key("V", "erify"))
     if meets_level(user, SYSOP_LEVEL):
-        option_list.append(menu_key("A", "dmin"))
+        option_list.append(menu_key("S", "ysOp"))
     option_list.append(menu_key("L", "ogoff"))
     options = "  ".join(option_list)
     await session.write_line(f"\r\n{header} {options}")
@@ -867,17 +867,20 @@ async def _main_menu(
             await session.write_line("")
             await _verify_identity_menu(session, db, user)
             await _draw_main_menu(session, db, mailbox, user)
-        elif choice == "a" and meets_level(user, SYSOP_LEVEL):
+        elif choice == "s" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
             # design doc round 91/115: admin is the fourth feature
             # migrated onto the two-lane database execution model -- see
             # the "e" (mail) branch above for the identical lane-is-None
-            # degrade-gracefully reasoning.
+            # degrade-gracefully reasoning. Keystroke is "s" (BBS
+            # convention: the "SysOp" menu), not "a" -- Thiesi's own
+            # explicit request, more in line with traditional BBS lingo
+            # than a generic "Admin" label/letter.
             if lane is not None:
                 await admin_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
             else:
                 await session.write_line(
-                    colored("Admin is not available in this context.", fg_color=MUTED_COLOR)
+                    colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
                 )
             await _draw_main_menu(session, db, mailbox, user)
         else:

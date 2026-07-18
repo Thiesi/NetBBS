@@ -1,7 +1,7 @@
 """
 Tests for the shared SysOp admin menu (design doc -- SysOp foundation
 round), `netbbs.net.admin_flow.admin_menu` -- the single implementation
-both the in-BBS [A]dmin option and the standalone `python -m
+both the in-BBS [S]ysOp main-menu option and the standalone `python -m
 netbbs.admin` CLI tool call. Driven with a scripted `FakeSession`
 (single ordered input queue serving both `read_key`/`read_line`, same
 as a real terminal has no concept of "key mode" vs "line mode" beyond
@@ -1499,3 +1499,93 @@ def test_update_screen_declining_toggle_leaves_auto_check_unchanged(db, lane, sy
     session = FakeSession(["s", "u", "n", "n", "b", "b"])
     _run(session, lane, sysop)
     assert get_auto_update_check_enabled(db) is True
+
+
+# -- node-wide timestamp display format/timezone ----------------------------
+
+
+def test_system_menu_shows_the_timestamp_format_option(db, lane, sysop):
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    assert "imestamp format" in _written_text(session)
+
+
+def test_timestamp_settings_screen_shows_current_format_and_timezone(db, lane, sysop):
+    session = FakeSession(["s", "t", "", "", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Current format:" in text
+    assert "Current timezone:" in text
+
+
+def test_timestamp_settings_screen_can_set_a_new_timezone(db, lane, sysop):
+    from netbbs.timeutil import resolve_display_preferences
+
+    session = FakeSession(["s", "t", "", "Europe/Berlin", "b", "b"])
+    _run(session, lane, sysop)
+    _, tz = resolve_display_preferences(db)
+    assert tz == "Europe/Berlin"
+    assert "Display timezone is now: Europe/Berlin" in _written_text(session)
+
+
+def test_timestamp_settings_screen_can_set_a_new_format(db, lane, sysop):
+    from netbbs.timeutil import resolve_display_preferences
+
+    session = FakeSession(["s", "t", "%Y-%m-%d %H:%M", "", "b", "b"])
+    _run(session, lane, sysop)
+    fmt, _ = resolve_display_preferences(db)
+    assert fmt == "%Y-%m-%d %H:%M"
+    assert "Display format is now:" in _written_text(session)
+
+
+def test_timestamp_settings_screen_blank_leaves_both_unchanged(db, lane, sysop):
+    from netbbs.timeutil import resolve_display_preferences
+
+    before = resolve_display_preferences(db)
+    session = FakeSession(["s", "t", "", "", "b", "b"])
+    _run(session, lane, sysop)
+    assert resolve_display_preferences(db) == before
+
+
+def test_timestamp_settings_screen_rejects_an_invalid_timezone(db, lane, sysop):
+    from netbbs.timeutil import resolve_display_preferences
+
+    before = resolve_display_preferences(db)
+    session = FakeSession(["s", "t", "", "Not/A/Real/Zone", "b", "b"])
+    _run(session, lane, sysop)
+    assert resolve_display_preferences(db) == before  # rejected -- nothing changed
+    assert "invalid timezone" in _written_text(session).lower()
+
+
+def test_timestamp_settings_screen_rejects_an_invalid_format(db, lane, sysop):
+    from netbbs.timeutil import resolve_display_preferences
+
+    before = resolve_display_preferences(db)
+    session = FakeSession(["s", "t", "%Q nonsense", "", "b", "b"])
+    _run(session, lane, sysop)
+    assert resolve_display_preferences(db) == before
+    assert "invalid" in _written_text(session).lower()
+
+
+def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line_clock(db, lane, sysop):
+    """End-to-end proof this closes the actual gap Thiesi reported: the
+    chat status line's clock (`netbbs.net.chat_flow._render_chat_status_
+    line`) reads the node's configured display timezone via the exact
+    same `format_for_display` resolution this screen writes to."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.hub import ChatHub
+    from netbbs.chat.presence import PresenceRegistry
+    from netbbs.net.chat_flow import _render_chat_status_line
+    from netbbs.timeutil import format_for_display, utc_now_iso
+
+    session = FakeSession(["s", "t", "", "Europe/Berlin", "b", "b"])
+    _run(session, lane, sysop)
+
+    channel = create_channel(db, "lobby", creator=sysop)
+    groups = _render_chat_status_line(db, ChatHub(), PresenceRegistry(), channel, sysop)
+    clock_text = groups[-1][0].text
+    # Europe/Berlin is never UTC+0 -- if the status line were still
+    # reading the hardcoded UTC default despite this screen's write,
+    # these two would be identical.
+    utc_clock_text = format_for_display(utc_now_iso(), override_format="%H:%M", override_timezone="UTC")
+    assert clock_text != utc_clock_text
