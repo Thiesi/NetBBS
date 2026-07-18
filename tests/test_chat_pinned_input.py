@@ -670,3 +670,47 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
     # Exit cleanup actually ran (ended "active" -- must reset before
     # handing control to whatever screen comes after /quit).
     assert text.endswith("\x1b[r" + "\x1b[2J\x1b[H")
+
+
+# -- Session.pinned_notice_hook (out-of-band notices, e.g. shutdown) --------
+
+
+def test_pinned_notice_hook_is_installed_while_chat_is_active_and_cleared_on_exit(
+    lane, hub, presence, mailbox, channel, alice
+):
+    """`Session.pinned_notice_hook` is how an out-of-band system notice
+    (a node-shutdown broadcast, `ActiveSessionRegistry.broadcast_to_all`)
+    reaches a session safely instead of a raw write that has no idea a
+    scroll region/pinned input row is active -- see that attribute's own
+    docstring. Calling it must go through the same content-region
+    primitive every other pinned-row print uses, not land on the pinned
+    input row the way a bare `write_line` would."""
+
+    async def scenario():
+        session = FakeSession([])  # never types anything -- observes only
+        task = asyncio.create_task(
+            chat_flow._chat_loop(session, lane, hub, presence, mailbox, InputHistory(), channel, alice)
+        )
+        # Polls for the hook itself, not hub.participant_count -- hub.join
+        # happens earlier in _chat_loop's own setup than the hook
+        # assignment does (scrollback replay, the join broadcast, and the
+        # initial status/input paint all sit in between).
+        while session.pinned_notice_hook is None:
+            await asyncio.sleep(0)
+
+        await session.pinned_notice_hook("*** This node is going down now. ***")
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return session
+
+    session = asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+    assert session.pinned_notice_hook is None  # cleared once chat exits
+
+    text = "".join(session.written)
+    scroll_bottom = session.terminal_height - 2
+    assert set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) in text
+    assert "This node is going down now" in text

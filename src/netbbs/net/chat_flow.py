@@ -2869,33 +2869,43 @@ async def _chat_loop(
             # at this exact point, so this first paint needs no lock.
             await _repaint_input_row(session, live_buffer, session.terminal_height)
 
+        async def deliver(text: str, *, repaint_status: bool = False) -> None:
+            """
+            Routes through the pinned-row-aware print-and-redraw path
+            when the pinned UI is active (under `lock`, so this can
+            never interleave with `send_loop` mid-keystroke or
+            mid-dispatch -- see `_repaint_status_line`'s docstring), or
+            falls straight back to a plain `write_line` when it isn't (a
+            too-short terminal, exactly the old, unconfined-scrolling
+            behavior).
+
+            Always acquires `lock` first, then re-derives whether the
+            pinned UI is *currently* active via `pinned_ui.sync()`
+            (GitHub issue #46) -- a resize can flip this at any moment
+            between two deliveries, and `sync()` itself needs the lock
+            held to perform a threshold-crossing transition atomically
+            with respect to `send_loop`.
+
+            Used two ways: `receive_loop`'s own writes below (design doc
+            round 79), and installed as `session.pinned_notice_hook` so
+            an out-of-band system notice (a node-shutdown broadcast,
+            `netbbs.net.session_registry.ActiveSessionRegistry.
+            broadcast_to_all`) reaches this session through the same
+            safe path instead of a raw write that assumes a plain
+            scrolling prompt -- see `Session.pinned_notice_hook`'s own
+            docstring.
+            """
+            async with lock:
+                if not await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
+                    await session.write_line(text)
+                    return
+                await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
+                if repaint_status:
+                    await _repaint_status_line(session, lane, hub, presence, channel, user)
+
+        session.pinned_notice_hook = deliver
+
         async def receive_loop() -> None:
-            async def deliver(text: str, *, repaint_status: bool = False) -> None:
-                """
-                The one place `receive_loop` actually writes to the screen
-                (design doc round 79) -- routes through the pinned-row-
-                aware print-and-redraw path when the pinned UI is active
-                (under `lock`, so this can never interleave with `send_loop`
-                mid-keystroke or mid-dispatch -- see `_repaint_status_line`'s
-                docstring), or falls straight back to a plain `write_line`
-                when it isn't (a too-short terminal, exactly the old,
-                unconfined-scrolling behavior).
-
-                Always acquires `lock` first, then re-derives whether the
-                pinned UI is *currently* active via `pinned_ui.sync()`
-                (GitHub issue #46) -- a resize can flip this at any moment
-                between two deliveries, and `sync()` itself needs the lock
-                held to perform a threshold-crossing transition atomically
-                with respect to `send_loop`.
-                """
-                async with lock:
-                    if not await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
-                        await session.write_line(text)
-                        return
-                    await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
-                    if repaint_status:
-                        await _repaint_status_line(session, lane, hub, presence, channel, user)
-
             while True:
                 message = await queue.get()
                 if isinstance(message, _KickNotice):
@@ -3230,6 +3240,13 @@ async def _chat_loop(
                 pass
         return outcome or _Quit()
     finally:
+        # Cleared unconditionally, even if `deliver` was never actually
+        # installed (an exception before that point above) -- a no-op in
+        # that case, but leaving a stale hook on `session` past this
+        # chat session's own lifetime would let a later out-of-band
+        # notice call back into closures capturing this session's own
+        # now-defunct `lock`/`live_buffer`/`channel`/`user`.
+        session.pinned_notice_hook = None
         # `pinned_ui.active` (GitHub issue #46), not the entry-time
         # `pinned_ui_enabled` local -- a resize during the session may
         # have changed which regime was actually active by the time

@@ -97,14 +97,24 @@ class ActiveSessionRegistry:
 
     async def broadcast_to_all(self, text: str) -> None:
         """
-        Write `text` directly to every currently connected session,
-        regardless of what it's blocked reading — the same "write
-        concurrently while a read is in progress" pattern
-        `netbbs.net.chat_flow`'s two-task chat loop already relies on
-        (see that module's docstring on why concurrent `write()` calls
-        are safe: a transport buffers a whole message before ever
-        awaiting `drain()`, so one write can't be interleaved
-        mid-message by another).
+        Deliver `text` to every currently connected session, regardless
+        of what it's blocked reading — the same "write concurrently
+        while a read is in progress" pattern `netbbs.net.chat_flow`'s
+        two-task chat loop already relies on (see that module's
+        docstring on why concurrent `write()` calls are safe: a
+        transport buffers a whole message before ever awaiting
+        `drain()`, so one write can't be interleaved mid-message by
+        another).
+
+        Uses `session.pinned_notice_hook` when a screen has installed
+        one, falling back to a plain `write_line` otherwise (every
+        screen except `netbbs.net.chat_flow`'s chat loop, which is the
+        only one that currently sets it) — see `Session.
+        pinned_notice_hook`'s own docstring for why a screen with
+        reserved/pinned rows needs this instead of a raw write. This
+        module stays deliberately unaware of *what* the hook does or
+        that it's chat-specific; it only knows "call this instead, if
+        given."
 
         Iterates a *snapshot* of the session list, not the live dict —
         same reasoning as `netbbs.chat.hub.ChatHub.broadcast`'s own
@@ -117,7 +127,10 @@ class ActiveSessionRegistry:
         """
         for session in list(self._sessions):
             try:
-                await session.write_line(text)
+                if session.pinned_notice_hook is not None:
+                    await session.pinned_notice_hook(text)
+                else:
+                    await session.write_line(text)
             except SessionClosedError:
                 pass
 

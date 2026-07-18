@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
     # Deferred/type-checking-only: netbbs.net.char_input itself imports
@@ -93,6 +93,24 @@ class Session(ABC):
     #: `netbbs.net.throttle.LoginThrottle`) — not meant for any identity
     #: or trust decision, since it's trivially spoofable/shared (NAT).
     peer_address: str | None = None
+
+    #: Hook a screen can install so an out-of-band system notice (a
+    #: node-shutdown broadcast, `netbbs.net.session_registry.
+    #: ActiveSessionRegistry.broadcast_to_all`) reaches this session
+    #: safely instead of assuming a plain scrolling prompt. `None` for
+    #: every screen that doesn't need anything special — the overwhelming
+    #: majority, which is exactly why `broadcast_to_all` falls back to a
+    #: plain `write_line` when this is unset. `netbbs.net.chat_flow.
+    #: _chat_loop` is currently the only screen that ever sets it: a
+    #: raw `write_line` while chat's pinned status/input rows are active
+    #: lands wherever the real cursor happens to sit (often the pinned
+    #: input row, mid-keystroke), and a subsequent Backspace then edits
+    #: text the session's own input-editing state never knew was
+    #: written — chat installs its already-correct pinned-row-aware
+    #: delivery path here instead (the same one kick/ban notices use),
+    #: and clears it again on exit so a stale closure never lingers past
+    #: the chat session that captured it.
+    pinned_notice_hook: Callable[[str], Awaitable[None]] | None = None
 
     @abstractmethod
     async def write(self, text: str) -> None:

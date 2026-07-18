@@ -626,6 +626,19 @@ by giving it an optional `list_candidates` hook (same shape as `live_buffer`/
 instead. Any future generic `char_input` primitive that can print more than
 one line needs the same hook, not an assumption that a bare newline is safe.
 
+Node-wide out-of-band writes hit the identical bug from a different angle:
+`ActiveSessionRegistry.broadcast_to_all` (a shutdown notice reaching every
+connected session regardless of screen) called a bare `session.write_line`
+directly, with no idea a target session might currently be `_chat_loop` with
+pinned rows active — landing the notice on the pinned input row and letting a
+subsequent Backspace edit it, since chat's own input-editing state never knew
+it was written. Fixed the same way: `Session.pinned_notice_hook`, `None` for
+every screen except chat (which installs its own already-correct pinned-row
+delivery closure on entry and clears it on exit), checked by `broadcast_to_all`
+before falling back to a plain write. Any future node-wide broadcast to
+arbitrary sessions needs the same hook, not an assumption that a session is at
+a plain scrolling prompt.
+
 ### Editors
 
 The ANSI editor and prose editor share a screen-buffer/diff shell but have

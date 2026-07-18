@@ -28,6 +28,10 @@ from tests.test_main_lifecycle import _config, _open_connection_when_ready
 
 class _FakeSession:
     peer_address: str | None = None
+    # Matches Session.pinned_notice_hook's own class-level default --
+    # broadcast_to_all reads this directly, and neither fake here is a
+    # real Session subclass to inherit it from.
+    pinned_notice_hook = None
 
     def __init__(self):
         self.written: list[str] = []
@@ -37,6 +41,8 @@ class _FakeSession:
 
 
 class _FailingSession:
+    pinned_notice_hook = None
+
     async def write_line(self, text: str = "") -> None:
         raise SessionClosedError("already gone")
 
@@ -124,6 +130,56 @@ def test_broadcast_to_all_skips_a_session_that_raises_session_closed_error():
         await asyncio.gather(*tasks, return_exceptions=True)
 
         assert ok.written == ["hello"]
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_to_all_uses_pinned_notice_hook_instead_of_write_line_when_set():
+    """A screen with reserved/pinned rows (currently only chat) installs
+    `Session.pinned_notice_hook` so an out-of-band notice like this one
+    reaches it safely instead of a raw `write_line` that has no idea a
+    scroll region/pinned input row is active -- see that attribute's own
+    docstring. `write_line` must not be called at all once a hook is
+    installed."""
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        session = _FakeSession()
+        hook_calls: list[str] = []
+
+        async def fake_hook(text: str) -> None:
+            hook_calls.append(text)
+
+        session.pinned_notice_hook = fake_hook
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        await registry.broadcast_to_all("hello")
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert hook_calls == ["hello"]
+        assert session.written == []  # write_line never called directly
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_to_all_falls_back_to_write_line_when_no_hook_is_set():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        session = _FakeSession()
+        assert session.pinned_notice_hook is None
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        await registry.broadcast_to_all("hello")
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert session.written == ["hello"]
 
     asyncio.run(scenario())
 
