@@ -415,12 +415,26 @@ def test_sync_respects_the_fallback_attempt_cap(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sync_module, "dial_hello", counting_dial_hello)
 
+    # A full peer, not the shared outgoing_only=True `_hello_for` default --
+    # otherwise `_maintain_relay_selection` also runs this same pass and
+    # dials both candidates on its own, independently-bounded schedule
+    # (`TARGET_RELAY_COUNT`), which has nothing to do with the fallback cap
+    # this test targets and would make `attempted_urls` flaky depending on
+    # `_try_candidate_fallback`'s own random pick. Same fix as the test
+    # above: keep this scoped to fallback specifically.
+    def _full_peer_hello_for_dialer() -> HelloMessage:
+        return dialer_node.build_hello(
+            addresses=[{"protocol": "http", "address": "198.51.100.50", "port": 7862}],
+            outgoing_only=False,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+
     async def scenario():
         async with aiohttp.ClientSession() as session:
             task = asyncio.create_task(
                 run_link_sync(
                     dialer_node, session, ["http://127.0.0.1:1"],  # the only "seed", also dead
-                    lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    _full_peer_hello_for_dialer, dialer.lane, interval_seconds=60.0,
                 )
             )
             await _run_sync_briefly(task, settle=3.0)
