@@ -15,6 +15,7 @@ through a `FakeSession`, inspecting the raw escape sequences it wrote.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import re
 
 import pytest
@@ -566,3 +567,71 @@ def test_status_line_reflects_a_second_participant_joining(lane, hub, presence, 
     alice_session = asyncio.run(scenario())
     text = _visible_text(alice_session)
     assert "2 online" in text  # alice's status line updated once bob joined
+
+
+# -- _seconds_until_next_minute / _clock_loop (per-minute clock refresh) ---
+
+
+def test_seconds_until_next_minute_exactly_on_the_boundary():
+    now = datetime.datetime(2029, 4, 3, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    assert chat_flow._seconds_until_next_minute(now) == 60.0
+
+
+def test_seconds_until_next_minute_one_second_before():
+    now = datetime.datetime(2029, 4, 3, 12, 0, 59, tzinfo=datetime.timezone.utc)
+    assert chat_flow._seconds_until_next_minute(now) == 1.0
+
+
+def test_seconds_until_next_minute_mid_minute_with_microseconds():
+    now = datetime.datetime(2029, 4, 3, 12, 0, 30, 500_000, tzinfo=datetime.timezone.utc)
+    assert chat_flow._seconds_until_next_minute(now) == 29.5
+
+
+def test_clock_loop_sleeps_until_the_minute_then_repaints_the_status_line(
+    lane, hub, presence, channel, alice
+):
+    """`now`/`sleep` injected -- same shape as `netbbs.net.daybreak.
+    run_daybreak_announcer`'s own test -- so this doesn't actually wait a
+    real minute. `fake_sleep` returns immediately the first time (letting
+    the loop reach one real repaint), then parks on an unset
+    `asyncio.Event` every time after, giving the scheduler a genuine
+    suspension point instead of spinning the loop forever (see
+    `tests/test_daybreak.py`'s own identical trick for why a `fake_sleep`
+    that always returns immediately would starve the test itself)."""
+    hub.join(channel.name, ParticipantId(username="alice", session_key=1))
+    session = FakeSession([])
+    lock = asyncio.Lock()
+
+    sleep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) > 1:
+            await parked.wait()
+
+    def fake_now() -> datetime.datetime:
+        return datetime.datetime(2029, 4, 3, 12, 59, 0, tzinfo=datetime.timezone.utc)
+
+    async def scenario():
+        task = asyncio.create_task(
+            chat_flow._clock_loop(
+                session, lane, hub, presence, channel, alice, lock, now=fake_now, sleep=fake_sleep
+            )
+        )
+        while not session.written:
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=2))
+
+    # fake_now only controls when _clock_loop wakes -- the repainted
+    # clock text itself still comes from _render_chat_status_line's own
+    # real utc_now_iso() call, so this checks for the repaint happening
+    # at all (recognizable status-line content), not a specific time.
+    assert sleep_calls[0] == 60.0
+    assert any("#lobby" in chunk for chunk in session.written)

@@ -2640,6 +2640,65 @@ class _PinnedUIState:
         return self.active
 
 
+def _seconds_until_next_minute(current: datetime.datetime) -> float:
+    """Seconds remaining until `current`'s wall-clock minute rolls
+    over -- `_clock_loop`'s own scheduling math, factored out as a pure
+    function the same way `netbbs.net.daybreak._seconds_until_next_
+    local_midnight` is, so the arithmetic is directly testable without
+    driving the loop itself. No timezone conversion needed here (unlike
+    daybreak's midnight math): every real IANA zone's UTC offset is a
+    whole number of minutes, so the instant a minute rolls over is the
+    same regardless of which zone the status line happens to be
+    displaying it in -- only the displayed digits differ, not the
+    timing."""
+    return 60 - current.second - current.microsecond / 1_000_000
+
+
+async def _clock_loop(
+    session: Session,
+    lane: DatabaseLane,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    channel: Channel,
+    user: User,
+    lock: asyncio.Lock,
+    *,
+    now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """
+    Repaints the pinned status row once a minute, aligned to the real
+    wall-clock minute boundary -- without this, the status line's own
+    clock (and everything else in it) only ever updates as a side
+    effect of some other event happening (a message, a command), so an
+    otherwise-idle session could sit showing a minute-stale clock
+    indefinitely. Sleeping a flat 60s from whichever moment this task
+    happened to start would drift against the real boundary and could
+    show a stale minute for up to 59 seconds after it actually ticked
+    over; `_seconds_until_next_minute` keeps every wakeup landing right
+    on it instead.
+
+    `now`/`sleep` are injectable so a test can drive this without a real
+    wait -- the same dependency-injection shape `run_daybreak_announcer`
+    already uses, for the identical reason.
+
+    Runs as `_chat_loop`'s own third task (`clock_task`), deliberately
+    not folded into `receive_loop`/`send_loop` -- neither of those ever
+    runs unconditionally on a timer, and layering a sleep-based tick
+    into either would mean it only fires between other work rather than
+    on a true schedule. Also deliberately excluded from `_chat_loop`'s
+    `asyncio.wait(..., return_when=FIRST_COMPLETED)`: this loop never
+    finishes on its own, so it must never be mistaken for "the user
+    quit" or "the connection dropped" the way `receive_task`/`send_task`
+    completing does -- `_chat_loop` cancels it alongside them on every
+    exit path instead, same as any other owned background task.
+    """
+    while True:
+        await sleep(_seconds_until_next_minute(now()))
+        async with lock:
+            await _repaint_status_line(session, lane, hub, presence, channel, user)
+
+
 async def _chat_loop(
     session: Session,
     lane: DatabaseLane,
@@ -2668,7 +2727,11 @@ async def _chat_loop(
     per-participant queue of incoming broadcasts (see `netbbs.chat.hub.
     ChatHub`) — and stopping, with cleanup, as soon as either one
     finishes: the user typing /quit, or the connection dropping out from
-    under either task.
+    under either task. A third task, `clock_loop`, repaints the pinned
+    status row once a minute so its clock keeps advancing even in an
+    idle session — deliberately not part of that same stop-on-first-
+    finish pair, since it never legitimately "finishes" on its own (see
+    its own docstring).
 
     Both tasks can call `session.write()`/`write_line()` concurrently
     (`send_loop` writes the sender's own self-colored message directly;
@@ -3097,6 +3160,7 @@ async def _chat_loop(
 
         receive_task = asyncio.create_task(receive_loop())
         send_task = asyncio.create_task(send_loop())
+        clock_task = asyncio.create_task(_clock_loop(session, lane, hub, presence, channel, user, lock))
 
         try:
             done, pending = await asyncio.wait(
@@ -3114,18 +3178,25 @@ async def _chat_loop(
             # asyncio logs "Task exception was never retrieved" since
             # there's no one left to retrieve it (seen for real on
             # Thiesi's NetBSD box on Ctrl-C with a chat session open,
-            # not just reasoned about).
-            for task in (receive_task, send_task):
+            # not just reasoned about). clock_task is included here too --
+            # it's never part of the wait() set above (see its own
+            # docstring for why), so it's just as orphaned by an external
+            # cancellation as the other two would be without this.
+            for task in (receive_task, send_task, clock_task):
                 task.cancel()
-            await asyncio.gather(receive_task, send_task, return_exceptions=True)
+            await asyncio.gather(receive_task, send_task, clock_task, return_exceptions=True)
             raise
         for task in pending:
             task.cancel()
         # Properly await cancelled tasks rather than fire-and-forget —
         # otherwise asyncio can warn "Task was destroyed but it is
         # pending" and the cancellation may not actually finish cleanly
-        # before this function returns.
-        await asyncio.gather(*pending, return_exceptions=True)
+        # before this function returns. clock_task is never in `pending`
+        # (excluded from the wait() set above) so it needs its own
+        # explicit cancel+gather here, on the normal (non-cancelled) exit
+        # path, same reasoning as the CancelledError branch above.
+        clock_task.cancel()
+        await asyncio.gather(*pending, clock_task, return_exceptions=True)
         outcome: ChatAction | None = None
         for task in done:
             value = task.result()  # re-raise, e.g. SessionClosedError from a dropped connection
