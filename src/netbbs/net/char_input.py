@@ -324,9 +324,44 @@ def _common_prefix(candidates: Sequence[str]) -> str:
     return prefix
 
 
+@dataclass
+class LastCandidateList:
+    """Tracks whether the *immediately preceding* keystroke was a Tab
+    press that printed a multi-candidate list, within one `read_line()`
+    call — lets a repeated Tab press with nothing typed or edited in
+    between suppress a redundant identical reprint, rather than
+    permanently scrolling another copy of the same list into the
+    caller's output every single time it's pressed.
+
+    The caller (`_read_line_editable`, in this module and mirrored in
+    `netbbs.net.web.WebSession`) is responsible for clearing `shown`
+    back to `False` at the top of every keystroke that *isn't* Tab,
+    before dispatching to that keystroke's own handling — an ordinary
+    typed character, Backspace, an arrow key, anything. That's what
+    makes this "the previous keystroke, not just the previous Tab
+    press": pressing Tab, then some other key, then Tab again is a
+    genuine new completion attempt and must print again, even in the
+    edge case where it happens to land back on an identical word
+    (Thiesi's own example: backspacing a fully-typed name back to
+    nothing, then pressing Tab again — the completion engine's own
+    common-prefix auto-extension can reconstruct the exact same
+    characters, so comparing the resulting *word* alone can't tell
+    this apart from a true no-op repeat; only "did some other keystroke
+    happen in between" can).
+
+    A plain mutable holder, not a return value threaded back through
+    every caller — `_read_line_editable` creates one per `read_line()`
+    call and passes it in by reference, the same lifecycle
+    `LiveInputBuffer` already uses for its own per-call state.
+    """
+
+    shown: bool = False
+
+
 async def apply_tab_completion(
     write: WriteFunc, completer: Completer, line: list[str], cursor: int,
     *, list_candidates: CandidateListPrinter | None = None,
+    last_candidates: LastCandidateList | None = None,
 ) -> int:
     """
     Handle one Tab keypress in an editable line buffer: ask `completer`
@@ -339,7 +374,11 @@ async def apply_tab_completion(
     candidate: replaces the current word with it plus a trailing space,
     ready to type the next word. Multiple candidates: extends the word
     to their longest shared prefix (bash-style), if that's longer than
-    what's already typed, then lists every candidate.
+    what's already typed, then lists every candidate — unless
+    `last_candidates` shows the immediately preceding keystroke already
+    printed a list with nothing typed or edited since, in which case
+    this press is also a complete no-op (`LastCandidateList`'s own
+    docstring).
 
     Deliberately reprints only the raw line content after showing a
     candidate list, not any caller-side prompt label ("Choice: ",
@@ -386,6 +425,11 @@ async def apply_tab_completion(
         await redraw_tail(
             write, terminal_col=terminal_col, edit_pos=word_start, line=line, new_cursor=cursor
         )
+
+    if last_candidates is not None:
+        if last_candidates.shown:
+            return cursor
+        last_candidates.shown = True
 
     if list_candidates is not None:
         await list_candidates(candidates, "".join(line), cursor)
@@ -535,6 +579,7 @@ async def _read_line_editable(
     history_index = 0  # 0 == "not recalling", editing the in-progress line
     saved_in_progress: list[str] | None = None
     submitted = ""  # set from `line` the moment Enter is handled, below
+    last_candidates = LastCandidateList()
 
     while True:
         b = await _read_byte(source)
@@ -553,6 +598,17 @@ async def _read_line_editable(
         # concurrent redraw.
         async with (lock if lock is not None else contextlib.nullcontext()):
             try:
+                # Any keystroke other than Tab itself invalidates a
+                # pending "the last thing that happened was an unresolved
+                # multi-candidate Tab press" -- see `LastCandidateList`'s
+                # own docstring for why this has to be tracked as "did a
+                # different keystroke happen", not by comparing the
+                # completed word before/after, which a Tab press's own
+                # common-prefix auto-extension can make look unchanged
+                # even after a real edit.
+                if b != _TAB:
+                    last_candidates.shown = False
+
                 if b in (_CR, _LF):
                     if b == _CR:
                         await _consume_optional_lf_or_nul(source)
@@ -589,7 +645,8 @@ async def _read_line_editable(
                 if b == _TAB:
                     if completer is not None:
                         cursor = await apply_tab_completion(
-                            write, completer, line, cursor, list_candidates=list_candidates
+                            write, completer, line, cursor,
+                            list_candidates=list_candidates, last_candidates=last_candidates,
                         )
                     continue
 

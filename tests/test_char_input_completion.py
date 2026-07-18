@@ -102,6 +102,64 @@ def test_candidate_list_is_followed_by_the_in_progress_line_reprinted():
     assert output.endswith("a") or "\r\na" in output
 
 
+# -- repeated Tab presses: suppress a redundant identical reprint -----------
+
+_BS = b"\x08"
+
+
+def test_repeated_tab_with_nothing_typed_in_between_does_not_reprint():
+    line, output = _run(b"a" + _TAB + _TAB + _CRLF, completer=_static(["alice", "andy"]))
+    assert line == "a"
+    assert output.count("alice") == 1
+    assert output.count("andy") == 1
+
+
+def test_a_third_candidate_list_is_also_suppressed_not_just_the_second():
+    line, output = _run(b"a" + _TAB + _TAB + _TAB + _CRLF, completer=_static(["alice", "andy"]))
+    assert line == "a"
+    assert output.count("alice") == 1
+    assert output.count("andy") == 1
+
+
+def test_tab_reprints_after_any_other_keystroke_in_between():
+    # Move the cursor and back (a keystroke that doesn't change `line`
+    # at all) between two Tab presses -- still a real keystroke, so the
+    # second Tab isn't treated as a no-progress repeat.
+    left_then_right = b"\x1b[D\x1b[C"
+    line, output = _run(
+        b"a" + _TAB + left_then_right + _TAB + _CRLF, completer=_static(["alice", "andy"])
+    )
+    assert line == "a"
+    assert output.count("alice") == 2
+    assert output.count("andy") == 2
+
+
+def test_tab_reprints_after_backspacing_the_word_away_and_retyping():
+    # Thiesi's own scenario: backspace a fully-typed word back to
+    # nothing, then press Tab again. The completion engine's own
+    # common-prefix auto-extension reconstructs the identical "a" both
+    # times (compare test_multiple_candidates_extend_to_the_shared_prefix),
+    # so this specifically exercises that suppression is keyed on "did a
+    # keystroke happen", not on whether the resulting word looks the same.
+    line, output = _run(b"a" + _TAB + _BS + _TAB + _CRLF, completer=_static(["alice", "andy"]))
+    assert line == "a"
+    assert output.count("alice") == 2
+    assert output.count("andy") == 2
+
+
+def test_tab_reprints_once_the_word_is_narrowed_to_a_new_ambiguous_state():
+    line, output = _run(
+        b"a" + _TAB + b"l" + _TAB + _CRLF, completer=_static(["alice", "alicia", "andy"])
+    )
+    # First Tab (word "a"): all three share prefix "a" already typed,
+    # so it lists all three, unextended. Typing "l" narrows to "al" --
+    # a real edit -- and the second Tab extends the shared prefix to
+    # "alic" and lists the two survivors.
+    assert line == "alic"
+    assert output.count("andy") == 1  # only the first, wider list
+    assert output.count("alicia") == 2  # both lists
+
+
 # -- mid-line completion (cursor not at the end) -----------------------------
 
 

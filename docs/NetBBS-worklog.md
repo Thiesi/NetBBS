@@ -568,6 +568,18 @@ be confused with an unknown multi-byte escape sequence.
 Masked input remains a simple non-history, non-cursor-editing path so redraws
 cannot expose password characters.
 
+A repeated Tab press with an unresolved multi-candidate completion must not
+reprint an identical candidate list — `char_input.LastCandidateList` (mirrored
+in `web.WebSession._read_line_editable`) suppresses it. This cannot be
+detected by comparing the completed *word* before and after: a multi-candidate
+Tab press extends the word to the shared prefix as a side effect, so backspacing
+a word away to nothing and pressing Tab again can reconstruct the exact same
+word the previous press already showed, even though a real edit happened.
+Detect it instead by tracking whether the *immediately preceding keystroke*
+was itself an unresolved Tab — every other keystroke (including ones that
+change nothing, like Left then Right) must clear that flag before its own
+handling runs.
+
 ### Pinned chat UI
 
 The pinned status/input rows and line editor share one write lock. The live

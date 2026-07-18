@@ -36,7 +36,12 @@ def _static(candidates: list[str]):
 
 
 def _read_line_result(data: str, completer) -> str:
+    return _read_line_result_and_output(data, completer)[0]
+
+
+def _read_line_result_and_output(data: str, completer) -> tuple[str, str]:
     received = []
+    chunks: list[str] = []
 
     async def handler(session: Session):
         received.append(await session.read_line(completer=completer))
@@ -49,13 +54,14 @@ def _read_line_result(data: str, completer) -> str:
                     await ws.send_json({"type": "key", "data": data})
                     while True:
                         msg = await ws.receive_json(timeout=2)
+                        chunks.append(msg["data"])
                         if msg["data"].endswith("\r\n"):
                             break
         finally:
             await server.stop()
 
     asyncio.run(scenario())
-    return received[0]
+    return received[0], "".join(chunks)
 
 
 def test_tab_with_no_completer_is_a_no_op():
@@ -78,3 +84,17 @@ def test_multiple_candidates_extend_to_the_shared_prefix():
 def test_completion_only_replaces_the_last_word():
     result = _read_line_result("/msg al" + _TAB + "\r", _static(["alice"]))
     assert result == "/msg alice "
+
+
+def test_repeated_tab_with_nothing_typed_in_between_does_not_reprint():
+    # Confirms the wiring for netbbs.net.char_input.LastCandidateList
+    # (design doc's Tab-repeat suppression) carries over to WebSession's
+    # own parallel _read_line_editable -- the full behavior matrix is
+    # already covered against Telnet/SSH in
+    # tests/test_char_input_completion.py.
+    line, output = _read_line_result_and_output(
+        "a" + _TAB + _TAB + "\r", _static(["alice", "andy"])
+    )
+    assert line == "a"
+    assert output.count("alice") == 1
+    assert output.count("andy") == 1

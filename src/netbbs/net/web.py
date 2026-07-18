@@ -48,6 +48,7 @@ from netbbs.net.char_input import (
     EditorKey,
     EditorKeyKind,
     InputHistory,
+    LastCandidateList,
     LiveInputBuffer,
     apply_tab_completion,
     move_cursor,
@@ -370,6 +371,7 @@ class WebSession(Session):
         history_index = 0
         saved_in_progress: list[str] | None = None
         submitted = ""  # set from `line` the moment Enter is handled, below
+        last_candidates = LastCandidateList()
 
         while True:
             item = await self._read_item()
@@ -382,6 +384,11 @@ class WebSession(Session):
             # once regardless of which branch below returns/continues.
             async with (lock if lock is not None else contextlib.nullcontext()):
                 try:
+                    # Mirrors char_input._read_line_editable's own
+                    # identical reset -- see LastCandidateList's docstring.
+                    if item != _TAB:
+                        last_candidates.shown = False
+
                     if isinstance(item, _SpecialKey):
                         key = item.name
                         if key == "LEFT":
@@ -463,7 +470,8 @@ class WebSession(Session):
                     if char == _TAB:
                         if completer is not None:
                             cursor = await apply_tab_completion(
-                                self.write, completer, line, cursor, list_candidates=list_candidates
+                                self.write, completer, line, cursor,
+                                list_candidates=list_candidates, last_candidates=last_candidates,
                             )
                         continue
 
