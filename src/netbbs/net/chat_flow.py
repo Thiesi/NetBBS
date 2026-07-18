@@ -872,44 +872,34 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
 
 async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/topic` with no arguments shows the current topic — viewable by
-    anyone already in the channel, no separate permission check, since
-    being here at all already implies visibility. `/topic <text>`
-    attempts to change it, gated by `ChannelPermission.EDIT` (see
-    `netbbs.chat.channels.set_topic`). Deliberately not persisted into
-    scrollback (design doc round 33 point 5 only asks for moderation-log
-    history, unlike `/nick`'s explicit scrollback requirement) — a live
+    `/topic <text>` sets the channel topic, gated by
+    `ChannelPermission.EDIT` (see `netbbs.chat.channels.set_topic`). A
+    bare `/topic` clears it -- same reasoning as `/nick`'s own bare
+    invocation (and requiring the same `EDIT` permission `set_topic`
+    already gates clearing on, same as setting): the status line
+    already shows whatever topic is currently set, so a query-only bare
+    invocation would just be redundant, and the only useful thing left
+    for it to do is act. Deliberately not persisted into scrollback
+    (design doc round 33 point 5 only asks for moderation-log history,
+    unlike `/nick`'s explicit scrollback requirement) — a live
     in-channel notice plus the audit log entry `set_topic` already
     writes is enough.
-
-    Viewing re-fetches the channel fresh from the database rather than
-    trusting `ctx.channel.topic` — `ctx.channel` is a snapshot taken once
-    per `_chat_loop` invocation (a frozen dataclass, never mutated in
-    place), so it would otherwise still show the *old* topic for the
-    rest of the session after a successful change, the same "look it up
-    fresh, don't cache" reasoning `display_label` already follows for
-    `/nick`.
     """
-    if not args:
-        current = await ctx.lane.run(get_channel_by_name, ctx.channel.name)
-        if current.topic:
-            await ctx.session.write_line(f"Topic: {sanitize_text(current.topic)}")
-        else:
-            await ctx.session.write_line(colored("No topic set.", fg_color=MUTED_COLOR))
-        return
-
     try:
-        await ctx.lane.run(set_topic, ctx.channel, args, set_by=ctx.user)
+        await ctx.lane.run(set_topic, ctx.channel, args or None, set_by=ctx.user)
     except TopicError:
         await ctx.session.write_line(
             colored("You do not have permission to change the topic.", fg_color=MUTED_COLOR)
         )
         return
 
-    notice = colored(
-        f"*** Topic changed by {sanitize_text(ctx.user.username)}: {sanitize_text(args)}",
-        fg_color=MUTED_COLOR,
-    )
+    if args:
+        notice = colored(
+            f"*** Topic changed by {sanitize_text(ctx.user.username)}: {sanitize_text(args)}",
+            fg_color=MUTED_COLOR,
+        )
+    else:
+        notice = colored(f"*** Topic cleared by {sanitize_text(ctx.user.username)}", fg_color=MUTED_COLOR)
     await ctx.session.write_line(notice)
     await ctx.hub.broadcast(ctx.channel.name, notice, exclude={ctx.participant_id})
 
@@ -1882,7 +1872,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "quit": ("/quit", "Leave chat and return to the main menu."),
     "leave": ("/leave", "Leave this channel and return to the channel picker."),
     "join": ("/join <channel>", "Switch to another channel."),
-    "topic": ("/topic [text]", "View the channel topic, or change it (requires edit permission)."),
+    "topic": ("/topic [text]", "Set the channel topic; a bare /topic clears it (requires edit permission)."),
     "msg": ("/msg <user> <text>", "Send a one-off private message to an online user."),
     "private": ("/private <user>", "Enter a private conversation with an online user."),
     "close": ("/close", "Leave the current private conversation."),

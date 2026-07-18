@@ -201,9 +201,12 @@ def test_join_with_no_argument_shows_usage(lane, hub, presence, alice, channel):
 # -- /topic ---------------------------------------------------------------
 
 
-def test_topic_shows_no_topic_set_by_default(lane, hub, presence, alice, channel):
+def test_bare_topic_without_permission_is_rejected(db, lane, hub, presence, alice, channel):
+    # A bare /topic clears (see test_bare_topic_with_permission_clears_it
+    # below), so it needs the same EDIT permission as setting one --
+    # set_topic itself gates clearing identically to setting.
     session, _ = asyncio.run(_run(lane, hub, presence, channel, alice, ["/topic", "/quit"]))
-    assert "No topic set." in _written(session)
+    assert "do not have permission" in _written(session)
 
 
 def test_topic_change_without_permission_is_rejected(db, lane, hub, presence, alice, channel):
@@ -230,7 +233,10 @@ def test_topic_change_with_permission_sets_and_announces(db, lane, hub, presence
     assert get_channel_by_name(db, channel.name).topic == "Retro chat"
 
 
-def test_topic_shows_current_topic_once_set(db, lane, hub, presence, sysop, channel):
+def test_bare_topic_with_permission_clears_it(db, lane, hub, presence, sysop, channel):
+    # Same reasoning as /nick's own bare invocation (design doc round
+    # 32): the status line already shows whatever topic is set, so a
+    # bare /topic's only useful job left is to clear it, not view it.
     grant_permissions(
         db,
         sysop,
@@ -244,7 +250,8 @@ def test_topic_shows_current_topic_once_set(db, lane, hub, presence, sysop, chan
         _run(lane, hub, presence, channel, sysop, ["/topic Retro chat", "/topic", "/quit"])
     )
 
-    assert "Topic: Retro chat" in _written(session)
+    assert "Topic cleared by sysop" in _written(session)
+    assert get_channel_by_name(db, channel.name).topic is None
 
 
 def test_topic_change_is_broadcast_to_other_participants(db, lane, hub, presence, sysop, channel):
