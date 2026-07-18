@@ -20,7 +20,7 @@ import re
 import pytest
 
 from netbbs.auth.users import create_user
-from netbbs.chat.channels import create_channel, get_channel_by_name
+from netbbs.chat.channels import create_channel, get_channel_by_name, set_topic
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.moderation import mute_user
@@ -191,6 +191,23 @@ def test_render_omits_topic_when_unset(db, hub, presence, channel, alice):
     assert '"' not in text
 
 
+def test_render_reflects_a_topic_changed_after_the_channel_snapshot_was_taken(db, hub, presence, channel, alice):
+    # `channel` here is deliberately the pre-change snapshot passed by
+    # the caller -- the same shape `_chat_loop` holds for its whole
+    # session (a frozen dataclass, never mutated in place). Without a
+    # fresh re-fetch, this would still show no topic at all: a real
+    # regression where the status line never picked up a /topic change
+    # until the channel was re-joined.
+    grant_permissions(
+        db, alice, object_type="channel", object_id=channel.id,
+        permissions=ChannelPermission.EDIT, granted_by=alice,
+    )
+    assert channel.topic is None
+    set_topic(db, channel, "Welcome to the lounge!", set_by=alice)
+    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
+    assert '"Welcome to the lounge!"' in text
+
+
 def test_render_shows_own_privileges(db, hub, presence, channel, alice):
     _grant_moderate(db, alice, channel)
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
@@ -346,6 +363,25 @@ def test_compose_drops_whole_groups_from_the_right_on_a_narrow_terminal(db, hub,
     line = chat_flow._compose_status_line(groups, width=10)
     assert "#lobby" in line
     assert "alice" not in line
+
+
+def test_compose_falls_back_to_the_bare_username_instead_of_dropping_identity_entirely(
+    db, hub, presence, channel, alice
+):
+    # Reported by Thiesi: "setting a nickname made my name disappear
+    # entirely from the status bar." A long nick pushed the whole
+    # identity group (username + nick + badges, one unit) past the
+    # available width, and the old "drop the whole group" truncation
+    # took the bare username down with it. The bare username on its own
+    # is still meaningful -- unlike, say, a lone digit from the online
+    # count -- so it must survive even when its decorations don't.
+    set_nick(db, alice, "N" * 30)  # MAX_NICK_LENGTH is 32 -- a realistic alias length
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    # Wide enough for channel/online/alice's bare name, nowhere near
+    # enough for the 30-character nick alongside it.
+    line = chat_flow._compose_status_line(groups, width=45)
+    assert "alice" in line
+    assert "N" * 30 not in line
 
 
 def test_compose_character_truncates_only_when_even_the_first_group_does_not_fit(db, hub, presence, channel, alice):

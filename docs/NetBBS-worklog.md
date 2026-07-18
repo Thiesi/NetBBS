@@ -528,6 +528,16 @@ color and reserved marker are the anti-forgery boundary. Live send and `/me`
 revalidate current participation requirements so a session cannot keep
 posting after policy or attestation changes.
 
+`_chat_loop` holds one `Channel` snapshot (a frozen dataclass) for the whole
+session. Anything rendered from it that can change mid-session — topic,
+`min_age`/name-requirement gates, visibility — must re-fetch fresh via
+`get_channel_by_name` at render/check time rather than trust the snapshot,
+or the change silently never appears (or never takes effect) until the
+channel is re-joined. Hit twice already: `_meets_live_participation_
+requirements` (age/name gates) and `_render_chat_status_line` (topic).
+Anything new that reads channel-level mutable state from a long-lived chat
+session needs the same treatment.
+
 ---
 
 ## 7. Rendering, input, and transport rules

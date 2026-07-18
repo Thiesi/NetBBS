@@ -2219,7 +2219,18 @@ def _render_chat_status_line(
     thread, so every read here (`get_nick`, `_own_channel_privileges`,
     `is_muted`, `format_for_display`) stays a plain synchronous call,
     unchanged from before this round.
+
+    Re-fetches `channel` fresh via `get_channel_by_name` rather than
+    trusting the frozen snapshot passed in -- the same reasoning
+    `_meets_live_participation_requirements` already applies, and
+    exactly the gap its own docstring flags ("not just showing a stale
+    topic/description"): `_chat_loop` holds one `channel` snapshot for
+    the session's whole lifetime, so without this, a topic changed via
+    `/topic` mid-session would never appear here until the channel was
+    re-joined, even though `/topic` with no arguments (which already
+    re-fetches) shows it correctly right away.
     """
+    channel = get_channel_by_name(db, channel.name)
     channel_type = "invite" if channel.members_only else ("hidden" if channel.hidden else "pub")
 
     roster = _roster_usernames(hub, channel)
@@ -2270,7 +2281,10 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool
     the same "least-important field disappears first" priority order
     `_render_chat_status_line`'s own field ordering establishes, now
     applied per-group instead of a raw character `truncate()`, which
-    could land mid-field.
+    could land mid-field. A group that doesn't fit in full first falls
+    back to just its own first span (a bare channel name, a bare
+    username) before being dropped outright -- see the fallback branch
+    below for why.
 
     `active` -- set by `_repaint_status_line` from the viewer's own away
     state, not a field this function decides on its own -- controls the
@@ -2298,12 +2312,30 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool
     kept: list[_StatusGroup] = []
     running = 0
     for group in groups:
-        text = "".join(span.text for span in group)
         sep_len = len(_STATUS_SEPARATOR) if kept else 0
-        if running + sep_len + len(text) > width:
-            break
-        running += sep_len + len(text)
-        kept.append(group)
+        text = "".join(span.text for span in group)
+        if running + sep_len + len(text) <= width:
+            running += sep_len + len(text)
+            kept.append(group)
+            continue
+
+        # The full group doesn't fit. For a multi-span group, its first
+        # span alone is still meaningful on its own -- a bare channel
+        # name without its "[pub]" tag, a bare username without a nick
+        # or mod badge -- unlike the group as a whole, which was built
+        # to read as one unit. Try that core span before dropping the
+        # group entirely: a user's own identity in particular must
+        # never vanish from their own status bar just because a long
+        # nickname or badge pushed the line over budget -- reported by
+        # Thiesi as "setting a nickname made my name disappear entirely".
+        if len(group) > 1:
+            core_text = group[0].text
+            if running + sep_len + len(core_text) <= width:
+                running += sep_len + len(core_text)
+                kept.append(group[:1])
+                continue
+
+        break
 
     if not kept:
         # Not even the first (most important) group fits -- fall back to
