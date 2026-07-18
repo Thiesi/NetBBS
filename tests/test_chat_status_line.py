@@ -163,6 +163,30 @@ def test_render_shows_channel_type(db, hub, presence, channel, alice):
     assert "[pub]" in text
 
 
+def test_render_does_not_truncate_a_short_channel_name(db, hub, presence, channel, alice):
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    channel_group = groups[0]
+    assert len(channel_group) == 2  # bare name + "[type]" -- no ellipsis span at all
+    assert channel_group[0].text == "#lobby"
+
+
+def test_render_truncates_a_long_channel_name_with_a_differently_colored_marker(db, hub, presence, alice):
+    # Thiesi's own repro: a long channel name was the actual root cause
+    # behind identity/topic/clock getting squeezed off an ordinary
+    # 80-column status line entirely, not just a cosmetic nicety.
+    from netbbs.rendering import MUTED_COLOR
+
+    long_channel = create_channel(db, "Test!! Hier wird getestet", creator=alice)
+    groups = chat_flow._render_chat_status_line(db, hub, presence, long_channel, alice)
+    channel_group = groups[0]
+    assert len(channel_group) == 3  # truncated name, "...", "[type]"
+    assert channel_group[0].text == "#Test!! Hier wird geteste"  # first 24 chars of the name
+    assert channel_group[1].text == "..."
+    assert channel_group[1].fg_color == MUTED_COLOR
+    assert channel_group[1].fg_color != channel_group[0].fg_color
+    assert channel_group[2].text == "[pub]"
+
+
 def test_render_shows_own_username(db, hub, presence, channel, alice):
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "alice" in text

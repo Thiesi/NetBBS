@@ -2176,6 +2176,32 @@ _StatusGroup = list[_StatusSpan]
 
 _STATUS_SEPARATOR = " | "
 
+# Characters of the channel *name* itself shown before truncating --
+# not counting the "#" prefix, the "..." marker, or the "[type]" tag
+# that follows. An overeager channel name was the actual root cause
+# observed in practice behind identity/topic/clock getting squeezed off
+# the status line entirely on an ordinary 80-column terminal (Thiesi's
+# own "Test!! Hier wird getestet" channel), not just a cosmetic nicety.
+_CHANNEL_NAME_DISPLAY_LIMIT = 24
+
+
+def _channel_name_spans(name: str) -> list[_StatusSpan]:
+    """The channel-name portion of the status line's channel group,
+    truncating a name over `_CHANNEL_NAME_DISPLAY_LIMIT` and marking the
+    cut with a separately `MUTED_COLOR`-ed "..." -- the same "this is
+    the display adding something, not part of the real content" color
+    every other status-line decoration already uses (the mute/away
+    parenthetical text, the online-count's own connective words), so it
+    reads unambiguously as a shortening marker rather than three literal
+    dots someone typed into the channel's actual name."""
+    sanitized = sanitize_text(name)
+    if len(sanitized) <= _CHANNEL_NAME_DISPLAY_LIMIT:
+        return [_StatusSpan(f"#{sanitized}", fg_color=ACCENT_COLOR, bold=True)]
+    return [
+        _StatusSpan(f"#{sanitized[:_CHANNEL_NAME_DISPLAY_LIMIT]}", fg_color=ACCENT_COLOR, bold=True),
+        _StatusSpan("...", fg_color=MUTED_COLOR),
+    ]
+
 
 def _render_chat_status_line(
     db: Database, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
@@ -2239,7 +2265,7 @@ def _render_chat_status_line(
 
     groups: list[_StatusGroup] = [
         [
-            _StatusSpan(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True),
+            *_channel_name_spans(channel.name),
             _StatusSpan(f"[{channel_type}]", fg_color=CHANNEL_TYPE_COLOR, bold=True),
         ],
         [
