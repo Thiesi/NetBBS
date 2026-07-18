@@ -1987,14 +1987,26 @@ _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
 # conversation can't reach an offline account, matching those commands'
 # own online_usernames() and the online refusal on send) versus any
 # registered account at all (/whois, /finger -- both work for offline
-# accounts too). /invite is its own case just below -- eligible
+# accounts too, so the *command* itself accepts any registered username
+# typed in full). /invite is its own case just below -- eligible
 # candidates are registered users who aren't already members.
+#
+# Tab-completion *suggestions* for /whois and /finger are narrower than
+# what the command itself accepts, though: on a node with hundreds of
+# registered users, offering every one of them from a single typed
+# character is noise, not help. So completion only searches this
+# channel's current roster (`_roster_usernames`, the same live source
+# the status line's own online count uses) -- a user not currently in
+# the channel still works if typed out in full, just without tab
+# assistance for it.
 _ONLINE_USER_COMMAND_PREFIXES = ("/msg ", "/private ")
 _ANY_USER_COMMAND_PREFIXES = ("/whois ", "/finger ")
 _INVITE_COMMAND_PREFIX = "/invite "
 
 
-async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, channel: Channel, user: User) -> Completer:
+async def _build_completer(
+    lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+) -> Completer:
     """
     Builds one Tab-completion closure per `read_line()` call in
     `send_loop`, from the state available there -- cheap (a handful of
@@ -2016,7 +2028,11 @@ async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, chann
     currently visible, the full username list, and current membership --
     is fetched once, eagerly, in one bundled `lane.run` call *before*
     the closure is built, and the closure itself only ever reads that
-    already-fetched data.
+    already-fetched data. `roster_usernames` is the one exception --
+    `_roster_usernames` reads `hub`'s live in-memory participant map,
+    not `db`, so it's computed directly here rather than routed through
+    `lane.run`, the same reasoning `_repaint_status_line` already
+    applies to `presence.is_away`.
     """
 
     def _gather(db: Database) -> tuple[list[str], list[str], set[str]]:
@@ -2031,6 +2047,7 @@ async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, chann
         return visible_commands, all_usernames, member_usernames
 
     visible_commands, all_usernames, member_usernames = await lane.run(_gather)
+    roster_usernames = _roster_usernames(hub, channel)
 
     def completer(text: str) -> list[str]:
         if text.startswith("/") and " " not in text:
@@ -2049,7 +2066,7 @@ async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, chann
             rest = text[len(command_prefix) :]
             if text.lower().startswith(command_prefix) and " " not in rest:
                 word = rest.lower()
-                return sorted(name for name in all_usernames if name.lower().startswith(word))
+                return sorted(name for name in roster_usernames if name.lower().startswith(word))
 
         rest = text[len(_INVITE_COMMAND_PREFIX) :]
         if text.lower().startswith(_INVITE_COMMAND_PREFIX) and " " not in rest:
@@ -2817,7 +2834,7 @@ async def _chat_loop(
                 )
 
             while True:
-                completer = await _build_completer(lane, presence, channel, user)
+                completer = await _build_completer(lane, hub, presence, channel, user)
                 line = (
                     await session.read_line(
                         history=history, completer=completer, live_buffer=live_buffer, lock=lock,

@@ -23,7 +23,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
-from netbbs.chat.hub import ChatHub
+from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net import char_input, chat_flow
@@ -320,9 +320,22 @@ def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
     goes through the exact same "new line in the content region, then
     redraw the pinned input row" primitive every other pinned-row print
     already uses.
+
+    bob is joined into the channel's live roster directly, not via a
+    second real `_chat_loop`, and *before* alice's own `_chat_loop`
+    starts -- /whois completion now only suggests users currently in
+    this channel (avoids a wall of suggestions on a node with hundreds
+    of registered users), and the completer is built once, eagerly,
+    right as `send_loop` reaches its first `read_line()` call (see
+    `_build_completer`'s own docstring), so bob has to already be in
+    the roster before that happens or alice's completer would still
+    only ever see herself -- taking the single-candidate auto-complete
+    branch instead of the multi-candidate list this test exists to
+    exercise.
     """
 
     async def scenario():
+        hub.join(channel.name, ParticipantId(username="bob", session_key=99))
         alice_session = _LiveTypingSession()
         alice_task = asyncio.create_task(
             chat_flow._chat_loop(
