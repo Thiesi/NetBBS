@@ -42,6 +42,7 @@ from netbbs.rendering.theme import (
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
+    STATUS_BAR_BACKGROUND,
     TOPIC_COLOR,
     VERIFIED_COLOR,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "NICK_COLOR",
     "PRIVILEGE_COLOR",
     "SELF_COLOR",
+    "STATUS_BAR_BACKGROUND",
     "TOPIC_COLOR",
     "VERIFIED_COLOR",
 ]

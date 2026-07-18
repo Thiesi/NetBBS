@@ -148,6 +148,7 @@ from netbbs.rendering import (
     NICK_COLOR,
     PRIVILEGE_COLOR,
     SELF_COLOR,
+    STATUS_BAR_BACKGROUND,
     TOPIC_COLOR,
     clear_line,
     clear_screen,
@@ -2190,9 +2191,9 @@ def _render_chat_status_line(
 ) -> list[_StatusGroup]:
     """
     The status line's content, as an ordered list of colored field
-    groups (composed/truncated/colored/reversed by the caller). Each
-    field gets its own distinct color rather than sharing one -- the
-    channel name, its `[pub]`/`[invite]`/`[hidden]` type, the topic,
+    groups (composed/truncated/backgrounded by the caller). Each field
+    gets its own distinct foreground color rather than sharing one --
+    the channel name, its `[pub]`/`[invite]`/`[hidden]` type, the topic,
     and this user's own moderator/SysOp badge are all visually distinct
     categories, not one undifferentiated run of text.
 
@@ -2203,14 +2204,15 @@ def _render_chat_status_line(
     disappears first -- the clock, then this user's own identity/
     privileges/mute state, then the topic, while the channel name and
     live counts always survive. Away state is deliberately *not* one of
-    these rendered indicator groups -- `_repaint_status_line` reverses
-    the whole composed row by default and turns that off specifically
-    when the viewer is away (a deliberately quieter, non-inverted look
-    for "I've stepped back"), so there is nothing here to drop or
-    truncate for it. Deliberately still *not* included: any per-channel
-    "linked vs. local" origin -- that distinction doesn't exist anywhere
-    in the schema yet (NetBBS Link is Phase 3, still private/
-    experimental federation), so there is nothing real to render.
+    these rendered indicator groups -- `_repaint_status_line` gives the
+    whole composed row a solid background band by default and drops it
+    specifically when the viewer is away (a deliberately quieter,
+    background-less look for "I've stepped back"), so there is nothing
+    here to drop or truncate for it. Deliberately still *not* included:
+    any per-channel "linked vs. local" origin -- that distinction
+    doesn't exist anywhere in the schema yet (NetBBS Link is Phase 3,
+    still private/experimental federation), so there is nothing real to
+    render.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -2270,31 +2272,38 @@ def _render_chat_status_line(
     return groups
 
 
-def _compose_status_line(groups: list[_StatusGroup], width: int, *, reverse: bool = False) -> str:
+def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool = False) -> str:
     """
     Joins `groups` with a dim `_STATUS_SEPARATOR`, dropping whole groups
     from the right when the terminal is too narrow to fit them all --
     the same "least-important field disappears first" priority order
     `_render_chat_status_line`'s own field ordering establishes, now
     applied per-group instead of a raw character `truncate()`, which
-    could land mid-field. Underlines every span, including the
-    separators and the trailing padding, so the whole row still reads
-    as one continuous rule.
+    could land mid-field.
 
-    `reverse` -- set by `_repaint_status_line` from the viewer's own
-    away state, not a field this function decides on its own --
-    additionally swaps fg/bg (SGR 7) on every span, on top of each
-    span's own `fg_color`/underline, rather than replacing per-field
-    color with one flat inverted bar: since only `fg_color` (never
-    `bg_color`) is ever set on a status-line span, reversing turns each
-    span into its own colored block (that color as background, the
-    terminal's own default as text) instead of plain colored text on
-    the terminal's default background. `_repaint_status_line` reverses
-    by default and turns it off specifically while the viewer is away
-    -- a deliberately quieter, non-inverted look standing in for an
-    inline `[away]` tag, so there's nothing further to render or drop
-    for it in the field groups themselves.
+    `active` -- set by `_repaint_status_line` from the viewer's own away
+    state, not a field this function decides on its own -- controls the
+    row's whole look, not any one field's color (Thiesi's own explicit
+    choice: literal per-field foreground colors, one flat background for
+    the whole bar, not reverse video swapping fg/bg per span):
+
+    - active (the default look, i.e. not away): every span keeps its own
+      `fg_color` and additionally gets `STATUS_BAR_BACKGROUND` as a
+      shared `bg_color`, including the separators and the trailing
+      padding, so the whole row reads as one continuous colored band —
+      no underline, since the background band itself already marks the
+      row's boundary.
+    - not active (away): no background at all -- literal per-field
+      foreground color on the terminal's own default background,
+      substituting a continuous underline (again spanning separators and
+      padding) as the row's boundary marker instead, since there's no
+      background band to serve that purpose. A deliberately quieter look
+      standing in for an inline `[away]` tag, so there's nothing further
+      to render or drop for it in the field groups themselves.
     """
+    background = STATUS_BAR_BACKGROUND if active else None
+    underline = not active
+
     kept: list[_StatusGroup] = []
     running = 0
     for group in groups:
@@ -2309,19 +2318,21 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, reverse: boo
         # Not even the first (most important) group fits -- fall back to
         # a raw character truncation of just that one.
         only = truncate("".join(span.text for span in groups[0]), width) if groups else ""
-        return colored(only, underline=True, reverse=reverse)
+        return colored(only, bg_color=background, underline=underline)
 
     rendered: list[str] = []
     for index, group in enumerate(kept):
         if index > 0:
-            rendered.append(colored(_STATUS_SEPARATOR, fg_color=MUTED_COLOR, underline=True, reverse=reverse))
+            rendered.append(
+                colored(_STATUS_SEPARATOR, fg_color=MUTED_COLOR, bg_color=background, underline=underline)
+            )
         for span in group:
             rendered.append(
-                colored(span.text, fg_color=span.fg_color, bold=span.bold, underline=True, reverse=reverse)
+                colored(span.text, fg_color=span.fg_color, bg_color=background, bold=span.bold, underline=underline)
             )
     pad = width - running
     if pad > 0:
-        rendered.append(colored(" " * pad, underline=True, reverse=reverse))
+        rendered.append(colored(" " * pad, bg_color=background, underline=underline))
     return "".join(rendered)
 
 
@@ -2368,7 +2379,7 @@ async def _repaint_status_line(
     non-`db`-touching code here, same split as `_resolve_target`/
     `_write_vcard_detail`.
 
-    Reverses the whole composed row by default, turning that off when
+    Gives the row its solid background band by default, dropping it when
     `user` is currently away (`presence.is_away`) instead of rendering a
     separate `[away]` tag inline -- read directly off `presence` here, a
     plain in-memory lookup, rather than threading it through the
@@ -2382,7 +2393,7 @@ async def _repaint_status_line(
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
-    line = _compose_status_line(groups, session.terminal_width, reverse=not presence.is_away(user.username))
+    line = _compose_status_line(groups, session.terminal_width, active=not presence.is_away(user.username))
     await session.write(
         save_cursor()
         + set_scroll_region(1, height - 2)

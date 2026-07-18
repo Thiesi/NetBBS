@@ -238,7 +238,7 @@ def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, a
     assert not re.search(r"\d{4}", text)  # no 4-digit year anywhere
 
 
-# -- _compose_status_line (pure function): colors, separators, reverse --
+# -- _compose_status_line (pure function): colors, separators, background --
 
 
 def test_compose_uses_ascii_pipe_separators_between_fields(db, hub, presence, channel, alice):
@@ -247,34 +247,34 @@ def test_compose_uses_ascii_pipe_separators_between_fields(db, hub, presence, ch
     assert chat_flow._STATUS_SEPARATOR in line
 
 
-def test_compose_colors_each_field_distinctly_and_does_not_reverse_by_default(db, hub, presence, channel, alice):
-    from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR
-    from netbbs.rendering.ansi import REVERSE, fg
+def test_compose_colors_each_field_distinctly_and_has_no_background_by_default(db, hub, presence, channel, alice):
+    from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR, STATUS_BAR_BACKGROUND
+    from netbbs.rendering.ansi import bg, fg
 
     groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
     line = chat_flow._compose_status_line(groups, width=200)
     # Channel name and this user's own identity get their own distinct
-    # colors (design doc's status-line redesign) rather than sharing one
-    # inverted background -- and `reverse` defaults to off.
+    # foreground colors rather than sharing one -- and `active` defaults
+    # to off, so there's no shared background band.
     assert fg(ACCENT_COLOR) in line
     assert fg(SELF_COLOR) in line
     assert fg(MUTED_COLOR) in line
-    assert REVERSE not in line
+    assert bg(STATUS_BAR_BACKGROUND) not in line
 
 
-def test_compose_reverses_every_span_when_asked(db, hub, presence, channel, alice):
-    """`reverse=True` (driven by `_repaint_status_line`'s default,
-    not-away look -- `test_status_line_reverses_by_default_when_not_away`
-    below) swaps fg/bg on every span, on top of its own `fg_color`/
-    underline, rather than replacing per-field color with one flat
-    inverted bar -- so REVERSE and each field's own distinct fg color
-    both appear."""
-    from netbbs.rendering import ACCENT_COLOR, SELF_COLOR
-    from netbbs.rendering.ansi import REVERSE, fg
+def test_compose_gives_every_span_the_same_background_when_active(db, hub, presence, channel, alice):
+    """`active=True` (driven by `_repaint_status_line`'s default,
+    not-away look -- `test_status_line_has_a_background_by_default_when_not_away`
+    below) gives every span the same shared `STATUS_BAR_BACKGROUND`, on
+    top of its own `fg_color`, rather than replacing per-field color
+    with one flat background -- so the background color and each
+    field's own distinct fg color both appear."""
+    from netbbs.rendering import ACCENT_COLOR, SELF_COLOR, STATUS_BAR_BACKGROUND
+    from netbbs.rendering.ansi import bg, fg
 
     groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
-    line = chat_flow._compose_status_line(groups, width=200, reverse=True)
-    assert REVERSE in line
+    line = chat_flow._compose_status_line(groups, width=200, active=True)
+    assert bg(STATUS_BAR_BACKGROUND) in line
     assert fg(ACCENT_COLOR) in line
     assert fg(SELF_COLOR) in line
 
@@ -295,18 +295,31 @@ def test_render_gives_channel_type_topic_and_privileges_their_own_colors(db, hub
     assert fg(PRIVILEGE_COLOR) in line
 
 
-def test_compose_underlines_the_full_row_including_padding(db, hub, presence, channel, alice):
+def test_compose_underlines_the_full_row_including_padding_when_not_active(db, hub, presence, channel, alice):
     import re
 
     from netbbs.rendering.ansi import RESET, UNDERLINE
 
     groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
-    line = chat_flow._compose_status_line(groups, width=200)
-    # The underline (round 77's original solid reverse-video bar,
-    # replaced here) must still reach the padding at the row's far
-    # right, not just the real field text, so it reads as one
-    # continuous rule the same way the old bar filled the whole row.
+    line = chat_flow._compose_status_line(groups, width=200, active=False)
+    # The away look's underline must still reach the padding at the
+    # row's far right, not just the real field text, so it reads as one
+    # continuous rule even with no background band to do that job.
     pattern = re.escape(UNDERLINE) + r" +" + re.escape(RESET) + r"$"
+    assert re.search(pattern, line)
+
+
+def test_compose_backgrounds_the_full_row_including_padding_when_active(db, hub, presence, channel, alice):
+    import re
+
+    from netbbs.rendering import STATUS_BAR_BACKGROUND
+    from netbbs.rendering.ansi import RESET, bg
+
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=200, active=True)
+    # Same "reaches the padding" property as the away look, just via the
+    # background band instead of an underline.
+    pattern = re.escape(bg(STATUS_BAR_BACKGROUND)) + r" +" + re.escape(RESET) + r"$"
     assert re.search(pattern, line)
 
 
@@ -404,41 +417,42 @@ def test_chat_loop_resets_the_scroll_region_even_if_that_write_itself_fails(
 # -- repaint triggers -----------------------------------------------------
 
 
-def test_status_line_reverses_by_default_when_not_away(lane, hub, presence, mailbox, channel, alice):
-    from netbbs.rendering.ansi import REVERSE
+def test_status_line_has_a_background_by_default_when_not_away(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering import STATUS_BAR_BACKGROUND
+    from netbbs.rendering.ansi import bg
 
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
-    assert REVERSE in _written_text(session)
+    assert bg(STATUS_BAR_BACKGROUND) in _written_text(session)
 
 
-def test_status_line_does_not_reverse_when_the_viewer_is_away(lane, hub, presence, mailbox, channel, alice):
-    from netbbs.rendering import save_cursor
-    from netbbs.rendering.ansi import REVERSE
+def test_status_line_loses_its_background_when_the_viewer_is_away(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering import STATUS_BAR_BACKGROUND, save_cursor
+    from netbbs.rendering.ansi import bg
 
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     # Status-line repaints are the only pinned-row writes that save/
     # restore the cursor (`_repaint_status_line`'s own docstring) --
     # isolates them from the input-row repaints interleaved in between,
     # so this is the *last* status-line paint, reflecting away having
-    # taken effect -- not the very first one on entry, which is still
-    # reversed (the default, not-away look).
+    # taken effect -- not the very first one on entry, which still has
+    # the default, not-away background.
     status_repaints = [chunk for chunk in session.written if chunk.startswith(save_cursor())]
     assert len(status_repaints) >= 2
-    assert REVERSE in status_repaints[0]  # entry: not away yet, default reversed look
-    assert REVERSE not in status_repaints[-1]  # after /away brb: quieter, non-reversed look
+    assert bg(STATUS_BAR_BACKGROUND) in status_repaints[0]  # entry: not away yet, default background
+    assert bg(STATUS_BAR_BACKGROUND) not in status_repaints[-1]  # after /away brb: quieter, no background
 
 
-def test_status_line_resumes_reversing_once_away_is_cleared(lane, hub, presence, mailbox, channel, alice):
-    from netbbs.rendering import save_cursor
-    from netbbs.rendering.ansi import REVERSE
+def test_status_line_regains_its_background_once_away_is_cleared(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering import STATUS_BAR_BACKGROUND, save_cursor
+    from netbbs.rendering.ansi import bg
 
     session, _ = asyncio.run(
         _run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/away", "/quit"])
     )
     status_repaints = [chunk for chunk in session.written if chunk.startswith(save_cursor())]
     assert len(status_repaints) >= 2
-    assert REVERSE not in status_repaints[-2]  # not reversed: /away brb just took effect
-    assert REVERSE in status_repaints[-1]  # reversed again: the very next /away cleared it
+    assert bg(STATUS_BAR_BACKGROUND) not in status_repaints[-2]  # no background: /away brb just took effect
+    assert bg(STATUS_BAR_BACKGROUND) in status_repaints[-1]  # background back: the very next /away cleared it
 
 
 def test_status_line_repaints_when_a_muted_message_is_rejected(db, lane, hub, presence, mailbox, channel, alice, bob):

@@ -41,3 +41,12 @@ PRIVILEGE_COLOR = 196  # red — a user's own moderator/SysOp badge ("[mod]",
                        # "[sysop]") in the chat status line, distinct from the
                        # muted gray used for state that's merely informational
                        # (mute expiry, the clock) rather than elevated access
+STATUS_BAR_BACKGROUND = 236  # dark neutral gray — the chat status line's own
+                             # solid background band (Thiesi's own explicit
+                             # choice: literal per-field foreground colors on
+                             # one flat background, not reverse video). Dark
+                             # enough to read as a distinct bar against a
+                             # typical terminal's own black/near-black
+                             # background, neutral enough that it never fights
+                             # any of this palette's foreground colors for
+                             # attention the way a hue-matched background could
