@@ -199,6 +199,13 @@ outgoing_only = true
 seeds = []
 # seeds = ["http://198.51.100.7:7862", "http://203.0.113.9:7862"]
 sync_interval_seconds = 300
+# Whether this node is willing to relay for outgoing-only peers that
+# ask (design doc §12, round 95, issue #58) -- on by default, since an
+# opt-in-only default would leave a young/small Link without enough
+# relays for outgoing-only nodes to ever reliably reach anyone.
+# max_relay_clients bounds how many peers it relays for at once.
+relay_serving_enabled = true
+max_relay_clients = 20
 
 [throttle]
 # All optional -- shown here with their built-in defaults.

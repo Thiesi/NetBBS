@@ -598,9 +598,14 @@ recipient node — not "everyone carrying this board."**
 
 **Status:** tier 1 is fully built (send/receive/read, wired through
 transport/sync/UI) — see the round 93/#52 implementation commits. Node/
-account key lifecycle (#51) is also resolved. Any relay mechanism (#58)
-remains separately tracked, not solved here — a Link message today can
-only reach a recipient whose node is already known via a prior hello.
+account key lifecycle (#51) is also resolved. Issue #58's relay mechanism
+(round 95, §12) now covers `link_message` specifically — a recipient who
+is outgoing-only and has selected relays can still be reached, but only if
+the sender already knows that recipient as a peer from some prior direct
+hello (see §12's own status note for why: composing/encrypting a message
+already needs that, and relay delivery never relaxes "no relay from a
+stranger" acceptance either). Reaching a recipient with no prior
+relationship at all — true stranger introduction — remains out of scope.
 
 ## 8. Real-time chat
 
@@ -818,6 +823,50 @@ inventing new ones:
   resources on it can switch it off in node config, the same shape as
   the existing ANSI welcome-banner toggle (round 63) — autonomy
   preserved via opt-out, automation preserved via the default.
+
+**Status: implemented, issue #58 closed.** Multi-address fallback
+(`netbbs.link.sync._dialable_addresses`/`_try_addresses_via`) tries
+every address an `endpoint_descriptor` advertises, in order, not just
+the first. Reliability scoring turned out to have nothing existing to
+reuse — **a real gap found while implementing this, not anticipated by
+this section's own wording ("reuses §6's existing local-reputation
+mechanism")**: §6's reputation/trust system is design-only, no data
+model exists anywhere in this codebase for it (confirmed by tracing,
+not assumed). `netbbs.link.reliability` is a genuinely new, minimal,
+direct-observation-only tracker (`link_reliability` table: attempts/
+successes per fingerprint, neutral 0.5 prior for the unobserved), fed
+by every fallback and relay-selection dial alike. `netbbs.link.
+relay_selection` picks up to three reachable full-peer candidates
+ranked by that score and flags a currently-serving relay whose score
+has dropped to self-heal. Consent is a new signed pair, `relay_
+consent_request`/`relay_consent_response` — structurally the odd one
+out among every other event pair in this codebase: it needs a
+*synchronous* reply (the requester may itself be outgoing-only and can
+never be dialed back), so it travels over a dedicated `/relay-consent`
+route rather than the general gossiped `/events` push, the response
+carried back in the same HTTP call exactly like `/hello`'s own reply.
+A relay's mailbox (`netbbs.link.relay_mailbox`, `link_relay_mailbox`
+table) custodies only opaque `link_message` envelopes, bounded per
+recipient; pickup is authenticated by requiring a fresh, verifiable
+hello as the pickup route's own request body rather than inventing yet
+another signed message type, since a hello already proves the caller's
+identity. A picked-up envelope is never trusted on the relay's say-so —
+the recipient re-runs the exact same `LinkNode.handle_events`
+acceptance path a directly-arrived message already goes through, keyed
+by that message's own claimed sender; a sender the recipient has never
+directly met is rejected exactly as it would be arriving any other way,
+so relaying never relaxes "no relay from a stranger," it only changes
+which node performs the check. This is also why relay delivery only
+ever works between nodes that have *already* met directly at some
+point (mail composition itself already requires a known peer to
+resolve an encryption key to) — reaching a total stranger purely via
+relay introduction is not this round's scope. `LinkNode.build_hello`
+reads its own `relays_serving_me` live, so self-healing republication
+needed no separate "push a fresh descriptor" mechanism: the very next
+hello a node sends anyone already carries the current set. `netbbs.
+net.nodeconfig.LinkConfig.relay_serving_enabled`/`max_relay_clients`
+give the opt-out and the resource cap; both default per this section's
+own decision above.
 
 ### Live seed-list refresh via the self-update channel (round 97)
 

@@ -15,21 +15,27 @@ from netbbs.link.events import (
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    EndpointDescriptor,
     EventError,
     KeyTransition,
     LinkMessage,
     LinkMessageAccepted,
     LinkMessageBounced,
+    RelayConsentRequest,
+    RelayConsentResponse,
     build_board_genesis,
     build_board_origin_transfer_accepted,
     build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
+    build_endpoint_descriptor,
     build_envelope,
     build_key_transition,
     build_link_message,
     build_link_message_accepted,
     build_link_message_bounced,
+    build_relay_consent_request,
+    build_relay_consent_response,
     canonical_bytes,
     event_content_id,
     verify_board_genesis,
@@ -37,10 +43,13 @@ from netbbs.link.events import (
     verify_board_origin_transfer_offer,
     verify_board_post,
     verify_board_post_edit,
+    verify_endpoint_descriptor,
     verify_key_transition,
     verify_link_message,
     verify_link_message_accepted,
     verify_link_message_bounced,
+    verify_relay_consent_request,
+    verify_relay_consent_response,
 )
 
 
@@ -943,3 +952,152 @@ def test_link_message_bounced_to_dict_from_dict_roundtrip(recipient_node_signing
     assert restored.envelope == original.envelope
     assert restored.signature == original.signature
     assert verify_link_message_bounced(restored, recipient_node_signing.verify_key)
+
+
+# -- endpoint_descriptor relays field (round 95/issue #58) -------------------
+
+
+@pytest.fixture
+def node_signing():
+    return Identity.generate(IdentityKind.NODE, "relay-endpoint-subject")
+
+
+def test_endpoint_descriptor_relays_omitted_when_none(node_signing):
+    descriptor = build_endpoint_descriptor(
+        signing_identity=node_signing,
+        subject_fingerprint="subject-fp",
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert "relays" not in descriptor.payload
+
+
+def test_endpoint_descriptor_relays_included_when_given(node_signing):
+    descriptor = build_endpoint_descriptor(
+        signing_identity=node_signing,
+        subject_fingerprint="subject-fp",
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00Z",
+        relays=["relay-fp-1", "relay-fp-2"],
+    )
+    assert descriptor.payload["relays"] == ["relay-fp-1", "relay-fp-2"]
+    assert verify_endpoint_descriptor(descriptor, node_signing.verify_key)
+
+
+def test_endpoint_descriptor_relays_to_dict_from_dict_roundtrip(node_signing):
+    original = build_endpoint_descriptor(
+        signing_identity=node_signing,
+        subject_fingerprint="subject-fp",
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-01-01T00:00:00Z",
+        relays=["relay-fp-1"],
+    )
+    restored = EndpointDescriptor.from_dict(original.to_dict())
+    assert restored.payload["relays"] == ["relay-fp-1"]
+    assert verify_endpoint_descriptor(restored, node_signing.verify_key)
+
+
+# -- relay_consent_request / relay_consent_response (round 95/issue #58) -----
+
+
+@pytest.fixture
+def requester_signing():
+    return Identity.generate(IdentityKind.NODE, "relay-requester")
+
+
+@pytest.fixture
+def relay_signing():
+    return Identity.generate(IdentityKind.NODE, "relay-candidate")
+
+
+def test_build_relay_consent_request_is_signed_by_requester(requester_signing):
+    request = build_relay_consent_request(
+        signing_identity=requester_signing,
+        requester_fingerprint="requester-fp",
+        relay_fingerprint="relay-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert request.payload["requester_fingerprint"] == "requester-fp"
+    assert request.payload["relay_fingerprint"] == "relay-fp"
+    assert verify_relay_consent_request(request, requester_signing.verify_key)
+
+
+def test_relay_consent_request_rejects_wrong_signing_key(requester_signing, relay_signing):
+    request = build_relay_consent_request(
+        signing_identity=requester_signing,
+        requester_fingerprint="requester-fp",
+        relay_fingerprint="relay-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert not verify_relay_consent_request(request, relay_signing.verify_key)
+
+
+def test_relay_consent_request_nonce_distinguishes_identical_requests(requester_signing):
+    first = build_relay_consent_request(
+        signing_identity=requester_signing,
+        requester_fingerprint="requester-fp",
+        relay_fingerprint="relay-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    second = build_relay_consent_request(
+        signing_identity=requester_signing,
+        requester_fingerprint="requester-fp",
+        relay_fingerprint="relay-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert first.content_id != second.content_id
+
+
+def test_relay_consent_request_to_dict_from_dict_roundtrip(requester_signing):
+    original = build_relay_consent_request(
+        signing_identity=requester_signing,
+        requester_fingerprint="requester-fp",
+        relay_fingerprint="relay-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    restored = RelayConsentRequest.from_dict(original.to_dict())
+    assert restored.content_id == original.content_id
+    assert verify_relay_consent_request(restored, requester_signing.verify_key)
+
+
+def test_build_relay_consent_response_is_signed_by_relay(relay_signing):
+    response = build_relay_consent_response(
+        signing_identity=relay_signing,
+        request_content_id="the-request-content-id",
+        relay_fingerprint="relay-fp",
+        requester_fingerprint="requester-fp",
+        accepted=True,
+        created_at="2026-01-01T00:00:01Z",
+    )
+    assert response.payload["request_content_id"] == "the-request-content-id"
+    assert response.payload["accepted"] is True
+    assert verify_relay_consent_response(response, relay_signing.verify_key)
+
+
+def test_relay_consent_response_rejects_wrong_signing_key(relay_signing, requester_signing):
+    response = build_relay_consent_response(
+        signing_identity=relay_signing,
+        request_content_id="the-request-content-id",
+        relay_fingerprint="relay-fp",
+        requester_fingerprint="requester-fp",
+        accepted=False,
+        created_at="2026-01-01T00:00:01Z",
+    )
+    assert not verify_relay_consent_response(response, requester_signing.verify_key)
+
+
+def test_relay_consent_response_to_dict_from_dict_roundtrip(relay_signing):
+    original = build_relay_consent_response(
+        signing_identity=relay_signing,
+        request_content_id="the-request-content-id",
+        relay_fingerprint="relay-fp",
+        requester_fingerprint="requester-fp",
+        accepted=True,
+        created_at="2026-01-01T00:00:01Z",
+    )
+    restored = RelayConsentResponse.from_dict(original.to_dict())
+    assert restored.payload["accepted"] is True
+    assert verify_relay_consent_response(restored, relay_signing.verify_key)

@@ -219,6 +219,8 @@ async def _start_servers(
                     node=link_node,
                     own_hello_provider=_build_own_hello_provider(link_node, config.link),
                     lane=link_lane,
+                    relay_serving_enabled=config.link.relay_serving_enabled,
+                    max_relay_clients=config.link.max_relay_clients,
                 ),
             )
             # Deliberately not counted toward any_interactive_started

@@ -505,3 +505,76 @@ def test_cli_link_seed_replaces_toml_seeds_entirely(tmp_path):
     )
     config = load_config(["--config", str(config_file), "--link-seed", "http://from-cli:7862"])
     assert config.link.seeds == ["http://from-cli:7862"]
+
+
+# -- relay-serving opt-out + resource cap (design doc §12 round 95/issue #58) --
+
+
+def test_default_link_config_serves_as_a_relay_with_a_default_cap():
+    config = NodeConfig()
+    assert config.link.relay_serving_enabled is True
+    assert config.link.max_relay_clients == 20
+
+
+def test_link_nonpositive_max_relay_clients_fails_validation():
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, max_relay_clients=0)
+    )
+    with pytest.raises(ConfigError, match="link.max_relay_clients"):
+        config.validate()
+
+
+def test_link_disabled_skips_max_relay_clients_validation():
+    config = NodeConfig(
+        link=LinkConfig(enabled=False, host="127.0.0.1", port=7862, max_relay_clients=-1)
+    )
+    config.validate()  # must not raise -- disabled means unvalidated, same as host/port
+
+
+def test_cli_can_disable_relay_serving():
+    config = load_config(["--enable-telnet", "--enable-link", "--link-no-relay-serving"])
+    assert config.link.relay_serving_enabled is False
+
+
+def test_cli_can_explicitly_enable_relay_serving():
+    config = load_config(["--enable-telnet", "--enable-link", "--link-relay-serving"])
+    assert config.link.relay_serving_enabled is True
+
+
+def test_cli_can_set_max_relay_clients():
+    config = load_config(["--enable-telnet", "--enable-link", "--link-max-relay-clients", "5"])
+    assert config.link.max_relay_clients == 5
+
+
+def test_toml_relay_serving_and_max_relay_clients(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        relay_serving_enabled = false
+        max_relay_clients = 7
+        """
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.link.relay_serving_enabled is False
+    assert config.link.max_relay_clients == 7
+
+
+def test_cli_overrides_toml_relay_serving(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        relay_serving_enabled = true
+        """
+    )
+    config = load_config(["--config", str(config_file), "--link-no-relay-serving"])
+    assert config.link.relay_serving_enabled is False

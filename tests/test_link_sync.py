@@ -27,7 +27,7 @@ from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queu
 from netbbs.link.events import build_endpoint_descriptor
 from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import HelloMessage, LinkNode, PeerRecord
 from netbbs.link.seedlist import set_cached_supplementary_seeds
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer
@@ -252,6 +252,52 @@ def test_sync_falls_back_to_a_candidate_when_the_only_seed_fails(tmp_path):
         candidate.close()
 
 
+def test_sync_tries_a_candidates_second_address_when_its_first_is_dead(tmp_path):
+    """Issue #58: previously only `addresses[0]` was ever attempted for
+    any peer, anywhere -- a candidate's later, genuinely-reachable
+    addresses were silently dead data. A real server behind the
+    *second* advertised address must still be reached."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    candidate_identity = bootstrap_node_identity("candidate")
+    dialer_node = LinkNode(identity=dialer_identity)
+    candidate_node = LinkNode(identity=candidate_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    candidate = _NodeDb(tmp_path, "candidate")
+
+    async def scenario():
+        candidate_server = await _run_server(candidate_node, candidate.lane)
+        descriptor = build_endpoint_descriptor(
+            signing_identity=candidate_identity.signing_key,
+            subject_fingerprint=candidate_identity.fingerprint,
+            addresses=[
+                {"protocol": "http", "address": "127.0.0.1", "port": 1},  # dead
+                {"protocol": "http", "address": "127.0.0.1", "port": candidate_server.port},  # real
+            ],
+            outgoing_only=False,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        dialer_node.candidate_descriptors[candidate_identity.fingerprint] = descriptor
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, ["http://127.0.0.1:1"],  # the only seed, dead too
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task, settle=8.0)
+        finally:
+            await candidate_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert candidate_identity.fingerprint in dialer_node.peers  # reached via the second address
+        assert dialer_identity.fingerprint in candidate_node.peers  # the dial really landed
+    finally:
+        dialer.close()
+        candidate.close()
+
+
 def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
     """The brand-new-node case round 97/95 both name as the one this
     resilience path matters most for."""
@@ -286,8 +332,14 @@ def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
 
 
 def test_sync_does_not_fall_back_when_a_seed_succeeds(tmp_path):
-    """A candidate must never be dialed just because it's known -- only
-    when every seed this pass genuinely failed."""
+    """A candidate must never be dialed via *fallback* just because it's
+    known -- only when every seed this pass genuinely failed. Round 95/
+    issue #58's separate relay-selection mechanism also dials known
+    candidates, but only for an outgoing-only node (design doc §12: a
+    full peer never needs relays) -- this dialer is deliberately built
+    as a full peer here so that mechanism stays out of this test's way,
+    keeping it scoped to fallback specifically (relay selection has its
+    own dedicated tests)."""
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
     candidate_identity = bootstrap_node_identity("candidate")
@@ -298,6 +350,13 @@ def test_sync_does_not_fall_back_when_a_seed_succeeds(tmp_path):
     seed = _NodeDb(tmp_path, "seed")
     candidate = _NodeDb(tmp_path, "candidate")
 
+    def _full_peer_hello_for_dialer() -> HelloMessage:
+        return dialer_node.build_hello(
+            addresses=[{"protocol": "http", "address": "198.51.100.50", "port": 7862}],
+            outgoing_only=False,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+
     async def scenario():
         seed_server = await _run_server(seed_node, seed.lane)
         candidate_server = await _run_server(candidate_node, candidate.lane)
@@ -307,7 +366,7 @@ def test_sync_does_not_fall_back_when_a_seed_succeeds(tmp_path):
                 task = asyncio.create_task(
                     run_link_sync(
                         dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
-                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                        _full_peer_hello_for_dialer, dialer.lane, interval_seconds=60.0,
                     )
                 )
                 await _run_sync_briefly(task)
@@ -624,8 +683,8 @@ def test_sync_pushes_pending_link_mail_directly_to_its_known_recipient(tmp_path)
         # (fine for every other test here, which only ever pushes *to* a
         # statically-configured seed URL), the recipient must advertise
         # a real, dialable address in its own hello -- that's the only
-        # way the dialer's later _dialable_address lookup has anything
-        # to find for it.
+        # way the dialer's later _dialable_addresses_for_peer lookup has
+        # anything to find for it.
         recipient_server = LinkServer(
             host="127.0.0.1", port=0, node=recipient_node,
             own_hello_provider=lambda: recipient_node.build_hello(
@@ -679,3 +738,166 @@ def test_sync_pushes_pending_link_mail_directly_to_its_known_recipient(tmp_path)
     finally:
         dialer.close()
         recipient.close()
+
+
+# -- relay selection, send-via-relay, and pickup (round 95/issue #58) --------
+
+
+def _seed_peer(db, identity, *, created_at="2026-01-01T00:00:00+00:00"):
+    descriptor = build_endpoint_descriptor(
+        signing_identity=identity.signing_key,
+        subject_fingerprint=identity.fingerprint,
+        addresses=None,
+        outgoing_only=True,
+        created_at=created_at,
+    )
+    peer = PeerRecord(
+        fingerprint=identity.fingerprint,
+        root_public_key=bytes(identity.root.verify_key),
+        transitions=identity.transitions,
+        descriptor=descriptor,
+    )
+    from netbbs.link.store import save_peer
+
+    save_peer(db, peer)
+    return peer
+
+
+def test_full_relay_round_trip_delivers_a_message_to_an_outgoing_only_recipient(tmp_path):
+    """
+    Round 95/issue #58 end-to-end sync-loop wiring: carol is outgoing-
+    only. bob is a full peer willing to relay. alice already knows
+    carol (a prior direct hello, persisted -- not something this test
+    is trying to prove) but has no way to dial her now. Proves the
+    whole chain purely through real sync passes over real sockets:
+    carol's own sync pass selects bob as a relay and gets consent;
+    alice's own sync pass learns carol is reachable via bob through
+    ordinary peer-list exchange, and deposits her pending message there
+    since she can't reach carol directly; carol's next pass picks the
+    message up from bob and delivers it into her own local mailbox.
+    """
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    carol_node = LinkNode(identity=carol_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+    carol = _NodeDb(tmp_path, "carol")
+
+    # alice already knows carol from a prior direct hello (persisted;
+    # compose_link_message needs it to resolve her encryption key).
+    _seed_peer(alice.db, carol_identity)
+    # carol already knows alice too, the other half of that same prior
+    # relationship -- needed for her own handle_events to accept the
+    # picked-up message later. Set directly on the live LinkNode
+    # (issue #53's own "self-origination"/pre-existing-relationship
+    # pattern, applied here to "pre-existing," not self-originated).
+    # Deliberately outgoing_only=True here too (alice's real, dialable
+    # address is a separate matter -- her own _alice_hello below) --
+    # this specific descriptor is only what carol has on file for her.
+    # Giving carol a bogus *dialable* record for alice would make alice
+    # a spurious relay-selection candidate (a real, if inert, hazard
+    # caught while first writing this test: dialing an unroutable test
+    # address stalls an entire pass for the length of the HTTP timeout).
+    carol_node.peers[alice_identity.fingerprint] = PeerRecord(
+        fingerprint=alice_identity.fingerprint,
+        root_public_key=bytes(alice_identity.root.verify_key),
+        transitions=alice_identity.transitions,
+        descriptor=build_endpoint_descriptor(
+            signing_identity=alice_identity.signing_key,
+            subject_fingerprint=alice_identity.fingerprint,
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+    alice_user = create_user(alice.db, "alice", password="hunter2", user_level=10)
+    carol_user = create_user(carol.db, "carolusername", password="hunter2", user_level=10)
+
+    compose_link_message(
+        alice.db, alice_user, f"carolusername@{carol_identity.fingerprint}", "hello",
+        "reachable only via bob", node_identity=alice_identity,
+    )
+
+    port_holder: dict[str, int] = {}
+
+    def _bob_hello():
+        return bob_node.build_hello(
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": port_holder["port"]}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    def _alice_hello():
+        return alice_node.build_hello(
+            addresses=[{"protocol": "http", "address": "198.51.100.10", "port": 7862}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+
+    async def scenario():
+        bob_server = LinkServer(
+            host="127.0.0.1", port=0, node=bob_node, own_hello_provider=_bob_hello, lane=bob.lane
+        )
+        await bob_server.start()
+        port_holder["port"] = bob_server.port
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Step 1: carol selects bob as a relay and gets consent.
+                # Her *own* hello for this pass goes out before her own
+                # relay selection runs later in the same pass (see
+                # _maintain_relay_selection's own docstring: "the very
+                # next hello... carries the updated relays field"),
+                # so bob only learns her relay-less descriptor from this
+                # first pass -- a short interval lets a second pass run
+                # within the settle window, whose hello already reflects
+                # the relay she just selected.
+                carol_task = asyncio.create_task(
+                    run_link_sync(
+                        carol_node, session, [f"http://127.0.0.1:{bob_server.port}"],
+                        lambda: _hello_for(carol_node), carol.lane, interval_seconds=0.2,
+                    )
+                )
+                await _run_sync_briefly(carol_task, settle=2.0)
+
+                # Step 2: alice learns of carol's relayed reachability via
+                # bob's own peer list, and deposits her pending message
+                # there since she can't reach carol directly.
+                alice_task = asyncio.create_task(
+                    run_link_sync(
+                        alice_node, session, [f"http://127.0.0.1:{bob_server.port}"],
+                        _alice_hello, alice.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(alice_task, settle=1.0)
+
+                # Step 3: carol's next pass picks the message up from bob.
+                carol_task_2 = asyncio.create_task(
+                    run_link_sync(
+                        carol_node, session, [f"http://127.0.0.1:{bob_server.port}"],
+                        lambda: _hello_for(carol_node), carol.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(carol_task_2, settle=1.0)
+        finally:
+            await bob_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        assert carol_identity.fingerprint in bob_node.relaying_for
+        assert bob_identity.fingerprint in carol_node.relays_serving_me
+
+        row = carol.db.connection.execute("SELECT * FROM mail_messages").fetchone()
+        assert row is not None
+        assert row["recipient_user_id"] == carol_user.id
+        assert row["subject"] == "hello"
+        assert row["body"] == "reachable only via bob"
+
+        # The relay's own mailbox is empty again -- picked up and cleared.
+        assert bob.db.connection.execute("SELECT * FROM link_relay_mailbox").fetchone() is None
+    finally:
+        alice.close()
+        bob.close()
+        carol.close()

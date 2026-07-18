@@ -83,6 +83,8 @@ from netbbs.link.events import (
     LinkMessage,
     LinkMessageAccepted,
     LinkMessageBounced,
+    RelayConsentRequest,
+    RelayConsentResponse,
     build_endpoint_descriptor,
     verify_board_genesis,
     verify_board_origin_transfer_accepted,
@@ -93,6 +95,8 @@ from netbbs.link.events import (
     verify_link_message,
     verify_link_message_accepted,
     verify_link_message_bounced,
+    verify_relay_consent_request,
+    verify_relay_consent_response,
 )
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
 
@@ -275,6 +279,29 @@ class LinkNode:
     # actually completes. See `handle_peer_list`'s own docstring for why
     # nothing here is ever cryptographically checked at receipt time.
     candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
+    # Round 95/issue #58: relay_fingerprint -> the still-outstanding
+    # RelayConsentRequest this node itself sent and hasn't yet gotten a
+    # reply to -- self-origination bookkeeping the caller sets directly
+    # before dialing out (`netbbs.link.transport.request_relay_consent`),
+    # mirroring `pending_origin_transfers`' own "this node's own request,
+    # never routed through handle_events" shape (see that field's own
+    # docstring for the general pattern).
+    pending_own_relay_requests: dict[str, RelayConsentRequest] = field(default_factory=dict)
+    # Round 95/issue #58: requester_fingerprint -> when this node (acting
+    # as the relay) agreed to serve it, once granted. Whether to grant is
+    # a resource-cap/opt-out policy decision this pure/in-memory layer
+    # has no config to make (see `handle_relay_consent_request`'s own
+    # docstring) -- the caller applies the decision to this dict directly
+    # after calling that method, the same "verify here, mutate there"
+    # split `record_board_origin_change` already uses for a bystander
+    # node's own board state.
+    relaying_for: dict[str, str] = field(default_factory=dict)
+    # Round 95/issue #58: relay_fingerprint -> when that candidate
+    # accepted this node's own relay_consent_request, once granted --
+    # what `netbbs.link.boards`-equivalent code for endpoint descriptors
+    # (issue #58 task #23) reads to populate this node's own published
+    # `relays` field.
+    relays_serving_me: dict[str, str] = field(default_factory=dict)
 
     def build_hello(
         self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str
@@ -283,13 +310,20 @@ class LinkNode:
         `outgoing_only`/`created_at` are the caller's to supply (node
         network configuration and the current time are not this
         method's concern — see `tests/link_harness.py`'s `FakeClock`
-        for how tests keep this deterministic)."""
+        for how tests keep this deterministic). `relays` (round 95/
+        issue #58) is **not** a caller-supplied parameter the way those
+        three are -- unlike deployment config, `relays_serving_me` is
+        already this node's own in-memory state (populated by
+        `netbbs.link.transport.request_relay_consent`), so build_hello
+        reads it directly rather than making every caller re-thread it
+        through."""
         descriptor = build_endpoint_descriptor(
             signing_identity=self.identity.signing_key,
             subject_fingerprint=self.identity.fingerprint,
             addresses=addresses,
             outgoing_only=outgoing_only,
             created_at=created_at,
+            relays=list(self.relays_serving_me.keys()) or None,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),
@@ -421,6 +455,113 @@ class LinkNode:
             self.candidate_descriptors[candidate_fingerprint] = descriptor
             recorded.append(candidate_fingerprint)
         return recorded
+
+    def handle_relay_consent_request(self, sender_fingerprint: str, request: RelayConsentRequest) -> None:
+        """
+        Verify an incoming `relay_consent_request` (design doc §12,
+        round 95/issue #58) from `sender_fingerprint`, who must already
+        be a completed peer -- the same "no relay from a stranger"
+        boundary every other acceptance rule in this module applies,
+        satisfied here by the mutual hello a candidate relay and a
+        prospective requester must have already exchanged before either
+        one calls this (round 116's hello is mutual by construction --
+        see `handle_hello`).
+
+        Raises `LinkProtocolError` if anything doesn't check out.
+        **Deliberately does not decide accept/decline, and does not
+        touch `relaying_for`** -- a resource-cap/opt-out check needs
+        config this pure/in-memory layer doesn't have (module docstring:
+        transport-agnostic, no idea about deployment). The caller
+        (`netbbs.link.transport`'s `/relay-consent` route handler) makes
+        that policy call and records its own outcome into `relaying_for`
+        directly once this method returns without raising.
+        """
+        if sender_fingerprint not in self.peers:
+            raise LinkProtocolError(
+                f"received a relay_consent_request from {sender_fingerprint}, which has no "
+                "completed hello -- refusing (no relay from a stranger yet)"
+            )
+        sender = self.peers[sender_fingerprint]
+
+        if request.payload.get("requester_fingerprint") != sender_fingerprint:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a relay_consent_request claiming a different "
+                f"requester_fingerprint ({request.payload.get('requester_fingerprint')!r}) -- refusing"
+            )
+        if request.payload.get("relay_fingerprint") != self.identity.fingerprint:
+            raise LinkProtocolError(
+                f"relay_consent_request from {sender_fingerprint} names a different relay "
+                f"({request.payload.get('relay_fingerprint')!r}), not this node "
+                f"({self.identity.fingerprint!r}) -- refusing"
+            )
+
+        signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "relay_consent_request")
+        if not verify_relay_consent_request(request, signing_verify_key):
+            raise LinkProtocolError(
+                f"relay_consent_request from {sender_fingerprint} does not verify against its "
+                "current signing key"
+            )
+
+    def handle_relay_consent_response(
+        self, sender_fingerprint: str, response: RelayConsentResponse, *, original_request: RelayConsentRequest
+    ) -> None:
+        """
+        Verify an incoming `relay_consent_response` from `sender_
+        fingerprint` (the candidate relay this node itself asked),
+        answering `original_request` -- the caller's own still-
+        outstanding request it's tracking in `pending_own_relay_
+        requests` (the same cross-check discipline `_resolve_own_link_
+        message` applies to a message acknowledgement: a reply is only
+        meaningful about something this node itself actually sent, not
+        an arbitrary content_id a peer could otherwise name).
+
+        Raises `LinkProtocolError` if anything doesn't check out.
+        **Deliberately does not touch `relays_serving_me`** -- same
+        "verify here, mutate there" split as `handle_relay_consent_
+        request`; the caller applies `response.payload["accepted"]`
+        after this returns without raising.
+        """
+        if sender_fingerprint not in self.peers:
+            raise LinkProtocolError(
+                f"received a relay_consent_response from {sender_fingerprint}, which has no "
+                "completed hello -- refusing (no relay from a stranger yet)"
+            )
+        sender = self.peers[sender_fingerprint]
+
+        if response.payload.get("relay_fingerprint") != sender_fingerprint:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a relay_consent_response claiming a different "
+                f"relay_fingerprint ({response.payload.get('relay_fingerprint')!r}) -- refusing"
+            )
+        if response.payload.get("relay_fingerprint") != original_request.payload.get("relay_fingerprint"):
+            # Catches a *different*, also-completed peer answering on
+            # behalf of whoever the outstanding request actually named --
+            # the content_id match alone doesn't rule this out, since
+            # nothing above ties "who answered" back to "who was asked"
+            # except this explicit cross-check.
+            raise LinkProtocolError(
+                f"{sender_fingerprint} answered a relay_consent_request that was addressed to "
+                f"a different relay ({original_request.payload.get('relay_fingerprint')!r}) -- refusing"
+            )
+        if response.payload.get("requester_fingerprint") != self.identity.fingerprint:
+            raise LinkProtocolError(
+                f"relay_consent_response from {sender_fingerprint} names a different requester "
+                f"({response.payload.get('requester_fingerprint')!r}), not this node "
+                f"({self.identity.fingerprint!r}) -- refusing"
+            )
+        if response.payload.get("request_content_id") != original_request.content_id:
+            raise LinkProtocolError(
+                f"relay_consent_response from {sender_fingerprint} answers "
+                f"{response.payload.get('request_content_id')!r}, not the outstanding request "
+                f"({original_request.content_id!r}) -- refusing"
+            )
+
+        signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "relay_consent_response")
+        if not verify_relay_consent_response(response, signing_verify_key):
+            raise LinkProtocolError(
+                f"relay_consent_response from {sender_fingerprint} does not verify against its "
+                "current signing key"
+            )
 
     def _resolve_sender_signing_key(self, sender: "PeerRecord", sender_fingerprint: str, kind: str) -> nacl.signing.VerifyKey:
         """Shared by the `board_genesis`/`board_post` branches below:

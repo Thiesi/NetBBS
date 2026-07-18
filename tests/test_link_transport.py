@@ -28,11 +28,20 @@ import json
 import aiohttp
 import pytest
 
-from netbbs.link.events import KeyTransition, build_endpoint_descriptor
+from netbbs.link.events import KeyTransition, build_endpoint_descriptor, build_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node
-from netbbs.link.transport import LinkServer, LinkTransportError, dial_hello, push_events, request_peer_list
+from netbbs.link.transport import (
+    LinkServer,
+    LinkTransportError,
+    deposit_into_relay_mailbox,
+    dial_hello,
+    pickup_from_relay_mailbox,
+    push_events,
+    request_peer_list,
+    request_relay_consent,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -41,8 +50,18 @@ def _hello_for(node: LinkNode, *, created_at: str = "2026-01-01T00:00:00+00:00")
     return node.build_hello(addresses=None, outgoing_only=True, created_at=created_at)
 
 
-async def _run_server(node: LinkNode, own_hello_provider, lane: DatabaseLane) -> LinkServer:
-    server = LinkServer(host="127.0.0.1", port=0, node=node, own_hello_provider=own_hello_provider, lane=lane)
+async def _run_server(
+    node: LinkNode,
+    own_hello_provider,
+    lane: DatabaseLane,
+    *,
+    relay_serving_enabled: bool = True,
+    max_relay_clients: int = 20,
+) -> LinkServer:
+    server = LinkServer(
+        host="127.0.0.1", port=0, node=node, own_hello_provider=own_hello_provider, lane=lane,
+        relay_serving_enabled=relay_serving_enabled, max_relay_clients=max_relay_clients,
+    )
     await server.start()
     return server
 
@@ -450,4 +469,354 @@ def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
         assert row["fingerprint"] == carol_identity.fingerprint
     finally:
         alice.close()
+        bob.close()
+
+
+# -- relay consent: a real synchronous request/response round trip --------
+
+
+def test_request_relay_consent_completes_a_real_http_round_trip(tmp_path):
+    """Round 95/issue #58's relay-consent exchange over a real socket:
+    alice (outgoing-only) asks bob to relay for her, and gets a signed
+    accept back in the *same* HTTP response -- the shape that has to
+    work for an outgoing-only requester who can never be dialed back."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                return await request_relay_consent(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", bob_identity.fingerprint, alice.lane
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        response = asyncio.run(scenario())
+        assert response.payload["accepted"] is True
+
+        # Both sides applied the grant to their own in-memory bookkeeping...
+        assert alice_node.relays_serving_me == {bob_identity.fingerprint: response.payload["created_at"]}
+        assert bob_node.relaying_for == {alice_identity.fingerprint: response.payload["created_at"]}
+        # ...and the requester's own outstanding-request bookkeeping was
+        # cleared once the synchronous reply came back.
+        assert alice_node.pending_own_relay_requests == {}
+
+        # Round 95/issue #58: both sides persisted the grant.
+        alice_row = alice.db.connection.execute(
+            "SELECT fingerprint, role, accepted_at FROM link_relay_consents"
+        ).fetchone()
+        bob_row = bob.db.connection.execute(
+            "SELECT fingerprint, role, accepted_at FROM link_relay_consents"
+        ).fetchone()
+        assert alice_row["fingerprint"] == bob_identity.fingerprint
+        assert alice_row["role"] == "relay_for_me"
+        assert bob_row["fingerprint"] == alice_identity.fingerprint
+        assert bob_row["role"] == "i_relay_for"
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_request_relay_consent_declines_once_the_relay_is_at_capacity(tmp_path):
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane, max_relay_clients=0)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                return await request_relay_consent(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", bob_identity.fingerprint, alice.lane
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        response = asyncio.run(scenario())
+        assert response.payload["accepted"] is False
+        # A decline never mutates either side's granted-relay bookkeeping,
+        # and is never persisted (netbbs.link.store.save_relay_consent's
+        # own "only ever persist a completed grant" scope).
+        assert alice_node.relays_serving_me == {}
+        assert bob_node.relaying_for == {}
+        assert alice.db.connection.execute("SELECT * FROM link_relay_consents").fetchone() is None
+        assert bob.db.connection.execute("SELECT * FROM link_relay_consents").fetchone() is None
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_request_relay_consent_declines_when_relay_serving_is_opted_out(tmp_path):
+    """Round 95/issue #58: an operator's `relay_serving_enabled=False`
+    (`netbbs.net.nodeconfig.LinkConfig`'s own opt-out) always declines,
+    even with plenty of capacity to spare -- separate knob from the
+    resource cap tested just above."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(
+            bob_node, lambda: _hello_for(bob_node), bob.lane, relay_serving_enabled=False, max_relay_clients=20
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                return await request_relay_consent(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", bob_identity.fingerprint, alice.lane
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        response = asyncio.run(scenario())
+        assert response.payload["accepted"] is False
+        assert alice_node.relays_serving_me == {}
+        assert bob_node.relaying_for == {}
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_request_relay_consent_raises_link_protocol_error_for_a_forged_response(tmp_path):
+    """A malicious/buggy relay answering with a response signed by the
+    wrong key must not be accepted -- same "verify what came back"
+    discipline `test_dial_hello_raises_link_protocol_error_for_a_forged_
+    returned_hello` already proves for hello."""
+    from aiohttp import web
+
+    from netbbs.link.events import build_relay_consent_response
+
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    mallory_identity = bootstrap_node_identity("mallory")
+    alice_node = LinkNode(identity=alice_identity)
+    alice = _NodeDb(tmp_path, "alice")
+
+    async def _forged_relay_consent(request: web.Request) -> web.Response:
+        body = await request.json()
+        from netbbs.link.events import RelayConsentRequest
+
+        real_request = RelayConsentRequest.from_dict(body)
+        forged = build_relay_consent_response(
+            signing_identity=mallory_identity.signing_key,  # wrong key
+            request_content_id=real_request.content_id,
+            relay_fingerprint=bob_identity.fingerprint,
+            requester_fingerprint=alice_identity.fingerprint,
+            accepted=True,
+            created_at="2026-01-01T00:00:01+00:00",
+        )
+        return web.json_response(forged.to_dict())
+
+    async def _bob_hello(request: web.Request) -> web.Response:
+        return web.json_response(_hello_for(LinkNode(identity=bob_identity)).to_dict())
+
+    async def scenario():
+        app = web.Application()
+        app.router.add_post("/link/v1/hello", _bob_hello)
+        app.router.add_post("/link/v1/relay-consent/{fingerprint}", _forged_relay_consent)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{site.port}", _hello_for(alice_node), alice.lane
+                )
+                await request_relay_consent(
+                    alice_node, session, f"http://127.0.0.1:{site.port}", bob_identity.fingerprint, alice.lane
+                )
+        finally:
+            await runner.cleanup()
+
+    try:
+        with pytest.raises(LinkProtocolError):
+            asyncio.run(scenario())
+        # The forged response never got applied.
+        assert alice_node.relays_serving_me == {}
+        assert alice_node.pending_own_relay_requests == {}
+    finally:
+        alice.close()
+
+
+# -- relay mailbox: deposit + pickup over real HTTP ---------------------------
+
+
+def _link_message_for(
+    sender_identity, recipient_fingerprint: str, *, created_at: str = "2026-01-01T00:00:00+00:00"
+):
+    return build_link_message(
+        signing_identity=sender_identity.signing_key,
+        home_node_fingerprint=sender_identity.fingerprint,
+        local_user_id="alice-the-user",
+        recipient_home_node_fingerprint=recipient_fingerprint,
+        recipient_local_user_id="carol-the-user",
+        confidentiality_tier="tier1_home_node_key",
+        ciphertext=b"opaque-sealed-bytes",
+        created_at=created_at,
+    )
+
+
+def test_deposit_and_pickup_relay_mailbox_round_trips_over_http(tmp_path):
+    """Round 95/issue #58: alice deposits a link_message for carol at
+    bob (acting as carol's relay); carol picks it up over a real
+    socket. Alice needs no prior relationship with bob at all -- see
+    `LinkServer._handle_relay_mailbox_deposit`'s own docstring."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    bob_node = LinkNode(identity=bob_identity)
+    bob = _NodeDb(tmp_path, "bob")
+
+    # bob has already granted carol relay consent (exercised separately
+    # in test_request_relay_consent_completes_a_real_http_round_trip) --
+    # set up directly here to keep this test focused on mailbox behavior.
+    bob_node.relaying_for[carol_identity.fingerprint] = "2026-01-01T00:00:00+00:00"
+
+    message = _link_message_for(alice_identity, carol_identity.fingerprint)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await deposit_into_relay_mailbox(
+                    session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
+                )
+                carol_node = LinkNode(identity=carol_identity)
+                return await pickup_from_relay_mailbox(
+                    session,
+                    f"http://127.0.0.1:{bob_server.port}",
+                    _hello_for(carol_node),
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        picked_up = asyncio.run(scenario())
+        assert len(picked_up) == 1
+        assert picked_up[0].content_id == message.content_id
+
+        # Round 95/issue #58: the deposit was persisted, then removed on pickup.
+        row = bob.db.connection.execute("SELECT * FROM link_relay_mailbox").fetchone()
+        assert row is None
+    finally:
+        bob.close()
+
+
+def test_pickup_returns_nothing_held_for_a_different_fingerprint(tmp_path):
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    dan_identity = bootstrap_node_identity("dan")
+    alice_identity = bootstrap_node_identity("alice")
+    bob_node = LinkNode(identity=bob_identity)
+    bob = _NodeDb(tmp_path, "bob")
+
+    bob_node.relaying_for[carol_identity.fingerprint] = "2026-01-01T00:00:00+00:00"
+    message = _link_message_for(alice_identity, carol_identity.fingerprint)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await deposit_into_relay_mailbox(
+                    session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
+                )
+                dan_node = LinkNode(identity=dan_identity)
+                return await pickup_from_relay_mailbox(
+                    session, f"http://127.0.0.1:{bob_server.port}", _hello_for(dan_node)
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        picked_up = asyncio.run(scenario())
+        assert picked_up == []
+    finally:
+        bob.close()
+
+
+def test_deposit_is_refused_when_not_relaying_for_the_recipient(tmp_path):
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    alice_identity = bootstrap_node_identity("alice")
+    bob_node = LinkNode(identity=bob_identity)  # bob has granted no one consent
+    bob = _NodeDb(tmp_path, "bob")
+
+    message = _link_message_for(alice_identity, carol_identity.fingerprint)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await deposit_into_relay_mailbox(
+                    session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        with pytest.raises(LinkTransportError):
+            asyncio.run(scenario())
+    finally:
+        bob.close()
+
+
+def test_deposit_is_refused_once_the_recipients_mailbox_is_full(tmp_path):
+    from netbbs.link.relay_mailbox import MAX_MAILBOX_ENVELOPES_PER_RECIPIENT
+
+    bob_identity = bootstrap_node_identity("bob")
+    carol_identity = bootstrap_node_identity("carol")
+    alice_identity = bootstrap_node_identity("alice")
+    bob_node = LinkNode(identity=bob_identity)
+    bob = _NodeDb(tmp_path, "bob")
+    bob_node.relaying_for[carol_identity.fingerprint] = "2026-01-01T00:00:00+00:00"
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                for i in range(MAX_MAILBOX_ENVELOPES_PER_RECIPIENT):
+                    message = _link_message_for(
+                        alice_identity, carol_identity.fingerprint, created_at=f"2026-01-01T00:{i:02d}:00+00:00"
+                    )
+                    await deposit_into_relay_mailbox(
+                        session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, message
+                    )
+                # One more than the cap must be refused.
+                one_too_many = _link_message_for(
+                    alice_identity, carol_identity.fingerprint, created_at="2026-01-01T23:59:00+00:00"
+                )
+                await deposit_into_relay_mailbox(
+                    session, f"http://127.0.0.1:{bob_server.port}", carol_identity.fingerprint, one_too_many
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        with pytest.raises(LinkTransportError):
+            asyncio.run(scenario())
+    finally:
         bob.close()

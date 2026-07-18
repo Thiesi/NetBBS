@@ -53,6 +53,32 @@ def test_build_hello_includes_root_key_and_own_signing_transitions(tmp_path, clo
     alice.close()
 
 
+def test_build_hello_omits_relays_when_none_are_serving(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    node = LinkNode(identity=alice.identity)
+
+    hello = _hello_bytes(node, clock=clock)
+
+    assert "relays" not in hello.descriptor.payload
+
+    alice.close()
+
+
+def test_build_hello_includes_relays_serving_me(tmp_path, clock):
+    # Round 95/issue #58: build_hello reads relays_serving_me directly
+    # rather than taking it as a caller-supplied parameter -- see that
+    # method's own docstring.
+    alice = spawn_node(tmp_path, "alice")
+    node = LinkNode(identity=alice.identity)
+    node.relays_serving_me["bobs-fingerprint"] = "2026-01-01T00:00:00Z"
+
+    hello = _hello_bytes(node, clock=clock)
+
+    assert hello.descriptor.payload["relays"] == ["bobs-fingerprint"]
+
+    alice.close()
+
+
 def test_handle_hello_accepts_a_valid_bundle_and_records_the_peer(tmp_path, clock):
     alice = spawn_node(tmp_path, "alice")
     bob = spawn_node(tmp_path, "bob")

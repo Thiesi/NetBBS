@@ -1485,4 +1485,51 @@ MIGRATIONS = [
         ALTER TABLE boards ADD COLUMN link_lifecycle_json TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "WAN reachability / relay selection (design doc §12 round 95, "
+            "issue #58). link_reliability: this node's own direct-observation "
+            "dial-outcome tally per fingerprint (netbbs.link.reliability) -- "
+            "the from-scratch tracker built because §6's own reputation "
+            "system, which the design doc assumed relay scoring would reuse, "
+            "turned out not to exist anywhere in this codebase. "
+            "link_relay_consents: relays this node has accepted to serve for "
+            "(as the relay), or that have accepted to serve for this node "
+            "(as the outgoing-only party) -- direction distinguished by "
+            "`role`. link_relay_mailbox: opaque envelopes a relay is "
+            "temporarily holding for a specific recipient fingerprint, "
+            "bounded per recipient (netbbs.link.relay) -- picked up and "
+            "deleted the next time that recipient dials this relay as part "
+            "of its own outbound sync pass, never decrypted or inspected "
+            "here (a relay only ever custodies ciphertext, design doc's own "
+            "confidentiality-tier guarantee applying unchanged)."
+        ),
+        sql="""
+        CREATE TABLE link_reliability (
+            fingerprint  TEXT PRIMARY KEY,
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            successes    INTEGER NOT NULL DEFAULT 0,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE TABLE link_relay_consents (
+            id            INTEGER PRIMARY KEY,
+            fingerprint   TEXT NOT NULL,
+            role          TEXT NOT NULL CHECK (role IN ('relay_for_me', 'i_relay_for')),
+            accepted_at   TEXT NOT NULL,
+            UNIQUE(fingerprint, role)
+        );
+
+        CREATE TABLE link_relay_mailbox (
+            content_id            TEXT PRIMARY KEY,
+            recipient_fingerprint TEXT NOT NULL,
+            sender_fingerprint    TEXT NOT NULL,
+            object_type           TEXT NOT NULL,
+            envelope_json         TEXT NOT NULL,
+            received_at           TEXT NOT NULL
+        );
+        CREATE INDEX idx_link_relay_mailbox_recipient
+            ON link_relay_mailbox(recipient_fingerprint, received_at);
+        """,
+    ),
 ]

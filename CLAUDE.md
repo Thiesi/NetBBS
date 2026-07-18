@@ -113,10 +113,12 @@ Current Phase 3 includes:
   carry-materialization (a node that merely carries a board now gets a real
   local, browsable copy, not just relayed raw events);
 - board origin succession: mutual-consent transfer, orphan detection, forks;
-- Link messages, scoped to tier-1 (locally-known) recipients only.
+- Link messages, scoped to tier-1 (locally-known) recipients only;
+- WAN reachability for outgoing-only nodes: direct-observation reliability
+  scoring, automatic relay selection/consent/self-healing, and a bounded
+  relay store-and-forward mailbox for `link_message` delivery.
 
-It does **not** yet imply public federation, general relay/WAN reachability
-(NAT traversal, automatic relay selection), inventory/pull catch-up, tier-2
+It does **not** yet imply public federation, inventory/pull catch-up, tier-2
 Link messages, channel-side Link support (boards only so far) or the
 origin-succession work that depends on it, advanced governance, or
 trust/quarantine. Check the design document and open issues for the current

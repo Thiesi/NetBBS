@@ -94,6 +94,39 @@ earlier rounds' own docstrings named as still open ("not yet consumed
 by anything"). Never a first resort: the normal seed list is always
 tried first, every pass, regardless of whether the previous pass had to
 fall back.
+
+**Automatic relay selection, pickup, and send-via-relay (design doc
+§12 round 95, issue #58)**, both gated on this node's own hello
+currently claiming `outgoing_only` (a full peer never needs relays --
+checked via `own_hello_provider()` itself rather than a new parameter,
+since that callable already encodes the addresses/outgoing_only
+decision, this module's own long-standing convention):
+`_maintain_relay_selection` runs right after the seed loop/fallback
+above, dropping any self-healing casualty (`netbbs.link.relay_
+selection.relays_needing_replacement`) and requesting consent from
+freshly-ranked candidates (`select_relay_candidates`) to top back up
+toward a redundant set -- no separate "republish my descriptor" step
+exists, since `LinkNode.build_hello` already reads `relays_serving_me`
+live, so the very next hello this node sends (including the seed-
+dialing loop that already ran earlier in the *same* pass) carries any
+change automatically. `_pickup_relay_mail` then collects whatever each
+currently-serving relay is holding and runs it through the exact same
+`LinkNode.handle_events` acceptance path a directly-arrived event
+already goes through (never trusting the relay itself -- see `netbbs.
+link.relay_mailbox`'s own docstring). Finally, `_push_pending_link_
+mail`'s existing per-message loop falls back to depositing at a
+recipient's own published relay(s) (`_relay_base_urls_for_peer`) when
+no direct address is dialable -- checking `node.candidate_descriptors`
+as well as `node.peers`, since a genuinely outgoing-only recipient can
+never become a completed peer of a sender who can never dial it in the
+first place; the *only* way such a sender ever learns that recipient's
+`relays` field is secondhand, via ordinary peer-list exchange with
+someone who has met them directly (see that function's own docstring
+for why this is safe: a wrong/stale candidate address costs a failed
+deposit, never a confidentiality issue, since the payload is already
+sealed to the real recipient's own key). Only `link_message` gets this
+fallback, never an acknowledgement -- `netbbs.link.relay_mailbox`'s own
+documented boundary this round.
 """
 
 from __future__ import annotations
@@ -101,20 +134,32 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Callable
+from typing import Awaitable, Callable
 
 from aiohttp import ClientSession
 
 from netbbs.link.boards import load_own_board_events
-from netbbs.link.events import EndpointDescriptor
+from netbbs.link.events import LINK_MESSAGE_OBJECT_TYPE, EndpointDescriptor, LinkMessage
 from netbbs.link.mail import (
+    deliver_link_message,
     load_pending_link_mail,
     load_pending_link_mail_acknowledgements,
     mark_link_mail_acknowledgement_sent,
 )
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
+from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.seedlist import get_cached_supplementary_seeds
-from netbbs.link.transport import LinkTransportError, dial_hello, push_events, request_peer_list
+from netbbs.link.store import delete_relay_consent, save_event, save_peer
+from netbbs.link.transport import (
+    LinkTransportError,
+    deposit_into_relay_mailbox,
+    dial_hello,
+    pickup_from_relay_mailbox,
+    push_events,
+    request_peer_list,
+    request_relay_consent,
+)
 from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
@@ -178,6 +223,23 @@ async def run_link_sync(
             # configuration and a genuinely live supplementary list
             # always take priority when either actually works.
             await _try_candidate_fallback(node, session, own_hello_provider, lane)
+        # Round 95/issue #58: relay selection/pickup only makes sense
+        # for an outgoing-only node -- a full peer is directly dialable
+        # by definition, so it has nothing to gain from seeking relays
+        # (design doc §12: "an outgoing-only node selects its own
+        # relays automatically," never a full peer). Checked via this
+        # node's own current hello rather than a separate parameter --
+        # `own_hello_provider` already encodes the addresses/outgoing_
+        # only decision (this method's own docstring), so there's
+        # nothing new to thread through from node startup config.
+        if own_hello_provider().descriptor.payload.get("outgoing_only"):
+            # Maintain the outgoing relay set and pick up anything held
+            # *before* pushing pending mail below -- so a message that
+            # only just became deliverable via a freshly-selected relay
+            # still gets its own send-via-relay attempt in the same
+            # pass, not one whole interval later.
+            await _maintain_relay_selection(node, session, own_hello_provider, lane)
+            await _pickup_relay_mail(node, session, own_hello_provider, lane)
         await _push_pending_link_mail(node, session, lane)
         await asyncio.sleep(interval_seconds)
 
@@ -219,27 +281,93 @@ async def _sync_one_seed(
     return True
 
 
-def _first_address_url(descriptor: EndpointDescriptor) -> str | None:
-    """The first advertised address in `descriptor`, as a dialable base
-    URL (§12: "peers try them in order" -- multi-address fallback isn't
-    built anywhere in this transport layer yet, for any caller, so this
-    doesn't attempt it either), or `None` if it has none (an outgoing-
-    only descriptor, round 12: by design, genuinely undialable)."""
+def _dialable_addresses(descriptor: EndpointDescriptor) -> list[str]:
+    """Every advertised address in `descriptor`, as dialable base URLs,
+    in the order the descriptor itself lists them (design doc §12:
+    "peers try them in order", issue #58 -- previously only `addresses[0]`
+    was ever attempted anywhere in this transport layer; callers now try
+    each of these in turn, stopping at the first that works). Empty for
+    an outgoing-only descriptor (round 12: by design, genuinely
+    undialable directly -- see `netbbs.link.relay_mailbox`/this
+    module's own `_relay_base_urls_for_peer` for how such a peer is
+    still reachable, via `payload["relays"]`, once it has any)."""
     addresses = descriptor.payload.get("addresses")
     if not addresses:
-        return None
-    first = addresses[0]
-    return f"{first['protocol']}://{first['address']}:{first['port']}"
+        return []
+    return [f"{a['protocol']}://{a['address']}:{a['port']}" for a in addresses]
 
 
-def _dialable_address(node: LinkNode, target_fingerprint: str) -> str | None:
-    """The first advertised address on file for `target_fingerprint`,
-    or `None` if this node has never said hello to that fingerprint (or
-    it's outgoing-only)."""
+def _dialable_addresses_for_peer(node: LinkNode, target_fingerprint: str) -> list[str]:
+    """Every advertised address on file for `target_fingerprint`, or an
+    empty list if this node has never said hello to that fingerprint
+    (or it's outgoing-only with none)."""
     peer = node.peers.get(target_fingerprint)
     if peer is None:
-        return None
-    return _first_address_url(peer.descriptor)
+        return []
+    return _dialable_addresses(peer.descriptor)
+
+
+def _candidate_dialable_addresses(node: LinkNode, fingerprint: str) -> list[str]:
+    """Every advertised address on file for `fingerprint`, whether it's
+    a completed peer or merely an unverified candidate (round 95/issue
+    #58's relay selection draws from both -- see `netbbs.link.relay_
+    selection.select_relay_candidates`'s own docstring for why). Checks
+    `node.peers` first since a completed peer's own descriptor is more
+    current than a possibly-stale candidate entry for the same
+    fingerprint."""
+    peer = node.peers.get(fingerprint)
+    if peer is not None:
+        return _dialable_addresses(peer.descriptor)
+    descriptor = node.candidate_descriptors.get(fingerprint)
+    if descriptor is not None:
+        return _dialable_addresses(descriptor)
+    return []
+
+
+def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[str]:
+    """
+    Base URLs of every relay `target_fingerprint` has itself published
+    as serving it (`EndpointDescriptor.payload["relays"]`, round 95/
+    issue #58) that *this* node can also directly dial -- a relay this
+    node has never itself met is skipped (round 116's own "no relay
+    from a stranger" boundary, extended here: reaching a relay to
+    deposit at it needs the same direct-address knowledge reaching
+    anyone else does). Empty if `target_fingerprint` is unknown, or
+    known but has published no relays.
+
+    Checks `node.candidate_descriptors` as well as `node.peers`,
+    **deliberately unlike** `_dialable_addresses_for_peer`'s own
+    peers-only check -- a genuinely outgoing-only recipient can never
+    complete a direct hello with this node at all (there's no address
+    to dial it *at*), so a completed-peer record for one will simply
+    never exist here; the *only* way this node ever learns such a
+    recipient's `relays` field is secondhand, via peer-list exchange
+    with someone who has directly met them (round 95's own "worth
+    trying, not trusting outright" framing, applied here to routing
+    rather than trust: a wrong or stale candidate address just costs a
+    failed deposit attempt, never a confidentiality issue, since the
+    payload is already sealed to the real recipient's own key
+    regardless of where it ends up)."""
+    peer = node.peers.get(target_fingerprint)
+    descriptor = peer.descriptor if peer is not None else node.candidate_descriptors.get(target_fingerprint)
+    if descriptor is None:
+        return []
+    relay_fingerprints = descriptor.payload.get("relays") or []
+    urls: list[str] = []
+    for relay_fingerprint in relay_fingerprints:
+        urls.extend(_candidate_dialable_addresses(node, relay_fingerprint))
+    return urls
+
+
+async def _try_addresses_via(base_urls: list[str], attempt: Callable[[str], Awaitable[bool]]) -> bool:
+    """Try `attempt(base_url)` for each of `base_urls` in order,
+    stopping at the first that returns `True` (design doc §12: "peers
+    try them in order", issue #58). Returns `False` if every address was
+    tried and none succeeded, or if `base_urls` is empty."""
+    for base_url in base_urls:
+        if await attempt(base_url):
+            return True
+    return False
 
 
 async def _try_candidate_fallback(
@@ -272,7 +400,21 @@ async def _try_candidate_fallback(
     separate bookkeeping to do here. A candidate with no dialable
     address (outgoing-only, or a malformed entry) is skipped without
     counting against the sample size, the same "genuinely cannot dial
-    it" reasoning `_dialable_address` already documents.
+    it" reasoning `_dialable_addresses` already documents. Every one of
+    a multi-address candidate's addresses is tried, in order, before
+    moving to the next candidate (issue #58) -- still one "attempt"
+    against the sample-size bound, not one per address.
+
+    Every candidate this function actually attempts (successful or not,
+    including the one that finally ends the loop) has its outcome
+    recorded via `netbbs.link.reliability.record_dial_outcome` (issue
+    #58) -- a failed attempt is exactly as informative for scoring
+    purposes as a successful one, and this is the direct-observation
+    sample relay selection later ranks candidates by (see that module's
+    own docstring for why nothing existing could be reused here). Still
+    stops at the first success, as before -- a candidate never reached
+    this call at all (beyond the attempt cap, or simply never picked in
+    this pass's random sample) has nothing recorded for it here.
     """
     candidates = list(node.candidate_descriptors.items())
     if not candidates:
@@ -283,11 +425,14 @@ async def _try_candidate_fallback(
     for fingerprint, descriptor in candidates:
         if attempted >= _MAX_CANDIDATE_FALLBACK_ATTEMPTS:
             return
-        base_url = _first_address_url(descriptor)
-        if base_url is None:
+        base_urls = _dialable_addresses(descriptor)
+        if not base_urls:
             continue
         attempted += 1
-        succeeded = await _sync_one_seed(node, session, base_url, own_hello_provider, lane)
+        succeeded = await _try_addresses_via(
+            base_urls, lambda url: _sync_one_seed(node, session, url, own_hello_provider, lane)
+        )
+        await lane.run(record_dial_outcome, fingerprint, succeeded=succeeded)
         if succeeded:
             _logger.info(
                 "Link sync: every configured seed failed this pass -- reached the network "
@@ -297,25 +442,231 @@ async def _try_candidate_fallback(
             return
 
 
+async def _request_one_relay_consent(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    relay_fingerprint: str,
+    own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
+) -> bool:
+    """One relay-consent attempt against a single `base_url`, collapsed
+    to a bool for `_try_addresses_via`'s own contract. A completed hello
+    always precedes the actual consent request -- required the first
+    time a candidate is only in `node.candidate_descriptors` (relay
+    consent's own acceptance rule needs the requester to already be a
+    completed peer, see `LinkNode.handle_relay_consent_request`'s own
+    docstring), and a harmless refresh otherwise. Both
+    `LinkTransportError` (transport-level failure) and
+    `LinkProtocolError` (the relay's returned response failed
+    verification) are treated as "this candidate didn't work out," the
+    same tolerance `_sync_one_seed` already applies to its own
+    `dial_hello` call -- one bad or hostile candidate must not abort the
+    rest of this pass."""
+    try:
+        await dial_hello(node, session, base_url, own_hello_provider(), lane)
+        response = await request_relay_consent(node, session, base_url, relay_fingerprint, lane)
+    except (LinkTransportError, LinkProtocolError) as exc:
+        _logger.warning(
+            "Link sync: relay consent request to %s (%s) failed: %s", relay_fingerprint, base_url, exc
+        )
+        return False
+    return bool(response.payload["accepted"])
+
+
+async def _maintain_relay_selection(
+    node: LinkNode,
+    session: ClientSession,
+    own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
+) -> None:
+    """
+    Round 95/issue #58's automatic relay selection. `run_link_sync`
+    only calls this for an outgoing-only node (design doc §12: a full
+    peer never needs relays, see that caller's own comment for why) --
+    this function itself has no such guard, so a future caller wiring
+    it in some other context is responsible for the same gate.
+
+    Two steps: **self-healing** first -- drop any currently-serving
+    relay whose observed reliability has fallen to or below `netbbs.
+    link.relay_selection`'s floor, both in memory and on disk (`netbbs.
+    link.store.delete_relay_consent`, so a restart doesn't resurrect a
+    relay this node already gave up on) -- then **top up** back toward
+    `TARGET_RELAY_COUNT` by requesting consent from freshly-ranked
+    candidates (unlike `_try_candidate_fallback`'s "stop at the first
+    success," every returned candidate is tried, since the goal is a
+    *redundant set*, not just one working relay).
+
+    **No explicit "republish my descriptor" step is needed here** --
+    `LinkNode.build_hello` already reads `relays_serving_me` live (see
+    that method's own docstring), so the very next hello this node
+    sends to anyone -- the seed-dialing loop that already runs earlier
+    in the same pass -- carries the updated `relays` field automatically.
+    This is what this module's own docstring means by "self-healing
+    republication" needing no separate mechanism.
+    """
+    for stale_fingerprint in await lane.run(relays_needing_replacement, node):
+        node.relays_serving_me.pop(stale_fingerprint, None)
+        await lane.run(delete_relay_consent, stale_fingerprint, role="relay_for_me")
+        _logger.info(
+            "Link sync: dropping relay %s -- its observed reliability has fallen below the "
+            "self-healing floor",
+            stale_fingerprint,
+        )
+
+    for candidate_fingerprint in await lane.run(select_relay_candidates, node):
+        base_urls = _candidate_dialable_addresses(node, candidate_fingerprint)
+        if not base_urls:
+            continue
+        await _try_addresses_via(
+            base_urls,
+            lambda url: _request_one_relay_consent(
+                node, session, url, candidate_fingerprint, own_hello_provider, lane
+            ),
+        )
+
+
+async def _pickup_one_relay_mailbox(
+    session: ClientSession, base_urls: list[str], own_hello_provider: Callable[[], HelloMessage]
+) -> list[LinkMessage]:
+    """Try each of `base_urls` in turn (issue #58's own multi-address
+    "peers try them in order" convention), returning whatever the first
+    reachable one hands back. Raises `LinkTransportError` only once
+    every address has failed."""
+    last_error: LinkTransportError | None = None
+    for url in base_urls:
+        try:
+            return await pickup_from_relay_mailbox(session, url, own_hello_provider())
+        except LinkTransportError as exc:
+            last_error = exc
+    raise last_error or LinkTransportError("no addresses to try")
+
+
+async def _pickup_relay_mail(
+    node: LinkNode,
+    session: ClientSession,
+    own_hello_provider: Callable[[], HelloMessage],
+    lane: DatabaseLane,
+) -> None:
+    """
+    Round 95/issue #58: for every relay currently serving this node
+    (`node.relays_serving_me`), pick up whatever mail it's holding and
+    feed each envelope through the exact same `LinkNode.handle_events`
+    acceptance path a directly-arrived `link_message` already goes
+    through, keyed by that message's own claimed sender -- never the
+    relay that happened to hand it over (see `netbbs.link.relay_mailbox.
+    pickup_relay_mailbox_envelopes`'s own docstring for why the relay
+    itself never verifies anything). A sender this node has no
+    completed hello with is rejected here exactly as it would be for a
+    directly-arrived message -- relaying doesn't relax "no relay from a
+    stranger," it just changes which node performs the check.
+
+    Persistence after acceptance mirrors `LinkServer._handle_events`
+    exactly (`save_event` then `deliver_link_message`) -- this is the
+    one place in this module that duplicates transport-layer bookkeeping
+    rather than calling through `netbbs.link.transport`, since pickup
+    has no equivalent existing entry point to reuse (it isn't an inbound
+    HTTP request `LinkServer` ever sees).
+    """
+    for relay_fingerprint in list(node.relays_serving_me):
+        base_urls = _candidate_dialable_addresses(node, relay_fingerprint)
+        if not base_urls:
+            continue
+        try:
+            messages = await _pickup_one_relay_mailbox(session, base_urls, own_hello_provider)
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not pick up mail from relay %s: %s", relay_fingerprint, exc)
+            continue
+
+        for message in messages:
+            claimed_sender = message.payload.get("sender", {}).get("home_node_fingerprint")
+            if claimed_sender is None:
+                continue
+            raw = message.to_dict()
+            try:
+                accepted = node.handle_events(claimed_sender, [raw])
+            except LinkProtocolError as exc:
+                _logger.warning(
+                    "Link sync: rejected a link_message picked up from relay %s: %s",
+                    relay_fingerprint,
+                    exc,
+                )
+                continue
+            for content_id in accepted:
+                envelope = node.events[content_id]
+                await lane.run(
+                    save_event,
+                    sender_fingerprint=claimed_sender,
+                    content_id=content_id,
+                    object_type=LINK_MESSAGE_OBJECT_TYPE,
+                    envelope=envelope,
+                )
+                await lane.run(deliver_link_message, envelope, node_identity=node.identity)
+            if accepted:
+                await lane.run(save_peer, node.peers[claimed_sender])
+
+
+async def _deposit_one(
+    session: ClientSession, base_url: str, recipient_fingerprint: str, message: LinkMessage
+) -> bool:
+    """One relay-mailbox deposit attempt against a single `base_url`,
+    collapsed to a bool for `_try_addresses_via`'s own contract -- a
+    failure here just means "try the next relay," not this pending
+    message's own final outcome."""
+    try:
+        await deposit_into_relay_mailbox(session, base_url, recipient_fingerprint, message)
+        return True
+    except LinkTransportError:
+        return False
+
+
+async def _push_one(node: LinkNode, session: ClientSession, base_url: str, events: list) -> bool:
+    """One `push_events` attempt against a single `base_url`, collapsed
+    to a bool for `_try_addresses_via`'s own contract -- a failure here
+    just means "try the next address," not this pass's own final
+    outcome, so the exception is swallowed, not logged, at this level.
+    """
+    try:
+        await push_events(node, session, base_url, events)
+        return True
+    except LinkTransportError:
+        return False
+
+
 async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: DatabaseLane) -> None:
     pending_messages = await lane.run(load_pending_link_mail)
     for target_fingerprint, message in pending_messages:
-        base_url = _dialable_address(node, target_fingerprint)
-        if base_url is None:
-            continue
-        try:
-            await push_events(node, session, base_url, [message])
-        except LinkTransportError as exc:
-            _logger.warning("Link sync: could not push pending mail to %s: %s", target_fingerprint, exc)
+        base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
+        delivered = False
+        if base_urls:
+            delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [message]))
+        if not delivered:
+            # Round 95/issue #58: send-via-relay -- the recipient is
+            # either unknown-as-directly-dialable or genuinely outgoing-
+            # only. Only `link_message` gets this fallback (never an
+            # acknowledgement, below) -- `netbbs.link.relay_mailbox`'s
+            # own documented boundary; see that module's docstring.
+            relay_urls = _relay_base_urls_for_peer(node, target_fingerprint)
+            if relay_urls:
+                delivered = await _try_addresses_via(
+                    relay_urls, lambda url: _deposit_one(session, url, target_fingerprint, message)
+                )
+        if not delivered:
+            _logger.warning(
+                "Link sync: could not push pending mail to %s on any known or relayed address",
+                target_fingerprint,
+            )
 
     pending_acks = await lane.run(load_pending_link_mail_acknowledgements)
     for target_fingerprint, ack in pending_acks:
-        base_url = _dialable_address(node, target_fingerprint)
-        if base_url is None:
+        base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
+        if not base_urls:
             continue
-        try:
-            await push_events(node, session, base_url, [ack])
-        except LinkTransportError as exc:
-            _logger.warning("Link sync: could not push pending acknowledgement to %s: %s", target_fingerprint, exc)
+        delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [ack]))
+        if not delivered:
+            _logger.warning(
+                "Link sync: could not push pending acknowledgement to %s on any known address",
+                target_fingerprint,
+            )
             continue
         await lane.run(mark_link_mail_acknowledgement_sent, ack)

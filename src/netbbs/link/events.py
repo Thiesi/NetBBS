@@ -39,6 +39,17 @@ not a signal on the wire (round 94: "no cryptographic proof an origin
 is gone versus merely offline," so no node's observation gets an
 automatic network-wide effect).
 
+Design doc §12 round 95/issue #58 adds `relay_consent_request` and
+`relay_consent_response` — the signed pair an outgoing-only node and a
+candidate relay exchange to establish relay consent. Structurally the
+odd one out among everything above: every other pair here is either
+gossiped (gains no reply, just accepted-or-not) or, for the mutual-
+consent pairs, exchanged as two independent gossiped events. Relay
+consent instead needs a *synchronous* reply, because the requester is
+by definition someone who can never be dialed back — see `netbbs.link.
+transport`'s dedicated `/relay-consent` route rather than the general
+`/events` push.
+
 No other event type (moderator grants, tombstones, etc.) is specified
 here yet — each gets its own payload-shape decision when it's actually
 being built, following this same envelope pattern (round 110's own
@@ -89,6 +100,17 @@ BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
 LINK_MESSAGE_OBJECT_TYPE = "link_message"
 LINK_MESSAGE_ACCEPTED_OBJECT_TYPE = "link_message_accepted"
 LINK_MESSAGE_BOUNCED_OBJECT_TYPE = "link_message_bounced"
+
+# Design doc §12 round 95/issue #58: the signed request/response pair an
+# outgoing-only node and a candidate relay exchange to establish relay
+# consent. Unlike every other pair above, these are never gossiped or
+# appended to a chain -- a synchronous round trip over a dedicated route
+# (`netbbs.link.transport`'s `/relay-consent`), the request going out and
+# the response coming back on the *same* HTTP call, the only shape that
+# works for an outgoing-only requester who can never be dialed back (see
+# each class's own docstring).
+RELAY_CONSENT_REQUEST_OBJECT_TYPE = "relay_consent_request"
+RELAY_CONSENT_RESPONSE_OBJECT_TYPE = "relay_consent_response"
 
 _VALID_PURPOSES = ("signing", "transport")
 _VALID_ACTIONS = ("authorize", "revoke")
@@ -256,6 +278,17 @@ class EndpointDescriptor:
     address just fails the handshake"), never a safety issue, so
     "whichever signed descriptor has the newest `created_at` wins" is
     sufficient — no chain-walking machinery needed to interpret one.
+
+    Round 95/issue #58 adds an optional `payload["relays"]` — the
+    fingerprints of candidates that have granted this node's own
+    `relay_consent_request` (`netbbs.link.protocol.LinkNode.relays_
+    serving_me`), meaningful for an outgoing-only node specifically
+    (design doc §12: "accepted relays are named in the requesting
+    node's own signed endpoint descriptor, so any sender resolving that
+    address automatically learns where to deliver"). A sender resolving
+    this descriptor tries `addresses` first when present, falling back
+    to `relays` — see `netbbs.link.sync`'s own send-via-relay logic
+    (issue #58 task #25) for that resolution order.
     """
 
     envelope: dict
@@ -287,15 +320,28 @@ def build_endpoint_descriptor(
     addresses: list[dict] | None,
     outgoing_only: bool,
     created_at: str,
+    relays: list[str] | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12/
-    round 116. `addresses` is a list of `{"protocol", "address", "port"}`
-    dicts, tried in order by a peer (§12: "multiple simultaneous
-    addresses... supported; peers try them in order") — required unless
-    `outgoing_only` is true, matching §12's two deployment modes
-    exactly: a full peer *must* publish where it can be reached, an
-    outgoing-only node publishes nothing but the marker itself.
+    round 116 (round 95/issue #58 adds `relays`). `addresses` is a list
+    of `{"protocol", "address", "port"}` dicts, tried in order by a peer
+    (§12: "multiple simultaneous addresses... supported; peers try them
+    in order") — required unless `outgoing_only` is true, matching
+    §12's two deployment modes exactly: a full peer *must* publish
+    where it can be reached, an outgoing-only node publishes nothing
+    but the marker itself (plus, optionally now, `relays`).
+
+    `relays` is a list of relay fingerprints (`netbbs.link.protocol.
+    LinkNode.relays_serving_me`'s own keys) that have granted this
+    node's `relay_consent_request` — omitted entirely, like `addresses`,
+    rather than stored as an empty list, when there are none (round
+    110 point 6's own "omitted rather than null/empty" convention).
+    Never validated against `outgoing_only` here — a full peer
+    publishing `relays` alongside `addresses` isn't a contradiction this
+    layer needs to police (a redundant reachability path costs nothing,
+    same "connecting to the wrong address just fails" reasoning this
+    class's own docstring already applies to a stale address).
 
     Always signed by `signing_identity` — the subject's *current*
     signing key (round 89), never the root key directly (root only ever
@@ -315,6 +361,8 @@ def build_endpoint_descriptor(
     }
     if addresses:
         payload["addresses"] = addresses
+    if relays:
+        payload["relays"] = relays
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))
@@ -1110,3 +1158,164 @@ def verify_link_message_bounced(
     node's *current signing key* — same division of responsibility as
     `verify_link_message`."""
     return verify_signature(signing_verify_key, canonical_bytes(bounced.envelope), bounced.signature)
+
+
+@dataclass(frozen=True)
+class RelayConsentRequest:
+    """
+    One signed `relay_consent_request` event (design doc §12, round
+    95/issue #58): an outgoing-only node's signed ask that a specific
+    candidate — `payload["relay_fingerprint"]` — relay for it. Always
+    signed by the requester's own current signing key; `payload[
+    "requester_fingerprint"]` is included explicitly (not merely implied
+    by whoever signed this or whichever URL it was POSTed to), matching
+    `LinkMessage`'s own reasoning for its explicit `sender`/`recipient`
+    fields — a verifier can cross-check the claim against the actual
+    caller rather than trusting position alone.
+
+    Not part of any chain (no `previous_event_id`) — a fresh, disposable
+    ask each time, matching `EndpointDescriptor`'s own "no chain-walking
+    machinery needed" reasoning: a stale or duplicate request costs
+    nothing beyond a redundant round trip, never a safety issue.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RelayConsentRequest":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_relay_consent_request(
+    *,
+    signing_identity: Identity,
+    requester_fingerprint: str,
+    relay_fingerprint: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> RelayConsentRequest:
+    """
+    Build and sign one `relay_consent_request` event, per design doc §12
+    round 95. Always signed by `signing_identity` — the requester's own
+    current signing key.
+    """
+    payload = {
+        "requester_fingerprint": requester_fingerprint,
+        "relay_fingerprint": relay_fingerprint,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    envelope = build_envelope(RELAY_CONSENT_REQUEST_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return RelayConsentRequest(envelope=envelope, signature=signature)
+
+
+def verify_relay_consent_request(
+    request: RelayConsentRequest, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `request`'s signature against the claimed requester's
+    *current signing key* — resolving which key that currently is, and
+    confirming the caller actually *is* the claimed requester, are both
+    the caller's job (`netbbs.link.transport`'s `/relay-consent` route
+    handler), same division of responsibility every other `verify_*`
+    function in this module already applies."""
+    return verify_signature(signing_verify_key, canonical_bytes(request.envelope), request.signature)
+
+
+@dataclass(frozen=True)
+class RelayConsentResponse:
+    """
+    One signed `relay_consent_response` event (design doc §12, round
+    95/issue #58): a candidate's answer to a specific `RelayConsentRequest`
+    — accept or decline, per its own local relay-acceptance policy (a
+    resource-cap/opt-out decision made by the caller, e.g.
+    `netbbs.link.transport`'s route handler; this class only carries the
+    already-made decision, same "verification here, policy elsewhere"
+    split `netbbs.link.protocol`'s module docstring establishes for
+    everything else).
+
+    `payload["request_content_id"]` always names the specific request
+    being answered — a response is never free-floating the way a
+    request is, so a requester can match a reply to what it actually
+    asked even if it has more than one outstanding request in flight at
+    once (unlike `BoardOriginTransferOffer`'s "at most one at a time"
+    restriction, nothing here limits how many relays a node may be
+    simultaneously asking).
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RelayConsentResponse":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_relay_consent_response(
+    *,
+    signing_identity: Identity,
+    request_content_id: str,
+    relay_fingerprint: str,
+    requester_fingerprint: str,
+    accepted: bool,
+    created_at: str,
+    nonce: str | None = None,
+) -> RelayConsentResponse:
+    """
+    Build and sign one `relay_consent_response` event, per design doc
+    §12 round 95. Always signed by `signing_identity` — the candidate
+    relay's own current signing key. `relay_fingerprint`/`requester_
+    fingerprint` are both included explicitly, matching `RelayConsent
+    Request`'s own reasoning, so a verifier can cross-check both ends of
+    the exchange without trusting position (who signed, which route
+    answered) alone.
+    """
+    payload = {
+        "request_content_id": request_content_id,
+        "relay_fingerprint": relay_fingerprint,
+        "requester_fingerprint": requester_fingerprint,
+        "accepted": accepted,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    envelope = build_envelope(RELAY_CONSENT_RESPONSE_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return RelayConsentResponse(envelope=envelope, signature=signature)
+
+
+def verify_relay_consent_response(
+    response: RelayConsentResponse, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `response`'s signature against the claimed relay's
+    *current signing key* — same division of responsibility as
+    `verify_relay_consent_request`."""
+    return verify_signature(signing_verify_key, canonical_bytes(response.envelope), response.signature)

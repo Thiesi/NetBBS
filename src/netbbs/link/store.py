@@ -191,6 +191,25 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             json.loads(row["descriptor_json"])
         )
 
+    # Round 95/issue #58: both directions of a completed relay-consent
+    # exchange (`netbbs.link.transport`'s `/relay-consent` route) --
+    # `relaying_for` (this node granted, acting as the relay) and
+    # `relays_serving_me` (a candidate granted this node's own request)
+    # are otherwise only ever set in-memory at the moment consent
+    # completes, same restart-forgets-state gap round 120 already fixed
+    # for peers/events. An outstanding, not-yet-answered `relay_consent_
+    # request` this node itself sent is deliberately NOT reconstructed
+    # here -- `pending_own_relay_requests` only ever holds something
+    # between a request going out and its synchronous reply coming back
+    # on the very same HTTP call (see `request_relay_consent`'s own
+    # docstring); nothing is ever "still outstanding" across a restart
+    # the way a gossiped mutual-consent offer can be.
+    for row in db.connection.execute("SELECT fingerprint, role, accepted_at FROM link_relay_consents"):
+        if row["role"] == "i_relay_for":
+            node.relaying_for[row["fingerprint"]] = row["accepted_at"]
+        else:
+            node.relays_serving_me[row["fingerprint"]] = row["accepted_at"]
+
     return node
 
 
@@ -270,5 +289,50 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
         ON CONFLICT(content_id) DO NOTHING
         """,
         (content_id, sender_fingerprint, object_type, json.dumps(envelope), utc_now_iso()),
+    )
+    db.connection.commit()
+
+
+def save_relay_consent(db: Database, fingerprint: str, *, role: str, accepted_at: str) -> None:
+    """
+    Persist one completed relay-consent grant (design doc §12, round
+    95/issue #58) -- `role` is `"i_relay_for"` (this node, as the relay,
+    granted `fingerprint`'s request) or `"relay_for_me"` (`fingerprint`,
+    as a candidate relay, granted this node's own request), matching
+    `link_relay_consents`' own `CHECK` constraint exactly. Called after
+    `netbbs.link.transport`'s `/relay-consent` route handler (relay
+    side) or `request_relay_consent` (requester side) applies its own
+    in-memory `relaying_for`/`relays_serving_me` update -- same
+    "verify/mutate in-memory first, persist after" order every other
+    accepted-event write in this module already follows.
+
+    A decline is never persisted -- there's nothing durable about it (a
+    future pass may simply ask again), matching this module's existing
+    "only ever persist an accepted/completed fact" scope.
+    """
+    db.connection.execute(
+        """
+        INSERT INTO link_relay_consents (fingerprint, role, accepted_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(fingerprint, role) DO UPDATE SET
+            accepted_at = excluded.accepted_at
+        """,
+        (fingerprint, role, accepted_at),
+    )
+    db.connection.commit()
+
+
+def delete_relay_consent(db: Database, fingerprint: str, *, role: str) -> None:
+    """
+    Remove one previously-granted relay-consent row (design doc §12,
+    round 95/issue #58) -- called when self-healing drops a relay whose
+    observed reliability has fallen below `netbbs.link.relay_selection`'s
+    floor (`role="relay_for_me"`), so a restarted node doesn't resurrect
+    a relay it already gave up on via `load_link_node`'s own
+    reconstruction. Harmless no-op if no such row exists, same tolerance
+    every other delete in this module already has.
+    """
+    db.connection.execute(
+        "DELETE FROM link_relay_consents WHERE fingerprint = ? AND role = ?", (fingerprint, role)
     )
     db.connection.commit()

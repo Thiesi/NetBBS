@@ -110,7 +110,22 @@ class LinkConfig:
 
     Defaults to disabled, matching §15's "Phase 3 is explicitly
     private/experimental federation" framing -- an operator opts in.
-    Automatic relay selection (§12, round 95) is not implemented yet.
+
+    `relay_serving_enabled`/`max_relay_clients` (design doc §12, round
+    95/issue #58) govern this node's own willingness to *act as a
+    relay* for other outgoing-only nodes -- entirely separate from
+    `outgoing_only` above, which governs whether *this* node needs a
+    relay itself. Defaults to serving enabled with a conservative cap
+    (round 95: "relay-serving defaults to on, with a conservative
+    resource cap... and an easy opt-out — confirmed with Thiesi over
+    defaulting off," since an opt-in-only default would leave a young
+    or small Link without enough relays for outgoing-only nodes to ever
+    reliably reach anyone). Neither setting has any effect on this
+    node's own outgoing relay *selection* (`netbbs.link.sync`'s own
+    `_maintain_relay_selection`, gated purely on `outgoing_only`) --
+    they only gate `netbbs.link.transport.LinkServer`'s consent-request
+    route, i.e. whether *other* nodes may successfully ask this one to
+    relay for them.
     """
 
     enabled: bool = False
@@ -121,6 +136,8 @@ class LinkConfig:
     advertised_port: int | None = None
     seeds: list[str] = field(default_factory=list)
     sync_interval_seconds: float = 300.0
+    relay_serving_enabled: bool = True
+    max_relay_clients: int = 20
 
 
 @dataclass(frozen=True)
@@ -222,6 +239,10 @@ class NodeConfig:
             for seed in self.link.seeds:
                 if not seed.strip():
                     raise ConfigError("link.seeds must not contain an empty entry")
+            if self.link.max_relay_clients <= 0:
+                raise ConfigError(
+                    f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
+                )
 
         t = self.throttle
         _require_positive = {
@@ -283,11 +304,11 @@ class NodeConfig:
                 f"NetBBS Link is configured as a full peer, advertising "
                 f"{self.link.advertised_host}:{self.link.advertised_port or self.link.port} to other "
                 "nodes -- design doc §15: Phase 3 is explicitly private/experimental federation, and "
-                "the WAN/NAT trust-boundary and operational-model work (issues #58/#60) is not yet "
-                "implemented. Not a plaintext-password risk the way Telnet/web are (Link traffic is "
-                "signed, not password-authenticated), but an externally reachable Link listener should "
-                "not be operated persistently before that work lands. Prefer outgoing_only (the "
-                "default) until then."
+                "the operational-model work (issue #60) is not yet implemented (the WAN/NAT trust-"
+                "boundary work, issue #58, has landed). Not a plaintext-password risk the way Telnet/"
+                "web are (Link traffic is signed, not password-authenticated), but an externally "
+                "reachable Link listener should not be operated persistently before that remaining "
+                "work lands. Prefer outgoing_only (the default) until then."
             )
         return warnings
 
@@ -339,6 +360,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--link-seed", dest="link_seeds", action="append", default=None)
     parser.add_argument(
         "--link-sync-interval-seconds", dest="link_sync_interval_seconds", type=float, default=None
+    )
+    # Round 95/issue #58: relay-serving opt-out + resource cap.
+    relay_serving_group = parser.add_mutually_exclusive_group()
+    relay_serving_group.add_argument(
+        "--link-relay-serving", dest="link_relay_serving_enabled", action="store_true", default=None
+    )
+    relay_serving_group.add_argument(
+        "--link-no-relay-serving", dest="link_relay_serving_enabled", action="store_false", default=None
+    )
+    parser.add_argument(
+        "--link-max-relay-clients", dest="link_max_relay_clients", type=int, default=None
     )
     return parser
 
@@ -417,6 +449,8 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         advertised_port=table.get("advertised_port", current.advertised_port),
         seeds=list(seeds),
         sync_interval_seconds=float(table.get("sync_interval_seconds", current.sync_interval_seconds)),
+        relay_serving_enabled=bool(table.get("relay_serving_enabled", current.relay_serving_enabled)),
+        max_relay_clients=int(table.get("max_relay_clients", current.max_relay_clients)),
     )
 
 
@@ -481,6 +515,8 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_advertised_port,
         args.link_seeds,
         args.link_sync_interval_seconds,
+        args.link_relay_serving_enabled,
+        args.link_max_relay_clients,
     )
     if any(value is not None for value in link_overrides):
         config = replace(
@@ -503,6 +539,16 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     link.sync_interval_seconds
                     if args.link_sync_interval_seconds is None
                     else args.link_sync_interval_seconds
+                ),
+                relay_serving_enabled=(
+                    link.relay_serving_enabled
+                    if args.link_relay_serving_enabled is None
+                    else args.link_relay_serving_enabled
+                ),
+                max_relay_clients=(
+                    link.max_relay_clients
+                    if args.link_max_relay_clients is None
+                    else args.link_max_relay_clients
                 ),
             ),
         )

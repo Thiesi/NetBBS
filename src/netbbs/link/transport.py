@@ -65,15 +65,34 @@ from netbbs.link.events import (
     LinkMessage,
     LinkMessageAccepted,
     LinkMessageBounced,
+    RelayConsentRequest,
+    RelayConsentResponse,
+    build_relay_consent_request,
+    build_relay_consent_response,
 )
 from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerListMessage, PeerRecord
-from netbbs.link.store import save_candidate_descriptor, save_event, save_peer
+from netbbs.link.relay_mailbox import (
+    RelayMailboxFullError,
+    deposit_relay_mailbox_envelope,
+    pickup_relay_mailbox_envelopes,
+)
+from netbbs.link.store import save_candidate_descriptor, save_event, save_peer, save_relay_consent
 from netbbs.storage.execution import DatabaseLane
+from netbbs.timeutil import utc_now_iso
 
 LINK_PATH_PREFIX = "/link/v1"
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# Round 95/issue #58: `LinkServer`'s own default resource cap on relay-
+# serving when a caller doesn't supply `max_relay_clients` explicitly
+# (every test in this codebase predating that parameter, plus any
+# caller that doesn't care to tune it) -- `netbbs.net.nodeconfig.
+# LinkConfig.max_relay_clients` carries the real, SysOp-adjustable
+# value for an actual running node (see `netbbs.__main__`'s own
+# `LinkServer(...)` construction).
+_DEFAULT_MAX_RELAY_CLIENTS = 20
 
 
 class LinkTransportError(Exception):
@@ -101,6 +120,17 @@ class LinkServer:
     `lane` (round 120): the background `DatabaseLane` this server
     persists accepted peers/events through, off the event loop, after
     `node`'s own in-memory verification accepts them.
+
+    `relay_serving_enabled`/`max_relay_clients` (round 95/issue #58):
+    this node's own policy for `_handle_relay_consent` -- whether to
+    ever grant a relay-consent request at all, and the cap on how many
+    simultaneous grants to hold once serving is enabled (design doc
+    §12: "a conservative resource cap... and an easy opt-out"). Plain
+    constructor parameters, not read from `netbbs.net.nodeconfig`
+    directly -- this module has no config-loading concern of its own
+    (matching `own_hello_provider`'s own "deployment concerns are the
+    caller's job" reasoning just above); `netbbs.__main__` is the one
+    real caller that threads `LinkConfig`'s values through.
     """
 
     def __init__(
@@ -110,12 +140,17 @@ class LinkServer:
         node: LinkNode,
         own_hello_provider: Callable[[], HelloMessage],
         lane: DatabaseLane,
+        *,
+        relay_serving_enabled: bool = True,
+        max_relay_clients: int = _DEFAULT_MAX_RELAY_CLIENTS,
     ) -> None:
         self._host = host
         self._port = port
         self._node = node
         self._own_hello_provider = own_hello_provider
         self._lane = lane
+        self._relay_serving_enabled = relay_serving_enabled
+        self._max_relay_clients = max_relay_clients
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -130,6 +165,11 @@ class LinkServer:
         app.router.add_post(f"{LINK_PATH_PREFIX}/hello", self._handle_hello)
         app.router.add_post(f"{LINK_PATH_PREFIX}/events/{{fingerprint}}", self._handle_events)
         app.router.add_get(f"{LINK_PATH_PREFIX}/peers", self._handle_peers)
+        app.router.add_post(f"{LINK_PATH_PREFIX}/relay-consent/{{fingerprint}}", self._handle_relay_consent)
+        app.router.add_post(
+            f"{LINK_PATH_PREFIX}/relay-mailbox/{{fingerprint}}/deposit", self._handle_relay_mailbox_deposit
+        )
+        app.router.add_post(f"{LINK_PATH_PREFIX}/relay-mailbox/pickup", self._handle_relay_mailbox_pickup)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -230,6 +270,122 @@ class LinkServer:
         gate on it.
         """
         return web.json_response(self._node.build_peer_list().to_dict())
+
+    async def _handle_relay_consent(self, request: web.Request) -> web.Response:
+        """
+        Round 95/issue #58: answer a `relay_consent_request` synchronously,
+        in the *same* HTTP response -- the only shape that works for a
+        requester who may itself be outgoing-only and can never be dialed
+        back (see `RelayConsentRequest`'s own docstring). Mirrors `_handle_
+        hello`'s own "reply carried in the response body" shape exactly.
+
+        The opt-out/resource-cap policy decision (`self._relay_serving_
+        enabled`/`self._max_relay_clients`, round 95/issue #58) lives
+        here, not in `LinkNode` itself -- `handle_relay_consent_request`
+        only ever verifies, deliberately never decides (see that
+        method's own docstring: this pure/in-memory layer has no config
+        to judge capacity against). A declined request -- whether from
+        the opt-out or the cap -- is still a normal, signed `accepted=
+        False` response, not an HTTP error: declining is an ordinary
+        outcome of this exchange, not a protocol violation.
+        """
+        fingerprint = request.match_info["fingerprint"]
+        try:
+            body = await request.json()
+            consent_request = RelayConsentRequest.from_dict(body)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed relay_consent_request: {exc}"}, status=400)
+
+        try:
+            self._node.handle_relay_consent_request(fingerprint, consent_request)
+        except LinkProtocolError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        accepted = self._relay_serving_enabled and len(self._node.relaying_for) < self._max_relay_clients
+        decided_at = utc_now_iso()
+
+        response = build_relay_consent_response(
+            signing_identity=self._node.identity.signing_key,
+            request_content_id=consent_request.content_id,
+            relay_fingerprint=self._node.identity.fingerprint,
+            requester_fingerprint=fingerprint,
+            accepted=accepted,
+            created_at=decided_at,
+        )
+
+        if accepted:
+            self._node.relaying_for[fingerprint] = decided_at
+            await self._lane.run(save_relay_consent, fingerprint, role="i_relay_for", accepted_at=decided_at)
+
+        return web.json_response(response.to_dict())
+
+    async def _handle_relay_mailbox_deposit(self, request: web.Request) -> web.Response:
+        """
+        Round 95/issue #58: accept one opaque `link_message` for
+        `recipient_fingerprint`, held until that recipient itself picks
+        it up (`_handle_relay_mailbox_pickup`). Unlike every other route
+        on this server, the depositing caller need not be a completed
+        peer -- receiving on behalf of a stranger is the entire point of
+        relaying (see `netbbs.link.relay_mailbox`'s own module docstring
+        for why no signature verification happens here either: this node
+        can't meaningfully check a signature for an identity chain it
+        may have never seen, and doesn't need to -- the recipient re-
+        verifies everything itself after pickup).
+        """
+        recipient_fingerprint = request.match_info["fingerprint"]
+        try:
+            body = await request.json()
+            message = LinkMessage.from_dict(body)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed link_message: {exc}"}, status=400)
+
+        if message.envelope.get("object_type") != LINK_MESSAGE_OBJECT_TYPE:
+            return web.json_response(
+                {"error": "only link_message may be deposited into a relay mailbox this round"}, status=400
+            )
+
+        if recipient_fingerprint not in self._node.relaying_for:
+            return web.json_response(
+                {"error": f"this node is not currently relaying for {recipient_fingerprint}"}, status=404
+            )
+
+        try:
+            await self._lane.run(deposit_relay_mailbox_envelope, recipient_fingerprint, message)
+        except RelayMailboxFullError as exc:
+            return web.json_response({"error": str(exc)}, status=507)
+
+        return web.json_response({"deposited": True})
+
+    async def _handle_relay_mailbox_pickup(self, request: web.Request) -> web.Response:
+        """
+        Round 95/issue #58: hand back (and clear) whatever mail this
+        relay is currently holding for the caller. Authenticated by
+        requiring a fresh, verifiable `hello` as the request body rather
+        than inventing a new signed message type — a hello already
+        cryptographically proves the caller's identity (its descriptor
+        signature verifies against the claimed fingerprint's own
+        resolved signing key, the same check `_handle_hello` already
+        performs), which is exactly the property picking up someone
+        else's held mail needs and a bare GET keyed only by a URL path
+        fingerprint would not have (see this method's own module-level
+        context: `netbbs.link.relay_mailbox` deliberately has no notion
+        of who's *allowed* to pick up, since it isn't the layer that can
+        check that).
+        """
+        try:
+            body = await request.json()
+            hello = HelloMessage.from_dict(body)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
+
+        try:
+            peer = self._node.handle_hello(hello)
+        except LinkProtocolError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        await self._lane.run(save_peer, peer)
+
+        envelopes = await self._lane.run(pickup_relay_mailbox_envelopes, peer.fingerprint)
+        return web.json_response({"envelopes": [e.to_dict() for e in envelopes]})
 
 
 async def dial_hello(
@@ -370,3 +526,159 @@ async def request_peer_list(
             save_candidate_descriptor, candidate_fingerprint, node.candidate_descriptors[candidate_fingerprint]
         )
     return recorded
+
+
+async def request_relay_consent(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    relay_fingerprint: str,
+    lane: DatabaseLane,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RelayConsentResponse:
+    """
+    Ask the peer at `base_url` (already a completed peer named
+    `relay_fingerprint` -- same "caller already completed a real hello"
+    precondition `request_peer_list` documents) to relay for this node
+    (design doc §12, round 95/issue #58): build and sign a `relay_
+    consent_request`, POST it to `/relay-consent/{this node's own
+    fingerprint}`, and verify the answer carried back in the *same* HTTP
+    response (`LinkServer._handle_relay_consent`'s own synchronous-reply
+    shape -- see `RelayConsentRequest`'s docstring for why this can't be
+    a `push_events`-style fire-and-forget the way every gossiped event
+    pair is).
+
+    On an accepted response, records `relay_fingerprint` into `node.
+    relays_serving_me` and persists the grant via `lane`. A declined
+    response is returned as-is, unpersisted (see `save_relay_consent`'s
+    own docstring for why) -- not an error, an ordinary outcome of this
+    exchange the caller (relay *selection*, issue #58 task #25) decides
+    what to do about, e.g. trying the next-ranked candidate.
+
+    Raises `LinkTransportError` for a transport-level failure. If the
+    returned response fails verification, `LinkProtocolError` propagates
+    unwrapped from `node.handle_relay_consent_response` — same division
+    of responsibility every other caller of a `handle_*` method already
+    has.
+    """
+    created_at = utc_now_iso()
+    consent_request = build_relay_consent_request(
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        relay_fingerprint=relay_fingerprint,
+        created_at=created_at,
+    )
+    node.pending_own_relay_requests[relay_fingerprint] = consent_request
+
+    url = f"{base_url}{LINK_PATH_PREFIX}/relay-consent/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json=consent_request.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"relay consent request to {url} failed: HTTP {response.status}: {text}")
+            body = await response.json()
+    except ClientError as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+    finally:
+        node.pending_own_relay_requests.pop(relay_fingerprint, None)
+
+    try:
+        consent_response = RelayConsentResponse.from_dict(body)
+    except (KeyError, ValueError, TypeError) as exc:
+        raise LinkTransportError(f"malformed relay consent response from {url}: {exc}") from exc
+
+    node.handle_relay_consent_response(relay_fingerprint, consent_response, original_request=consent_request)
+
+    if consent_response.payload["accepted"]:
+        accepted_at = consent_response.payload["created_at"]
+        node.relays_serving_me[relay_fingerprint] = accepted_at
+        await lane.run(save_relay_consent, relay_fingerprint, role="relay_for_me", accepted_at=accepted_at)
+
+    return consent_response
+
+
+async def deposit_into_relay_mailbox(
+    session: ClientSession,
+    relay_base_url: str,
+    recipient_fingerprint: str,
+    message: LinkMessage,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """
+    Leave `message` (a `link_message` this node couldn't deliver
+    directly) at the relay reachable at `relay_base_url`, for
+    `recipient_fingerprint` to pick up on its own next outbound sync
+    pass (design doc §12, round 95/issue #58). Does not require a
+    completed hello with the relay first — see `LinkServer._handle_
+    relay_mailbox_deposit`'s own docstring for why depositing is the one
+    route on this server that's intentionally open to a stranger.
+
+    Raises `LinkTransportError` for a transport-level failure, including
+    the relay reporting it isn't currently relaying for `recipient_
+    fingerprint`, or that its mailbox for that recipient is full — both
+    surface as a non-200 response, same as any other rejected request
+    on this transport.
+    """
+    url = f"{relay_base_url}{LINK_PATH_PREFIX}/relay-mailbox/{recipient_fingerprint}/deposit"
+    try:
+        async with session.post(
+            url, json=message.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"relay mailbox deposit to {url} failed: HTTP {response.status}: {text}")
+    except ClientError as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+
+async def pickup_from_relay_mailbox(
+    session: ClientSession,
+    relay_base_url: str,
+    hello: HelloMessage,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> list[LinkMessage]:
+    """
+    Pick up (and clear) whatever mail the relay at `relay_base_url` is
+    currently holding for this node -- design doc §12, round 95/issue
+    #58. `hello` is this node's own current hello bundle, the caller's
+    to supply (same "deployment config isn't this layer's concern"
+    reasoning `dial_hello` already applies to its own `hello` parameter)
+    -- it's what authenticates this call (`_handle_relay_mailbox_
+    pickup`'s own docstring explains why a hello, not a new signed
+    message type).
+
+    Returns raw, **not yet verified** `LinkMessage`s -- the caller
+    (issue #58 task #25's sync-loop wiring) is responsible for running
+    each one through `LinkNode.handle_events` (keyed by that message's
+    own claimed sender, not this relay) before treating it as accepted,
+    same as `netbbs.link.relay_mailbox.pickup_relay_mailbox_envelopes`'s
+    own docstring already documents on the server side.
+
+    Raises `LinkTransportError` for a transport-level failure.
+    """
+    url = f"{relay_base_url}{LINK_PATH_PREFIX}/relay-mailbox/pickup"
+    try:
+        async with session.post(
+            url, json=hello.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"relay mailbox pickup from {url} failed: HTTP {response.status}: {text}")
+            body = await response.json()
+    except ClientError as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+    try:
+        raw_envelopes = body["envelopes"]
+    except (KeyError, TypeError) as exc:
+        raise LinkTransportError(f"malformed relay mailbox pickup response from {url}: {exc}") from exc
+
+    try:
+        return [LinkMessage.from_dict(raw) for raw in raw_envelopes]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise LinkTransportError(f"malformed envelope in relay mailbox pickup response from {url}: {exc}") from exc

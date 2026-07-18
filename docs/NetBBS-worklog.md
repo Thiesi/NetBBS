@@ -115,14 +115,23 @@ infrastructure rather than only placeholders:
   discovered candidates only when every one of those fails (or none are
   configured) for that pass, never as a first resort;
 - a scheduled background release-check task, closing a gap where the admin
-  menu's "daily automatic check" switch previously had nothing behind it.
+  menu's "daily automatic check" switch previously had nothing behind it;
+- WAN reachability for outgoing-only nodes (issue #58): direct-observation
+  dial-reliability scoring, automatic relay candidate selection/consent (a
+  synchronous request/response route, not gossiped events) and self-healing,
+  a bounded relay store-and-forward mailbox for `link_message` only, and an
+  operator opt-out/resource cap on serving as a relay for others.
 
 Important boundaries of the current Link implementation:
 
 - It is still private/experimental federation. Phase 4 trust and quarantine are
   the public-readiness gate.
-- The working topology is direct pairwise synchronization. Nodes do not yet
-  provide general multi-hop relay or anti-entropy catch-up.
+- The working topology is direct pairwise synchronization plus single-hop
+  relay for outgoing-only reachability (issue #58). Nodes do not provide
+  general multi-hop relay or anti-entropy catch-up.
+- Relay delivery only works between nodes that have already met directly at
+  some point -- see "WAN reachability and relay selection" below. It is not a
+  way to reach or message a total stranger.
 - A hello carries key-lifecycle state, not arbitrary board history. Healing a
   connection does not itself transfer missed board events; they must be sent.
 - Only implemented event types are supported. Do not infer generic federation
@@ -132,9 +141,10 @@ Important boundaries of the current Link implementation:
 - Tier2_personal_key Link messages are reserved but not offered: the server
   can never hold a tier-2 user's decryption key, and nothing in this codebase
   does client-side decryption yet.
-- Automatic relay selection remains undesigned in one real respect: whether
-  its reliability metric is a new, narrow Phase-3 tracker or genuinely needs
-  Phase 4's reputation system.
+- A relay mailbox accepts only `link_message`; `link_message_accepted`/
+  `link_message_bounced` have no relay path yet -- an acknowledgement to a
+  message that arrived via relay is only delivered if the original sender is
+  independently dialable.
 - Current GitHub issues, not this file, are the task-status authority.
 
 ---
@@ -776,6 +786,69 @@ Reproduced multiple times across unrelated sessions; root cause not yet
 found. Worth a dedicated investigation before trusting that test as a
 regression signal.
 
+### WAN reachability and relay selection
+
+**§6's "reuse the existing local-reputation mechanism" had nothing to reuse --
+a real gap found while implementing issue #58, not anticipated by the design
+doc's own wording.** No data model or table for §6's reputation/trust system
+exists anywhere in this codebase; it is design-only. `netbbs.link.reliability`
+is a genuinely new, minimal, direct-observation-only tracker (attempts/
+successes per fingerprint, neutral prior for the unobserved) fed by every
+fallback and relay-selection dial. Before reusing a design doc's stated
+mechanism for a new feature, confirm it actually exists in code -- do not
+assume a cross-reference is still accurate.
+
+**Relay consent needed a synchronous route, not a gossiped event pair.** Every
+other mutual-consent exchange in this codebase (origin transfer, channel
+invitations) is two independent gossiped events with no reply requirement.
+Relay consent cannot work that way: the requester may itself be outgoing-only
+and permanently undialable, so the *only* way it can ever learn the answer is
+in the same HTTP response as its own request -- `netbbs.link.transport`'s
+`/relay-consent` route, mirroring `/hello`'s own "reply carried in the
+response body" shape. When designing a new request/response exchange, check
+whether either party could be permanently unreachable by the other before
+defaulting to the gossip-pair pattern.
+
+**A sender can never resolve a genuinely outgoing-only recipient's relays
+through `LinkNode.peers` alone.** A hello is a real TCP connection; a node
+with no dialable address can never complete one with a sender who can't reach
+it. The *only* way such a sender ever learns that recipient's `relays` field
+is secondhand, via ordinary peer-list exchange with someone who has met them
+directly -- landing in `candidate_descriptors`, never `peers`. Any relay-
+routing resolution function must check both, not just the completed-peer
+table other Link code paths default to.
+
+**Relay delivery only works between nodes that have already met directly at
+some point; it is not stranger discovery via introduction.** Composing a
+`link_message` at all requires a known peer to resolve the recipient's
+encryption key from (`netbbs.link.mail.compose_link_message`), and delivery
+requires the recipient already knows the sender as a peer (`handle_events`'s
+"no relay from a stranger" boundary, unchanged and still enforced even when
+the bytes arrive via a relay pickup rather than directly). A relay only ever
+changes *how* the bytes travel, never who is allowed to talk to whom.
+
+**Self-healing republication needs no separate mechanism, but only takes
+effect on a node's *next* hello, not its current pass's.** `LinkNode.
+build_hello` reads `relays_serving_me` live, so any future hello already
+reflects the current set with no explicit "republish" step. But a node's own
+hello for the *current* sync pass goes out before that same pass's relay
+selection runs later in the pass -- a relay granted mid-pass is not reflected
+until the node's *next* pass sends its *next* hello. A test (or any other
+code) that needs a freshly-granted relay visible to a third party within one
+observation window must account for this one-pass lag.
+
+**A test/setup helper's "known peer at address X" record is a live dial
+target for relay selection too, not just whatever it was added for.** Giving
+a node a `PeerRecord` with a real (even fabricated/unroutable) address, to
+satisfy some unrelated precondition (e.g. enabling `compose_link_message`'s
+encryption-key lookup), makes that fingerprint a legitimate-looking relay
+*candidate* as well -- `netbbs.link.relay_selection` has no way to know the
+address was never meant to be dialed. Dialing a genuinely unroutable address
+can stall an entire sync pass for the length of the HTTP client timeout.
+Any peer record constructed purely for an unrelated test precondition should
+be `outgoing_only=True` with no address unless the test actually needs that
+peer to be dialable.
+
 ### Current distribution limit
 
 Configured-seed sync currently sends the complete supported outbound event set
@@ -939,11 +1012,10 @@ Near-term Phase 3 work includes:
   types are added;
 - persistent event/dedup retention without replay or resurrection bugs;
 - linked-resource closure, transfer, succession, orphan, and fork behavior;
-- automatic relay selection for outgoing-only nodes (needs its own reliability-
-  metric scope decision: a narrow Phase-3 tracker, or genuinely gated on
-  Phase 4's real reputation system) and pull-based catch-up; peer-list
-  exchange, live supplementary seed-list refresh, and a bounded candidate-
-  fallback dial when every configured/cached seed fails a pass are done;
+- pull-based catch-up; peer-list exchange, live supplementary seed-list
+  refresh, a bounded candidate-fallback dial when every configured/cached
+  seed fails a pass, and automatic relay selection/consent/self-healing plus
+  a bounded relay mailbox for outgoing-only reachability are done;
 - Link messages: tier1_home_node_key only (server-side decryption; tier2
   needs a real client-side decryption story first) -- send/receive/read,
   bounce, and acknowledgement are done; link_message_expired and active
