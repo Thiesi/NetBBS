@@ -3,7 +3,7 @@
 NetBBS is a modern, TCP/IP-native BBS with an ad-hoc mesh network
 (**NetBBS Link**). Phases 1–2 are complete; Phase 3 is active and already
 includes working Link identity, transport, persistence, seed synchronization,
-and linked-board event propagation.
+linked-board event propagation, and tier-1 Link messages.
 
 ## Start here
 
@@ -104,13 +104,16 @@ Current Phase 3 includes:
 - root and operational node keys with signed transitions;
 - canonical Link event bytes;
 - hello/endpoint protocol and `aiohttp` adapter;
-- configured-seed background synchronization;
+- configured-seed background synchronization, peer-list exchange, and live
+  seed-list refresh;
 - persistent peers/events and restart reconstruction;
 - foreground/background database lanes;
 - deterministic multi-node fault injection;
-- linked-board genesis, posts, and self-authored edit propagation.
+- linked-board genesis, posts, and self-authored edit propagation;
+- Link messages, scoped to tier-1 (locally-known) recipients only.
 
-It does **not** yet imply public federation, general relay, inventory/pull
-catch-up, Link messages, linked-resource succession, advanced governance, or
+It does **not** yet imply public federation, general relay/WAN reachability
+(NAT traversal, automatic relay selection), inventory/pull catch-up, tier-2
+Link messages, linked-resource succession, advanced governance, or
 trust/quarantine. Check the design document and open issues for the current
 roadmap rather than extending this summary.
