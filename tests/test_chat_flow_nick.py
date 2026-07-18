@@ -213,7 +213,7 @@ def test_alias_shown_in_regular_message(db, lane, hub, presence, alice, channel)
     # Anchored to the raw-username chat-stream author format (design
     # doc round 77) -- "<alice>" is what an un-aliased message would
     # look like -- not a blanket "alice" never appears anywhere: the
-    # status line's own "you:alice(DeepParse)" field (round 77)
+    # status line's own "alice(DeepParse)" field (round 77)
     # legitimately shows the real username, since it's telling the
     # viewer who *they* are, not attributing a message to anyone.
     assert "<alice>" not in text

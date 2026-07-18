@@ -2066,9 +2066,15 @@ async def _build_completer(lane: DatabaseLane, presence: PresenceRegistry, chann
 # -- chat status line (design doc round 75) + pinned input row (round 79) ---
 
 # The scroll region reserves the terminal's last two rows -- the pinned
-# input row, then the status row below it -- for the duration of the
+# status row, then the input row below it -- for the duration of the
 # session (rows 1..height-2 scroll normally; neither reserved row ever
-# does). At least 3 rows are needed for that split to mean anything at
+# does). Status above input -- originally the other way around (design
+# doc round 79), swapped so the status row's own underline sits on the
+# boundary between scrollback and the pinned UI, where it actually
+# reads as a divider. On the terminal's true last row (the old order)
+# there was nothing below the rule to separate, so it was rendered but
+# pointless.
+# At least 3 rows are needed for that split to mean anything at
 # all: >=1 row of actual scrolling content, plus the two reserved ones.
 # Below this, both pinned rows are skipped entirely and chat behaves
 # exactly as it did before either feature existed: plain, unconfined
@@ -2137,10 +2143,12 @@ def _check_ban(db: Database, channel: Channel, user: User) -> str | None:
 @dataclass
 class _StatusSpan:
     """One colored run of text within a status-line field group -- e.g.
-    the identity group splits into a `SELF_COLOR` "you:alice" span, an
-    optional `NICK_COLOR` "(nick)" span, and a `MUTED_COLOR` "[mod]"
-    indicator span, concatenated with no gap between them so they read
-    as one field while still each getting their own color."""
+    the identity group splits into a bold `SELF_COLOR` "alice" span
+    (bold, not a "you:" label -- `SELF_COLOR` already reads as "this is
+    you" on its own), an optional `NICK_COLOR` "(nick)" span, and a
+    `MUTED_COLOR` "[mod]" indicator span, concatenated with no gap
+    between them so they read as one field while still each getting
+    their own color."""
 
     text: str
     fg_color: int | None = None
@@ -2173,12 +2181,15 @@ def _render_chat_status_line(
     caller) drops whole groups from the *right* on a too-narrow
     terminal, so whichever group is listed last here is what silently
     disappears first -- the clock, then this user's own identity/
-    privileges/away/mute state, then the topic, while the channel name
-    and live counts always survive. Deliberately still *not* included:
-    any per-channel "linked vs. local" origin -- that distinction
-    doesn't exist anywhere in the schema yet (NetBBS Link is Phase 3,
-    not started -- see design doc round 77's sign-off note), so there
-    is nothing real to render.
+    privileges/mute state, then the topic, while the channel name and
+    live counts always survive. Away state is deliberately *not* one of
+    these rendered indicator groups -- `_repaint_status_line` reverses
+    the whole composed row instead when the viewer is away, so there is
+    nothing here to drop or truncate for it. Deliberately still *not*
+    included: any per-channel "linked vs. local" origin -- that
+    distinction doesn't exist anywhere in the schema yet (NetBBS Link
+    is Phase 3, still private/experimental federation), so there is
+    nothing real to render.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -2201,18 +2212,22 @@ def _render_chat_status_line(
     roster = _roster_usernames(hub, channel)
     online_count = hub.participant_count(channel.name)
     away_count = sum(1 for username in roster if presence.is_away(username))
-    online = f"{online_count} online({away_count} away)"
 
     groups: list[_StatusGroup] = [
         [_StatusSpan(channel_label, fg_color=ACCENT_COLOR, bold=True)],
-        [_StatusSpan(online, fg_color=MUTED_COLOR)],
+        [
+            _StatusSpan(str(online_count), fg_color=ACCENT_COLOR, bold=True),
+            _StatusSpan(" online (", fg_color=MUTED_COLOR),
+            _StatusSpan(str(away_count), fg_color=ACCENT_COLOR, bold=True),
+            _StatusSpan(" away)", fg_color=MUTED_COLOR),
+        ],
     ]
 
     if channel.topic:
         groups.append([_StatusSpan(f'"{sanitize_text(channel.topic)}"', fg_color=MUTED_COLOR)])
 
     nick = get_nick(db, user)
-    identity: _StatusGroup = [_StatusSpan(f"you:{sanitize_text(user.username)}", fg_color=SELF_COLOR)]
+    identity: _StatusGroup = [_StatusSpan(sanitize_text(user.username), fg_color=SELF_COLOR, bold=True)]
     if nick:
         identity.append(_StatusSpan(f"({sanitize_text(nick)})", fg_color=NICK_COLOR))
 
@@ -2220,8 +2235,6 @@ def _render_chat_status_line(
     privileges = _own_channel_privileges(db, channel, user)
     if privileges is not None:
         own_indicators.append(privileges)
-    if presence.is_away(user.username):
-        own_indicators.append("away")
 
     until = _check_mute(db, channel, user)
     if until is not None:
@@ -2238,19 +2251,25 @@ def _render_chat_status_line(
     return groups
 
 
-def _compose_status_line(groups: list[_StatusGroup], width: int) -> str:
+def _compose_status_line(groups: list[_StatusGroup], width: int, *, reverse: bool = False) -> str:
     """
     Joins `groups` with a dim `_STATUS_SEPARATOR`, dropping whole groups
     from the right when the terminal is too narrow to fit them all --
     the same "least-important field disappears first" priority order
     `_render_chat_status_line`'s own field ordering establishes, now
-    applied per-group instead of the old raw character `truncate()`
-    (design doc round 77), which could land mid-field. Underlines every
-    span, including the separators and the trailing padding, so the
-    whole row still reads as one continuous rule the way solid reverse
-    video (round 77's original choice) used to read as one continuous
-    inverted bar -- just without needing every field to share one
-    fought-over background color.
+    applied per-group instead of a raw character `truncate()`, which
+    could land mid-field. Underlines every span, including the
+    separators and the trailing padding, so the whole row still reads
+    as one continuous rule.
+
+    `reverse` -- set by `_repaint_status_line` from the viewer's own
+    away state, not a field this function decides on its own --
+    additionally swaps fg/bg (SGR 7) on every span, on top of each
+    span's own `fg_color`/underline, rather than replacing per-field
+    color with one flat inverted bar. This is how "away" is now shown:
+    the whole row inverts instead of an inline `[away]` tag, so there's
+    nothing further to render or drop for it in the field groups
+    themselves.
     """
     kept: list[_StatusGroup] = []
     running = 0
@@ -2266,17 +2285,19 @@ def _compose_status_line(groups: list[_StatusGroup], width: int) -> str:
         # Not even the first (most important) group fits -- fall back to
         # a raw character truncation of just that one.
         only = truncate("".join(span.text for span in groups[0]), width) if groups else ""
-        return colored(only, underline=True)
+        return colored(only, underline=True, reverse=reverse)
 
     rendered: list[str] = []
     for index, group in enumerate(kept):
         if index > 0:
-            rendered.append(colored(_STATUS_SEPARATOR, fg_color=MUTED_COLOR, underline=True))
+            rendered.append(colored(_STATUS_SEPARATOR, fg_color=MUTED_COLOR, underline=True, reverse=reverse))
         for span in group:
-            rendered.append(colored(span.text, fg_color=span.fg_color, bold=span.bold, underline=True))
+            rendered.append(
+                colored(span.text, fg_color=span.fg_color, bold=span.bold, underline=True, reverse=reverse)
+            )
     pad = width - running
     if pad > 0:
-        rendered.append(colored(" " * pad, underline=True))
+        rendered.append(colored(" " * pad, underline=True, reverse=reverse))
     return "".join(rendered)
 
 
@@ -2322,16 +2343,25 @@ async def _repaint_status_line(
     truncating and the actual terminal write stay plain, synchronous,
     non-`db`-touching code here, same split as `_resolve_target`/
     `_write_vcard_detail`.
+
+    Reverses the whole composed row when `user` is currently away
+    (`presence.is_away`) instead of rendering a separate `[away]` tag
+    inline -- read directly off `presence` here, a plain in-memory
+    lookup, rather than threading it through the `lane.run` call, since
+    it's not a `db` read at all. Tied specifically to the viewer's own
+    away state, the same as every other "own state" field
+    `_render_chat_status_line` already renders -- other participants'
+    away state only ever shows up folded into the online/away counts.
     """
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
-    line = _compose_status_line(groups, session.terminal_width)
+    line = _compose_status_line(groups, session.terminal_width, reverse=presence.is_away(user.username))
     await session.write(
         save_cursor()
         + set_scroll_region(1, height - 2)
-        + move_cursor(height, 1)
+        + move_cursor(height - 1, 1)
         + clear_line()
         + line
         + restore_cursor()
@@ -2369,7 +2399,7 @@ async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, hei
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     scroll_bottom = height - 2
-    input_row = height - 1
+    input_row = height
     full_text = _INPUT_PROMPT + live_buffer.text
     displayed = truncate(full_text, session.terminal_width)
     await session.write(
@@ -2428,8 +2458,9 @@ async def _print_candidates_and_redraw_input(
     input`, reused directly here), instead of `apply_tab_completion`'s
     own default fallback -- an unconditional `"\\r\\n"` that has no idea
     the terminal's cursor sits on the pinned input row, outside the
-    scroll region, and lands the candidate list on (overwriting) the
-    status row directly below instead of scrolling normally above it.
+    scroll region, and would print the candidate list wherever that
+    unconstrained newline happens to land instead of scrolling normally
+    within the content region above.
 
     `live_buffer` is updated with the completion's own already-applied
     result *before* `_print_and_redraw_input` reads it to redraw the
@@ -2589,7 +2620,7 @@ async def _chat_loop(
     the loop at all. Mute has no equivalent join-time check — a muted
     user can still read, just not send (enforced in `send_loop`).
 
-    A pinned status row, and a pinned input row just above it (design
+    A pinned status row, and a pinned input row just below it (design
     doc round 75, expanded round 79; see `_repaint_status_line`/
     `_repaint_input_row`), occupy the terminal's last two lines for the
     duration of the session, via a VT100 scroll region — everything

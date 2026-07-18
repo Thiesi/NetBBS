@@ -129,7 +129,7 @@ def test_away_not_broadcast_to_others(db, lane, hub, presence, alice, channel):
     watcher = asyncio.run(scenario())
     # Anchored to the away *reason* text specifically (design doc round
     # 77), not a blanket "away" never appears anywhere -- the chat
-    # status line's own "N online(M away)" label (round 77) legitimately
+    # status line's own "N online (M away)" label (round 77) legitimately
     # contains that word as static chrome regardless of whether anyone
     # is actually away, so a bare substring check would now always fail
     # for a reason unrelated to what this test actually protects: that

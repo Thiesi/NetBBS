@@ -15,6 +15,7 @@ through a `FakeSession`, inspecting the raw escape sequences it wrote.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -81,6 +82,20 @@ def _written_text(session: FakeSession) -> str:
     return "".join(session.written)
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible_text(session: FakeSession) -> str:
+    """`_written_text`, with SGR/cursor escape sequences stripped --
+    needed for substring checks that span more than one `_StatusSpan`
+    (e.g. "2 online"), since the online-count field is now multiple
+    independently-colored spans (a bright count, a muted label) with a
+    color-reset/color-start escape sequence sitting between them in the
+    raw written bytes, even though a real terminal still renders them
+    as one unbroken run of visible characters."""
+    return _ANSI_ESCAPE_RE.sub("", _written_text(session))
+
+
 def _plain(groups) -> str:
     """Flattens `_render_chat_status_line`'s colored field groups back
     to plain text for substring assertions -- groups themselves join
@@ -125,7 +140,7 @@ def test_render_reflects_the_away_count_among_current_participants(db, hub, pres
     hub.join(channel.name, ParticipantId(username="bob", session_key=2))
     presence.set_away(bob.username, "brb")
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "2 online(1 away)" in text
+    assert "2 online (1 away)" in text
 
 
 def test_render_shows_channel_type(db, hub, presence, channel, alice):
@@ -135,13 +150,13 @@ def test_render_shows_channel_type(db, hub, presence, channel, alice):
 
 def test_render_shows_own_username(db, hub, presence, channel, alice):
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "you:alice" in text
+    assert "alice" in text
 
 
 def test_render_shows_own_nick_when_set(db, hub, presence, channel, alice):
     set_nick(db, alice, "night_owl")
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "you:alice(night_owl)" in text
+    assert "alice(night_owl)" in text
 
 
 def test_render_shows_topic_when_set(db, hub, presence, channel, alice):
@@ -164,7 +179,7 @@ def test_render_omits_topic_when_unset(db, hub, presence, channel, alice):
 def test_render_shows_own_privileges(db, hub, presence, channel, alice):
     _grant_moderate(db, alice, channel)
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "you:alice[mod]" in text
+    assert "alice[mod]" in text
 
 
 def test_render_shows_sysop_privilege_label_instead_of_enumerating_bits(db, hub, presence, channel, alice):
@@ -173,18 +188,20 @@ def test_render_shows_sysop_privilege_label_instead_of_enumerating_bits(db, hub,
     sysop_actor = create_user(db, "root", password="hunter2", user_level=255)
     promoted = set_user_level(db, alice, 255, changed_by=sysop_actor)
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, promoted))
-    assert "you:alice[sysop]" in text
+    assert "alice[sysop]" in text
 
 
 def test_render_shows_no_indicators_by_default(db, hub, presence, channel, alice):
-    assert "[away]" not in _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
     assert "[muted" not in _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
 
 
-def test_render_shows_away_indicator(db, hub, presence, channel, alice):
+def test_render_never_shows_an_inline_away_tag(db, hub, presence, channel, alice):
+    """Away is shown by reversing the whole composed row
+    (`test_compose_reverses_the_whole_row_when_away`), not an inline
+    `[away]` field group -- there is nothing for `_render_chat_status_line`
+    itself to add or omit for it, away or not."""
     presence.set_away(alice.username, "brb")
-    text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
-    assert "[away]" in text
+    assert "[away]" not in _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
 
 
 def _grant_moderate(db, user, channel):
@@ -221,7 +238,7 @@ def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, a
     assert not re.search(r"\d{4}", text)  # no 4-digit year anywhere
 
 
-# -- _compose_status_line (pure function): colors, separators, no reverse --
+# -- _compose_status_line (pure function): colors, separators, reverse --
 
 
 def test_compose_uses_ascii_pipe_separators_between_fields(db, hub, presence, channel, alice):
@@ -230,7 +247,7 @@ def test_compose_uses_ascii_pipe_separators_between_fields(db, hub, presence, ch
     assert chat_flow._STATUS_SEPARATOR in line
 
 
-def test_compose_colors_each_field_distinctly_and_never_reverses(db, hub, presence, channel, alice):
+def test_compose_colors_each_field_distinctly_and_does_not_reverse_by_default(db, hub, presence, channel, alice):
     from netbbs.rendering import ACCENT_COLOR, MUTED_COLOR, SELF_COLOR
     from netbbs.rendering.ansi import REVERSE, fg
 
@@ -238,11 +255,27 @@ def test_compose_colors_each_field_distinctly_and_never_reverses(db, hub, presen
     line = chat_flow._compose_status_line(groups, width=200)
     # Channel name and this user's own identity get their own distinct
     # colors (design doc's status-line redesign) rather than sharing one
-    # inverted background -- and reverse video is gone entirely.
+    # inverted background -- and `reverse` defaults to off.
     assert fg(ACCENT_COLOR) in line
     assert fg(SELF_COLOR) in line
     assert fg(MUTED_COLOR) in line
     assert REVERSE not in line
+
+
+def test_compose_reverses_every_span_when_asked(db, hub, presence, channel, alice):
+    """`reverse=True` (driven by the viewer's own away state --
+    `test_status_line_reverses_when_the_viewer_is_away` below) swaps
+    fg/bg on every span, on top of its own `fg_color`/underline, rather
+    than replacing per-field color with one flat inverted bar -- so
+    REVERSE and each field's own distinct fg color both appear."""
+    from netbbs.rendering import ACCENT_COLOR, SELF_COLOR
+    from netbbs.rendering.ansi import REVERSE, fg
+
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    line = chat_flow._compose_status_line(groups, width=200, reverse=True)
+    assert REVERSE in line
+    assert fg(ACCENT_COLOR) in line
+    assert fg(SELF_COLOR) in line
 
 
 def test_compose_underlines_the_full_row_including_padding(db, hub, presence, channel, alice):
@@ -267,7 +300,7 @@ def test_compose_drops_whole_groups_from_the_right_on_a_narrow_terminal(db, hub,
     # rather than character-truncating mid-field.
     line = chat_flow._compose_status_line(groups, width=10)
     assert "#lobby" in line
-    assert "you:alice" not in line
+    assert "alice" not in line
 
 
 def test_compose_character_truncates_only_when_even_the_first_group_does_not_fit(db, hub, presence, channel, alice):
@@ -283,7 +316,7 @@ def test_chat_loop_sets_a_scroll_region_reserving_the_last_two_rows(lane, hub, p
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     # Default FakeSession terminal is 80x24 (netbbs.net.session.Session's
     # own class defaults) -- rows 1-22 scroll, row 23 is the pinned
-    # input row, row 24 is the status row (design doc round 79).
+    # status row, row 24 is the input row.
     assert "\x1b[1;22r" in _written_text(session)
 
 
@@ -355,10 +388,45 @@ def test_chat_loop_resets_the_scroll_region_even_if_that_write_itself_fails(
 
 
 def test_status_line_repaints_after_a_self_state_changing_command(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering.ansi import REVERSE
+
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     text = _written_text(session)
-    # At least one repaint after the /away command shows the new state.
-    assert "[away]" in text
+    # At least one repaint after the /away command shows the new state --
+    # a reversed status row (test_status_line_reverses_when_the_viewer_is_away
+    # covers this in more depth), not an inline "[away]" tag.
+    assert REVERSE in text
+
+
+def test_status_line_reverses_when_the_viewer_is_away(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering.ansi import REVERSE
+
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
+    assert REVERSE in _written_text(session)
+
+
+def test_status_line_does_not_reverse_when_the_viewer_is_not_away(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering.ansi import REVERSE
+
+    session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
+    assert REVERSE not in _written_text(session)
+
+
+def test_status_line_stops_reversing_once_away_is_cleared(lane, hub, presence, mailbox, channel, alice):
+    from netbbs.rendering.ansi import REVERSE
+    from netbbs.rendering import save_cursor
+
+    session, _ = asyncio.run(
+        _run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/away", "/quit"])
+    )
+    # Status-line repaints are the only pinned-row writes that save/
+    # restore the cursor (`_repaint_status_line`'s own docstring) --
+    # isolates them from the input-row repaints interleaved in between,
+    # so each list entry here is one status-line paint, in order.
+    status_repaints = [chunk for chunk in session.written if chunk.startswith(save_cursor())]
+    assert len(status_repaints) >= 2
+    assert REVERSE in status_repaints[-2]  # still reversed: /away brb just took effect
+    assert REVERSE not in status_repaints[-1]  # not reversed: the very next /away cleared it
 
 
 def test_status_line_repaints_when_a_muted_message_is_rejected(db, lane, hub, presence, mailbox, channel, alice, bob):
@@ -395,5 +463,5 @@ def test_status_line_reflects_a_second_participant_joining(lane, hub, presence, 
         return alice_session
 
     alice_session = asyncio.run(scenario())
-    text = _written_text(alice_session)
+    text = _visible_text(alice_session)
     assert "2 online" in text  # alice's status line updated once bob joined

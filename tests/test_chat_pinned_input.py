@@ -99,17 +99,17 @@ async def _run(lane, hub, presence, mailbox, channel, user, lines):
 def test_input_row_is_painted_on_entry_with_the_prompt_marker(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     text = _written_text(session)
-    # Row 23 on the default 80x24 terminal (row 22 is the last scrolling
-    # row, row 24 is the status row -- design doc round 79).
-    assert "\x1b[23;1H\x1b[2K> " in text
+    # Row 24 on the default 80x24 terminal (row 22 is the last scrolling
+    # row, row 23 is the status row, row 24 is the pinned input row).
+    assert "\x1b[24;1H\x1b[2K> " in text
 
 
 def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/away brb", "/quit"]))
     text = _written_text(session)
-    # At least two distinct "row 23, cleared, prompt-only" repaints --
+    # At least two distinct "row 24, cleared, prompt-only" repaints --
     # one on entry, at least one more after /away's own dispatch.
-    assert text.count("\x1b[23;1H\x1b[2K> ") >= 2
+    assert text.count("\x1b[24;1H\x1b[2K> ") >= 2
 
 
 def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence, mailbox, channel, alice):
@@ -354,10 +354,9 @@ def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
     # The candidate list is printed via the same content-region primitive
     # every other pinned-row print uses (scroll region + jump to its
     # bottom row -- row 22 on the default 80x24 terminal, one above the
-    # pinned input row at 23 and the status row at 24), not a bare,
+    # status row at 23 and the pinned input row at 24), not a bare,
     # region-unaware "\r\n" that would instead land wherever the cursor
-    # already was (the input row, one row above the status line it then
-    # overwrites).
+    # already was (the input row, the terminal's true last row).
     scroll_bottom = alice_session.terminal_height - 2
     assert set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) in text
 
