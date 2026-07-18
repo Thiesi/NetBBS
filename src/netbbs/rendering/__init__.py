@@ -35,11 +35,14 @@ from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
+    CHANNEL_TYPE_COLOR,
     HEADER_COLOR,
     MENU_KEY_COLOR,
     MUTED_COLOR,
     NICK_COLOR,
+    PRIVILEGE_COLOR,
     SELF_COLOR,
+    TOPIC_COLOR,
     VERIFIED_COLOR,
 )
 
@@ -72,10 +75,13 @@ __all__ = [
     "diff_ansi",
     "full_render_ansi",
     "ACCENT_COLOR",
+    "CHANNEL_TYPE_COLOR",
     "HEADER_COLOR",
     "MENU_KEY_COLOR",
     "MUTED_COLOR",
     "NICK_COLOR",
+    "PRIVILEGE_COLOR",
     "SELF_COLOR",
+    "TOPIC_COLOR",
     "VERIFIED_COLOR",
 ]

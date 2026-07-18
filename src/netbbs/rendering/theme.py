@@ -32,3 +32,12 @@ VERIFIED_COLOR = 82  # vivid green — a SysOp-verified real name (design doc ro
                      # directly from the trusted attested_value, never derived from
                      # user-supplied text — see netbbs.attestation's module
                      # docstring for why that's the actual anti-forgery property
+CHANNEL_TYPE_COLOR = 208  # orange — a channel's [pub]/[invite]/[hidden] tag in the
+                          # chat status line, distinct from the channel name itself
+                          # so the two independent facts (which channel, what kind
+                          # of channel) read as separate fields rather than one run
+TOPIC_COLOR = 141  # light purple — the chat status line's quoted channel topic
+PRIVILEGE_COLOR = 196  # red — a user's own moderator/SysOp badge ("[mod]",
+                       # "[sysop]") in the chat status line, distinct from the
+                       # muted gray used for state that's merely informational
+                       # (mute expiry, the clock) rather than elevated access

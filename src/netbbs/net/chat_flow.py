@@ -143,9 +143,12 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
+    CHANNEL_TYPE_COLOR,
     MUTED_COLOR,
     NICK_COLOR,
+    PRIVILEGE_COLOR,
     SELF_COLOR,
+    TOPIC_COLOR,
     clear_line,
     clear_screen,
     colored,
@@ -2187,11 +2190,11 @@ def _render_chat_status_line(
 ) -> list[_StatusGroup]:
     """
     The status line's content, as an ordered list of colored field
-    groups (composed/truncated/underlined by the caller) -- design doc
-    round 77's original channel-name/count/clock bar, redesigned onto
-    per-field color plus a continuous underline rather than one solid
-    reverse-video bar (Thiesi's own explicit choice, over inventing a
-    background-color band).
+    groups (composed/truncated/colored/reversed by the caller). Each
+    field gets its own distinct color rather than sharing one -- the
+    channel name, its `[pub]`/`[invite]`/`[hidden]` type, the topic,
+    and this user's own moderator/SysOp badge are all visually distinct
+    categories, not one undifferentiated run of text.
 
     Groups are ordered most- to least-important on purpose, not
     alphabetically or by "how it's stored": `_compose_status_line` (the
@@ -2201,12 +2204,13 @@ def _render_chat_status_line(
     privileges/mute state, then the topic, while the channel name and
     live counts always survive. Away state is deliberately *not* one of
     these rendered indicator groups -- `_repaint_status_line` reverses
-    the whole composed row instead when the viewer is away, so there is
-    nothing here to drop or truncate for it. Deliberately still *not*
-    included: any per-channel "linked vs. local" origin -- that
-    distinction doesn't exist anywhere in the schema yet (NetBBS Link
-    is Phase 3, still private/experimental federation), so there is
-    nothing real to render.
+    the whole composed row by default and turns that off specifically
+    when the viewer is away (a deliberately quieter, non-inverted look
+    for "I've stepped back"), so there is nothing here to drop or
+    truncate for it. Deliberately still *not* included: any per-channel
+    "linked vs. local" origin -- that distinction doesn't exist anywhere
+    in the schema yet (NetBBS Link is Phase 3, still private/
+    experimental federation), so there is nothing real to render.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -2224,14 +2228,16 @@ def _render_chat_status_line(
     unchanged from before this round.
     """
     channel_type = "invite" if channel.members_only else ("hidden" if channel.hidden else "pub")
-    channel_label = f"#{sanitize_text(channel.name)}[{channel_type}]"
 
     roster = _roster_usernames(hub, channel)
     online_count = hub.participant_count(channel.name)
     away_count = sum(1 for username in roster if presence.is_away(username))
 
     groups: list[_StatusGroup] = [
-        [_StatusSpan(channel_label, fg_color=ACCENT_COLOR, bold=True)],
+        [
+            _StatusSpan(f"#{sanitize_text(channel.name)}", fg_color=ACCENT_COLOR, bold=True),
+            _StatusSpan(f"[{channel_type}]", fg_color=CHANNEL_TYPE_COLOR, bold=True),
+        ],
         [
             _StatusSpan(str(online_count), fg_color=ACCENT_COLOR, bold=True),
             _StatusSpan(" online (", fg_color=MUTED_COLOR),
@@ -2241,25 +2247,21 @@ def _render_chat_status_line(
     ]
 
     if channel.topic:
-        groups.append([_StatusSpan(f'"{sanitize_text(channel.topic)}"', fg_color=MUTED_COLOR)])
+        groups.append([_StatusSpan(f'"{sanitize_text(channel.topic)}"', fg_color=TOPIC_COLOR, bold=True)])
 
     nick = get_nick(db, user)
     identity: _StatusGroup = [_StatusSpan(sanitize_text(user.username), fg_color=SELF_COLOR, bold=True)]
     if nick:
         identity.append(_StatusSpan(f"({sanitize_text(nick)})", fg_color=NICK_COLOR))
 
-    own_indicators = []
     privileges = _own_channel_privileges(db, channel, user)
     if privileges is not None:
-        own_indicators.append(privileges)
+        identity.append(_StatusSpan(f"[{privileges}]", fg_color=PRIVILEGE_COLOR, bold=True))
 
     until = _check_mute(db, channel, user)
     if until is not None:
-        own_indicators.append("muted" if until == "indefinitely" else f"muted {until}")
-    if own_indicators:
-        identity.append(
-            _StatusSpan("".join(f"[{indicator}]" for indicator in own_indicators), fg_color=MUTED_COLOR)
-        )
+        label = "muted" if until == "indefinitely" else f"muted {until}"
+        identity.append(_StatusSpan(f"[{label}]", fg_color=MUTED_COLOR))
     groups.append(identity)
 
     groups.append(
@@ -2283,10 +2285,15 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, reverse: boo
     away state, not a field this function decides on its own --
     additionally swaps fg/bg (SGR 7) on every span, on top of each
     span's own `fg_color`/underline, rather than replacing per-field
-    color with one flat inverted bar. This is how "away" is now shown:
-    the whole row inverts instead of an inline `[away]` tag, so there's
-    nothing further to render or drop for it in the field groups
-    themselves.
+    color with one flat inverted bar: since only `fg_color` (never
+    `bg_color`) is ever set on a status-line span, reversing turns each
+    span into its own colored block (that color as background, the
+    terminal's own default as text) instead of plain colored text on
+    the terminal's default background. `_repaint_status_line` reverses
+    by default and turns it off specifically while the viewer is away
+    -- a deliberately quieter, non-inverted look standing in for an
+    inline `[away]` tag, so there's nothing further to render or drop
+    for it in the field groups themselves.
     """
     kept: list[_StatusGroup] = []
     running = 0
@@ -2361,20 +2368,21 @@ async def _repaint_status_line(
     non-`db`-touching code here, same split as `_resolve_target`/
     `_write_vcard_detail`.
 
-    Reverses the whole composed row when `user` is currently away
-    (`presence.is_away`) instead of rendering a separate `[away]` tag
-    inline -- read directly off `presence` here, a plain in-memory
-    lookup, rather than threading it through the `lane.run` call, since
-    it's not a `db` read at all. Tied specifically to the viewer's own
-    away state, the same as every other "own state" field
-    `_render_chat_status_line` already renders -- other participants'
-    away state only ever shows up folded into the online/away counts.
+    Reverses the whole composed row by default, turning that off when
+    `user` is currently away (`presence.is_away`) instead of rendering a
+    separate `[away]` tag inline -- read directly off `presence` here, a
+    plain in-memory lookup, rather than threading it through the
+    `lane.run` call, since it's not a `db` read at all. Tied specifically
+    to the viewer's own away state, the same as every other "own state"
+    field `_render_chat_status_line` already renders -- other
+    participants' away state only ever shows up folded into the online/
+    away counts.
     """
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
-    line = _compose_status_line(groups, session.terminal_width, reverse=presence.is_away(user.username))
+    line = _compose_status_line(groups, session.terminal_width, reverse=not presence.is_away(user.username))
     await session.write(
         save_cursor()
         + set_scroll_region(1, height - 2)
