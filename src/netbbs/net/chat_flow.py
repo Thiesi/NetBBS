@@ -144,6 +144,7 @@ from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
     CHANNEL_TYPE_COLOR,
+    HEADER_COLOR,
     MUTED_COLOR,
     NICK_COLOR,
     PRIVILEGE_COLOR,
@@ -2241,9 +2242,9 @@ def _render_chat_status_line(
             _StatusSpan(f"[{channel_type}]", fg_color=CHANNEL_TYPE_COLOR, bold=True),
         ],
         [
-            _StatusSpan(str(online_count), fg_color=ACCENT_COLOR, bold=True),
+            _StatusSpan(str(online_count), fg_color=HEADER_COLOR, bold=True),
             _StatusSpan(" online (", fg_color=MUTED_COLOR),
-            _StatusSpan(str(away_count), fg_color=ACCENT_COLOR, bold=True),
+            _StatusSpan(str(away_count), fg_color=HEADER_COLOR, bold=True),
             _StatusSpan(" away)", fg_color=MUTED_COLOR),
         ],
     ]

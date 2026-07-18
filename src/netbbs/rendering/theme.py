@@ -16,7 +16,10 @@ independently.
 
 from __future__ import annotations
 
-HEADER_COLOR = 51  # bright cyan — section headers, banners
+HEADER_COLOR = 51  # bright cyan — section headers, banners; also the chat status
+                   # line's own online/away counts, distinct from ACCENT_COLOR
+                   # since that already means "channel name" there and reusing it
+                   # for the numbers would make two unrelated fields look like one
 ACCENT_COLOR = 220  # gold — navigable items: board/channel names, other users' names
 MUTED_COLOR = 244  # gray — system/meta messages (join/leave notices, etc.)
 MENU_KEY_COLOR = 46  # bright green — the actual valid keystroke in a menu option

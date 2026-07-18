@@ -127,6 +127,21 @@ def test_render_shows_channel_name_and_online_count(db, hub, presence, channel, 
     assert "1 online" in text
 
 
+def test_render_gives_the_online_count_a_different_color_than_the_channel_name(db, hub, presence, channel, alice):
+    # ACCENT_COLOR already means "channel name" (the same gold used for
+    # "Joined #channel" system messages elsewhere in chat) -- the counts
+    # need their own distinct color rather than reusing it, so the two
+    # unrelated facts don't visually blend into one field.
+    from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR
+
+    hub.join(channel.name, ParticipantId(username="alice", session_key=1))
+    groups = chat_flow._render_chat_status_line(db, hub, presence, channel, alice)
+    channel_group, online_group = groups[0], groups[1]
+    assert channel_group[0].fg_color == ACCENT_COLOR
+    assert online_group[0].fg_color == HEADER_COLOR
+    assert online_group[0].fg_color != channel_group[0].fg_color
+
+
 def test_render_reflects_the_live_participant_count(db, hub, presence, channel, alice):
     hub.join(channel.name, ParticipantId(username="alice", session_key=1))
     hub.join(channel.name, ParticipantId(username="bob", session_key=2))
