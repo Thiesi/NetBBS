@@ -1054,23 +1054,24 @@ already being made for every post on it, not a new category of trust.
   privileged users able to act on infrastructure they don't own — even
   though the stakes here are lower than that original failure.
 - **Origin succession, transfer, and orphan/fork policy (round 94 —
-  resolves issue #53's remaining scope).** Since origin authority for a
-  linked resource *is* its originating node's identity, most of
-  succession is already solved by round 89's key-lifecycle model applied
-  here rather than invented fresh: **routine rotation and compromise-
-  with-root-intact** need nothing new — verification already walks the
-  transition chain, and a revoked key's forged events already fail.
-  **Voluntary origin transfer** (a SysOp deliberately handing a
-  board/channel to a different node) is modeled as just another entry in
-  the resource's own event chain (round 90's general shape), requiring
-  **mutual consent** — the old origin signs the handoff, the new origin
-  signs acceptance, before any other node honors it — directly reusing
-  the existing "an invitation alone never creates membership" pattern
-  above for channel invitations, not a new trust shape. **Root-key loss
-  or compromise has no cryptographic recovery**, symmetric with round
-  89's own stance on node/user keys: the resource becomes **orphaned** —
-  it keeps existing exactly as last known (still content-addressed,
-  still re-fetchable), but accepts no further origin-authorized events.
+  resolves issue #53's remaining scope; implemented for boards, see
+  status note below).** Since origin authority for a linked resource
+  *is* its originating node's identity, most of succession is already
+  solved by round 89's key-lifecycle model applied here rather than
+  invented fresh: **routine rotation and compromise-with-root-intact**
+  need nothing new — verification already walks the transition chain,
+  and a revoked key's forged events already fail. **Voluntary origin
+  transfer** (a SysOp deliberately handing a board/channel to a
+  different node) is modeled as just another entry in the resource's
+  own event chain (round 90's general shape), requiring **mutual
+  consent** — the old origin signs the handoff, the new origin signs
+  acceptance, before any other node honors it — directly reusing the
+  existing "an invitation alone never creates membership" pattern above
+  for channel invitations, not a new trust shape. **Root-key loss or
+  compromise has no cryptographic recovery**, symmetric with round 89's
+  own stance on node/user keys: the resource becomes **orphaned** — it
+  keeps existing exactly as last known (still content-addressed, still
+  re-fetchable), but accepts no further origin-authorized events.
   **Orphan recognition and fork handling are kept purely local, not a
   network-wide protocol state — confirmed with Thiesi over a lightweight
   opt-in signal piggybacking on §6's quarantine-flag machinery.** There
@@ -1082,6 +1083,31 @@ already being made for every post on it, not a new category of trust.
   `forked_from` pointer for discoverability; each node locally decides
   whether to carry the frozen original, the fork, both, or neither,
   exactly like today's default-carry-with-visible-opt-out.
+
+  **Status: implemented for boards, issue #53 closed.** `board_origin_
+  transfer_offer`/`board_origin_transfer_accepted` (two new signed
+  event types extending a board's own lifecycle chain, same shape as
+  `board_post_edit`'s content chain) carry the mutual-consent handoff;
+  `netbbs.link.protocol.LinkNode.handle_events` enforces it can only
+  ever come directly from the board's own *current* origin, and an
+  acceptance only directly from that offer's own named new origin, at
+  most one offer outstanding per board at a time. Orphan detection
+  needed no new event type — it's a computed property of the origin's
+  existing key-transition chain (`resolve_current_operational_key`
+  returning `None`). `forked_from` is an optional field on `board_
+  genesis` itself. **A real prerequisite gap found while implementing
+  this, not anticipated by this section's own design: "carrying" a
+  board previously meant only relaying/storing its raw signed events —
+  no node but the origin ever had a locally browsable copy.** Fixed by
+  `netbbs.link.boards.materialize_carried_board`, which now creates a
+  real local `Board` row the moment a node accepts a peer's `board_
+  genesis`, seeded from that genesis's own `default_*` recommendations
+  — the missing half of the "every node carries by default" policy
+  above, not something this round's original scope foresaw needing.
+  Channels have no Link support at all yet (no `channel_genesis` event
+  type exists), so this round is board-only; extending origin
+  succession to channels is blocked on that separate, larger
+  prerequisite, not on anything in this section.
 - **Default-carry policy for Link participation:** joining NetBBS Link
   **carries every linked board/channel by default** — this gives "same
   content available on any node" as the **default availability/behavior**,

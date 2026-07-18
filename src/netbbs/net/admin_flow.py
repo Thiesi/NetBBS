@@ -113,7 +113,17 @@ from netbbs.files.entries import (
     set_file_pinned,
 )
 from netbbs.identity.keys import IdentityError, parse_verify_key
-from netbbs.link.boards import LinkBoardsError, LinkContext, is_board_linked, link_board, queue_board_post_if_linked
+from netbbs.link.boards import (
+    LinkBoardsError,
+    LinkContext,
+    accept_board_origin_transfer,
+    board_origin_fingerprint,
+    is_board_linked,
+    is_board_origin_orphaned,
+    link_board,
+    offer_board_origin_transfer,
+    queue_board_post_if_linked,
+)
 from netbbs.moderation.log import list_actions_for_target_user, record_action
 from netbbs.moderation.roles import (
     BoardPermission,
@@ -1584,7 +1594,9 @@ async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
     linked = await lane.run(is_board_linked, board) if link_context is not None else False
-    await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+    is_origin, has_incoming_offer = await _draw_board_detail(
+        session, lane, board, linked=linked, link_context=link_context
+    )
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1596,22 +1608,42 @@ async def _board_detail_screen(
             updated = await _edit_board_screen(session, lane, actor, board)
             if updated is not None:
                 board = updated
-            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_board_screen(session, lane, actor, board)
             if deleted:
                 return
-            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
         elif choice == "p":
             await session.write_line("")
             await _pending_posts_screen(session, lane, actor, board, link_context=link_context)
-            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
             await _link_board_screen(session, lane, board, link_context)
             linked = await lane.run(is_board_linked, board)
-            await _draw_board_detail(session, lane, board, linked=linked, link_context=link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
+        elif choice == "t" and link_context is not None and linked and is_origin:
+            await session.write_line("")
+            await _transfer_board_origin_screen(session, lane, board, link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
+        elif choice == "a" and has_incoming_offer:
+            await session.write_line("")
+            await _accept_board_origin_transfer_screen(session, lane, board, link_context)
+            is_origin, has_incoming_offer = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
         else:
             await session.write(reject_keystroke())
 
@@ -1676,6 +1708,17 @@ async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board,
     if not ok:
         return
 
+    forked_from: str | None = None
+    if await prompt_yes_no(session, "Is this a fork of an existing Linked board?", default=False):
+        candidates = await lane.run(_linked_boards_excluding, board.id)
+        chosen = await pick_item(
+            session, candidates,
+            name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
+            title="Fork of which board?", empty_message="No other Linked boards to fork from.",
+        )
+        if chosen is not None:
+            forked_from = chosen.board_id
+
     try:
         genesis = await lane.run(
             link_board,
@@ -1687,6 +1730,7 @@ async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board,
             default_max_post_age_days=default_max_post_age_days,
             default_min_age=default_min_age,
             default_name_requirement=default_name_requirement,
+            forked_from=forked_from,
         )
     except LinkBoardsError as exc:
         await session.write_line(colored(f"Could not Link board: {exc}", fg_color=MUTED_COLOR))
@@ -1699,6 +1743,122 @@ async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board,
     await session.write_line(f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
 
 
+def _linked_boards_excluding(db: Database, exclude_board_id: int) -> list[Board]:
+    """Every currently-Linked board except `exclude_board_id` (design
+    doc §13, round 94/issue #53) -- the fork-source candidate list for
+    `_link_board_screen`'s own optional `forked_from` prompt. A board
+    doesn't fork from itself, and an as-yet-unLinked board has no
+    genesis to point at in the first place, so both are excluded by
+    construction (`exclude_board_id` covers the former; `is_board_
+    linked` alone already covers the latter)."""
+    return [
+        board for board in list_boards(db, order_by="alphabetical")
+        if board.id != exclude_board_id and is_board_linked(db, board)
+    ]
+
+
+async def _transfer_board_origin_screen(
+    session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
+) -> None:
+    """
+    `[T]ransfer origin` (design doc §13, round 94/issue #53): the
+    current origin's half of the mutual-consent handoff -- offers a
+    different, already-known peer as `board`'s next origin. Alone, this
+    changes nothing (see `BoardOriginTransferOffer`'s own docstring) --
+    every other node, including the proposed new origin itself, keeps
+    trusting *this* node until that peer's own SysOp explicitly accepts
+    on their own node (`_accept_board_origin_transfer_screen`, there).
+
+    No picker here, deliberately -- unlike `board`/`Board` rows, a peer
+    has no local integer id `pick_item`'s `stable_id_of` could use;
+    fingerprints are typed directly, the same way this UI already shows
+    them everywhere else a specific peer needs naming (e.g. `Origin:
+    <fingerprint>` on this same screen).
+    """
+    peers = sorted(link_context.link_node.peers.keys())
+    await session.write_line(colored("\r\nTransfer board origin", fg_color=HEADER_COLOR, bold=True))
+    if not peers:
+        await session.write_line(colored("No known peers to transfer this board to.", fg_color=MUTED_COLOR))
+        return
+    await session.write_line("Known peers:")
+    for fingerprint in peers:
+        await session.write_line(f"  {fingerprint}")
+    await session.write("New origin's fingerprint (blank to cancel): ")
+    target = (await session.read_line()).strip()
+    if not target:
+        return
+    if target not in link_context.link_node.peers:
+        await session.write_line(colored("Not a known peer -- cancelled.", fg_color=MUTED_COLOR))
+        return
+    if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target}?", default=False):
+        await session.write_line("Cancelled.")
+        return
+
+    try:
+        offer = await lane.run(
+            offer_board_origin_transfer,
+            board,
+            node_identity=link_context.node_identity,
+            new_origin_fingerprint=target,
+        )
+    except LinkBoardsError as exc:
+        await session.write_line(colored(f"Could not offer transfer: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.pending_origin_transfers[board.board_id] = offer
+    link_context.link_node.board_lifecycle_head[board.board_id] = offer.content_id
+    link_context.link_node.known_event_ids.add(offer.content_id)
+    link_context.link_node.events[offer.content_id] = offer.to_dict()
+
+    await session.write_line("Offer sent -- it will be pushed to peers on the next sync pass.")
+
+
+async def _accept_board_origin_transfer_screen(
+    session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
+) -> None:
+    """
+    `[A]ccept transfer` (design doc §13, round 94/issue #53): the
+    consent-completing half -- accepts the single pending incoming
+    origin-transfer offer for `board` that names this node as the
+    proposed new origin. Only reachable when `_draw_board_detail`
+    already confirmed such an offer exists (`has_incoming_offer`), but
+    re-checked here too rather than trusted blindly, the same
+    defense-in-depth every other admin mutation in this file already
+    applies to a caller-supplied precondition.
+    """
+    offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
+    if offer is None or offer.payload.get("new_origin_fingerprint") != link_context.node_identity.fingerprint:
+        await session.write_line(colored("\r\nNo pending incoming offer for this board.", fg_color=MUTED_COLOR))
+        return
+
+    old_origin = offer.payload.get("old_origin_fingerprint")
+    await session.write_line(colored("\r\nAccept board origin", fg_color=HEADER_COLOR, bold=True))
+    if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_origin}?", default=False):
+        await session.write_line("Cancelled.")
+        return
+
+    try:
+        accepted = await lane.run(
+            accept_board_origin_transfer,
+            board,
+            node_identity=link_context.node_identity,
+            offer=offer,
+        )
+    except LinkBoardsError as exc:
+        await session.write_line(colored(f"Could not accept transfer: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.board_origin[board.board_id] = link_context.node_identity.fingerprint
+    link_context.link_node.board_lifecycle_head[board.board_id] = accepted.content_id
+    del link_context.link_node.pending_origin_transfers[board.board_id]
+    link_context.link_node.known_event_ids.add(accepted.content_id)
+    link_context.link_node.events[accepted.content_id] = accepted.to_dict()
+
+    await session.write_line(
+        f"Accepted -- this node is now {board.name!r}'s origin. Pushed to peers on the next sync pass."
+    )
+
+
 async def _draw_board_detail(
     session: Session,
     lane: DatabaseLane,
@@ -1706,7 +1866,16 @@ async def _draw_board_detail(
     *,
     linked: bool = False,
     link_context: LinkContext | None = None,
-) -> None:
+) -> tuple[bool, bool]:
+    """
+    Returns `(is_origin, has_incoming_offer)` (design doc §13, round
+    94/issue #53) -- whether this node is currently `board`'s own
+    origin (gates `[T]ransfer origin`) and whether a pending incoming
+    origin-transfer offer names this node as the proposed new origin
+    (gates `[A]ccept transfer`). `_board_detail_screen`'s own dispatch
+    loop needs both every time it redraws, so returning them here
+    avoids a second, separately-timed recomputation immediately after.
+    """
     header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(board.description) if board.description else '(none)'}")
@@ -1723,14 +1892,54 @@ async def _draw_board_detail(
         f"Minimum age: {board.min_age if board.min_age is not None else 'none'}  "
         f"Name requirement: {board.name_requirement or 'none'}"
     )
+    is_origin = False
+    has_incoming_offer = False
     if link_context is not None:
         await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+        if linked:
+            origin_fingerprint = await lane.run(board_origin_fingerprint, board)
+            is_origin = origin_fingerprint == link_context.node_identity.fingerprint
+            orphan_note = ""
+            if not is_origin:
+                peer = link_context.link_node.peers.get(origin_fingerprint)
+                if peer is not None and is_board_origin_orphaned(peer):
+                    orphan_note = colored(
+                        " (ORPHANED -- origin's signing key was revoked, no replacement on file)",
+                        fg_color=MUTED_COLOR,
+                    )
+            origin_label = "this node" if is_origin else origin_fingerprint
+            await session.write_line(f"Origin: {origin_label}{orphan_note}")
+
+            offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
+            if offer is not None:
+                if offer.payload.get("new_origin_fingerprint") == link_context.node_identity.fingerprint:
+                    has_incoming_offer = True
+                    await session.write_line(
+                        colored(
+                            f"Pending: an incoming origin-transfer offer from "
+                            f"{offer.payload.get('old_origin_fingerprint')}",
+                            fg_color=MUTED_COLOR,
+                        )
+                    )
+                elif is_origin:
+                    await session.write_line(
+                        colored(
+                            f"Pending: your own outstanding transfer offer to "
+                            f"{offer.payload.get('new_origin_fingerprint')}",
+                            fg_color=MUTED_COLOR,
+                        )
+                    )
     options = [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts")]
     if link_context is not None and not linked:
         options.append(menu_key("L", "ink this board"))
+    if link_context is not None and linked and is_origin and board.board_id not in link_context.link_node.pending_origin_transfers:
+        options.append(menu_key("T", "ransfer origin"))
+    if has_incoming_offer:
+        options.append(menu_key("A", "ccept transfer"))
     options.append(menu_key("B", "ack"))
     await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
+    return is_origin, has_incoming_offer
 
 
 async def _edit_board_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> Board | None:

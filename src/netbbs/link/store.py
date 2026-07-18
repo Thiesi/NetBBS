@@ -29,8 +29,12 @@ import json
 
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BoardGenesis,
+    BoardOriginTransferAccepted,
+    BoardOriginTransferOffer,
     BoardPostEdit,
     EndpointDescriptor,
     KeyTransition,
@@ -79,6 +83,16 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     edited revision's own `posts.link_event_json` column instead, same
     as a self-originated `board_genesis` lives on `boards.link_genesis_
     json` rather than ever passing through `handle_events`.
+
+    Round 94/issue #53: the same two-source shape again, applied to
+    `node.board_origin`/`board_lifecycle_head`/`pending_origin_
+    transfers` -- peer-received `board_origin_transfer_offer`/
+    `_accepted` come from `link_events`; this node's own self-
+    originated one (`netbbs.link.boards.offer_board_origin_transfer`/
+    `accept_board_origin_transfer`) lives on `boards.link_lifecycle_
+    json`. Reconstructed *before* `link_events` this time, not after --
+    see the inline comment at that block for why the ordering hazard is
+    different here than it is for genesis.
     """
     node = LinkNode(identity=identity)
 
@@ -91,6 +105,34 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             transitions=tuple(KeyTransition.from_dict(t) for t in json.loads(row["transitions_json"])),
             descriptor=EndpointDescriptor.from_dict(json.loads(row["descriptor_json"])),
         )
+
+    # Round 94/issue #53: this node's own self-originated lifecycle
+    # event (an offer made as current origin, or an acceptance made as
+    # a newly-accepted origin), if any -- deliberately reconstructed
+    # *before* the link_events loop below, not after (unlike genesis's
+    # own self-originated block further down, which has no such
+    # ordering hazard: one board has exactly one genesis, self-
+    # originated XOR peer-received, never both). A board's lifecycle
+    # state can legitimately move from self-authored to peer-observed
+    # over time (this node offered, then the new origin's own
+    # acceptance arrives back via ordinary sync) -- if this node has
+    # since learned of that same transfer completing via link_events
+    # (below, processed in received_at order), that more current fact
+    # must win over this node's own now-stale offer, not the reverse.
+    for row in db.connection.execute(
+        "SELECT link_lifecycle_json FROM boards WHERE link_lifecycle_json IS NOT NULL"
+    ):
+        raw = json.loads(row["link_lifecycle_json"])
+        if raw["envelope"]["object_type"] == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
+            offer = BoardOriginTransferOffer.from_dict(raw)
+            board_id = offer.payload["board_id"]
+            node.pending_origin_transfers[board_id] = offer
+            node.board_lifecycle_head[board_id] = offer.content_id
+        else:
+            own_accepted = BoardOriginTransferAccepted.from_dict(raw)
+            board_id = own_accepted.payload["board_id"]
+            node.board_origin[board_id] = own_accepted.payload["new_origin_fingerprint"]
+            node.board_lifecycle_head[board_id] = own_accepted.content_id
 
     for row in db.connection.execute(
         "SELECT content_id, object_type, envelope_json FROM link_events ORDER BY received_at ASC"
@@ -105,6 +147,17 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             edit = BoardPostEdit.from_dict(envelope)
             root_post_id = edit.payload["root_post_id"]
             node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (edit,)
+        elif row["object_type"] == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
+            offer = BoardOriginTransferOffer.from_dict(envelope)
+            board_id = offer.payload["board_id"]
+            node.pending_origin_transfers[board_id] = offer
+            node.board_lifecycle_head[board_id] = offer.content_id
+        elif row["object_type"] == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
+            peer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
+            board_id = peer_accepted.payload["board_id"]
+            node.board_origin[board_id] = peer_accepted.payload["new_origin_fingerprint"]
+            node.board_lifecycle_head[board_id] = peer_accepted.content_id
+            node.pending_origin_transfers.pop(board_id, None)
 
     for row in db.connection.execute(
         "SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"

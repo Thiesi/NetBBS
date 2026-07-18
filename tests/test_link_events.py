@@ -11,6 +11,8 @@ from netbbs.identity.keys import Identity, IdentityKind
 from netbbs.link.events import (
     NETBBS_PROTOCOL_VERSION,
     BoardGenesis,
+    BoardOriginTransferAccepted,
+    BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
     EventError,
@@ -19,6 +21,8 @@ from netbbs.link.events import (
     LinkMessageAccepted,
     LinkMessageBounced,
     build_board_genesis,
+    build_board_origin_transfer_accepted,
+    build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
     build_envelope,
@@ -29,6 +33,8 @@ from netbbs.link.events import (
     canonical_bytes,
     event_content_id,
     verify_board_genesis,
+    verify_board_origin_transfer_accepted,
+    verify_board_origin_transfer_offer,
     verify_board_post,
     verify_board_post_edit,
     verify_key_transition,
@@ -313,6 +319,29 @@ def test_board_genesis_to_dict_from_dict_roundtrip(origin_signing):
     assert verify_board_genesis(restored, origin_signing.verify_key)
 
 
+def test_board_genesis_forked_from_omitted_by_default(origin_signing):
+    genesis = build_board_genesis(
+        signing_identity=origin_signing,
+        origin_fingerprint="origin-fp",
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert "forked_from" not in genesis.payload
+
+
+def test_board_genesis_forked_from_included_when_given(origin_signing):
+    genesis = build_board_genesis(
+        signing_identity=origin_signing,
+        origin_fingerprint="origin-fp",
+        board_id="new-fork-board-id",
+        name="Vintage Computing (redux)",
+        created_at="2026-01-01T00:00:00Z",
+        forked_from="original-board-id",
+    )
+    assert genesis.payload["forked_from"] == "original-board-id"
+
+
 # -- board_post construction (design doc round 124) ---------------------------
 
 
@@ -534,6 +563,138 @@ def test_board_post_edit_to_dict_from_dict_roundtrip(home_node_signing):
     assert restored.envelope == original.envelope
     assert restored.signature == original.signature
     assert verify_board_post_edit(restored, home_node_signing.verify_key)
+
+
+# -- board_origin_transfer_offer/accepted construction (design doc round 94/#53) --
+
+
+@pytest.fixture
+def old_origin_signing():
+    return Identity.generate(IdentityKind.NODE, "old-origin")
+
+
+@pytest.fixture
+def new_origin_signing():
+    return Identity.generate(IdentityKind.NODE, "new-origin")
+
+
+def test_build_board_origin_transfer_offer_is_signed_by_old_origins_signing_key(old_origin_signing):
+    offer = build_board_origin_transfer_offer(
+        signing_identity=old_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="genesis-content-id",
+        old_origin_fingerprint="old-fp",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert verify_board_origin_transfer_offer(offer, old_origin_signing.verify_key)
+
+
+def test_board_origin_transfer_offer_rejects_wrong_signing_key(old_origin_signing, new_origin_signing):
+    offer = build_board_origin_transfer_offer(
+        signing_identity=old_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="genesis-content-id",
+        old_origin_fingerprint="old-fp",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert not verify_board_origin_transfer_offer(offer, new_origin_signing.verify_key)
+
+
+def test_board_origin_transfer_offer_fields(old_origin_signing):
+    offer = build_board_origin_transfer_offer(
+        signing_identity=old_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="genesis-content-id",
+        old_origin_fingerprint="old-fp",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    assert offer.payload["board_id"] == "existing-local-board-id"
+    assert offer.payload["previous_event_id"] == "genesis-content-id"
+    assert offer.payload["old_origin_fingerprint"] == "old-fp"
+    assert offer.payload["new_origin_fingerprint"] == "new-fp"
+    assert "nonce" in offer.payload
+
+
+def test_board_origin_transfer_offer_nonce_distinguishes_identical_offers(old_origin_signing):
+    kwargs = dict(
+        signing_identity=old_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="genesis-content-id",
+        old_origin_fingerprint="old-fp",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    a = build_board_origin_transfer_offer(**kwargs)
+    b = build_board_origin_transfer_offer(**kwargs)
+    assert a.payload["nonce"] != b.payload["nonce"]
+    assert a.content_id != b.content_id
+
+
+def test_board_origin_transfer_offer_to_dict_from_dict_roundtrip(old_origin_signing):
+    original = build_board_origin_transfer_offer(
+        signing_identity=old_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="genesis-content-id",
+        old_origin_fingerprint="old-fp",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    restored = BoardOriginTransferOffer.from_dict(original.to_dict())
+    assert restored.envelope == original.envelope
+    assert restored.signature == original.signature
+    assert verify_board_origin_transfer_offer(restored, old_origin_signing.verify_key)
+
+
+def test_build_board_origin_transfer_accepted_is_signed_by_new_origins_signing_key(new_origin_signing):
+    accepted = build_board_origin_transfer_accepted(
+        signing_identity=new_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="offer-content-id",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:01:00Z",
+    )
+    assert verify_board_origin_transfer_accepted(accepted, new_origin_signing.verify_key)
+
+
+def test_board_origin_transfer_accepted_rejects_wrong_signing_key(old_origin_signing, new_origin_signing):
+    accepted = build_board_origin_transfer_accepted(
+        signing_identity=new_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="offer-content-id",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:01:00Z",
+    )
+    assert not verify_board_origin_transfer_accepted(accepted, old_origin_signing.verify_key)
+
+
+def test_board_origin_transfer_accepted_fields(new_origin_signing):
+    accepted = build_board_origin_transfer_accepted(
+        signing_identity=new_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="offer-content-id",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:01:00Z",
+    )
+    assert accepted.payload["board_id"] == "existing-local-board-id"
+    assert accepted.payload["previous_event_id"] == "offer-content-id"
+    assert accepted.payload["new_origin_fingerprint"] == "new-fp"
+
+
+def test_board_origin_transfer_accepted_to_dict_from_dict_roundtrip(new_origin_signing):
+    original = build_board_origin_transfer_accepted(
+        signing_identity=new_origin_signing,
+        board_id="existing-local-board-id",
+        previous_event_id="offer-content-id",
+        new_origin_fingerprint="new-fp",
+        created_at="2026-01-01T00:01:00Z",
+    )
+    restored = BoardOriginTransferAccepted.from_dict(original.to_dict())
+    assert restored.envelope == original.envelope
+    assert restored.signature == original.signature
+    assert verify_board_origin_transfer_accepted(restored, new_origin_signing.verify_key)
 
 
 # -- link_message construction (design doc round 93) ---------------------------

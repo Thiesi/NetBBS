@@ -28,6 +28,17 @@ mechanism that actually reaches a specific recipient node, and
 design not yet settled) are deliberately not part of this slice; see
 each class's own docstring for the boundary.
 
+Design doc round 94/issue #53 adds `board_origin_transfer_offer` and
+`board_origin_transfer_accepted` (§13's origin-succession policy) — the
+mutual-consent pair a board's current origin and a prospective new one
+exchange to hand off authority, plus an optional `forked_from` pointer
+on `board_genesis` itself. Orphan detection needs no event type of its
+own — it's a computed property of the origin's existing key-transition
+chain (`netbbs.link.node_identity.resolve_current_operational_key`),
+not a signal on the wire (round 94: "no cryptographic proof an origin
+is gone versus merely offline," so no node's observation gets an
+automatic network-wide effect).
+
 No other event type (moderator grants, tombstones, etc.) is specified
 here yet — each gets its own payload-shape decision when it's actually
 being built, following this same envelope pattern (round 110's own
@@ -63,6 +74,13 @@ BOARD_POST_OBJECT_TYPE = "board_post"
 # Round 129: a self-authored edit to an existing board_post -- never a
 # moderator edit or a tombstone this round (design doc round 129).
 BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
+
+# Design doc round 94/issue #53: the mutual-consent origin-succession
+# pair -- the current origin's handoff offer, and the new origin's
+# acceptance. Neither alone changes anything (see each class's own
+# docstring).
+BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE = "board_origin_transfer_offer"
+BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
 
 # Design doc round 93: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
@@ -372,6 +390,7 @@ def build_board_genesis(
     default_max_post_age_days: int | None = None,
     default_min_age: int | None = None,
     default_name_requirement: str | None = None,
+    forked_from: str | None = None,
 ) -> BoardGenesis:
     """
     Build and sign one `board_genesis` event, per design doc round 124.
@@ -393,6 +412,16 @@ def build_board_genesis(
     omitted entirely when `None` (round 110 point 6), never stored as
     `null`; a carrying node's own local value always wins regardless of
     what's recommended here.
+
+    `forked_from` (design doc §13, round 94/issue #53) is an optional,
+    **non-authoritative** pointer to a different board's own `board_id`
+    — purely a discoverability hint for readers/other nodes ("this board
+    started as a copy of that one"), never verified or enforced, and
+    never implies any relationship the protocol actually acts on. A
+    fork is simply a new board with its own fresh genesis; each carrying
+    node independently decides whether to carry the original, the fork,
+    both, or neither, exactly like any other board (round 94's own
+    "purely local" framing for orphan/fork handling generally).
 
     Always signed by `signing_identity` — the origin's *current signing
     key* (round 89), matching `build_endpoint_descriptor`'s own
@@ -421,6 +450,8 @@ def build_board_genesis(
         payload["default_min_age"] = default_min_age
     if default_name_requirement is not None:
         payload["default_name_requirement"] = default_name_requirement
+    if forked_from is not None:
+        payload["forked_from"] = forked_from
 
     envelope = build_envelope(BOARD_GENESIS_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))
@@ -649,6 +680,187 @@ def verify_board_post_edit(edit: BoardPostEdit, signing_verify_key: nacl.signing
     events`), since it needs the root post's own payload, not just this
     edit's."""
     return verify_signature(signing_verify_key, canonical_bytes(edit.envelope), edit.signature)
+
+
+@dataclass(frozen=True)
+class BoardOriginTransferOffer:
+    """
+    One signed `board_origin_transfer_offer` event (design doc §13,
+    round 94/issue #53): the *first* half of a mutual-consent origin
+    handoff — a board's current origin proposing that a different node
+    become the new one. Alone, this changes nothing: every other node
+    keeps trusting the *old* origin until the matching
+    `BoardOriginTransferAccepted` is also seen (round 94's own framing,
+    directly reusing `netbbs.chat.membership`'s "an invitation alone
+    never creates membership" pattern).
+
+    Extends the board's own lifecycle chain the same way `BoardPostEdit`
+    extends a post's content chain — `payload["previous_event_id"]` is
+    always present, referencing the chain's current head (the board's
+    own `BoardGenesis.content_id` for a board's first-ever transfer, or
+    a prior `BoardOriginTransferAccepted.content_id` for a later one).
+    Deliberately simple, not a general revocable-offer state machine: at
+    most one outstanding offer may exist per board at a time
+    (`netbbs.link.protocol.LinkNode.pending_origin_transfers` enforces
+    this) — there is no way to cancel/retarget an outstanding offer in
+    this slice, a known, accepted limitation rather than a gap found
+    late, matching `link_message`'s own "route selection... deliberately
+    not part of this slice" precedent.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardOriginTransferOffer":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_origin_transfer_offer(
+    *,
+    signing_identity: Identity,
+    board_id: str,
+    previous_event_id: str,
+    old_origin_fingerprint: str,
+    new_origin_fingerprint: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardOriginTransferOffer:
+    """
+    Build and sign one `board_origin_transfer_offer` event, per design
+    doc round 94.
+
+    Always signed by `signing_identity` — the *current* origin's own
+    current signing key, matching `build_board_genesis`'s own signing
+    choice. `old_origin_fingerprint` is included explicitly (not merely
+    implied by who signed this) for the same cross-check reason
+    `build_board_genesis`'s own `origin_fingerprint` field is: a
+    verifier can confirm it matches the board's current origin without
+    trusting the signer's claim alone.
+    """
+    payload = {
+        "board_id": board_id,
+        "previous_event_id": previous_event_id,
+        "old_origin_fingerprint": old_origin_fingerprint,
+        "new_origin_fingerprint": new_origin_fingerprint,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardOriginTransferOffer(envelope=envelope, signature=signature)
+
+
+def verify_board_origin_transfer_offer(
+    offer: BoardOriginTransferOffer, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `offer`'s signature against the claimed current origin's
+    *current signing key* — resolving which key that currently is, and
+    confirming the sender actually *is* the board's current origin, are
+    both the caller's job (`netbbs.link.protocol.LinkNode.handle_
+    events`), same division of responsibility as `verify_board_post_
+    edit`."""
+    return verify_signature(signing_verify_key, canonical_bytes(offer.envelope), offer.signature)
+
+
+@dataclass(frozen=True)
+class BoardOriginTransferAccepted:
+    """
+    One signed `board_origin_transfer_accepted` event (design doc §13,
+    round 94/issue #53): the *second*, consent-completing half of an
+    origin handoff — signed by the *new* origin, referencing the
+    specific offer it accepts. Only once this is seen (never from the
+    offer alone) does `netbbs.link.protocol.LinkNode.board_origin`
+    actually flip which fingerprint is authoritative for the board —
+    the mechanical expression of "mutual consent" round 94 requires.
+
+    `payload["previous_event_id"]` is always the accepted offer's own
+    `content_id` — an acceptance is never the head of its own chain, and
+    never accepts anything other than the single currently-outstanding
+    offer for its board (see `BoardOriginTransferOffer`'s own docstring
+    for why at most one can exist at a time).
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardOriginTransferAccepted":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_origin_transfer_accepted(
+    *,
+    signing_identity: Identity,
+    board_id: str,
+    previous_event_id: str,
+    new_origin_fingerprint: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardOriginTransferAccepted:
+    """
+    Build and sign one `board_origin_transfer_accepted` event, per
+    design doc round 94.
+
+    Always signed by `signing_identity` — the *new* origin's own current
+    signing key. `previous_event_id` is always the offer's own
+    `content_id` (see `BoardOriginTransferAccepted`'s own docstring).
+    `new_origin_fingerprint` is included explicitly, matching `board_
+    origin_transfer_offer`'s own reasoning, so a verifier can confirm it
+    matches both the offer's own claim and the signer's identity without
+    trusting either alone.
+    """
+    payload = {
+        "board_id": board_id,
+        "previous_event_id": previous_event_id,
+        "new_origin_fingerprint": new_origin_fingerprint,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardOriginTransferAccepted(envelope=envelope, signature=signature)
+
+
+def verify_board_origin_transfer_accepted(
+    accepted: BoardOriginTransferAccepted, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `accepted`'s signature against the claimed new origin's
+    *current signing key* — resolving which key that currently is, and
+    confirming the sender actually *is* the offer's named new origin,
+    are both the caller's job, same division of responsibility as
+    `verify_board_origin_transfer_offer`."""
+    return verify_signature(signing_verify_key, canonical_bytes(accepted.envelope), accepted.signature)
 
 
 @dataclass(frozen=True)

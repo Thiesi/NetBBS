@@ -12,6 +12,8 @@ import pytest
 
 from netbbs.link.events import (
     build_board_genesis,
+    build_board_origin_transfer_accepted,
+    build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
     build_endpoint_descriptor,
@@ -881,6 +883,274 @@ def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
         bob_node.handle_events(alice.fingerprint, [fake_event])
 
     alice.close()
+
+
+# -- events: gossiping board_origin_transfer_offer/accepted (design doc round 94/#53) --
+
+
+def _linked_board(alice, bob_node, clock, *, board_id="existing-local-board-id"):
+    """Sets up bob_node with alice's board_genesis already accepted --
+    the common setup every origin-transfer test needs, alice starting
+    as the board's own origin."""
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id=board_id,
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    return genesis
+
+
+def test_handle_events_accepts_a_valid_origin_transfer_offer(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    assert accepted == [offer.content_id]
+    # The offer alone changes nothing -- the old origin is still trusted.
+    assert bob_node.current_board_origin("existing-local-board-id") == alice.fingerprint
+    assert bob_node.pending_origin_transfers["existing-local-board-id"].content_id == offer.content_id
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_accepts_a_valid_origin_transfer_completing_the_handoff(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=carol.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    accepted_event = build_board_origin_transfer_accepted(
+        signing_identity=carol.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=offer.content_id,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+
+    assert accepted == [accepted_event.content_id]
+    assert bob_node.current_board_origin("existing-local-board-id") == carol.fingerprint
+    assert "existing-local-board-id" not in bob_node.pending_origin_transfers
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_rejects_an_offer_not_from_the_current_origin(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    mallory = spawn_node(tmp_path, "mallory")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=mallory.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    # mallory (not the origin) tries to offer alice's board to carol.
+    forged_offer = build_board_origin_transfer_offer(
+        signing_identity=mallory.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=mallory.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(mallory.fingerprint, [forged_offer.to_dict()])
+
+    assert bob_node.current_board_origin("existing-local-board-id") == alice.fingerprint
+
+    alice.close()
+    mallory.close()
+    carol.close()
+
+
+def test_handle_events_rejects_an_offer_with_a_mismatched_old_origin_claim(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint="not-actually-the-current-origin",
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_rejects_a_second_offer_while_one_is_outstanding(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    dave = spawn_node(tmp_path, "dave")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    first_offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [first_offer.to_dict()])
+
+    second_offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=dave.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [second_offer.to_dict()])
+
+    alice.close()
+    carol.close()
+    dave.close()
+
+
+def test_handle_events_rejects_an_offer_for_an_unknown_board(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="never-linked-board-id",
+        previous_event_id="some-content-id",
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_rejects_an_acceptance_with_no_outstanding_offer(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=carol.identity), clock=clock))
+    _linked_board(alice, bob_node, clock)
+
+    accepted_event = build_board_origin_transfer_accepted(
+        signing_identity=carol.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id="some-offer-that-was-never-made",
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_rejects_an_acceptance_not_from_the_offers_named_new_origin(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    mallory = spawn_node(tmp_path, "mallory")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=mallory.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    # mallory (not the named new origin) tries to accept carol's offer.
+    forged_accept = build_board_origin_transfer_accepted(
+        signing_identity=mallory.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=offer.content_id,
+        new_origin_fingerprint=mallory.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(mallory.fingerprint, [forged_accept.to_dict()])
+
+    assert bob_node.current_board_origin("existing-local-board-id") == alice.fingerprint
+
+    alice.close()
+    carol.close()
+    mallory.close()
+
+
+def test_handle_events_is_idempotent_for_a_resent_origin_transfer_offer(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    first = bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    assert first == [offer.content_id]
+    assert second == []  # already seen -- silently skipped, not re-applied or errored
+
+    alice.close()
+    carol.close()
 
 
 # -- events: gossiping link_message (design doc round 93) -------------------

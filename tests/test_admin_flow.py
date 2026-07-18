@@ -636,6 +636,7 @@ def test_link_this_board_flow(db, lane, sysop):
         "",  # recommend moderated? blank = no recommendation
         "",  # recommended max post age: blank = no recommendation
         "", "",  # min age / name requirement: keep current (none)
+        "",  # is this a fork of an existing Linked board? blank = no
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -665,6 +666,118 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
     text = _written_text(session)
     assert "Linked: yes" in text
     assert "ink this board" not in text  # the [L]ink option itself is hidden
+
+
+def _add_fake_peer(link_context):
+    """A minimal but real, correctly-shaped `PeerRecord` for a second
+    node -- enough for `_transfer_board_origin_screen` to recognize a
+    transfer target as a known peer (design doc §13, round 94/issue
+    #53)."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+
+    peer_identity = bootstrap_node_identity("elsewhere")
+    peer = PeerRecord(
+        fingerprint=peer_identity.fingerprint,
+        root_public_key=bytes(peer_identity.root.verify_key),
+        transitions=peer_identity.transitions,
+        descriptor=None,
+    )
+    link_context.link_node.peers[peer.fingerprint] = peer
+    return peer
+
+
+def test_transfer_board_origin_flow(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    peer = _add_fake_peer(link_context)
+
+    inputs = [
+        "m", "m", "l", "0", "1",  # navigate to board detail
+        "t",  # [T]ransfer origin
+        peer.fingerprint,  # new origin's fingerprint
+        "y",  # confirm
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Offer sent" in text
+    assert board.board_id in link_context.link_node.pending_origin_transfers
+    offer = link_context.link_node.pending_origin_transfers[board.board_id]
+    assert offer.payload["new_origin_fingerprint"] == peer.fingerprint
+    assert offer.payload["old_origin_fingerprint"] == link_context.node_identity.fingerprint
+
+
+def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board, offer_board_origin_transfer
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    peer = _add_fake_peer(link_context)
+    offer = offer_board_origin_transfer(
+        db, board, node_identity=link_context.node_identity, new_origin_fingerprint=peer.fingerprint
+    )
+    link_context.link_node.pending_origin_transfers[board.board_id] = offer
+
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "ransfer origin" not in text
+    assert "your own outstanding transfer offer" in text
+
+
+def test_accept_board_origin_transfer_flow(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board, offer_board_origin_transfer
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    # A remote node ("elsewhere") is the current origin of a board this
+    # node already carries (materialized locally the same way a real
+    # sync pass would -- see test_link_boards.py's own materialize_
+    # carried_board coverage for that half in isolation).
+    remote_identity = bootstrap_node_identity("elsewhere")
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    genesis = link_board(db, board, node_identity=remote_identity)
+    # Overwrite the row to look carried, not self-originated, matching
+    # what materialize_carried_board would have produced.
+    import json
+    db.connection.execute(
+        "UPDATE boards SET link_genesis_json = ? WHERE id = ?", (json.dumps(genesis.to_dict()), board.id)
+    )
+    db.connection.commit()
+
+    offer = offer_board_origin_transfer(
+        db, board, node_identity=remote_identity, new_origin_fingerprint=link_context.node_identity.fingerprint
+    )
+    link_context.link_node.pending_origin_transfers[board.board_id] = offer
+
+    inputs = [
+        "m", "m", "l", "0", "1",  # navigate to board detail
+        "a",  # [A]ccept transfer
+        "y",  # confirm
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Accepted" in text
+    assert board.board_id not in link_context.link_node.pending_origin_transfers
+    assert link_context.link_node.board_origin[board.board_id] == link_context.node_identity.fingerprint
+
+    from netbbs.link.boards import board_origin_fingerprint
+    assert board_origin_fingerprint(db, board) == link_context.node_identity.fingerprint
 
 
 def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane, sysop):

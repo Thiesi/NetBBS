@@ -201,7 +201,9 @@ async def _sync_one_seed(
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
 
-    own_events = list(node.identity.transitions) + await lane.run(load_own_board_events)
+    own_events = list(node.identity.transitions) + await lane.run(
+        load_own_board_events, node.identity.fingerprint
+    )
     try:
         await push_events(node, session, seed_url, own_events)
     except LinkTransportError as exc:

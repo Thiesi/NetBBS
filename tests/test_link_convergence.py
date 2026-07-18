@@ -61,6 +61,8 @@ import pytest
 
 from netbbs.link.events import (
     build_board_genesis,
+    build_board_origin_transfer_accepted,
+    build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
     build_link_message,
@@ -755,6 +757,83 @@ def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_a
     a.close()
     b.close()
     c.close()
+
+
+# -- board_origin_transfer_offer/accepted (design doc round 94/issue #53) -----
+
+
+def test_a_bystander_node_correctly_witnesses_a_full_origin_transfer(tmp_path, clock):
+    """The scenario `record_board_origin_change`'s own docstring exists
+    for: bob is a direct party to neither the offer nor the acceptance
+    (alice hands the board to carol), but he *does* directly know both
+    of them, and receives both events during ordinary sync -- his own
+    view of "who currently owns this board" must end up correct anyway,
+    not just alice's and carol's."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    transport = ScriptedTransport()
+    for node in (alice, bob, carol):
+        transport.register(node)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    carol_node = LinkNode(identity=carol.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    _exchange_hellos(transport, alice, alice_node, carol, carol_node, clock)
+    _exchange_hellos(transport, bob, bob_node, carol, carol_node, clock)
+
+    genesis = _board_genesis(alice, clock)
+    # Self-originated, same as the offer below -- alice's own node
+    # records her own genesis directly (`_link_board_screen` does this
+    # in production too), never via her own handle_events.
+    alice_node.boards["existing-local-board-id"] = genesis
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    carol_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    # alice's own node records her own outstanding offer directly (the
+    # same thing `_transfer_board_origin_screen`/`offer_board_origin_
+    # transfer` do in production -- self-originated events never pass
+    # through alice's own handle_events, same as a self-originated
+    # genesis never does), then pushes the offer to both bob and carol,
+    # same as an ordinary sync pass would (design doc: an offer alone
+    # changes nothing yet).
+    alice_node.pending_origin_transfers["existing-local-board-id"] = offer
+    bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+    carol_node.handle_events(alice.fingerprint, [offer.to_dict()])
+    assert bob_node.current_board_origin("existing-local-board-id") == alice.fingerprint
+
+    accepted_event = build_board_origin_transfer_accepted(
+        signing_identity=carol.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=offer.content_id,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    # carol's own node records her own new-origin status directly too
+    # (the same thing `accept_board_origin_transfer`/`record_board_
+    # origin_change` do in production -- her own acceptance never
+    # passes through her own handle_events either), then pushes it out
+    # -- bob, an uninvolved bystander to the handoff itself, still
+    # receives it directly from carol during an ordinary sync pass.
+    carol_node.board_origin["existing-local-board-id"] = carol.fingerprint
+    bob_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+    alice_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+
+    for node in (alice_node, bob_node, carol_node):
+        assert node.current_board_origin("existing-local-board-id") == carol.fingerprint
+
+    alice.close()
+    bob.close()
+    carol.close()
 
 
 # -- link_message: full round trip, an uninvolved third node isolated -------

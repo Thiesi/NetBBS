@@ -736,6 +736,46 @@ LinkNode mutation remains on the event-loop side. Database-lane functions may
 build and persist events, but must not mutate the shared live LinkNode from a
 worker thread.
 
+**"Carrying" a board and having a locally browsable copy of it are different
+things, and the gap between them was invisible until origin transfer needed
+it.** Before issue #53, a node that received and stored a peer's
+`board_genesis`/`board_post` events had nothing a local user could actually
+read or post through -- no `boards` row was ever created for it, only
+`LinkNode.boards`/`link_events`. `netbbs.link.boards.materialize_carried_board`
+closes this: any node accepting a `board_genesis` it didn't originate now gets
+a real local `Board` row, seeded from that genesis's own `default_*`
+recommendations, using the genesis's exact `board_id` (never minted fresh --
+`netbbs.boards.boards.create_board` cannot be reused for this, since it always
+mints a new content-addressed ID from the *local* creator/timestamp). Any
+future feature that assumes "every carrying node has a working local copy" of
+Linked content should check whether that assumption is actually true yet for
+the object type in question, rather than trusting the default-carry policy's
+own description of intent.
+
+**A self-originated Link event's effect on `LinkNode` state must be applied
+directly by whichever caller built it -- it never flows through that same
+node's own `handle_events`.** This already held for `board_genesis`/
+`board_post`/`board_post_edit`; origin-transfer's `board_origin_transfer_
+offer`/`_accepted` follow the identical shape, and it is easy to forget on
+both sides of a transfer: the *offering* node must set its own `pending_
+origin_transfers`/`board_lifecycle_head` the moment it builds the offer (never
+waiting to see its own event echoed back, which never happens), and the
+*accepting* node must set its own `board_origin` the moment it builds the
+acceptance, for the identical reason. Missing either produces exactly the
+kind of test failure that looks like a real protocol bug (a node's own view
+of "who currently owns this board" silently wrong) but is actually a test/
+caller setup gap -- confirmed by tracing, not assumed, while writing this
+round's own multi-node convergence test.
+
+**Known, reproducible flaky test, not caused by this round, not yet
+diagnosed:** `tests/test_link_boards.py::test_queue_board_post_edit_chains_a_
+second_edit` fails intermittently (including in total isolation, no other
+tests involved) with a `previous_event_id`/`content_id` mismatch between two
+back-to-back `queue_board_post_edit_if_linked` calls on the same post chain.
+Reproduced multiple times across unrelated sessions; root cause not yet
+found. Worth a dedicated investigation before trusting that test as a
+regression signal.
+
 ### Current distribution limit
 
 Configured-seed sync currently sends the complete supported outbound event set

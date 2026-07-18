@@ -49,11 +49,16 @@ from typing import Callable
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
+from netbbs.link.boards import materialize_carried_board, record_board_origin_change
 from netbbs.link.events import (
+    BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
     BoardGenesis,
+    BoardOriginTransferAccepted,
+    BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
     KeyTransition,
@@ -177,15 +182,34 @@ class LinkServer:
             # Link messages (design doc round 93) need real follow-up
             # beyond persisting the envelope -- decrypt/deliver into a
             # local mailbox or bounce, and apply an incoming
-            # acknowledgement to the outbound row it's about. Board
-            # events need none of this; persistence alone is enough for
-            # them (round 126's own finding).
+            # acknowledgement to the outbound row it's about. board_post/
+            # board_post_edit need none of this; persistence alone is
+            # enough for them (round 126's own finding) -- but round 94/
+            # issue #53's carry-materialization gap means board_genesis
+            # and board_origin_transfer_accepted both need real follow-up
+            # too now: a received genesis has nothing a local user could
+            # browse without also becoming a real Board row (see
+            # materialize_carried_board's own docstring for why this was
+            # missing even for a board this node has carried all along),
+            # and an accepted transfer must update this node's own
+            # locally-materialized copy's current-origin record even when
+            # this node was only a bystander to the transfer, not a party
+            # to it (see record_board_origin_change's own docstring).
             if object_type == LINK_MESSAGE_OBJECT_TYPE:
                 await self._lane.run(deliver_link_message, envelope, node_identity=self._node.identity)
             elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
                 await self._lane.run(apply_link_message_accepted, envelope)
             elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
                 await self._lane.run(apply_link_message_bounced, envelope)
+            elif object_type == BOARD_GENESIS_OBJECT_TYPE:
+                await self._lane.run(materialize_carried_board, BoardGenesis.from_dict(envelope))
+            elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
+                transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
+                await self._lane.run(
+                    record_board_origin_change,
+                    transfer_accepted.payload["board_id"],
+                    transfer_accepted.payload["new_origin_fingerprint"],
+                )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
             # accepted event (round 120).
@@ -257,6 +281,7 @@ async def push_events(
     base_url: str,
     events: list[
         KeyTransition | BoardGenesis | BoardPost | BoardPostEdit
+        | BoardOriginTransferOffer | BoardOriginTransferAccepted
         | LinkMessage | LinkMessageAccepted | LinkMessageBounced
     ],
     *,
@@ -265,12 +290,13 @@ async def push_events(
     """
     Push `events` — this node's *own* originated events (`key_
     transition`s, `board_genesis`/`board_post`/`board_post_edit` since
-    round 128/130, and `link_message`/`link_message_accepted`/`link_
-    message_bounced` since round 93's mail-sync wiring) — per round
-    116's "no relay from a stranger" scope note — to a peer at
-    `base_url`. Returns whichever content_ids the peer newly accepted;
-    purely informational, since the sender's own copies are already
-    known-good on its own side.
+    round 128/130, `board_origin_transfer_offer`/`board_origin_transfer_
+    accepted` since round 94/issue #53, and `link_message`/`link_
+    message_accepted`/`link_message_bounced` since round 93's mail-sync
+    wiring) — per round 116's "no relay from a stranger" scope note —
+    to a peer at `base_url`. Returns whichever content_ids the peer
+    newly accepted; purely informational, since the sender's own copies
+    are already known-good on its own side.
 
     Raises `LinkTransportError` for a transport-level failure. A
     peer rejecting one of the pushed events (e.g. an inconsistent

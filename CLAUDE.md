@@ -109,11 +109,15 @@ Current Phase 3 includes:
 - persistent peers/events and restart reconstruction;
 - foreground/background database lanes;
 - deterministic multi-node fault injection;
-- linked-board genesis, posts, and self-authored edit propagation;
+- linked-board genesis, posts, and self-authored edit propagation, including
+  carry-materialization (a node that merely carries a board now gets a real
+  local, browsable copy, not just relayed raw events);
+- board origin succession: mutual-consent transfer, orphan detection, forks;
 - Link messages, scoped to tier-1 (locally-known) recipients only.
 
 It does **not** yet imply public federation, general relay/WAN reachability
 (NAT traversal, automatic relay selection), inventory/pull catch-up, tier-2
-Link messages, linked-resource succession, advanced governance, or
+Link messages, channel-side Link support (boards only so far) or the
+origin-succession work that depends on it, advanced governance, or
 trust/quarantine. Check the design document and open issues for the current
 roadmap rather than extending this summary.

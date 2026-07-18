@@ -11,18 +11,31 @@ import json
 import pytest
 
 from netbbs.auth.users import create_user
-from netbbs.boards.boards import create_board
+from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import approve_post, create_post, edit_post
 from netbbs.link.boards import (
     LinkBoardsError,
+    accept_board_origin_transfer,
+    board_origin_fingerprint,
     is_board_linked,
+    is_board_origin_orphaned,
     link_board,
     load_own_board_events,
+    materialize_carried_board,
+    offer_board_origin_transfer,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
+    record_board_origin_change,
 )
-from netbbs.link.events import BoardGenesis, BoardPostEdit
+from netbbs.link.events import (
+    BoardGenesis,
+    BoardPostEdit,
+    build_board_genesis,
+    build_board_origin_transfer_offer,
+    build_key_transition,
+)
 from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import PeerRecord
 from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.storage.database import Database
 
@@ -103,6 +116,231 @@ def test_link_board_defaults_description_to_the_boards_own(db, alice, node_ident
     genesis = link_board(db, board, node_identity=node_identity)
 
     assert genesis.payload["description"] == "General discussion"
+
+
+def test_link_board_carries_forked_from(db, alice, node_identity):
+    original = create_board(db, "original", creator=alice)
+    link_board(db, original, node_identity=node_identity)
+    fork = create_board(db, "fork-of-original", creator=alice)
+
+    genesis = link_board(db, fork, node_identity=node_identity, forked_from=original.board_id)
+
+    assert genesis.payload["forked_from"] == original.board_id
+
+
+# -- materialize_carried_board (design doc round 94/issue #53) -----------------
+
+
+@pytest.fixture
+def remote_node_identity():
+    return bootstrap_node_identity("elsewhere")
+
+
+def _remote_genesis(remote_node_identity, *, board_id="remote-board-id", **kwargs):
+    return build_board_genesis(
+        signing_identity=remote_node_identity.signing_key,
+        origin_fingerprint=remote_node_identity.fingerprint,
+        board_id=board_id,
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00Z",
+        **kwargs,
+    )
+
+
+def test_materialize_carried_board_creates_a_local_row_with_the_genesis_board_id(db, remote_node_identity):
+    genesis = _remote_genesis(remote_node_identity)
+
+    board = materialize_carried_board(db, genesis)
+
+    assert board.board_id == genesis.payload["board_id"]
+    assert board.name == "Remote Discussion"
+    row = db.connection.execute("SELECT link_genesis_json FROM boards WHERE id = ?", (board.id,)).fetchone()
+    assert BoardGenesis.from_dict(json.loads(row["link_genesis_json"])).content_id == genesis.content_id
+
+
+def test_materialize_carried_board_is_idempotent(db, remote_node_identity):
+    genesis = _remote_genesis(remote_node_identity)
+
+    first = materialize_carried_board(db, genesis)
+    second = materialize_carried_board(db, genesis)
+
+    assert first.id == second.id
+    assert len(db.connection.execute("SELECT 1 FROM boards WHERE board_id = ?", (genesis.payload["board_id"],)).fetchall()) == 1
+
+
+def test_materialize_carried_board_seeds_settings_from_defaults(db, remote_node_identity):
+    genesis = _remote_genesis(
+        remote_node_identity,
+        default_min_read_level=5,
+        default_min_write_level=10,
+        default_moderated=True,
+        default_max_post_age_days=30,
+    )
+
+    board = materialize_carried_board(db, genesis)
+
+    assert board.min_read_level == 5
+    assert board.min_write_level == 10
+    assert board.moderated is True
+    assert board.max_post_age_days == 30
+
+
+def test_materialize_carried_board_is_locally_browsable(db, remote_node_identity):
+    # The actual point of materialization -- an ordinary local lookup
+    # (the same one every other board-browsing screen uses) now finds
+    # it, not just netbbs.link's own internal state.
+    genesis = _remote_genesis(remote_node_identity)
+    materialize_carried_board(db, genesis)
+
+    found = get_board_by_name(db, "Remote Discussion")
+    assert found.board_id == genesis.payload["board_id"]
+
+
+# -- board_origin_fingerprint (design doc round 94/issue #53) ------------------
+
+
+def test_board_origin_fingerprint_falls_back_to_genesis_when_no_transfer_happened(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+
+    assert board_origin_fingerprint(db, board) == node_identity.fingerprint
+
+
+def test_board_origin_fingerprint_uses_override_once_a_transfer_completes(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+
+    record_board_origin_change(db, board.board_id, "some-other-node-fingerprint")
+
+    assert board_origin_fingerprint(db, board) == "some-other-node-fingerprint"
+
+
+def test_board_origin_fingerprint_raises_for_an_unlinked_board(db, alice):
+    board = create_board(db, "general", creator=alice)
+
+    with pytest.raises(LinkBoardsError):
+        board_origin_fingerprint(db, board)
+
+
+# -- offer_board_origin_transfer (design doc round 94/issue #53) ---------------
+
+
+def test_offer_board_origin_transfer_builds_a_valid_offer(db, alice, node_identity, remote_node_identity):
+    board = create_board(db, "general", creator=alice)
+    genesis = link_board(db, board, node_identity=node_identity)
+
+    offer = offer_board_origin_transfer(
+        db, board, node_identity=node_identity, new_origin_fingerprint=remote_node_identity.fingerprint
+    )
+
+    assert offer.payload["board_id"] == board.board_id
+    assert offer.payload["previous_event_id"] == genesis.content_id
+    assert offer.payload["old_origin_fingerprint"] == node_identity.fingerprint
+    assert offer.payload["new_origin_fingerprint"] == remote_node_identity.fingerprint
+    row = db.connection.execute("SELECT link_lifecycle_json FROM boards WHERE id = ?", (board.id,)).fetchone()
+    assert json.loads(row["link_lifecycle_json"])["envelope"]["payload"]["board_id"] == board.board_id
+
+
+def test_offer_board_origin_transfer_refuses_when_not_the_current_origin(db, alice, node_identity, remote_node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    record_board_origin_change(db, board.board_id, remote_node_identity.fingerprint)
+
+    with pytest.raises(LinkBoardsError):
+        offer_board_origin_transfer(
+            db, board, node_identity=node_identity, new_origin_fingerprint=remote_node_identity.fingerprint
+        )
+
+
+def test_offer_board_origin_transfer_refuses_a_second_outstanding_offer(db, alice, node_identity, remote_node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    offer_board_origin_transfer(
+        db, board, node_identity=node_identity, new_origin_fingerprint=remote_node_identity.fingerprint
+    )
+
+    third_party = bootstrap_node_identity("third-party")
+    with pytest.raises(LinkBoardsError):
+        offer_board_origin_transfer(
+            db, board, node_identity=node_identity, new_origin_fingerprint=third_party.fingerprint
+        )
+
+
+# -- accept_board_origin_transfer (design doc round 94/issue #53) --------------
+
+
+def test_accept_board_origin_transfer_builds_a_valid_acceptance_and_updates_origin(
+    db, alice, node_identity, remote_node_identity
+):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    offer = offer_board_origin_transfer(
+        db, board, node_identity=node_identity, new_origin_fingerprint=remote_node_identity.fingerprint
+    )
+
+    accepted = accept_board_origin_transfer(db, board, node_identity=remote_node_identity, offer=offer)
+
+    assert accepted.payload["board_id"] == board.board_id
+    assert accepted.payload["previous_event_id"] == offer.content_id
+    assert accepted.payload["new_origin_fingerprint"] == remote_node_identity.fingerprint
+    assert board_origin_fingerprint(db, board) == remote_node_identity.fingerprint
+
+
+def test_accept_board_origin_transfer_refuses_an_offer_not_naming_this_node(
+    db, alice, node_identity, remote_node_identity
+):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    third_party = bootstrap_node_identity("third-party")
+    offer = offer_board_origin_transfer(
+        db, board, node_identity=node_identity, new_origin_fingerprint=third_party.fingerprint
+    )
+
+    with pytest.raises(LinkBoardsError):
+        accept_board_origin_transfer(db, board, node_identity=remote_node_identity, offer=offer)
+
+
+# -- record_board_origin_change (design doc round 94/issue #53) ----------------
+
+
+def test_record_board_origin_change_is_a_no_op_for_an_unknown_board_id(db):
+    # Defensive only -- must not raise even if this node has no local
+    # row for the board at all.
+    record_board_origin_change(db, "no-such-board-id", "some-fingerprint")
+
+
+# -- is_board_origin_orphaned (design doc round 94/issue #53) ------------------
+
+
+def _peer_record(identity, *, revoked: bool = False) -> PeerRecord:
+    transitions = identity.transitions
+    if revoked:
+        signing_transitions = [t for t in transitions if t.payload["purpose"] == "signing"]
+        revoke = build_key_transition(
+            root=identity.root,
+            purpose="signing",
+            action="revoke",
+            operational_key=identity.signing_key.verify_key,
+            previous_transition_id=signing_transitions[-1].content_id,
+            created_at="2026-01-01T00:00:00Z",
+        )
+        transitions = transitions + (revoke,)
+    return PeerRecord(
+        fingerprint=identity.fingerprint,
+        root_public_key=bytes(identity.root.verify_key),
+        transitions=transitions,
+        descriptor=None,
+    )
+
+
+def test_is_board_origin_orphaned_false_for_a_live_signing_key(remote_node_identity):
+    peer = _peer_record(remote_node_identity, revoked=False)
+    assert is_board_origin_orphaned(peer) is False
+
+
+def test_is_board_origin_orphaned_true_once_the_signing_key_is_revoked_with_no_replacement(remote_node_identity):
+    peer = _peer_record(remote_node_identity, revoked=True)
+    assert is_board_origin_orphaned(peer) is True
 
 
 # -- queue_board_post_if_linked -------------------------------------------------
@@ -310,7 +548,7 @@ def test_load_own_board_events_returns_genesis_and_posts(db, alice, node_identit
     post = create_post(db, board, alice, "hello", "world")
     board_post = queue_board_post_if_linked(db, post, board, node_identity=node_identity)
 
-    events = load_own_board_events(db)
+    events = load_own_board_events(db, node_identity.fingerprint)
 
     content_ids = {e.content_id for e in events}
     assert genesis.content_id in content_ids
@@ -325,14 +563,14 @@ def test_load_own_board_events_includes_edits_and_distinguishes_them_by_type(db,
     edited = edit_post(db, post, board, subject="hello (edited)", body="world, edited", edited_by=alice)
     edit = queue_board_post_edit_if_linked(db, edited, board, node_identity=node_identity, edited_by=alice)
 
-    events = load_own_board_events(db)
+    events = load_own_board_events(db, node_identity.fingerprint)
 
     by_content_id = {e.content_id: e for e in events}
     assert isinstance(by_content_id[board_post.content_id], type(board_post))
     assert isinstance(by_content_id[edit.content_id], BoardPostEdit)
 
 
-def test_load_own_board_events_empty_when_nothing_linked(db, alice):
+def test_load_own_board_events_empty_when_nothing_linked(db, alice, node_identity):
     create_board(db, "general", creator=alice)
 
-    assert load_own_board_events(db) == []
+    assert load_own_board_events(db, node_identity.fingerprint) == []

@@ -1457,4 +1457,32 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Origin succession/transfer (design doc round 94, issue #53): "
+            "two new nullable columns on boards, both NULL for every "
+            "existing row including already-Linked ones -- deliberately no "
+            "backfill (this codebase parses link_genesis_json in Python "
+            "everywhere else, never json_extract() in SQL; introducing that "
+            "pattern for a one-time backfill wasn't worth it). "
+            "link_origin_fingerprint is an *override*: NULL means 'no "
+            "transfer has ever completed for this board, the origin is "
+            "still link_genesis_json's own origin_fingerprint' -- callers "
+            "resolve the current origin by checking this column first and "
+            "falling back to the genesis's own field, never reading either "
+            "alone. Only ever written once a board_origin_transfer_accepted "
+            "is actually verified and accepted. link_lifecycle_json holds "
+            "this node's own latest self-originated lifecycle event (an "
+            "offer this node made as current origin, or an acceptance this "
+            "node made as a newly-accepted origin) -- re-pushed every sync "
+            "pass alongside link_genesis_json, same 'push everything, dedup "
+            "handles idempotency' model board_post/board_post_edit already "
+            "use. NULL means this node has never originated a lifecycle "
+            "event for this board (the overwhelmingly common case)."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN link_origin_fingerprint TEXT;
+        ALTER TABLE boards ADD COLUMN link_lifecycle_json TEXT;
+        """,
+    ),
 ]

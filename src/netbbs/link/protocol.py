@@ -65,6 +65,8 @@ import nacl.signing
 from netbbs.identity.keys import fingerprint_from_verify_key
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+    BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
@@ -72,6 +74,8 @@ from netbbs.link.events import (
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
     BoardGenesis,
+    BoardOriginTransferAccepted,
+    BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
     EndpointDescriptor,
@@ -81,6 +85,8 @@ from netbbs.link.events import (
     LinkMessageBounced,
     build_endpoint_descriptor,
     verify_board_genesis,
+    verify_board_origin_transfer_accepted,
+    verify_board_origin_transfer_offer,
     verify_board_post,
     verify_board_post_edit,
     verify_endpoint_descriptor,
@@ -248,6 +254,21 @@ class LinkNode:
     # the current head" alone, the same shape simpler than key_
     # transition's two-interleaved-purposes chain.
     post_edits: dict[str, tuple[BoardPostEdit, ...]] = field(default_factory=dict)
+    # Round 94/issue #53: board_id -> the fingerprint currently
+    # authoritative for it, once a board_origin_transfer_accepted has
+    # been verified -- absent means "still the genesis's own origin,"
+    # see current_board_origin.
+    board_origin: dict[str, str] = field(default_factory=dict)
+    # Round 94/issue #53: board_id -> the content_id a new lifecycle
+    # event (an offer or an acceptance) must reference as its own
+    # previous_event_id -- absent means "still genesis," see current_
+    # board_lifecycle_head.
+    board_lifecycle_head: dict[str, str] = field(default_factory=dict)
+    # Round 94/issue #53: board_id -> its single outstanding, not-yet-
+    # accepted board_origin_transfer_offer, if any -- at most one may be
+    # in flight per board at a time (see BoardOriginTransferOffer's own
+    # docstring for why this slice doesn't support more).
+    pending_origin_transfers: dict[str, BoardOriginTransferOffer] = field(default_factory=dict)
     # Round 95: fingerprint -> an unverified endpoint descriptor learned
     # secondhand via peer-list exchange -- "worth trying," never
     # promoted to `peers` until a real hello with that fingerprint
@@ -438,6 +459,25 @@ class LinkNode:
             )
         return original_message
 
+    def current_board_origin(self, board_id: str) -> str:
+        """The fingerprint currently authoritative for `board_id`
+        (design doc §13, round 94/issue #53) -- `self.board_origin`'s
+        override if a transfer has ever completed, else the board's own
+        genesis claim. Mirrors `netbbs.link.boards.board_origin_
+        fingerprint`'s exact same two-tier resolution, applied here to
+        this node's in-memory state instead of a DB row -- both must
+        agree, since the DB-side version is this same fact persisted."""
+        return self.board_origin.get(board_id, self.boards[board_id].payload["origin_fingerprint"])
+
+    def current_board_lifecycle_head(self, board_id: str) -> str:
+        """The content_id a *new* lifecycle event for `board_id` (an
+        offer or an acceptance) must reference as its own `previous_
+        event_id` (design doc §13, round 94/issue #53) -- the latest
+        accepted lifecycle event if one exists, else the board's own
+        genesis. Mirrors `netbbs.link.boards._current_lifecycle_head`'s
+        own reasoning, applied to this node's in-memory state."""
+        return self.board_lifecycle_head.get(board_id, self.boards[board_id].content_id)
+
     def handle_events(self, sender_fingerprint: str, raw_events: list[dict]) -> list[str]:
         """
         Accept zero or more incoming signed events from a peer that has
@@ -450,22 +490,34 @@ class LinkNode:
         idempotency for an already-applied one no longer depends solely
         on `known_event_ids` still holding the entry, see below).
 
-        Seven recognized `object_type`s: `key_transition` (round 116),
+        Nine recognized `object_type`s: `key_transition` (round 116),
         `board_genesis`/`board_post` (design doc round 124, wired up
         here in round 125/126), `board_post_edit` (design doc round
-        129/130), and `link_message`/`link_message_accepted`/
-        `link_message_bounced` (design doc round 93). `board_genesis`/
-        `board_post` have no per-object chain to self-heal against
-        (`board_genesis` has no lifecycle chain built yet; `board_post`
-        is immutable content per round 90, nothing to project beyond
-        "does it exist") -- for both, `known_event_ids` dedup alone is
-        what's built so far, which is already correct for content that's
-        never resent as a *candidate extension* of anything.
-        `board_post_edit` *is* a candidate extension (a single linear
-        chain per root post, round 129) and gets the same chain-
+        129/130), `board_origin_transfer_offer`/`board_origin_transfer_
+        accepted` (design doc round 94/issue #53), and `link_message`/
+        `link_message_accepted`/`link_message_bounced` (design doc round
+        93). `board_genesis`/`board_post` have no per-object chain to
+        self-heal against (`board_post` is immutable content per round
+        90, nothing to project beyond "does it exist"; `board_genesis`
+        itself is still one-per-board, never resent as a candidate
+        extension of anything) -- for both, `known_event_ids` dedup
+        alone is what's built so far, which is already correct for
+        content that's never resent as a *candidate extension* of
+        anything. `board_post_edit` *is* a candidate extension (a single
+        linear chain per root post, round 129) and gets the same chain-
         membership self-heal `key_transition` has had since round 121,
         just against `self.post_edits` instead of a peer's own
-        `transitions`.
+        `transitions`. `board_origin_transfer_offer`/`_accepted` extend
+        a *different* per-board chain (`board_lifecycle_head`, starting
+        from the board's own genesis) with the same "does previous_
+        event_id match the current head" discipline, plus their own
+        mutual-consent rule: an offer is only accepted directly from a
+        board's own *current* origin (`current_board_origin`, not
+        merely `board_genesis`'s original claim -- a board can change
+        hands more than once), and an acceptance is only accepted
+        directly from that specific offer's own named new origin, with
+        at most one outstanding offer tolerated per board at a time
+        (see `BoardOriginTransferOffer`'s own docstring for why).
 
         `link_message`/`link_message_accepted`/`link_message_bounced`
         are immutable, single-shot content like `board_post` -- `known_
@@ -664,6 +716,109 @@ class LinkNode:
                 self.known_event_ids.add(edit.content_id)
                 self.events[edit.content_id] = raw
                 accepted.append(edit.content_id)
+
+            elif object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
+                offer = BoardOriginTransferOffer.from_dict(raw)
+                if offer.content_id in self.known_event_ids:
+                    continue
+
+                board_id = offer.payload.get("board_id")
+                if board_id not in self.boards:
+                    raise LinkProtocolError(
+                        f"received a board_origin_transfer_offer for board_id {board_id!r}, "
+                        "which has no verified board_genesis on file -- refusing (no relay "
+                        "from a stranger yet)"
+                    )
+
+                current_origin = self.current_board_origin(board_id)
+                if sender_fingerprint != current_origin:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a board_origin_transfer_offer for board_id "
+                        f"{board_id!r}, but is not its current origin ({current_origin!r}) -- "
+                        "refusing (no relay from a stranger yet)"
+                    )
+                old_origin_fingerprint = offer.payload.get("old_origin_fingerprint")
+                if old_origin_fingerprint != current_origin:
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_offer for board_id {board_id!r} claims an "
+                        f"old_origin_fingerprint ({old_origin_fingerprint!r}) that doesn't "
+                        f"match its actual current origin ({current_origin!r})"
+                    )
+                if board_id in self.pending_origin_transfers:
+                    raise LinkProtocolError(
+                        f"board_id {board_id!r} already has an outstanding, unaccepted "
+                        "origin-transfer offer -- at most one may be in flight at a time"
+                    )
+
+                current_head = self.current_board_lifecycle_head(board_id)
+                if offer.payload.get("previous_event_id") != current_head:
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_offer for board_id {board_id!r} does not "
+                        f"extend the current lifecycle head ({current_head!r})"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    sender, sender_fingerprint, "board_origin_transfer_offer"
+                )
+                if not verify_board_origin_transfer_offer(offer, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_offer from {sender_fingerprint} does not "
+                        "verify against its current signing key"
+                    )
+
+                self.pending_origin_transfers[board_id] = offer
+                self.board_lifecycle_head[board_id] = offer.content_id
+                self.known_event_ids.add(offer.content_id)
+                self.events[offer.content_id] = raw
+                accepted.append(offer.content_id)
+
+            elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
+                transfer_accepted = BoardOriginTransferAccepted.from_dict(raw)
+                if transfer_accepted.content_id in self.known_event_ids:
+                    continue
+
+                board_id = transfer_accepted.payload.get("board_id")
+                offer = self.pending_origin_transfers.get(board_id)
+                if offer is None:
+                    raise LinkProtocolError(
+                        f"received a board_origin_transfer_accepted for board_id {board_id!r}, "
+                        "which has no outstanding offer on file -- refusing (no relay from a "
+                        "stranger yet)"
+                    )
+                if transfer_accepted.payload.get("previous_event_id") != offer.content_id:
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_accepted for board_id {board_id!r} does not "
+                        f"reference the outstanding offer ({offer.content_id!r})"
+                    )
+
+                new_origin_fingerprint = offer.payload.get("new_origin_fingerprint")
+                if transfer_accepted.payload.get("new_origin_fingerprint") != new_origin_fingerprint:
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_accepted for board_id {board_id!r} names a "
+                        "new_origin_fingerprint that doesn't match the offer it's accepting"
+                    )
+                if sender_fingerprint != new_origin_fingerprint:
+                    raise LinkProtocolError(
+                        f"{sender_fingerprint} sent a board_origin_transfer_accepted for "
+                        f"board_id {board_id!r}, but is not the offer's named new origin "
+                        f"({new_origin_fingerprint!r}) -- refusing (no relay from a stranger yet)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    sender, sender_fingerprint, "board_origin_transfer_accepted"
+                )
+                if not verify_board_origin_transfer_accepted(transfer_accepted, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"board_origin_transfer_accepted from {sender_fingerprint} does not "
+                        "verify against its current signing key"
+                    )
+
+                self.board_origin[board_id] = new_origin_fingerprint
+                self.board_lifecycle_head[board_id] = transfer_accepted.content_id
+                del self.pending_origin_transfers[board_id]
+                self.known_event_ids.add(transfer_accepted.content_id)
+                self.events[transfer_accepted.content_id] = raw
+                accepted.append(transfer_accepted.content_id)
 
             elif object_type == LINK_MESSAGE_OBJECT_TYPE:
                 message = LinkMessage.from_dict(raw)
