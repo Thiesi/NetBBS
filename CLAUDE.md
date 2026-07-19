@@ -53,6 +53,39 @@ Do not append:
 Use GitHub issues for outstanding work and acceptance criteria. Use commit and
 PR descriptions for the implementation narrative of the change being made.
 
+## Development direction
+
+NetBBS should leave proof-of-concept territory before the entire roadmap is
+finished. Do not treat protocol, background, and architectural work as a queue
+which must be exhausted before user-facing work resumes.
+
+Maintain an intentional cadence between two tracks:
+
+- **Foundation track:** complete bounded protocol, persistence, reliability,
+  security, and operational slices with explicit invariants and realistic tests.
+- **Product track:** turn mature foundations into complete, discoverable, and
+  pleasant caller/SysOp experiences; repair usability problems exposed by real
+  use; and make already-built capability visible through the interface.
+
+After a substantial backend slice, ask what a caller or SysOp can now actually
+do, whether the capability is discoverable, and whether its success and failure
+states make sense to a human. Conversely, user-visible work must build toward
+the product rather than becoming an unbounded cosmetic pass over unstable
+surfaces.
+
+Prefer coherent vertical increments which include enough implementation, UI,
+validation, and failure handling to feel like product capability. It is valid to
+polish a mature surface—such as chat—even while later roadmap foundations remain
+unfinished. Broad visual redesign and theming may remain deferred, but broken,
+ambiguous, inaccessible, or needlessly hostile interactions are current product
+work, not post-roadmap luxuries.
+
+The standing principle is:
+
+> Alternate meaningful foundation work with complete, user-visible slices, and
+> periodically polish mature surfaces enough that NetBBS becomes a usable,
+> lived-in product long before its ultimate roadmap is complete.
+
 ## Working conventions
 
 - **Design before code for non-trivial choices.** Check existing decisions
