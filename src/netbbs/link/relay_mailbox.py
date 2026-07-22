@@ -100,6 +100,23 @@ def deposit_relay_mailbox_envelope(db: Database, recipient_fingerprint: str, mes
     db.connection.commit()
 
 
+def mailbox_sizes(db: Database) -> dict[str, int]:
+    """
+    recipient_fingerprint -> count of envelopes currently held for them,
+    across every recipient this relay is holding mail for. A
+    non-destructive peek, unlike `pickup_relay_mailbox_envelopes` below
+    (which reads *and deletes*) -- issue #60's SysOp Link-status screen
+    is the only caller, and status visibility must never itself empty
+    the mailbox it's reporting on.
+    """
+    return {
+        row["recipient_fingerprint"]: row["n"]
+        for row in db.connection.execute(
+            "SELECT recipient_fingerprint, COUNT(*) AS n FROM link_relay_mailbox GROUP BY recipient_fingerprint"
+        )
+    }
+
+
 def pickup_relay_mailbox_envelopes(db: Database, recipient_fingerprint: str) -> list[LinkMessage]:
     """
     Return every envelope currently held for `recipient_fingerprint`,

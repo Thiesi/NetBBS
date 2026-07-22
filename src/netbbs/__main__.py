@@ -21,7 +21,7 @@ import sys
 from netbbs.auth.users import count_sysops
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
-from netbbs.link.boards import LinkContext
+from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.link.seedlist import run_scheduled_seed_refresh
@@ -423,7 +423,9 @@ async def run(
             # (see its own construction below), so this mirrors it
             # directly rather than re-checking config.link.enabled here.
             link_context=(
-                LinkContext(node_identity=node_identity, link_node=link_node) if link_node is not None else None
+                LinkContext(
+                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot
+                ) if link_node is not None else None
             ),
         )
 
@@ -439,7 +441,9 @@ async def run(
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
             lane=foreground_lane,
             link_context=(
-                LinkContext(node_identity=node_identity, link_node=link_node) if link_node is not None else None
+                LinkContext(
+                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot
+                ) if link_node is not None else None
             ),
         )
 
@@ -478,6 +482,25 @@ async def run(
         # same reasoning node_identity/count_sysops(db) already read
         # synchronously at this point in startup.
         link_node = load_link_node(db, node_identity) if config.link.enabled else None
+
+        # Issue #60's SysOp Link-status screen needs a handful of
+        # netbbs.net.nodeconfig.LinkConfig fields for display -- built
+        # once here (config never changes at runtime), not per-session,
+        # and as a primitives-only snapshot rather than the LinkConfig
+        # object itself, so netbbs.link never has to import netbbs.net
+        # (see LinkConfigSnapshot's own docstring).
+        link_config_snapshot = (
+            LinkConfigSnapshot(
+                outgoing_only=config.link.outgoing_only,
+                advertised_host=config.link.advertised_host,
+                advertised_port=config.link.advertised_port,
+                seeds=tuple(config.link.seeds),
+                sync_interval_seconds=config.link.sync_interval_seconds,
+                relay_serving_enabled=config.link.relay_serving_enabled,
+                max_relay_clients=config.link.max_relay_clients,
+            )
+            if link_node is not None else None
+        )
 
         if count_sysops(db) == 0:
             raise StartupError(

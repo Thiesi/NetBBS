@@ -668,11 +668,13 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
     assert "ink this board" not in text  # the [L]ink option itself is hidden
 
 
-def _add_fake_peer(link_context):
+def _add_fake_peer(link_context, *, descriptor=None):
     """A minimal but real, correctly-shaped `PeerRecord` for a second
     node -- enough for `_transfer_board_origin_screen` to recognize a
     transfer target as a known peer (design doc §13, round 94/issue
-    #53)."""
+    #53). `descriptor` defaults to `None` (every existing caller doesn't
+    need one) -- pass a real `EndpointDescriptor` (issue #60's Link
+    status screen reads `.payload` off it) when a test needs one."""
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import PeerRecord
 
@@ -681,7 +683,7 @@ def _add_fake_peer(link_context):
         fingerprint=peer_identity.fingerprint,
         root_public_key=bytes(peer_identity.root.verify_key),
         transitions=peer_identity.transitions,
-        descriptor=None,
+        descriptor=descriptor,
     )
     link_context.link_node.peers[peer.fingerprint] = peer
     return peer
@@ -1589,3 +1591,79 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
     # these two would be identical.
     utc_clock_text = format_for_display(utc_now_iso(), override_format="%H:%M", override_timezone="UTC")
     assert clock_text != utc_clock_text
+
+
+# -- Link status (issue #60, narrow scope) -----------------------------------
+
+
+def test_link_status_option_hidden_without_link_context(db, lane, sysop):
+    session = FakeSession(["s", "l", "b", "b"])
+    _run(session, lane, sysop)  # _run's admin_menu call passes no link_context
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
+
+
+def test_link_status_screen_shows_summary_counts(db, lane, sysop):
+    import dataclasses
+
+    from netbbs.link.boards import LinkConfigSnapshot
+
+    link_context = _link_context()
+    link_context = dataclasses.replace(
+        link_context,
+        link_config=LinkConfigSnapshot(
+            outgoing_only=True,
+            advertised_host=None,
+            advertised_port=None,
+            seeds=("http://seed.example:7862",),
+            sync_interval_seconds=300.0,
+            relay_serving_enabled=True,
+            max_relay_clients=20,
+        ),
+    )
+    link_context.link_node.boards["board-1"] = object()
+    link_context.link_node.known_event_ids.add("event-1")
+
+    session = FakeSession(["s", "l", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert link_context.node_identity.fingerprint in text
+    assert "Mode: outgoing-only" in text
+    assert "Configured seeds: 1" in text
+    assert "Linked boards: 1" in text
+    assert "Known events: 1" in text
+    assert "No verified peers." in text
+
+
+def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
+    from netbbs.link.events import build_endpoint_descriptor
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+
+    link_context = _link_context()
+    peer_identity = bootstrap_node_identity("elsewhere")
+    descriptor = build_endpoint_descriptor(
+        signing_identity=peer_identity.signing_key,
+        subject_fingerprint=peer_identity.fingerprint,
+        addresses=[{"protocol": "tcp", "address": "203.0.113.5", "port": 7862}],
+        outgoing_only=False,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    peer = PeerRecord(
+        fingerprint=peer_identity.fingerprint,
+        root_public_key=bytes(peer_identity.root.verify_key),
+        transitions=peer_identity.transitions,
+        descriptor=descriptor,
+    )
+    link_context.link_node.peers[peer.fingerprint] = peer
+
+    session = FakeSession(["s", "l", "0", "1", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert peer.fingerprint in text
+    assert "Reliability: 0.50" in text
+    assert "Last contact: never" in text
+    assert "Addresses:" in text
+    assert "203.0.113.5" in text

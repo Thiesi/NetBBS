@@ -224,6 +224,22 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     return node
 
 
+def load_peer_last_contact(db: Database) -> dict[str, str]:
+    """
+    fingerprint -> `link_peers.updated_at` (ISO 8601) for every peer
+    this node has ever completed a hello or events exchange with --
+    issue #60's SysOp Link-status screen needs "when did we last hear
+    from this peer" for display, but `load_link_node` above deliberately
+    doesn't reconstruct this column onto the in-memory `PeerRecord`
+    (no protocol-shape change for a value nothing but display ever
+    needs). Callers wanting it query separately, here.
+    """
+    return {
+        row["fingerprint"]: row["updated_at"]
+        for row in db.connection.execute("SELECT fingerprint, updated_at FROM link_peers")
+    }
+
+
 def save_peer(db: Database, peer: PeerRecord) -> None:
     """
     Upsert one peer's current record. Called after any successful

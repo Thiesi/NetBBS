@@ -25,7 +25,7 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
-from netbbs.link.store import load_link_node, save_candidate_descriptor, save_event, save_peer
+from netbbs.link.store import load_link_node, load_peer_last_contact, save_candidate_descriptor, save_event, save_peer
 from netbbs.storage.database import Database
 
 
@@ -73,6 +73,20 @@ def test_save_peer_then_load_link_node_reconstructs_it(tmp_path):
     assert loaded.root_public_key == peer.root_public_key
     assert [t.content_id for t in loaded.transitions] == [t.content_id for t in peer.transitions]
     assert loaded.descriptor.content_id == peer.descriptor.content_id
+    db.close()
+
+
+def test_load_peer_last_contact_reflects_saved_peers_only(tmp_path):
+    db = Database(tmp_path / "node.db")
+    peer_identity = bootstrap_node_identity("bob")
+    peer = _peer_record_for(peer_identity)
+
+    save_peer(db, peer)
+    last_contact = load_peer_last_contact(db)
+
+    assert peer_identity.fingerprint in last_contact
+    assert last_contact[peer_identity.fingerprint]  # non-empty ISO timestamp string
+    assert "never-saved-fingerprint" not in last_contact
     db.close()
 
 

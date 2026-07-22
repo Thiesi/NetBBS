@@ -56,6 +56,28 @@ from netbbs.timeutil import utc_now_iso
 
 
 @dataclass(frozen=True)
+class LinkConfigSnapshot:
+    """
+    Read-only copy of just the `netbbs.net.nodeconfig.LinkConfig`
+    fields issue #60's SysOp Link-status screen needs -- plain
+    primitives, not the `LinkConfig` object itself, so this module
+    never has to import `netbbs.net.nodeconfig`. `netbbs.link` depends
+    on `netbbs.boards` one-way, never the reverse (see this module's
+    own docstring); `netbbs.net` is exactly the same kind of reverse
+    dependency `LinkContext` must not introduce, since `netbbs.net`
+    already imports from `netbbs.link`, not the other way around.
+    """
+
+    outgoing_only: bool
+    advertised_host: str | None
+    advertised_port: int | None
+    seeds: tuple[str, ...]
+    sync_interval_seconds: float
+    relay_serving_enabled: bool
+    max_relay_clients: int
+
+
+@dataclass(frozen=True)
 class LinkContext:
     """Everything an in-session `[L]ink this board` command needs,
     bundled as one optional parameter -- same shape as `netbbs.net.
@@ -64,10 +86,16 @@ class LinkContext:
     admin_flow`'s board screens, `None` whenever this node has Link
     disabled (design doc round 87: Phase 3 is opt-in/experimental) or
     when reached via the standalone `netbbs.admin` CLI, which has no
-    running `LinkNode` at all."""
+    running `LinkNode` at all.
+
+    `link_config` (issue #60) is `None` under the exact same conditions
+    as everything else here -- it additionally stays `None` for callers
+    (tests, mainly) that build a `LinkContext` without needing config-
+    derived display, since it's optional and additive."""
 
     node_identity: NodeIdentity
     link_node: LinkNode
+    link_config: LinkConfigSnapshot | None = None
 
 
 class LinkBoardsError(Exception):

@@ -1168,7 +1168,11 @@ including:
 
 - generic persistent outbound-work items;
 - retry, backoff, dead-letter, replay, and cancellation;
-- peer health and sync-lag visibility;
+- sync-lag and historical/trend peer-health visibility (a read-only current-
+  state view — peer count/mode, dial-reliability score, last contact, relay
+  activity, board/event counters, and relay-mailbox size — is available in
+  the SysOp menu's `[L]ink status` screen; per-seed health has nothing to
+  show yet, since no per-seed success/failure tracking exists);
 - disk, event, mailbox, relay, and bandwidth quotas;
 - integrity checks and crash recovery;
 - bounded diagnostic log retention without content logging;

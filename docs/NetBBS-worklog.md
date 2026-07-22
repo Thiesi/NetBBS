@@ -590,6 +590,20 @@ was itself an unresolved Tab — every other keystroke (including ones that
 change nothing, like Left then Right) must clear that flag before its own
 handling runs.
 
+### Picker line width
+
+`netbbs.net.picker.pick_item` truncates each rendered row to terminal width
+(`truncate`, `netbbs.net.picker.py`) — the 2-digit selector, `name_of`, and
+`description_of` all share that one line. This is invisible until an item's
+`name_of` is naturally long: a Link peer fingerprint (32+ characters) plus
+its `(#<id>)` reference already consumes most of an 80-column line, so a
+`description_of` packing in more than one short field (issue #60's SysOp
+Link-status peer picker originally tried "mode, reliability, last contact"
+in one string) silently truncates mid-word with no error or indication
+anything was cut. Keep `description_of` to one short field for any picker
+whose `name_of` is itself long; put additional detail in the full-width
+post-selection screen instead, where `truncate` doesn't apply.
+
 ### Pinned chat UI
 
 The pinned status/input rows and line editor share one write lock. The live

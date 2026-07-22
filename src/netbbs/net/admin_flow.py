@@ -124,6 +124,11 @@ from netbbs.link.boards import (
     offer_board_origin_transfer,
     queue_board_post_if_linked,
 )
+from netbbs.link.protocol import PeerRecord
+from netbbs.link.relay_mailbox import mailbox_sizes
+from netbbs.link.reliability import reliability_score
+from netbbs.link.seedlist import get_cached_supplementary_seeds
+from netbbs.link.store import load_peer_last_contact
 from netbbs.moderation.log import list_actions_for_target_user, record_action
 from netbbs.moderation.roles import (
     BoardPermission,
@@ -222,7 +227,7 @@ async def admin_menu(
             await _draw_admin_menu(session)
         elif choice == "s":
             await session.write_line("")
-            await _system_menu(session, lane, user, node_controls=node_controls)
+            await _system_menu(session, lane, user, node_controls=node_controls, link_context=link_context)
             await _draw_admin_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -311,13 +316,22 @@ async def _draw_users_menu(session: Session) -> None:
 
 
 async def _system_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+    session: Session,
+    lane: DatabaseLane,
+    actor: User,
+    *,
+    node_controls: NodeControls | None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Node-wide settings, grouped together (design doc -- admin menu
     reorganization round): welcome banner, self-update, and -- Thiesi's
     own call -- `[N]ode` (sessions/shutdown) nested here rather than
-    sitting at the top level, since it's a node-wide concern too."""
-    await _draw_system_menu(session, node_controls)
+    sitting at the top level, since it's a node-wide concern too.
+
+    `link_context` (issue #60), if given, unlocks `[L]ink status` --
+    same presence/absence reasoning as `node_controls`: absent for the
+    standalone CLI and for any node with Link disabled."""
+    await _draw_system_menu(session, node_controls, link_context)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -327,26 +341,34 @@ async def _system_menu(
         elif choice == "w":
             await session.write_line("")
             await _welcome_banner_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "u":
             await session.write_line("")
             await _update_settings_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "n" and node_controls is not None:
             await session.write_line("")
             await _node_menu(session, lane, actor, node_controls)
-            await _draw_system_menu(session, node_controls)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "t":
             await session.write_line("")
             await _timestamp_settings_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls)
+            await _draw_system_menu(session, node_controls, link_context)
+        elif choice == "l" and link_context is not None:
+            await session.write_line("")
+            await _link_status_screen(session, lane, actor, link_context=link_context)
+            await _draw_system_menu(session, node_controls, link_context)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_system_menu(session: Session, node_controls: NodeControls | None) -> None:
+async def _draw_system_menu(
+    session: Session, node_controls: NodeControls | None, link_context: LinkContext | None = None
+) -> None:
     header = colored("\r\nSystem:", fg_color=HEADER_COLOR, bold=True)
     option_list = [menu_key("W", "elcome banner"), menu_key("U", "pdate"), menu_key("T", "imestamp format")]
+    if link_context is not None:
+        option_list.append(menu_key("L", "ink status"))
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
@@ -700,6 +722,140 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         else:
             await session.write_line(f"Display timezone is now: {new_tz}")
+
+
+# -- Link status (issue #60, narrow scope) -----------------------------------
+
+
+async def _link_status_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
+) -> None:
+    """
+    Read-only SysOp visibility into this node's live NetBBS Link state
+    (issue #60, deliberately narrow: just visibility into what already
+    exists -- peers, relay activity, board/event counters -- not the
+    backup/quota/retry-queue/dead-letter machinery #60 also calls for,
+    which stays a future design task). Nothing here mutates anything,
+    so unlike every other screen in this submenu there's no
+    `record_action` call; `actor` is accepted only so this screen's
+    signature matches its `_system_menu` siblings.
+
+    `link_context.link_node`'s in-memory fields are read directly, no
+    lane dispatch -- the same "in-memory, no I/O" shape `_who_screen`
+    already uses for `node_controls.session_registry`. Reliability
+    scores, per-peer last-contact, cached seed count, and mailbox sizes
+    are separate, read-only lane-dispatched queries, since none of that
+    is held in memory.
+    """
+    node = link_context.link_node
+    config = link_context.link_config
+
+    await session.write_line(colored("\r\nLink status:", fg_color=HEADER_COLOR, bold=True))
+    await session.write_line(f"This node's fingerprint: {sanitize_text(link_context.node_identity.fingerprint)}")
+
+    if config is not None:
+        await session.write_line(f"Mode: {'outgoing-only' if config.outgoing_only else 'full peer'}")
+        if not config.outgoing_only:
+            address = (
+                f"{config.advertised_host}:{config.advertised_port}"
+                if config.advertised_host else "(not configured)"
+            )
+            await session.write_line(f"Advertised address: {sanitize_text(address)}")
+        await session.write_line(
+            f"Relay-serving: {'on' if config.relay_serving_enabled else 'off'} "
+            f"({len(node.relaying_for)}/{config.max_relay_clients} slots in use)"
+        )
+        await session.write_line(f"Sync interval: {config.sync_interval_seconds:.0f}s")
+        await session.write_line(f"Configured seeds: {len(config.seeds)}")
+    else:
+        await session.write_line(f"Relaying for: {len(node.relaying_for)} requester(s)")
+
+    cached_seeds = await lane.run(get_cached_supplementary_seeds)
+    await session.write_line(f"Cached supplementary seeds: {len(cached_seeds)}")
+
+    await session.write_line(f"Linked boards: {len(node.boards)}")
+    await session.write_line(f"Known events: {len(node.known_event_ids)}")
+    await session.write_line(f"Post-edit chains: {len(node.post_edits)}")
+    await session.write_line(f"Candidate (unverified) peers: {len(node.candidate_descriptors)}")
+    await session.write_line(f"Relays serving this node: {len(node.relays_serving_me)}")
+    await session.write_line(
+        f"Outstanding relay-consent requests of this node's own: {len(node.pending_own_relay_requests)}"
+    )
+
+    mailbox_by_recipient = await lane.run(mailbox_sizes)
+    if mailbox_by_recipient:
+        held = sum(mailbox_by_recipient.values())
+        await session.write_line(
+            f"Relay mailbox: {held} envelope(s) held for {len(mailbox_by_recipient)} recipient(s)."
+        )
+    else:
+        await session.write_line(colored("Relay mailbox: empty.", fg_color=MUTED_COLOR))
+
+    if not node.peers:
+        await session.write_line(colored("\r\nNo verified peers.", fg_color=MUTED_COLOR))
+        return
+
+    await session.write_line(f"\r\nVerified peers: {len(node.peers)}")
+
+    def _load(db: Database) -> tuple[dict[str, float], dict[str, str]]:
+        return (
+            {fingerprint: reliability_score(db, fingerprint) for fingerprint in node.peers},
+            load_peer_last_contact(db),
+        )
+
+    scores, last_contact = await lane.run(_load)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
+
+    def _peer_description(peer: PeerRecord) -> str:
+        # Kept to a single short word -- this is squeezed onto one line
+        # alongside the fingerprint (32+ chars) and pick_item's own
+        # "(#<id>)" reference, then truncated to terminal width
+        # (netbbs.net.picker.truncate); reliability and last-contact
+        # both get their own full-width line in the post-selection
+        # detail below instead, where truncation isn't a concern.
+        return "outgoing-only" if peer.descriptor.payload.get("outgoing_only") else "full peer"
+
+    selected = await pick_item(
+        session, list(node.peers.values()),
+        name_of=lambda peer: peer.fingerprint,
+        stable_id_of=lambda peer: id(peer),  # in-memory only, same idiom _who_screen uses for sessions
+        description_of=_peer_description,
+        title="Verified peers",
+        empty_message="No verified peers.",
+    )
+    if selected is None:
+        return
+
+    await session.write_line(f"Reliability: {scores.get(selected.fingerprint, 0.5):.2f}")
+    when = last_contact.get(selected.fingerprint)
+    last = (
+        format_for_display(when, override_format=display_format, override_timezone=display_timezone)
+        if when else "never"
+    )
+    await session.write_line(f"Last contact: {last}")
+
+    # selected.descriptor's fields are peer-controlled -- sanitized here
+    # since this is a plain session.write_line, outside pick_item's own
+    # automatic name_of/description_of sanitization.
+    addresses = selected.descriptor.payload.get("addresses") or []
+    if addresses:
+        rendered = ", ".join(
+            sanitize_text(f"{a.get('protocol')}://{a.get('address')}:{a.get('port')}") for a in addresses
+        )
+        await session.write_line(f"Addresses: {rendered}")
+    else:
+        await session.write_line(colored("Addresses: none published (outgoing-only).", fg_color=MUTED_COLOR))
+
+    relays = selected.descriptor.payload.get("relays") or []
+    if relays:
+        await session.write_line(f"Publishes {len(relays)} relay(s) in its own descriptor.")
+    await session.write_line(
+        f"Currently relaying for this node's requests: "
+        f"{'yes' if selected.fingerprint in node.relaying_for else 'no'}"
+    )
+    await session.write_line(
+        f"This node relays for it: {'yes' if selected.fingerprint in node.relays_serving_me else 'no'}"
+    )
 
 
 # -- promote/demote, enable/disable ---------------------------------------
