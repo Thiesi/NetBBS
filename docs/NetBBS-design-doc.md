@@ -1298,8 +1298,6 @@ Implemented or substantially working:
 
 Still required for Phase 3 completeness:
 
-- finish issue #11’s language-independent canonical protocol specification and
-  vectors;
 - inventory/pull-based catch-up and efficient synchronization;
 - correctness-preserving event/dedup retention;
 - linked channels and channel lifecycle;
