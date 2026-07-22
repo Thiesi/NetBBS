@@ -214,6 +214,11 @@ def delete_community(db: Database, community: Community, *, deleted_by: User) ->
     grants this affects) before calling this function is the admin UI's
     job, same "detail screen owns the confirmation prompt" split
     already used for board/channel/area deletion.
+
+    A user following this Community itself (issue #56 -- never its
+    member boards/channels/areas, which keep their own follow rows
+    regardless of Community deletion) has that follow row removed too;
+    there's no read-cursor concept for a Community itself.
     """
     record_action(
         db, actor=deleted_by, action="delete_community", object_type="community", object_id=community.id,
@@ -223,6 +228,9 @@ def delete_community(db: Database, community: Community, *, deleted_by: User) ->
     db.connection.execute("UPDATE channels SET community_id = NULL WHERE community_id = ?", (community.id,))
     db.connection.execute("UPDATE file_areas SET community_id = NULL WHERE community_id = ?", (community.id,))
     db.connection.execute("DELETE FROM moderator_grants WHERE community_id = ?", (community.id,))
+    db.connection.execute(
+        "DELETE FROM user_follows WHERE object_type = 'community' AND object_id = ?", (community.id,)
+    )
     db.connection.execute("DELETE FROM communities WHERE id = ?", (community.id,))
     db.connection.commit()
 

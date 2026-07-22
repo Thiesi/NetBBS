@@ -383,3 +383,61 @@ def test_browse_channels_returns_immediately_if_nothing_picked(monkeypatch, lane
     asyncio.run(chat_flow.browse_channels(FakeSession([]), lane, hub, presence, MessageMailbox(), InputHistory(), alice))
 
     assert chat_loop_called is False
+
+
+# -- issue #56: joining a channel advances the read cursor -------------------
+
+
+def test_joining_a_channel_with_scrollback_advances_the_read_cursor(db, lane, hub, presence, sysop, channel, alice):
+    from netbbs.activity import unread_channel_count
+    from netbbs.chat.scrollback import record_message
+
+    record_message(db, channel, kind="message", author_label="sysop", body="hello")
+    assert unread_channel_count(db, alice, channel) is None
+
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
+
+    assert unread_channel_count(db, alice, channel) == 0
+
+
+def test_unread_channel_count_reflects_messages_after_a_previous_visit(db, lane, hub, presence, sysop, channel, alice):
+    from netbbs.activity import unread_channel_count
+    from netbbs.chat.scrollback import record_message
+
+    record_message(db, channel, kind="message", author_label="sysop", body="first")
+    asyncio.run(_run(lane, hub, presence, channel, alice, ["/quit"]))
+    assert unread_channel_count(db, alice, channel) == 0
+
+    record_message(db, channel, kind="message", author_label="sysop", body="second")
+
+    assert unread_channel_count(db, alice, channel) == 1
+
+
+# -- issue #56: entering a channel directly from [N]ew scan -----------------
+
+
+def test_browse_channels_initial_channel_skips_the_picker_entirely(monkeypatch, lane, hub, presence, alice, channel):
+    pick_calls = []
+
+    async def fake_pick_channel(session, lane, hub, user, *, category_id, **kwargs):
+        pick_calls.append(category_id)
+        return None  # would end the loop immediately if ever actually called
+
+    chat_loop_calls = []
+
+    async def fake_chat_loop(session, lane, hub, presence, mailbox, history, ch, user, **kwargs):
+        chat_loop_calls.append(ch)
+        return chat_flow._Quit()
+
+    monkeypatch.setattr(chat_flow, "_pick_channel", fake_pick_channel)
+    monkeypatch.setattr(chat_flow, "_chat_loop", fake_chat_loop)
+
+    asyncio.run(
+        chat_flow.browse_channels(
+            FakeSession([]), lane, hub, presence, MessageMailbox(), InputHistory(), alice,
+            initial_channel=channel,
+        )
+    )
+
+    assert pick_calls == []  # the picker was never consulted at all
+    assert chat_loop_calls == [channel]  # entered the given channel directly

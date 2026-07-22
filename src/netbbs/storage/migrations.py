@@ -1532,4 +1532,41 @@ MIGRATIONS = [
             ON link_relay_mailbox(recipient_fingerprint, received_at);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #56: per-user read cursors and follow/favourite state "
+            "(design doc §6.6). user_read_cursors is the newest item a user "
+            "has been shown per board/channel/file_area -- object_id is "
+            "polymorphic (that resource's own local integer id), so it gets "
+            "no FK, the same shape moderator_grants already uses for the "
+            "identical reason. last_seen_stable_id is the content-addressed "
+            "post_id/file_id for boards/file_areas, or a channel message's "
+            "plain integer id stored as text (netbbs.activity encapsulates "
+            "the comparison difference so no caller has to know). "
+            "user_follows is a separate, independent table (never folded "
+            "into channel_members/moderator_grants or any node-carry "
+            "concept) -- object_type also allows 'community', for a future "
+            "follow-a-whole-Community convenience layered on top of these "
+            "same per-resource rows."
+        ),
+        sql="""
+        CREATE TABLE user_read_cursors (
+            user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            object_type           TEXT NOT NULL CHECK (object_type IN ('board', 'channel', 'file_area')),
+            object_id             INTEGER NOT NULL,
+            last_seen_created_at  TEXT NOT NULL,
+            last_seen_stable_id   TEXT NOT NULL,
+            updated_at            TEXT NOT NULL,
+            PRIMARY KEY (user_id, object_type, object_id)
+        );
+
+        CREATE TABLE user_follows (
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            object_type  TEXT NOT NULL CHECK (object_type IN ('community', 'board', 'channel', 'file_area')),
+            object_id    INTEGER NOT NULL,
+            created_at   TEXT NOT NULL,
+            PRIMARY KEY (user_id, object_type, object_id)
+        );
+        """,
+    ),
 ]

@@ -18,10 +18,21 @@ editor that's the actual reason it's needed (design doc round 26).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import date
 from enum import Enum, auto
 from pathlib import Path
 
+from netbbs.activity import (
+    board_read_cursor,
+    file_area_read_cursor,
+    is_following,
+    record_board_seen,
+    unread_channel_count,
+    unread_file_count,
+    unread_post_count,
+    unread_replies_to,
+)
 from netbbs.attestation import (
     AttestationError,
     ProfileFieldError,
@@ -79,6 +90,7 @@ from netbbs.chat import (
     format_with_preference,
     list_pending_invitations_for_user,
 )
+from netbbs.chat.channels import Channel
 from netbbs.communities import (
     Community,
     get_effective_min_age,
@@ -98,15 +110,16 @@ from netbbs.directory import (
     set_bio,
     set_bio_visible,
 )
+from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.link.boards import LinkContext, queue_board_post_edit_if_linked, queue_board_post_if_linked
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.chat_flow import browse_channels, has_visible_channels
+from netbbs.net.chat_flow import browse_channels, has_visible_channels, list_visible_channels_for
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
-from netbbs.net.file_flow import browse_file_areas, has_visible_areas
+from netbbs.net.file_flow import browse_file_areas, enter_file_area, has_visible_areas
 from netbbs.net.mail_flow import browse_mail
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
@@ -723,6 +736,12 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     `[U]ncategorized  [J]ump to...` (assuming at least one board/
     channel/area already exists), functionally identical to today's
     flat menu -- migration is a non-event, per round 83.
+
+    `[N]ew scan` (issue #56) is always shown too, right next to `[J]ump
+    to...` -- an activity summary across every accessible board/channel/
+    file area, not gated on anything currently existing (a brand-new
+    account with nothing yet visited still gets a useful "not yet
+    visited" summary, matching classic BBS new-scan semantics).
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
@@ -736,6 +755,7 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     if _has_uncategorized_resources(db, user):
         option_list.append(menu_key("U", "ncategorized"))
     option_list.append(menu_key("J", "ump to..."))
+    option_list.append(menu_key("N", "ew scan"))
     option_list.extend(
         [
             menu_key("D", "irectory"),
@@ -835,6 +855,21 @@ async def _main_menu(
                 node_controls=node_controls, lane=lane, link_context=link_context,
             )
             await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "n":
+            await session.write_line("")
+            # Issue #56: same lane-is-None degrade-gracefully reasoning
+            # as "e"/"s" above -- a direct test call site without a real
+            # lane simply can't reach the new-scan screen's own
+            # unread-count queries.
+            if lane is not None:
+                await _new_scan_screen(
+                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context
+                )
+            else:
+                await session.write_line(
+                    colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
+                )
+            await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
             await session.write_line("")
             await _browse_directory(session, db, user)
@@ -885,6 +920,150 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         else:
             await session.write(reject_keystroke())
+
+
+@dataclass(frozen=True)
+class _ScanItem:
+    """One row in issue #56's `[N]ew scan` picker -- a board, channel,
+    or file area `user` can currently access, with its computed unread
+    state and follow status. Built fresh on every screen entry, never
+    persisted -- see `_new_scan_screen`'s own docstring for why
+    `stable_id_of=lambda item: id(item)` is the correct idiom here."""
+
+    kind: str  # "board" | "channel" | "file_area"
+    name: str
+    unread: int | None  # None = never visited, 0 = caught up, >0 = unread count
+    followed: bool
+    board: Board | None = None
+    channel: Channel | None = None
+    file_area: FileArea | None = None
+
+
+async def _new_scan_screen(
+    session: Session,
+    db: Database,
+    lane: DatabaseLane,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    link_context: LinkContext | None = None,
+) -> None:
+    """
+    Issue #56's activity summary: every board/channel/file area `user`
+    can currently access, each showing whether it's never been visited,
+    fully caught up, or has unread activity -- plus a distinct "replies
+    to you" section, always shown regardless of follow state (a reply
+    is always worth surfacing). Followed items are listed first, but
+    new scan itself always covers everything accessible, not only
+    followed items -- matches the traditional meaning of a BBS
+    "new scan" and avoids a brand-new account with nothing followed
+    yet seeing an empty screen.
+
+    Built fresh every time this screen is entered -- a plain Python
+    list, never persisted -- so `stable_id_of=lambda item: id(item)`
+    is the correct idiom (same as `_who_screen`'s sessions, or the
+    Link status screen's in-memory peers), not a database id.
+
+    Selecting a board/file area jumps straight to its first unread post/
+    file via `initial_cursor`; selecting a channel enters it directly
+    via `initial_channel`. Channels have no page concept to jump within
+    (`get_scrollback` always replays the same bounded buffer), so
+    entering one from here is just the ordinary join.
+    """
+
+    def _load(db: Database) -> tuple[list[_ScanItem], list[Post], dict[int, Board]]:
+        items: list[_ScanItem] = []
+        boards_by_id: dict[int, Board] = {}
+
+        for board in list_boards(db):
+            boards_by_id[board.id] = board
+            if not (
+                meets_level(user, get_effective_min_read_level(db, board))
+                and meets_age(db, user, get_effective_min_age(db, board))
+            ):
+                continue
+            items.append(
+                _ScanItem(
+                    kind="board", name=board.name, unread=unread_post_count(db, user, board),
+                    followed=is_following(db, user, "board", board.id), board=board,
+                )
+            )
+
+        for channel in list_visible_channels_for(db, user):
+            items.append(
+                _ScanItem(
+                    kind="channel", name=channel.name, unread=unread_channel_count(db, user, channel),
+                    followed=is_following(db, user, "channel", channel.id), channel=channel,
+                )
+            )
+
+        for area in list_file_areas(db):
+            if not (
+                meets_level(user, get_effective_min_read_level(db, area))
+                and meets_age(db, user, get_effective_min_age(db, area))
+            ):
+                continue
+            items.append(
+                _ScanItem(
+                    kind="file_area", name=area.name, unread=unread_file_count(db, user, area),
+                    followed=is_following(db, user, "file_area", area.id), file_area=area,
+                )
+            )
+
+        # Followed items first; a stable sort preserves each source
+        # list's own activity-based order within both groups.
+        items.sort(key=lambda item: not item.followed)
+        replies = unread_replies_to(db, user)
+        return items, replies, boards_by_id
+
+    items, replies, boards_by_id = await lane.run(_load)
+
+    await session.write_line(colored("\r\nNew scan:", fg_color=HEADER_COLOR, bold=True))
+    if replies:
+        await session.write_line(f"Replies to you: {len(replies)}")
+        for reply in replies[:10]:
+            reply_board = boards_by_id.get(reply.board_id)
+            board_label = sanitize_text(reply_board.name) if reply_board is not None else "unknown board"
+            await session.write_line(f"  {sanitize_text(reply.subject)} ({board_label})")
+        if len(replies) > 10:
+            await session.write_line(f"  ...and {len(replies) - 10} more.")
+    else:
+        await session.write_line(colored("Replies to you: none.", fg_color=MUTED_COLOR))
+
+    def _description(item: _ScanItem) -> str:
+        prefix = "* " if item.followed else ""
+        if item.unread is None:
+            status = "not yet visited"
+        elif item.unread == 0:
+            status = "caught up"
+        else:
+            status = f"{item.unread} unread"
+        return f"{prefix}{item.kind.replace('_', ' ')}, {status}"
+
+    selected = await pick_item(
+        session, items,
+        name_of=lambda item: item.name,
+        stable_id_of=lambda item: id(item),
+        description_of=_description,
+        title="New scan",
+        empty_message="Nothing accessible yet.",
+    )
+    if selected is None:
+        return
+
+    if selected.kind == "board":
+        cursor = await lane.run(board_read_cursor, user, selected.board)
+        await _show_board(session, db, selected.board, user, link_context=link_context, initial_cursor=cursor)
+    elif selected.kind == "channel":
+        await browse_channels(
+            session, lane, hub, presence, mailbox, history, user, initial_channel=selected.channel
+        )
+    else:
+        cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
+        await enter_file_area(session, lane, selected.file_area, user, initial_cursor=cursor)
 
 
 async def _login(
@@ -1541,7 +1720,13 @@ async def _render_board_page(
 
 
 async def _show_board(
-    session: Session, db: Database, board: Board, user: User, *, link_context: LinkContext | None = None
+    session: Session,
+    db: Database,
+    board: Board,
+    user: User,
+    *,
+    link_context: LinkContext | None = None,
+    initial_cursor: tuple[str, str] | None = None,
 ) -> None:
     """
     Show `board`, one bounded page of posts at a time (design doc round
@@ -1551,7 +1736,11 @@ async def _show_board(
     old oldest-first default: an active board's most recent activity is
     what's actually useful to see on arrival, not its oldest history —
     directly answers the original complaint that returning to a board
-    re-rendered everything, most of which was already read.
+    re-rendered everything, most of which was already read. `initial_
+    cursor` (issue #56's `[N]ew scan` "jump to first unread"), if given,
+    overrides this just for the very first render -- opens on the page
+    immediately *after* that cursor instead of the newest page; every
+    later Older/Newer/Recent navigation in this same call is unaffected.
 
     Composing a new post is a first-class `[P]ost` menu option inside
     the browsing loop (GitHub issue #40), not something a `[B]ack`
@@ -1583,6 +1772,20 @@ async def _show_board(
         mode, cursor = page_anchor
         return list_posts_page(db, board, user, **{mode: cursor})
 
+    async def _render_and_advance_cursor(current_page: PostPage) -> None:
+        """The one place every render in this loop funnels through
+        (issue #56) -- advances `user`'s board read cursor to whatever
+        is now newest on screen. A no-op when the page is empty (the
+        empty-board early return above never reaches here at all, but
+        an Older/Newer navigation could in principle land on an empty
+        result if a page emptied out from under a live session)."""
+        await _render_board_page(
+            session, db, board_name, current_page, user, can_post=can_post,
+            name_requirement=get_effective_name_requirement(db, board),
+        )
+        if current_page.posts:
+            record_board_seen(db, user, board, current_page.posts[-1])
+
     async def _compose_new_post() -> None:
         await session.write("\r\nSubject (or press Enter to cancel): ")
         subject = (await session.read_line()).strip()
@@ -1604,8 +1807,16 @@ async def _show_board(
             queue_board_post_if_linked(db, post, board, node_identity=link_context.node_identity)
         await session.write_line(f"Posted (id {post.post_id[:12]}...).")
 
-    page_anchor: tuple[str, tuple[str, str]] | None = None
-    page = list_posts_page(db, board, user)
+    page_anchor: tuple[str, tuple[str, str]] | None = ("after", initial_cursor) if initial_cursor else None
+    page = list_posts_page(db, board, user, after=initial_cursor) if initial_cursor else list_posts_page(db, board, user)
+    if initial_cursor and not page.posts:
+        # Nothing newer than the cursor `[N]ew scan` jumped in with --
+        # the user is caught up, not looking at a genuinely empty board.
+        # Fall back to the ordinary newest-page view rather than the
+        # "has no posts yet" path below, which would falsely claim the
+        # board is empty and (worse) prompt to compose the first post.
+        page_anchor = None
+        page = list_posts_page(db, board, user)
     if not page.posts:
         # Deliberately still skips the navigation loop entirely --
         # nothing to browse, so there's nothing for [O]lder/[N]ewer/
@@ -1619,7 +1830,7 @@ async def _show_board(
             await _compose_new_post()
         return
 
-    await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+    await _render_and_advance_cursor(page)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1628,29 +1839,29 @@ async def _show_board(
             oldest = page.posts[0]
             page_anchor = ("before", (oldest.created_at, oldest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+            await _render_and_advance_cursor(page)
         elif choice == "n" and page.has_newer:
             await session.write_line("")
             newest = page.posts[-1]
             page_anchor = ("after", (newest.created_at, newest.post_id))
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+            await _render_and_advance_cursor(page)
         elif choice == "r" and page.has_newer:
             await session.write_line("")
             page_anchor = None
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+            await _render_and_advance_cursor(page)
         elif choice == "e" and any(_can_edit_post(db, post, user) for post in page.posts):
             await session.write_line("")
             await _edit_existing_post(session, db, board, page, user, link_context=link_context)
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+            await _render_and_advance_cursor(page)
         elif choice == "p" and can_post:
             await session.write_line("")
             await _compose_new_post()
             page_anchor = None  # a freshly-created post always lands on the newest page
             page = _refetch_current_page()
-            await _render_board_page(session, db, board_name, page, user, can_post=can_post, name_requirement=get_effective_name_requirement(db, board))
+            await _render_and_advance_cursor(page)
         elif choice == "b":
             await session.write_line("")
             return

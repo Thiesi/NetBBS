@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import asyncio
 
+from netbbs.activity import record_board_seen, unread_post_count
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import create_post
+from netbbs.boards.posts import create_post, edit_post
 from netbbs.net.login_flow import _show_board
 from netbbs.storage.database import Database
 
@@ -324,4 +325,84 @@ def test_composing_a_post_without_link_context_never_queues_one(tmp_path):
         "SELECT link_event_json FROM posts WHERE subject = ?", ("Hello",)
     ).fetchone()
     assert row["link_event_json"] is None
+    db.close()
+
+
+# -- issue #56: viewing a board advances the read cursor ---------------------
+
+
+def test_opening_a_board_advances_the_viewers_read_cursor(tmp_path, monkeypatch):
+    db = Database(tmp_path / "node.db")
+    board, alice = _make_board_with_posts(db, 3, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    assert unread_post_count(db, bob, board) is None
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, bob))
+
+    assert unread_post_count(db, bob, board) == 0
+    db.close()
+
+
+def test_paging_to_an_older_page_does_not_regress_the_cursor(tmp_path, monkeypatch):
+    db = Database(tmp_path / "node.db")
+    total = _PAGE_SIZE * 2
+    board, alice = _make_board_with_posts(db, total, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+
+    session = FakeSession(keys=["o", "b"])  # newest page, then page backward into history
+    asyncio.run(_show_board(session, db, board, bob))
+
+    assert unread_post_count(db, bob, board) == 0  # still fully caught up, not regressed
+    db.close()
+
+
+def test_editing_an_already_seen_post_does_not_make_it_unread_again(tmp_path):
+    db = Database(tmp_path / "node.db")
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Hello", "World")
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+    record_board_seen(db, bob, board, post)
+
+    edit_post(db, post, board, subject="Hello (edited)", body="World, edited", edited_by=alice)
+
+    assert unread_post_count(db, bob, board) == 0
+    db.close()
+
+
+def test_jump_to_first_unread_opens_on_the_post_right_after_the_cursor(tmp_path, monkeypatch):
+    db = Database(tmp_path / "node.db")
+    board, alice = _make_board_with_posts(db, _PAGE_SIZE + 1, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+
+    posts = db.connection.execute(
+        "SELECT post_id, created_at FROM posts ORDER BY created_at ASC"
+    ).fetchall()
+    cursor = (posts[0]["created_at"], posts[0]["post_id"])  # bob has seen only the very first post
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
+
+    text = session.output
+    assert "Subject 0 --" not in text  # already-seen post is not on the jumped-to page
+    assert "Subject 1 --" in text  # first unread post is
+    db.close()
+
+
+def test_jump_to_first_unread_falls_back_to_the_newest_page_once_caught_up(tmp_path, monkeypatch):
+    db = Database(tmp_path / "node.db")
+    board, alice = _make_board_with_posts(db, 3, monkeypatch)
+    bob = create_user(db, "bob", password="hunter2", user_level=10)
+
+    newest = db.connection.execute(
+        "SELECT post_id, created_at FROM posts ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    cursor = (newest["created_at"], newest["post_id"])  # bob is already fully caught up
+
+    session = FakeSession(keys=["b"])
+    asyncio.run(_show_board(session, db, board, bob, initial_cursor=cursor))
+
+    assert "has no posts yet" not in session.output  # must not be mistaken for a genuinely empty board
+    assert "Subject 2 --" in session.output  # shows the ordinary newest page instead
     db.close()

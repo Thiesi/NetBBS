@@ -349,8 +349,9 @@ def update_board(
 
 def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
     """
-    Permanently remove `board`, along with its posts and any moderator
-    grants scoped to it (design doc -- board/area management round).
+    Permanently remove `board`, along with its posts, any moderator
+    grants scoped to it (design doc -- board/area management round),
+    and any per-user read-cursor/follow rows for it (issue #56).
 
     No `ON DELETE` behavior exists in the schema for this -- rebuilding
     `boards`/`posts` together to add it was found, by direct testing
@@ -372,6 +373,12 @@ def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
     db.connection.execute("DELETE FROM posts WHERE board_id = ?", (board.id,))
     db.connection.execute(
         "DELETE FROM moderator_grants WHERE object_type = 'board' AND object_id = ?", (board.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_read_cursors WHERE object_type = 'board' AND object_id = ?", (board.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_follows WHERE object_type = 'board' AND object_id = ?", (board.id,)
     )
     db.connection.execute("DELETE FROM boards WHERE id = ?", (board.id,))
     db.connection.commit()

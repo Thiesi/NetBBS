@@ -73,6 +73,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Sequence
 
+from netbbs.activity import record_channel_seen
 from netbbs.attestation import (
     format_verified_name_unit,
     get_display_name,
@@ -181,10 +182,18 @@ async def browse_channels(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    initial_channel: Channel | None = None,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
     whatever's picked.
+
+    `initial_channel` (issue #56's `[N]ew scan`), if given, skips the
+    first picker entirely and enters `_chat_loop` with that channel
+    directly -- the same shape `/join`'s `_SwitchTo` already re-enters
+    this loop with, just supplied by the caller instead of a chat
+    command. Every later `/leave`/picker re-entry in this call still
+    goes through the ordinary picker, unaffected.
 
     `session_registry` (GitHub issue #27), if given, is what
     `_deliver_private_message` uses to enumerate *every* live session
@@ -229,7 +238,7 @@ async def browse_channels(
     `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
     the full reasoning, identical here.
     """
-    channel = await _pick_channel(
+    channel = initial_channel or await _pick_channel(
         session, lane, hub, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
     )
@@ -313,6 +322,16 @@ def has_visible_channels(
     if community_scoped:
         channels = [c for c in channels if c.community_id == community_id]
     return bool(channels)
+
+
+def list_visible_channels_for(db: Database, user: User) -> list[Channel]:
+    """Every channel `user` can currently see, unscoped by Community --
+    public (unlike `_visible_channels_for`) so issue #56's `[N]ew scan`
+    screen (`netbbs.net.login_flow`) can reuse this module's own
+    hidden/members_only/permission visibility logic instead of
+    duplicating it, the same reasoning `has_visible_channels` already
+    applies for its own boolean-only callers."""
+    return _visible_channels_for(db, user)
 
 
 async def _pick_channel(
@@ -2848,6 +2867,11 @@ async def _chat_loop(
                     fg_color=MUTED_COLOR,
                 )
             )
+            # Issue #56: viewing this channel's scrollback advances
+            # user's read cursor to whatever is now newest on screen --
+            # scrollback is oldest-first (get_scrollback's own contract),
+            # so the last element is the newest.
+            await lane.run(record_channel_seen, user, channel, scrollback[-1])
 
         await session.write_line(f"\r\nJoined {channel_label}. Type {quit_hint}.")
         # author_label is stored raw here (user.username, not a sanitized/

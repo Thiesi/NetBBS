@@ -1463,7 +1463,8 @@ Still required for Phase 3 completeness:
 - linked channels and channel lifecycle;
 - remaining linked-board governance, closure, moderator edits, and tombstones;
 - remote file catalogue and on-demand chunks;
-- unread/follow/activity discovery from issue #56;
+- local search from issue #56 (read/unread, follows, and `[N]ew scan` are
+  done);
 - issue #60’s operational controls and recovery model;
 - broader real-world multi-node deployment validation.
 
@@ -1540,9 +1541,15 @@ never broadcast over Link; and a zero-backfill migration story (existing
 users' read cursors start empty; first post-upgrade visit sets the
 baseline).
 
-Still open: this is a design, not yet an implementation. The read-cursor and
-follow tables, the `[N]ew scan` screen, and the search index do not exist in
-code yet.
+Implemented: the read-cursor table (`netbbs.activity`), the follow table, and
+the `[N]ew scan` main-menu screen, wired into board/file-area viewing and
+channel scrollback replay. Verified against a real Telnet session, not just
+scripted tests.
+
+Still open: local search (FTS5-backed, scoped to this node's own carried
+content) has no code yet -- the one piece of §6.6 deliberately deferred, since
+this codebase has never used FTS5 or confirmed it's compiled into the Python
+builds this project targets.
 
 ### Issue #60 — production operations
 

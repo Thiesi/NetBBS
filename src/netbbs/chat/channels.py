@@ -240,8 +240,9 @@ def update_channel(
 def delete_channel(db: Database, channel: Channel, *, deleted_by: User) -> None:
     """
     Permanently remove `channel`, along with its scrollback, mute/ban
-    restrictions, membership/invitations, and any moderator grants
-    scoped to it (design doc -- channel management round) --
+    restrictions, membership/invitations, any moderator grants scoped
+    to it (design doc -- channel management round), and any per-user
+    read-cursor/follow rows for it (issue #56) --
     application-level cleanup, same reasoning as
     `netbbs.boards.boards.delete_board`: no `ON DELETE` behavior in the
     schema (a rebuild to add it risks the same silent-cascade hazard
@@ -258,6 +259,12 @@ def delete_channel(db: Database, channel: Channel, *, deleted_by: User) -> None:
     db.connection.execute("DELETE FROM channel_invitations WHERE channel_id = ?", (channel.id,))
     db.connection.execute(
         "DELETE FROM moderator_grants WHERE object_type = 'channel' AND object_id = ?", (channel.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_read_cursors WHERE object_type = 'channel' AND object_id = ?", (channel.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_follows WHERE object_type = 'channel' AND object_id = ?", (channel.id,)
     )
     db.connection.execute("DELETE FROM channels WHERE id = ?", (channel.id,))
     db.connection.commit()

@@ -538,6 +538,45 @@ requirements` (age/name gates) and `_render_chat_status_line` (topic).
 Anything new that reads channel-level mutable state from a long-lived chat
 session needs the same treatment.
 
+### Read cursors and follows (issue #56)
+
+A per-user read cursor is a position marker `(user_id, object_type,
+object_id) -> (last_seen_created_at, last_seen_stable_id)`
+(`netbbs.activity`), not a per-item flag table — deliberately reusing the
+exact `(created_at, stable_id)` tuple boards/file areas already
+keyset-paginate with, so "unread" is the identical tuple comparison
+`list_posts_page`/`list_files_page` already perform for their own `after=`
+parameter, just anchored at the user's cursor instead of a page boundary.
+
+A channel's cursor stores a message's plain integer `id` as text (uniform
+column type across object types), but every comparison against it must cast
+back to `int` explicitly — comparing it as a string ranks `"9" > "10"`,
+silently losing every double-digit-and-beyond message the moment a channel's
+retained scrollback passes nine messages. Boards/file areas don't have this
+hazard: their stable ids are fixed-length content-addressed hex, so ordinary
+string comparison is safe there.
+
+A cursor must never retreat: paging backward into history, or an
+older-page redraw, must not un-mark already-read newer content. Every
+`record_*_seen` call reads the existing cursor first and only writes when
+the new position is strictly newer — never a blind upsert.
+
+Jump-to-first-unread (`_show_board`/`_show_area`'s `initial_cursor`
+parameter) must fall back to the ordinary newest-page view when nothing is
+newer than the supplied cursor (a caught-up user, not a genuinely empty
+board/area) — treating an empty `after=` result as "board has no posts"
+would falsely claim an active board is empty and could even prompt the
+viewer to compose its first post.
+
+Follow/favourite state (`user_follows`) and read cursors both key on
+`object_id` with no FK (`object_type` is polymorphic across
+board/channel/file_area/community, the same shape `moderator_grants`
+already uses for the identical reason) — every polymorphic-cleanup
+`delete_board`/`delete_channel`/`delete_file_area`/`delete_community`
+function needs its own explicit `DELETE` for both tables, the same way it
+already does for `moderator_grants`; nothing in the schema cascades this
+automatically.
+
 ---
 
 ## 7. Rendering, input, and transport rules
@@ -1105,7 +1144,9 @@ Near-term Phase 3 work includes:
   blocklist-backed sender blocking are not;
 - user-key and node-author signing tiers beyond current node-vouched users;
 - linked-board moderator grants and later moderator edits/tombstones;
-- unread/follow/activity state for Communities;
+- local search over carried board/file/channel content (issue #56's
+  remaining piece -- read/unread cursors, follows, and `[N]ew scan` are
+  done, see §6 below);
 - operator-visible quotas, retry/dead-letter control, peer health, backup,
   restore, and disaster recovery;
 - the trust, reputation, and quarantine model required before public

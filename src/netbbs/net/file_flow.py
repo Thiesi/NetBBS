@@ -49,6 +49,7 @@ for, not a structural requirement the way the picker case was.
 
 from __future__ import annotations
 
+from netbbs.activity import record_file_area_seen
 from netbbs.attestation import format_name_for_resource, meets_age, meets_name_requirement
 from netbbs.auth.users import User, get_user_by_id
 from netbbs.communities import (
@@ -81,6 +82,18 @@ from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, sani
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
+
+
+async def enter_file_area(
+    session: Session, lane: DatabaseLane, area: FileArea, user: User, *, initial_cursor: tuple[str, str] | None = None
+) -> None:
+    """Enter `area` directly, bypassing the category picker entirely --
+    public (unlike `_show_area`) so issue #56's `[N]ew scan` screen
+    (`netbbs.net.login_flow`) can jump straight into a specific area
+    with a starting cursor, the same reasoning `netbbs.net.chat_flow.
+    browse_channels`'s own `initial_channel` parameter already has for
+    channels."""
+    await _show_area(session, lane, area, user, initial_cursor=initial_cursor)
 
 
 async def browse_file_areas(
@@ -270,7 +283,14 @@ async def _render_area_page(
     await session.write_line("  ".join(hints))
 
 
-async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
+async def _show_area(
+    session: Session,
+    lane: DatabaseLane,
+    area: FileArea,
+    user: User,
+    *,
+    initial_cursor: tuple[str, str] | None = None,
+) -> None:
     """
     Show `area`, one bounded page of files at a time (design doc round
     31, issue #10's file-area follow-up to round 30's board-post
@@ -280,7 +300,10 @@ async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user:
     both (see that function's docstring, not repeated here) — including
     only redrawing the listing on an actual page change, and `b` (not a
     bare Enter, which used to also work here but no longer does) as the
-    one consistent way back.
+    one consistent way back. `initial_cursor` (issue #56's `[N]ew scan`
+    "jump to first unread") works identically to `_show_board`'s own:
+    overrides only the very first render, falling back to the newest
+    page if nothing is newer than the cursor.
 
     One deliberate mechanical difference from `_show_board`, not an
     inconsistency: this reads the choice via `read_line()`, not
@@ -303,7 +326,11 @@ async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user:
         # Bundled into one lane call: the page, the effective
         # name_requirement, and the can_write gate all come from the
         # same worker-thread pass rather than three round trips.
-        page = list_files_page(db, area, user)
+        page = list_files_page(db, area, user, after=initial_cursor) if initial_cursor else list_files_page(db, area, user)
+        if initial_cursor and not page.entries:
+            # Nothing newer than the cursor -- caught up, not a
+            # genuinely empty area; fall back to the newest page.
+            page = list_files_page(db, area, user)
         effective_name_requirement = get_effective_name_requirement(db, area)
         can_write = (
             meets_level(user, get_effective_min_write_level(db, area))
@@ -314,12 +341,20 @@ async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user:
 
     page, effective_name_requirement, can_write = await lane.run(_load)
 
+    async def _render_and_advance_cursor(current_page: FileEntryPage) -> None:
+        """The one place every render in this loop funnels through
+        (issue #56) -- advances `user`'s file-area read cursor to
+        whatever is now newest on screen."""
+        await _render_area_page(
+            session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement
+        )
+        if current_page.entries:
+            await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
+
     if not page.entries:
         await session.write_line(f"\r\n[{area_name}] has no files yet.")
     else:
-        await _render_area_page(
-            session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
-        )
+        await _render_and_advance_cursor(page)
         while True:
             await session.write("Choice or command: ")
             choice = (await session.read_line()).strip()
@@ -331,22 +366,16 @@ async def _show_area(session: Session, lane: DatabaseLane, area: FileArea, user:
                 page = await lane.run(
                     list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
                 )
-                await _render_area_page(
-                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
-                )
+                await _render_and_advance_cursor(page)
             elif choice.lower() == "n" and page.has_newer:
                 newest = page.entries[-1]
                 page = await lane.run(
                     list_files_page, area, user, after=(newest.created_at, newest.file_id)
                 )
-                await _render_area_page(
-                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
-                )
+                await _render_and_advance_cursor(page)
             elif choice.lower() == "r" and page.has_newer:
                 page = await lane.run(list_files_page, area, user)
-                await _render_area_page(
-                    session, lane, area_name, page, can_write=can_write, name_requirement=effective_name_requirement
-                )
+                await _render_and_advance_cursor(page)
             elif choice.lower() == "/upload" and can_write:
                 await _handle_upload(session, lane, area, user)
                 return

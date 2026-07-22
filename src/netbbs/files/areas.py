@@ -301,11 +301,12 @@ def update_file_area(
 
 
 def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
-    """Permanently remove `area`, along with its files and any
-    moderator grants scoped to it -- mirrors
-    `netbbs.boards.boards.delete_board` exactly, see that function's
-    docstring for the full reasoning (including why this is handled at
-    the application level rather than via a schema ON DELETE clause)."""
+    """Permanently remove `area`, along with its files, any moderator
+    grants scoped to it, and any per-user read-cursor/follow rows for
+    it (issue #56) -- mirrors `netbbs.boards.boards.delete_board`
+    exactly, see that function's docstring for the full reasoning
+    (including why this is handled at the application level rather
+    than via a schema ON DELETE clause)."""
     record_action(
         db, actor=deleted_by, action="delete_file_area", object_type="file_area", object_id=area.id,
         detail=f"deleted file area {area.name!r} (id {area.id})",
@@ -313,6 +314,12 @@ def delete_file_area(db: Database, area: FileArea, *, deleted_by: User) -> None:
     db.connection.execute("DELETE FROM files WHERE area_id = ?", (area.id,))
     db.connection.execute(
         "DELETE FROM moderator_grants WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_read_cursors WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
+    )
+    db.connection.execute(
+        "DELETE FROM user_follows WHERE object_type = 'file_area' AND object_id = ?", (area.id,)
     )
     db.connection.execute("DELETE FROM file_areas WHERE id = ?", (area.id,))
     db.connection.commit()
