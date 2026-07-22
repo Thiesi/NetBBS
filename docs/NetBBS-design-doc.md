@@ -441,8 +441,11 @@ Local boards provide:
 - moderation and pending approval;
 - expiry, pinning, and exemption;
 - immutable revision history for edits;
-- simple and fullscreen composition;
-- local search/navigation foundations.
+- simple and fullscreen composition.
+
+Read/unread state, follows, activity discovery, and local search across
+boards, file areas, channels, and Communities are specified together in
+§6.6, not per-domain.
 
 A visible edit is a revision, not destructive replacement of history. Any
 threading or revision semantics which affect Link event IDs or propagation must
@@ -556,7 +559,160 @@ win locally.
 Actual Link Community event schemas, signed membership changes, and advanced
 governance are Phase 6 work.
 
-### 6.6 Self-update
+### 6.6 Activity, unread state, follows, and search (issue #56)
+
+A topic-first Community hierarchy is only more useful than a plain directory if
+a user can tell what changed since their last visit. This section is the
+complete answer to issue #56: read/unread semantics, follow state, a
+new-activity surface, and local search. It replaces §6.1's earlier vague
+"local search/navigation foundations" phrase.
+
+#### Read/unread state
+
+Local mail already has a complete, working model: a per-message `read_at`
+timestamp, a live `unread_count` query, and independent sender/recipient
+deletion. A delivered Link message is a normal row in the same table, so it
+already has full read tracking the moment it lands in a mailbox. Nothing new
+is needed for mail; issue #56's mail bullet is already satisfied.
+
+Boards, file areas, and channels need a per-user, per-container **read
+cursor**, not a per-item flag — per-item read state for a potentially
+unbounded board would itself be an unbounded table. One new table holds it:
+`(user_id, object_type, object_id)` primary key, where `object_type` is
+`board`/`channel`/`file_area` and `object_id` is that resource's own local
+integer id (the same id `community_id`/category columns already reference —
+never the content-addressed `post_id`/`file_id`, which only identifies one
+item, not a container). Its payload is the newest item's ordering key the
+user has already seen:
+
+- boards and file areas already page with a stable `(created_at, post_id)` /
+  `(created_at, file_id)` keyset cursor (the existing `list_posts_page`/
+  file-listing implementation) — the read cursor stores exactly that same
+  tuple shape, so "what's unread" is the identical tuple comparison keyset
+  pagination already performs for `after=`, just anchored at the user's own
+  cursor instead of a page boundary;
+- channel scrollback has no revision concept and is already ordered by a
+  plain monotonic message id, so a channel's cursor is just that id.
+
+An **edit never resets read state**: an edit's root post keeps the original
+`created_at`/`post_id` (§6.1), which is exactly what the cursor comparison
+keys on — a post a user has already scrolled past stays "read" after a later
+typo fix, matching normal reader expectance. **Expiry and deletion cannot
+corrupt a cursor**: an expired post keeps its `post_id` reachable until
+nothing references it, and even final hard-deletion only ever removes an
+already-fully-dereferenced row — a stored cursor value is a stable position
+marker being compared against, never a live foreign key, so it cannot dangle
+or resurrect deleted content.
+
+A resource with no cursor row for a user has never been visited by them.
+First visit — not a retroactive backfill — establishes the baseline: viewing
+a board/file-area page or a channel's current scrollback advances that user's
+cursor to the newest item they were just shown. This is also the complete
+migration story for existing accounts (issue #56's last acceptance
+criterion): the read-cursor table starts empty for everyone, including
+existing users, at upgrade time. Nobody's history is scanned or backfilled;
+the first real visit after upgrade sets the baseline, so only genuinely new
+activity from that point forward counts as unread — never a flood of
+years-old "unread" content on the first login after this ships.
+
+A never-visited resource is surfaced as **not yet visited**, not as a
+specific (and potentially enormous, meaningless) unread count — a real
+numeric unread count only exists once a baseline cursor is established.
+
+Channel scrollback is a bounded ring buffer (§6.3): a channel's cursor can
+only ever express "unread among what's still retained." A message trimmed
+out of scrollback before a user's next visit is simply gone, the same as it
+already is for a session that was never connected to see it live — this is
+an existing, accepted limitation of chat's ephemeral model, not a new gap
+introduced here.
+
+**Replies and mentions** need no new schema. A board post's existing
+`parent_post_id` already names the post it replies to; "replies to me,
+unread" is the same cursor-filtered query further restricted to posts whose
+`parent_post_id` belongs to one of the user's own posts, run across every
+board the user can read rather than one at a time. A channel "mention" is a
+lightweight, unverified `@username` substring match against
+`channel_messages.body` for messages newer than the user's channel cursor —
+a convenience heuristic, not a structured or security-relevant feature; a
+literal `@alice` typed with no intended addressee is an accepted false
+positive, and a message directed at someone without using their exact
+username is an accepted false negative.
+
+#### Follows and favourites
+
+Follow state is a new, separate table — `(user_id, object_type, object_id)`
+where `object_type` is `community`/`board`/`channel`/`file_area` — deliberately
+independent of every existing access concept it sits beside:
+
+- **not** channel membership/invitations (`netbbs.chat.membership`), which
+  govern *whether you may enter*, never *whether you care about it*;
+- **not** node carry policy (`netbbs.link.boards.materialize_carried_board`),
+  which is a per-node, all-or-nothing decision about whether Linked content
+  exists locally at all, made with no per-user awareness whatsoever today;
+- **not** Community membership, since a Community has no membership concept
+  to begin with — it is a browsing/navigation container, not a joined group.
+
+Following an object a user can no longer read (level raised, Community/
+channel access changed, or — for a Linked board — this node stopping carrying
+it) is never actively revoked; it simply stops being resolvable and is
+filtered out of every follows-aware view at display time, the same
+lazy-filter approach category/board listings already use elsewhere for
+resources no longer visible.
+
+#### Activity summary and direct jump ("new scan")
+
+A single new main-menu entry — `[N]ew scan`, the traditional BBS term for
+exactly this feature — is the fast, always-shown surface issue #56 asks
+for, following the same unconditional-visibility
+precedent `[J]ump to...` already sets.
+
+New scan covers **every board, channel, and file area the user can currently
+access**, not only followed ones — matching the traditional meaning of a
+new-scan pass, and avoiding a chicken-and-egg problem where a brand-new
+account has followed nothing yet and a "new scan" would show nothing at all.
+Followed objects are surfaced first / distinguished within that same list; a
+follows-only filtered view remains one keystroke away for a user who wants to
+narrow it. Within new scan, a dedicated "replies to you" pass (described
+above) runs across every board regardless of follow state, since a reply is
+always worth surfacing.
+
+Selecting an item from new scan jumps directly into that resource
+pre-positioned at the first unread item — mechanically, calling the
+resource's own existing keyset-pagination entry point with `after=` set to
+the user's stored cursor, not a new navigation primitive.
+
+#### Local search
+
+No search beyond the item picker's simple, per-call substring name match
+(the existing `pick_item`) exists today. Local search is a new, separate
+capability:
+
+- **scope**: only this node's own already-stored content — approved board
+  posts (subject/body), file entries (filename/description), and, lower
+  priority given its bounded/ephemeral nature, recent retained channel
+  scrollback. Never content this node does not itself carry — there is no
+  Link-wide query protocol, and this design does not imply or require one;
+- **mechanism**: SQLite FTS5 virtual tables kept in sync with the
+  corresponding content tables — a standard SQLite-native indexing
+  mechanism, not a new external dependency;
+- **authorization**: a search result set passes through the exact same
+  visibility rules (level gates, Community/channel access, moderation
+  status) normal browsing already enforces — search must never be a
+  side-channel that reveals a restricted resource's existence or content;
+- **privacy, explicit**: a user's search query text is never transmitted to
+  any peer or broadcast over Link, by default and without exception in this
+  design. Searching a Linked board only ever searches this node's own
+  locally carried copy of it. A future Link-wide search capability, if ever
+  built, is a distinct protocol extension requiring its own explicit design
+  (rate limits, query exposure, opt-in) — never an implied consequence of
+  local search existing.
+
+Local, in-page substring matching over a short list (`pick_item`'s own
+search command) is unrelated and unchanged — it is not "search" in this
+section's sense, just incremental filtering of an already-open, already
+access-checked list.
+
+### 6.7 Self-update
 
 The updater uses explicit GitHub Releases over HTTPS rather than arbitrary
 branch HEAD. Current foundations include version comparison, release checking,
@@ -1373,10 +1529,20 @@ implementation/publication follow-up, not a further design decision.
 
 ### Issue #56 — unread, follows, activity, and search
 
-Define stable per-user read state, follows/favourites independent of node carry,
-Community activity summaries, replies/mentions, new file discovery, and local
-search over carried content. Arbitrary user search queries must not be broadcast
-Link-wide by default.
+§6.6 now states the complete design: cursor-based read/unread state for
+boards, file areas, and channels (mail already had this); replies/mentions
+derived from existing `parent_post_id`/message-body fields with no new
+schema; a follow/favourite table independent of channel membership and node
+carry; a `[N]ew scan` activity surface covering every accessible resource,
+not only followed ones, with a direct jump to the first unread item; local
+FTS5-backed search scoped to this node's own carried content, explicitly
+never broadcast over Link; and a zero-backfill migration story (existing
+users' read cursors start empty; first post-upgrade visit sets the
+baseline).
+
+Still open: this is a design, not yet an implementation. The read-cursor and
+follow tables, the `[N]ew scan` screen, and the search index do not exist in
+code yet.
 
 ### Issue #60 — production operations
 
