@@ -59,8 +59,10 @@ scope note).
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 from dataclasses import dataclass
+from typing import Any
 
 import nacl.signing
 
@@ -168,6 +170,42 @@ def event_content_id(envelope: dict) -> str:
     """The content-ID of a canonical event envelope — same
     canonicalization as `canonical_bytes`, hashed (round 110)."""
     return compute_content_id(envelope)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
+    seen: set[str] = set()
+    result: dict = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r} in wire JSON object")
+        seen.add(key)
+        result[key] = value
+    return result
+
+
+def strict_json_loads(data: str | bytes) -> Any:
+    """
+    Parse untrusted wire JSON for anything that will be canonicalized,
+    signed, or verified (design doc §7.2, issue #11's "duplicate-key ...
+    handling" requirement) — rejects any JSON object containing the same
+    key twice, at any nesting depth, instead of silently resolving to
+    "last one wins" the way `json.loads` does by default.
+
+    A canonical envelope is always built from an already-parsed dict, in
+    which duplicate keys are structurally impossible — but two different
+    JSON parsers can disagree about *which* value "last one wins" picks,
+    so a sender and receiver using different implementations could
+    reconstruct two different objects from the same wire bytes while
+    each believes it processed "the message." Rejecting outright removes
+    the ambiguity instead of leaving it to be resolved differently by
+    every language's parser.
+
+    Passed as the `loads=` argument to aiohttp's `Request.json`/
+    `ClientResponse.json` (`netbbs.link.transport`) rather than only
+    validating after the fact — by the time a plain `json.loads` result
+    reaches this module, the duplicate key is already gone.
+    """
+    return json.loads(data, object_pairs_hook=_reject_duplicate_keys)
 
 
 @dataclass(frozen=True)

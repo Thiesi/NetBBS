@@ -712,13 +712,47 @@ Current rules include:
 - recursive Unicode NFC normalization;
 - deterministic compact JSON representation;
 - no floats, including nested floats;
+- integers bounded to `[-(2^53 - 1), 2^53 - 1]` (the IEEE-754-double-safe
+  range), including nested integers -- issue #11's cross-language numeric
+  policy, enforced in the same `_normalize_for_hashing` pass as the float
+  ban (`netbbs.boards.content_id.ContentIdError`);
 - explicit object/protocol typing;
 - optional fields omitted where the event schema says omission, not replaced
   casually with `null`;
-- nonces where two otherwise-identical actions must remain distinct.
+- nonces where two otherwise-identical actions must remain distinct;
+- duplicate keys within one wire JSON object, at any nesting depth, rejected
+  before parsing completes (`netbbs.link.events.strict_json_loads`, wired
+  into every `request.json()`/`response.json()` call in
+  `netbbs.link.transport` via its `loads=` parameter) -- never resolved by
+  whichever "last one wins" behavior the parsing language happens to pick,
+  since two different parsers can disagree about which duplicate value wins.
 
 Builders, verifiers, content IDs, and golden fixtures must never maintain
-independent canonicalization implementations.
+independent canonicalization implementations. Design doc §7.2's golden
+vectors (`tests/fixtures/link_canonical_vectors.json`) pin exact canonical
+bytes/content IDs for representative payloads; update them only alongside a
+deliberate canonicalization change.
+
+### Chain-order reconstruction must not trust `created_at` alone
+
+A per-object chain's authoritative order comes from its own
+`previous_event_id`/head-pointer links, verified at acceptance time --
+`created_at` is descriptive metadata, not an ordering mechanism, and two
+genuinely successive edits *can* share one clock's timestamp resolution
+(confirmed in practice already: `tests/test_boards.py`'s own
+`test_list_posts_page_returns_all_in_order` comment records real successive
+`utc_now_iso()` calls landing on the same microsecond). Any code that
+reconstructs a chain from storage instead of re-verifying it live (restart
+reconstruction, not `handle_events`) must sort on a locally-assigned,
+genuinely monotonic column -- `netbbs.link.store.load_link_node`'s
+peer-received `board_post_edit` loop already does this correctly via
+`link_events.received_at`; its self-originated counterpart (reading
+`posts.link_event_json`) sorted only by the payload's own `created_at` until
+a tie-break on `posts.id` (the table's own rowid, assigned in true insertion
+order) was added alongside issue #11's spec work. SQLite does not guarantee
+a stable sort on tied `ORDER BY` keys; do not assume a tie "happens to" sort
+in insertion order without an explicit secondary key, even though it may in
+a given build/query plan.
 
 ### Hello and peer state
 

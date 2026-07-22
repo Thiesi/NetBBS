@@ -69,6 +69,7 @@ from netbbs.link.events import (
     RelayConsentResponse,
     build_relay_consent_request,
     build_relay_consent_response,
+    strict_json_loads,
 )
 from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerListMessage, PeerRecord
@@ -182,7 +183,7 @@ class LinkServer:
 
     async def _handle_hello(self, request: web.Request) -> web.Response:
         try:
-            body = await request.json()
+            body = await request.json(loads=strict_json_loads)
             hello = HelloMessage.from_dict(body)
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
@@ -198,7 +199,7 @@ class LinkServer:
     async def _handle_events(self, request: web.Request) -> web.Response:
         fingerprint = request.match_info["fingerprint"]
         try:
-            raw_events = await request.json()
+            raw_events = await request.json(loads=strict_json_loads)
         except ValueError as exc:
             return web.json_response({"error": f"malformed events: {exc}"}, status=400)
 
@@ -291,7 +292,7 @@ class LinkServer:
         """
         fingerprint = request.match_info["fingerprint"]
         try:
-            body = await request.json()
+            body = await request.json(loads=strict_json_loads)
             consent_request = RelayConsentRequest.from_dict(body)
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed relay_consent_request: {exc}"}, status=400)
@@ -334,7 +335,7 @@ class LinkServer:
         """
         recipient_fingerprint = request.match_info["fingerprint"]
         try:
-            body = await request.json()
+            body = await request.json(loads=strict_json_loads)
             message = LinkMessage.from_dict(body)
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed link_message: {exc}"}, status=400)
@@ -373,7 +374,7 @@ class LinkServer:
         check that).
         """
         try:
-            body = await request.json()
+            body = await request.json(loads=strict_json_loads)
             hello = HelloMessage.from_dict(body)
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
@@ -417,8 +418,8 @@ async def dial_hello(
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"hello to {url} failed: HTTP {response.status}: {text}")
-            body = await response.json()
-    except ClientError as exc:
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
@@ -470,8 +471,8 @@ async def push_events(
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"events push to {url} failed: HTTP {response.status}: {text}")
-            body = await response.json()
-    except ClientError as exc:
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
@@ -511,8 +512,8 @@ async def request_peer_list(
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"peer list request to {url} failed: HTTP {response.status}: {text}")
-            body = await response.json()
-    except ClientError as exc:
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:
@@ -579,8 +580,8 @@ async def request_relay_consent(
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"relay consent request to {url} failed: HTTP {response.status}: {text}")
-            body = await response.json()
-    except ClientError as exc:
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
     finally:
         node.pending_own_relay_requests.pop(relay_fingerprint, None)
@@ -669,8 +670,8 @@ async def pickup_from_relay_mailbox(
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"relay mailbox pickup from {url} failed: HTTP {response.status}: {text}")
-            body = await response.json()
-    except ClientError as exc:
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
         raise LinkTransportError(f"could not reach {url}: {exc}") from exc
 
     try:

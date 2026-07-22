@@ -33,6 +33,7 @@ from netbbs.link.node_identity import bootstrap_node_identity, rotate_operationa
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node
 from netbbs.link.transport import (
+    LINK_PATH_PREFIX,
     LinkServer,
     LinkTransportError,
     deposit_into_relay_mailbox,
@@ -229,6 +230,71 @@ def test_dial_hello_raises_link_transport_error_when_nothing_is_listening(tmp_pa
             asyncio.run(scenario())
     finally:
         alice.close()
+
+
+# -- issue #11: duplicate JSON keys are rejected at the wire boundary -------
+
+
+def test_server_rejects_a_hello_body_with_a_duplicate_json_key(tmp_path):
+    """Design doc §7.2/issue #11: a wire JSON object containing the same
+    key twice must be rejected outright, not silently resolved to
+    "last one wins" -- see `netbbs.link.events.strict_json_loads`'s own
+    docstring for why. Sends genuinely malformed raw bytes no `HelloMessage`
+    could ever produce, so this has to bypass `dial_hello`/`.to_dict()`
+    and POST by hand."""
+    bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
+    bob = _NodeDb(tmp_path, "bob")
+
+    raw_body = '{"root_public_key": "aaaa", "root_public_key": "bbbb"}'
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            url = f"http://127.0.0.1:{bob_server.port}{LINK_PATH_PREFIX}/hello"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, data=raw_body.encode("utf-8"), headers={"Content-Type": "application/json"}
+                ) as response:
+                    return response.status, await response.json()
+        finally:
+            await bob_server.stop()
+
+    try:
+        status, body = asyncio.run(scenario())
+        assert status == 400
+        assert "duplicate key" in body["error"]
+    finally:
+        bob.close()
+
+
+def test_server_rejects_an_events_body_with_a_duplicate_json_key_in_a_nested_object(tmp_path):
+    """Same rule as the hello test above, applied to `/events`, whose
+    body is a *list* of envelopes -- confirms `object_pairs_hook`
+    catches a duplicate inside a nested object, not just at the
+    top level."""
+    bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
+    bob = _NodeDb(tmp_path, "bob")
+
+    raw_body = '[{"envelope": {"object_type": "key_transition", "object_type": "board_post"}}]'
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            url = f"http://127.0.0.1:{bob_server.port}{LINK_PATH_PREFIX}/events/{'a' * 8}"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, data=raw_body.encode("utf-8"), headers={"Content-Type": "application/json"}
+                ) as response:
+                    return response.status, await response.json()
+        finally:
+            await bob_server.stop()
+
+    try:
+        status, body = asyncio.run(scenario())
+        assert status == 400
+        assert "duplicate key" in body["error"]
+    finally:
+        bob.close()
 
 
 # -- events: real HTTP gossip push ------------------------------------------

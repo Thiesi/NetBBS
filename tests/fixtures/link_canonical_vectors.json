@@ -1,0 +1,64 @@
+{
+  "_comment": "Golden canonicalization vectors for design doc §7.2 / issue #11. Each entry's 'fields' is the JSON object passed to netbbs.boards.content_id.canonical_json_bytes/compute_content_id. 'canonical_hex' is the exact resulting canonical UTF-8 bytes, hex-encoded. 'content_id' is BLAKE2b-256 (hex) of those exact bytes. An independent, non-Python implementation of the canonical format is compatible if and only if it reproduces canonical_hex byte-for-byte (and therefore content_id) for every vector here. See tests/test_link_canonical_vectors.py, which asserts the current Python implementation against this same file.",
+  "vectors": [
+    {
+      "name": "sorted_keys_regardless_of_construction_order",
+      "description": "Object keys are sorted lexicographically in the canonical bytes, independent of the order fields were constructed in.",
+      "fields": {"object_type": "board_post", "subject": "hello", "body": "world"},
+      "canonical_hex": "7b22626f6479223a22776f726c64222c226f626a6563745f74797065223a22626f6172645f706f7374222c227375626a656374223a2268656c6c6f227d",
+      "content_id": "74ce1dfd0192280338935516da795bc8d17a45b927719c8989f4ce0c5dfae842"
+    },
+    {
+      "name": "same_logical_content_different_field_order",
+      "description": "Identical logical content built with fields in a different order produces byte-identical canonical output and the same content_id as the previous vector.",
+      "fields": {"body": "world", "subject": "hello", "object_type": "board_post"},
+      "canonical_hex": "7b22626f6479223a22776f726c64222c226f626a6563745f74797065223a22626f6172645f706f7374222c227375626a656374223a2268656c6c6f227d",
+      "content_id": "74ce1dfd0192280338935516da795bc8d17a45b927719c8989f4ce0c5dfae842"
+    },
+    {
+      "name": "nfc_and_nfd_forms_normalize_identically",
+      "description": "The NFD-decomposed input string ('cafe' + combining acute accent, U+0301) must be recursively NFC-normalized before serialization; the canonical bytes below contain the single precomposed U+00E9 codepoint ('\\u00e9'), not the two-codepoint NFD sequence.",
+      "fields": {"subject": "café"},
+      "canonical_hex": "7b227375626a656374223a226361665c7530306539227d",
+      "content_id": "ddd8c24ca957b4cd882bada97628d4d0dc38506d614fa11c87b47a0c34944005"
+    },
+    {
+      "name": "omitted_optional_field_differs_from_explicit_null",
+      "description": "An explicit JSON null is a distinct canonical value from the field being absent entirely -- this vector is the explicit-null case ({\"parent_post_id\": null}), which must NOT collide with the content_id of an empty object.",
+      "fields": {"parent_post_id": null},
+      "canonical_hex": "7b22706172656e745f706f73745f6964223a6e756c6c7d",
+      "content_id": "818123cf9335b7f70d918345522caabdd61d22fec7e234917e3346c3f29c0883"
+    },
+    {
+      "name": "nested_dict_and_list_structure",
+      "description": "Normalization and key-sorting recurse into nested dicts/lists; a bool is serialized as true/false, never mistaken for the integer 1/0.",
+      "fields": {"payload": {"tags": ["alpha", "beta"], "count": 2, "flag": true}},
+      "canonical_hex": "7b227061796c6f6164223a7b22636f756e74223a322c22666c6167223a747275652c2274616773223a5b22616c706861222c2262657461225d7d7d",
+      "content_id": "d9cb7924c3334f1340f5c311a317f3c8fcbe4547c88afd2ecd54315e601dd695"
+    },
+    {
+      "name": "full_envelope_with_key_transition_shaped_payload",
+      "description": "A complete round-27 envelope ({netbbs_protocol, object_type, payload}) shaped like a real key_transition event -- object_type participates in the hashed/signed bytes, which is what makes it mandatory domain separation rather than caller convention.",
+      "fields": {
+        "netbbs_protocol": 1,
+        "object_type": "key_transition",
+        "payload": {
+          "subject_fingerprint": "abcexampleexamplefingerprint2345",
+          "purpose": "signing",
+          "action": "authorize",
+          "operational_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "created_at": "2026-01-01T00:00:00.000000+00:00"
+        }
+      },
+      "canonical_hex": "7b226e65746262735f70726f746f636f6c223a312c226f626a6563745f74797065223a226b65795f7472616e736974696f6e222c227061796c6f6164223a7b22616374696f6e223a22617574686f72697a65222c22637265617465645f6174223a22323032362d30312d30315430303a30303a30302e3030303030302b30303a3030222c226f7065726174696f6e616c5f6b6579223a22414141414141414141414141414141414141414141414141414141414141414141414141414141414141413d222c22707572706f7365223a227369676e696e67222c227375626a6563745f66696e6765727072696e74223a226162636578616d706c656578616d706c6566696e6765727072696e7432333435227d7d",
+      "content_id": "8b42265e44267fd41c7b2fd3a13759ec29817d97c30d69f36a304c73696b767b"
+    },
+    {
+      "name": "integer_at_safe_boundary",
+      "description": "2^53 - 1, the largest integer exactly representable as an IEEE-754 double (JSON.parse's/JavaScript's safe integer bound), is the largest permitted integer value -- see the corresponding *_beyond_safe_boundary rejection tests in tests/test_content_id.py for the value one past this.",
+      "fields": {"count": 9007199254740991},
+      "canonical_hex": "7b22636f756e74223a393030373139393235343734303939317d",
+      "content_id": "0ab9b84bed022a9fee56eb0859aa9cb158a4c7265f7d3345a479e506ebafd44b"
+    }
+  ]
+}

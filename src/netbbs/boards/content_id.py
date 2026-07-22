@@ -34,31 +34,54 @@ import nacl.hash
 # human-typable, not for maximum collision resistance at network scale.
 _CONTENT_ID_BYTES = 32
 
+# Issue #11: the canonical format must be safely round-trippable by any
+# future non-Python implementation, and JSON itself has no integer type —
+# a number is just a number. The tightest widely-interoperable bound is
+# JavaScript's/JSON.parse's safe integer range (every integer exactly
+# representable as an IEEE-754 double), so a canonical field is bounded
+# to that range rather than Python's unbounded int. No current payload
+# field (levels, ages, days, protocol version) comes remotely close to
+# this bound; it exists to reject a future field before it silently
+# produces bytes only Python's own arbitrary-precision ints can hash
+# consistently.
+_MAX_SAFE_INTEGER = 2**53 - 1
+_MIN_SAFE_INTEGER = -_MAX_SAFE_INTEGER
+
 
 class ContentIdError(Exception):
     """Raised when `fields` passed to `compute_content_id`/
-    `canonical_json_bytes` violates design doc round 110's
-    canonicalization rule — currently just "no floats" (round 110 point
-    4): floats are forbidden in anything hashed or signed, since float
-    serialization isn't reliably deterministic across platforms/
-    languages, and every current caller (board/post/channel/file-area
-    IDs) already only ever passes strings."""
+    `canonical_json_bytes` violates the canonical-format rule (design
+    doc §7.2, issue #11): a `float` anywhere, or an `int` outside the
+    cross-language-safe integer range — both forbidden because their
+    serialization isn't reliably deterministic/round-trippable across
+    platforms and languages. Every current caller (board/post/channel/
+    file-area IDs, Link event payloads) already only ever passes
+    strings and small ints, so neither rule affects existing behavior."""
 
 
 def _normalize_for_hashing(value):
     """
-    Recursively normalize `value` per round 110's canonicalization rule:
-    every string is Unicode-NFC-normalized (round 110 point 3), and a
-    `float` anywhere raises `ContentIdError` (round 110 point 4) rather
-    than being silently serialized. Dicts/lists are walked recursively
-    so the rule applies uniformly regardless of nesting depth; every
-    other type (str already handled, int, bool, None) passes through
-    unchanged — `bool` is deliberately not mistaken for a numeric type
-    here despite `isinstance(True, int)` being true in Python, since
-    JSON already serializes it as `true`/`false`, never a number.
+    Recursively normalize `value` per the canonicalization rule (design
+    doc §7.2): every string is Unicode-NFC-normalized, a `float` anywhere
+    raises `ContentIdError`, and an out-of-safe-range `int` raises
+    `ContentIdError` too. Dicts/lists are walked recursively so the rule
+    applies uniformly regardless of nesting depth; every other type (str
+    already handled, in-range int, bool, None) passes through unchanged —
+    `bool` is deliberately not mistaken for a numeric type here despite
+    `isinstance(True, int)` being true in Python, since JSON already
+    serializes it as `true`/`false`, never a number.
     """
     if isinstance(value, float):
-        raise ContentIdError(f"floats are forbidden in content-addressed fields (round 110): {value!r}")
+        raise ContentIdError(f"floats are forbidden in content-addressed fields: {value!r}")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if not (_MIN_SAFE_INTEGER <= value <= _MAX_SAFE_INTEGER):
+            raise ContentIdError(
+                f"integer {value!r} is outside the cross-language-safe range "
+                f"[{_MIN_SAFE_INTEGER}, {_MAX_SAFE_INTEGER}] for content-addressed fields"
+            )
+        return value
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
     if isinstance(value, dict):

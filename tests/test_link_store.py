@@ -12,6 +12,7 @@ isolation.
 from __future__ import annotations
 
 from netbbs.auth.users import create_user
+from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
 from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
@@ -268,6 +269,48 @@ def test_load_link_node_reconstructs_self_originated_board_post_edit(tmp_path):
 
     assert board_post.content_id in node.post_edits
     assert [e.content_id for e in node.post_edits[board_post.content_id]] == [edit.content_id]
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_edit_chain_when_created_at_ties(tmp_path, monkeypatch):
+    """Issue #11's "deterministic ordering when timestamps tie" question,
+    applied to restart reconstruction: two real successive `edit_post`
+    calls *have* landed on the identical microsecond before (see
+    `test_list_posts_page_returns_all_in_order`'s own comment in
+    tests/test_boards.py), so this isn't a hypothetical. Unlike the
+    peer-received loop above (already ordered by the locally-assigned
+    `received_at`), the self-originated loop sorted only by the
+    payload's own `created_at` -- a tie there left SQLite's row order
+    unspecified, risking `node.post_edits` reconstructing in the wrong
+    causal order after a restart. Forces the tie via `monkeypatch` (real
+    wall-clock timing can't be relied on to reproduce it on demand) and
+    confirms the chain still reconstructs in true creation order."""
+    frozen = "2026-01-01T00:00:00.000000+00:00"
+    monkeypatch.setattr(posts_module, "utc_now_iso", lambda: frozen)
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=creator)
+    link_board(db, board, node_identity=own_identity)
+    post = create_post(db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=own_identity)
+
+    first_edited = edit_post(db, post, board, subject="v2", body="v2", edited_by=creator)
+    first_edit = queue_board_post_edit_if_linked(
+        db, first_edited, board, node_identity=own_identity, edited_by=creator
+    )
+    second_edited = edit_post(db, first_edited, board, subject="v3", body="v3", edited_by=creator)
+    second_edit = queue_board_post_edit_if_linked(
+        db, second_edited, board, node_identity=own_identity, edited_by=creator
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert [e.content_id for e in node.post_edits[board_post.content_id]] == [
+        first_edit.content_id,
+        second_edit.content_id,
+    ]
     db.close()
 
 

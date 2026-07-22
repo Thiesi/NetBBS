@@ -168,7 +168,18 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     for row in db.connection.execute(
         "SELECT link_event_json FROM posts "
         "WHERE link_event_json IS NOT NULL AND post_id != root_post_id "
-        "ORDER BY created_at ASC"
+        # Issue #11's ordering-tie-break question, applied here: `created_at`
+        # is the edit's own claimed payload timestamp, not a locally-assigned
+        # monotonic value, so two edits made within the same timestamp
+        # resolution would otherwise leave SQLite's tie order unspecified.
+        # `id` (this table's own INTEGER PRIMARY KEY rowid) is assigned in
+        # true insertion order regardless of any timestamp tie, matching the
+        # peer-received loop above, which already orders by the locally-
+        # assigned `received_at` for the identical reason -- neither loop may
+        # trust the payload's own `created_at` alone to reconstruct chain
+        # order, since nothing here re-verifies `previous_event_id` linkage
+        # the way live `handle_events` acceptance does.
+        "ORDER BY created_at ASC, id ASC"
     ):
         envelope = json.loads(row["link_event_json"])
         if envelope["envelope"]["object_type"] != BOARD_POST_EDIT_OBJECT_TYPE:

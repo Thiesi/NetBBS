@@ -85,6 +85,29 @@ def test_int_is_allowed():
     compute_content_id({"count": 42})  # must not raise
 
 
+# -- issue #11: integers bounded to the cross-language-safe range -----------
+
+
+def test_integer_at_safe_boundary_is_allowed():
+    compute_content_id({"count": 2**53 - 1})  # must not raise
+    compute_content_id({"count": -(2**53 - 1)})  # must not raise
+
+
+def test_integer_beyond_safe_boundary_raises():
+    with pytest.raises(ContentIdError):
+        compute_content_id({"count": 2**53})
+
+
+def test_negative_integer_beyond_safe_boundary_raises():
+    with pytest.raises(ContentIdError):
+        compute_content_id({"count": -(2**53)})
+
+
+def test_nested_out_of_range_integer_raises():
+    with pytest.raises(ContentIdError):
+        compute_content_id({"payload": {"items": [1, 2**53]}})
+
+
 # -- round 110: canonical_json_bytes is the same bytes compute_content_id hashes --
 
 

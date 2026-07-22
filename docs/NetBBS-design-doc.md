@@ -607,16 +607,58 @@ A durable Link event uses a signed envelope:
 ```
 
 The content ID and signature cover the entire canonical envelope, including the
-object type. The object type therefore provides domain separation.
+object type. Object type is therefore **mandatory domain separation**: it is
+intrinsic to the exact bytes that get hashed and signed, not a caller
+convention a future event type could accidentally bypass by reusing another
+type's shape.
 
-Current canonical encoding uses compact deterministic JSON, recursive Unicode
-NFC normalization, and rejects floating-point values. Protocol-visible schemas
-must define allowed values and omit-versus-null behavior deliberately.
+**Canonicalization rule** (binding and language-independent — issue #11):
 
-Issue #11 remains the authority for unfinished interoperability details,
-including complete cross-language canonicalization rules, strict numeric and
-unknown-field policy, and golden signed test vectors. Existing Python behavior
-must not be mistaken for a complete language-independent specification.
+- Compact JSON: no insignificant whitespace, `":"`/`","` separators only.
+- Object keys sorted by exact Unicode codepoint sequence, at every nesting
+  depth.
+- Every string is recursively normalized to Unicode NFC before serialization.
+  Two payloads differing only in normalization form (precomposed versus
+  combining-mark sequences) canonicalize identically and share one content ID.
+- Floating-point values are forbidden anywhere in a hashed or signed field:
+  float serialization is not reliably deterministic across languages and
+  platforms.
+- Any other JSON number is an integer and must fall within
+  `[-(2^53 - 1), 2^53 - 1]` — the widest range exactly representable as an
+  IEEE-754 double, matching JavaScript's/JSON's own safe-integer bound. No
+  current field approaches this bound; the rule exists so a future field
+  cannot silently produce bytes only an arbitrary-precision-integer language
+  can hash consistently.
+- `true`/`false` are booleans, never conflated with the integers `1`/`0`.
+- A field that does not apply to a given event omits the key entirely.
+  Storing it as an explicit JSON `null` is a **different, distinct canonical
+  value** — `{"parent_post_id": null}` and `{}` must never share a content ID.
+  Each event schema states, field by field, which behavior applies; a builder
+  must not choose between omission and `null` ad hoc.
+- Wire JSON containing the same key twice in one object, at any nesting
+  depth, is rejected outright before it is canonicalized, hashed, or
+  verified — never silently resolved by a "last one wins" rule. Two
+  different JSON parser implementations can disagree about which duplicate
+  value wins; a sender and receiver that disagree would each reconstruct a
+  different object from what they would both call "the same bytes."
+
+`netbbs.boards.content_id.canonical_json_bytes` is the sole canonicalization
+implementation this codebase uses to produce these bytes. Anything that
+signs, verifies, or content-addresses a Link event reuses it directly, never
+a second, independently-maintained implementation that could quietly drift.
+`netbbs.link.events.strict_json_loads` is the reference implementation of the
+duplicate-key rule, applied to every message this node's transport reads off
+the wire before that JSON becomes a candidate envelope.
+
+Golden test vectors (`tests/fixtures/link_canonical_vectors.json`, checked by
+`tests/test_link_canonical_vectors.py`) pin exact canonical bytes and content
+IDs for representative payloads, including Unicode normalization,
+omitted-versus-null, and integer-boundary cases. An independent,
+non-Python implementation of this format is compatible with NetBBS Link if
+and only if it reproduces every vector's canonical bytes exactly.
+
+Existing Python behavior implements the rule above; it is not a separate,
+looser specification of its own.
 
 ### 7.3 Author references
 
@@ -632,6 +674,17 @@ keys, validates its transition history back to the root identity.
 Only the author tiers implemented for a specific event type are accepted. The
 existence of the tagged union does not imply every tier already works for every
 feature.
+
+A `node_vouched_user` author (or a `link_message` sender/recipient) is
+identified by the pair `(home_node_fingerprint, local_user_id)`, never by
+`local_user_id` alone — a username is unique only within its own node, so the
+pair, not the bare name, is the globally-scoped identity issue #11 asks for,
+matching the `user@node-fingerprint` addressing form already used elsewhere.
+`local_user_id` is the account's canonical, immutable, stored-case username
+(§5); it participates in canonical bytes exactly as stored, after the same
+NFC normalization every string field receives — never case-folded the way
+local login/uniqueness lookups are, since a signed event fixes one exact
+string forever, not a case-insensitive equivalence class.
 
 ### 7.4 Immutable content and state-changing chains
 
@@ -664,6 +717,21 @@ safety comes from the authoritative object state or chain, not from a purgeable
 
 Tombstones are chain events, not deletion of history. Local byte pruning cannot
 resurrect state if the permanent projection rules remain intact.
+
+Two events both validly extending the same predecessor at the same instant is
+impossible by definition: a chain has exactly one current head, and an
+incoming event either extends it (accepted) or does not (rejected as
+reordering, or handled as a fork, per the object's own policy). `created_at`
+is descriptive metadata for display and audit, never the mechanism that
+orders or authorizes a chain extension — two genuinely successive events can
+legitimately share one clock's timestamp resolution. Reconstructing a chain
+from storage (for example, after a restart) must walk the same
+`previous_event_id`/head-pointer links original acceptance already verified,
+or rely on the storage layer's own locally-assigned, monotonic receipt
+ordering — never re-sort on the payload's own claimed `created_at` alone.
+Ordering among unrelated immutable events for local presentation (for
+example, a board's post listing) is a separate, local concern with its own
+stable tie-break, not a protocol question.
 
 ### 7.5 Version and unknown-event behavior
 
@@ -1166,6 +1234,15 @@ Before calling affected functionality production ready, test as applicable with:
 - long-running operation across midnight and DST changes;
 - update, restart, backup, and restore on NetBSD.
 
+### 14.5 Canonical format compatibility vectors
+
+Any change to the canonicalization rule (§7.2) must update
+`tests/fixtures/link_canonical_vectors.json` and keep
+`tests/test_link_canonical_vectors.py` passing. A vector's canonical bytes or
+content ID may only change alongside a deliberate, documented
+canonicalization change — never as the side effect of an unrelated
+refactor.
+
 ---
 
 ## 15. Roadmap and phase boundaries
@@ -1276,9 +1353,21 @@ GitHub issues are authoritative and may evolve beyond this summary.
 
 ### Issue #11 — canonical Link format
 
-Still needs a complete interoperable specification for canonical values,
-unknown/duplicate fields, numeric ranges, schema/version behavior, and golden
-vectors. Current Python encoding is implementation, not the complete spec.
+§7.2/§7.3/§7.4 now state the complete rule: canonical byte encoding (sorted
+keys, recursive NFC, compact separators), the safe-integer bound, duplicate-
+key wire rejection, omitted-versus-null field semantics, mandatory
+object-type domain separation, event-identity distinctness (a nonce for
+immutable creation events; `previous_event_id` chains, never `created_at`,
+for per-object chains), `(home_node_fingerprint, local_user_id)` as a
+node-vouched author's globally-scoped identity, and golden test vectors
+(`tests/fixtures/link_canonical_vectors.json`).
+
+Still open: this specification and its vectors exist only as this
+codebase's own Python implementation plus one fixture file. No independent,
+non-Python implementation has yet exercised the vectors to prove real
+cross-language interoperability, and the rule is not yet published as an
+external protocol document outside this repository. Closing that gap is
+implementation/publication follow-up, not a further design decision.
 
 ### Issue #56 — unread, follows, activity, and search
 
