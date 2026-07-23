@@ -1487,18 +1487,18 @@ alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
 for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
 required for restore itself.
 
-`restore_backup(*, source, db_path, identity_dir)` reverses the five copies.
-**Precondition, checked, not just documented**: before writing anything,
-attempts `sqlite3.connect(str(db_path), timeout=0)` followed by
-`BEGIN IMMEDIATE` against any existing `db_path` — if that fails (a live
-node already holds the write lock), refuses the entire restore with a clear
-error rather than silently overwriting bytes out from under a running
-process's open connection. This catches the same-machine, currently-running
-case; it cannot catch — and this remains an accepted, documented operator
-responsibility, unchanged from this section's prior wording — a second
-instance of the same identity already running on a *different* machine.
+`restore_backup(*, source, db_path, identity_dir)` reverses the five copies
+-- **superseded by §13.10's staged/validated workflow (issue #75)**: the
+original mechanism restored each artifact in place, sequentially, with no
+validation before the first live path was overwritten and no recoverable
+state if interrupted partway. §13.10 replaces the restore side of this
+mechanism; `create_backup` and the artifact table above are unchanged.
+
 Restoration always resumes the same node identity; there is still no
-supported way to run an old and a restored instance simultaneously.
+supported way to run an old and a restored instance simultaneously -- a
+second instance of the same identity already running on a *different*
+machine remains an accepted, documented operator responsibility (§13.10's
+own PID-file check only ever covers *this* machine).
 
 **Explicitly deferred, not part of this slice**: encrypting backup
 contents at rest (identity material is already unencrypted-by-default on a
@@ -1536,20 +1536,21 @@ including:
   activity, board/event counters, and relay-mailbox size — is available in
   the SysOp menu's `[L]ink status` screen; per-seed health has nothing to
   show yet, since no per-seed success/failure tracking exists);
-- disk, event, mailbox, relay, and bandwidth quotas (§13.9 specifies peer-
-  count, events-per-request, carried-board-count, received-post-size,
-  request-body-size, and request-rate quotas; design-complete, not yet
-  implemented. Event-retention/purging and node-wide disk quota are
-  explicitly deferred out of that slice — see §13.9's own reasoning);
+- disk, event, mailbox, relay, and bandwidth quotas (§13.9 — peer-count,
+  events-per-request, carried-board-count, received-post-size, request-
+  body-size, and request-rate quotas, implemented. Event-retention/purging
+  and node-wide disk quota are explicitly deferred out of that slice — see
+  §13.9's own reasoning);
 - integrity checks and crash recovery;
 - bounded diagnostic log retention without content logging;
 - protocol/database upgrade and rollback compatibility;
 - graceful drain of Link work during shutdown;
 - disaster recovery drills exercising a restore under realistic conditions
   (§13.4 specifies the backup/restore mechanism itself — `netbbs.backup`,
-  implemented; this bullet is the separate, still-fully-open work of
-  proving that mechanism against crash-mid-transfer, corrupt-snapshot, and
-  stale-backup scenarios, not just its happy path).
+  implemented; §13.10 replaces its original restore mechanism with a
+  staged, validated, interruption-recoverable one and proves it against
+  corrupt/truncated backups, missing components, and mid-switch
+  interruption — issue #75, design-complete, not yet implemented).
 
 An externally operated persistent Link node should not be considered production
 ready before these controls exist and have been exercised.
@@ -1813,6 +1814,118 @@ scope:
 display precedent) and a carried-boards `current/max_carried_boards` line;
 rate-limit rejections are logged the same way `LoginThrottle` rejections
 already are, not surfaced as a separate screen in this slice.
+
+Design-complete, not yet implemented.
+
+### 13.10 Staged, validated restore (issue #75)
+
+**Problem, confirmed by reading the code, not assumed from the issue alone**:
+the original `restore_backup` copies each of the five artifacts (§13.4)
+straight into its live path, sequentially, in place -- `shutil.copy2`/
+`copytree` directly onto `db_path`/`identity_dir`/etc., with the previous
+live directory `shutil.rmtree`d immediately before the replacement copy
+starts. Nothing about the backup is checked before the first live path is
+touched (the manifest's own fields today are metadata only -- no
+checksums), and an interruption mid-copy leaves neither the old state (already
+half-deleted) nor a complete new one -- exactly the "restore intended to
+recover a node can make it less recoverable" failure the issue describes.
+The write-lock probe (`_require_not_in_use`) also only ever catches a
+transaction genuinely in flight at that instant, not an idle-but-running
+node holding no lock between transactions -- its own docstring already
+said so.
+
+**Mechanism**: validate everything first, stage a full copy, then switch
+staged artifacts into their live paths with atomic renames -- never restore
+by copying directly onto a live path again.
+
+**1. Manifest gains per-artifact checksums.** `create_backup` now writes
+`manifest["checksums"] = {relative_path: sha256_hex}` for every file it
+captures *outside* the content-addressed blob tree: the database snapshot,
+each of the four identity files, the SSH host key, and the welcome banner.
+The blob tree needs no manifest entry at all -- `netbbs.files.storage`
+already lays every blob out at `root/{sha256[:2]}/{sha256}`, so a blob's own
+path *is* its claimed hash; restore verifies the tree by recomputing each
+blob's hash and checking it against its own filename, catching truncation/
+corruption with no extra bookkeeping and no manifest growth as a node's
+file area grows.
+
+**2. Full validation before any live path is touched.** A new
+`_validate_backup_source(source) -> Manifest`, called first, unconditionally:
+manifest exists and parses; every checksummed file listed is present and its
+hash matches; the database snapshot passes `PRAGMA integrity_check` *and*
+opens cleanly as a real `netbbs.storage.database.Database` (this reuses,
+rather than reimplements, that class's own existing "refuse a schema newer
+than this build supports" guard from `_apply_migrations` -- restoring a
+backup taken by a newer NetBBS version onto an older install was already a
+real risk this makes checked, not just checked-if-someone-remembers); the
+identity directory, if present, actually loads via `netbbs.link.node_
+identity.NodeIdentity.load` (a genuine functional check -- chain-to-key
+consistency and all -- not just "the files exist"). Any failure raises
+`BackupError` with the specific problem before a single live byte moves.
+
+**3. Node-liveness check gains a PID file, kept as a second layer alongside
+the existing lock probe, not a replacement for it.** `netbbs.__main__`
+writes its own PID to `db_path.parent / f"{db_path.stem}.pid"` once
+started, removed in the same `finally` that already closes the database on
+every exit path (SIGTERM, SIGINT, and startup failure alike). Restore reads
+this file if present and checks the PID is still alive with a portable,
+best-effort liveness check (`os.kill(pid, 0)` on POSIX; a `tasklist` shell-
+out on Windows for local dev/test convenience -- the deployment target is
+NetBSD, where the POSIX path is what actually matters) -- refuses if alive,
+catching the idle-but-running case the lock probe alone could not. A PID
+file present but pointing at a dead process is treated as a stale leftover
+from an unclean exit (warn, proceed) rather than a hard refusal -- the same
+"an operator responsibility, not a load-bearing distributed lock" framing
+this section already applies to the cross-machine case.
+
+**4. Stage before touching anything live.** Every artifact is copied (with
+its checksum reverified against the fresh copy, catching corruption
+introduced by the staging copy itself, not just the original backup) into
+`db_path.parent / f".netbbs-restore-staging-{token}"` -- a sibling directory
+on the same filesystem as the live targets, which is what makes step 5's
+renames atomic rather than a second copy.
+
+**5. Switch via rename, not copy, with a non-silent marker for the gap
+between the first and last rename.** Before switching anything, restore
+writes a small state file (`db_path.parent / ".netbbs-restore-state.json"`)
+naming the staging directory, a per-token rollback directory, and which
+artifacts remain to switch. For each of the five targets in turn: rename
+the current live artifact (if any) into `db_path.parent /
+f".netbbs-restore-rollback-{token}"` under its own name, then rename the
+staged artifact into the live path, updating the state file after each
+completed step. If any single rename fails, everything already switched is
+renamed back from the rollback directory (best-effort, since the renames
+already succeeded once and are switching back onto paths that still exist)
+before re-raising -- recovering the previous generation automatically in
+the common case. The state file is removed only once every artifact has
+switched (success) or every switched artifact has been rolled back
+(recovered failure); if the process is killed outright mid-switch rather
+than raising a catchable exception, the state file survives as the "clearly
+identified... not a silent mixture" record the acceptance criteria asks
+for, and a subsequent `restore` invocation refuses to start a new one over
+an unresolved marker rather than compounding the mess.
+
+**6. The rollback generation is not auto-deleted on success.** A completed
+restore leaves `.netbbs-restore-rollback-{token}` on disk holding the
+*previous* live state, not silently discarded -- matching this project's
+"never silently discard state a human might still need" stance (§13.5) and
+`netbbs.selfupdate`'s own "kept on disk, rotated out" precedent for a
+superseded release directory. The CLI prints its path; cleanup is an
+explicit operator/cron action (retention/rotation stays out of scope here,
+same as §13.4's own already-deferred list), not automatic.
+
+**Disaster-recovery drill.** A documented procedure (`docs/` or the CLI's
+own `--help`, not repeated here) walks an operator through: stop the node;
+corrupt or truncate a real backup and confirm restore refuses before
+touching anything live; kill the restore process mid-switch (a test hook,
+not a production flag) and confirm the previous generation is intact or
+the state file clearly names what to do; complete a real restore and
+confirm identity continuity (same fingerprint), every configured transport
+still authenticates, previously created local content is still browsable,
+and Link resumes gossiping with its peers on restart. To be proven
+functionally against real interruption/corruption scenarios as part of
+implementing this slice; running it specifically on NetBSD hardware will
+remain an operator step this design enables but does not itself execute.
 
 Design-complete, not yet implemented.
 
