@@ -1593,6 +1593,29 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
     assert clock_text != utc_clock_text
 
 
+# -- backup status (design doc §13.4, issue #60's first operational slice) --
+
+
+def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
+    session = FakeSession(["s", "k", "b", "b"])
+    _run(session, lane, sysop)
+    assert "No backup has been taken on this node yet." in _written_text(session)
+
+
+def test_backup_status_shows_last_backup_summary(db, lane, sysop):
+    from netbbs.backup import create_backup
+
+    identity_dir = db.path.parent / "netbbs_identity"
+    destination = db.path.parent / "backup1"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=destination)
+
+    session = FakeSession(["s", "k", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Last backup:" in text
+    assert str(destination) in text
+
+
 # -- Link status (issue #60, narrow scope) -----------------------------------
 
 

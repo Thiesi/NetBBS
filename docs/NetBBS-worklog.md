@@ -1094,6 +1094,20 @@ DB-references-a-blob invariant only holds in that direction) and the
 restore-time precondition check (`sqlite3.connect(db_path, timeout=0)` +
 `BEGIN IMMEDIATE`, refusing loudly if a live process already holds the
 write lock, rather than silently overwriting bytes out from under it).
+Implemented and verified against a real, separately-started node process
+(`netbbs.backup`): confirmed the precondition check does catch a real
+concurrent writer holding `BEGIN IMMEDIATE`, and confirmed a full
+create-wipe-restore cycle round-trips the database, blobs, and node
+identity (same Link fingerprint, no new SSH host key generated) intact.
+One real limitation worth remembering, not just a hypothetical: the
+`BEGIN IMMEDIATE` probe only catches a write actually in flight at that
+exact instant — SQLite's WAL-mode locking does not hold the write lock
+between transactions, and this project's own writes are always short
+`execute()`-then-`commit()` pairs with no surrounding delay. So this
+check reliably catches "restoring during an active write," not "the
+node happens to be running but idle" — the latter is the overwhelmingly
+common case, and the actual guarantee against it remains the documented
+operator precondition (stop the node first), not this code.
 
 ### Bounds and visibility
 

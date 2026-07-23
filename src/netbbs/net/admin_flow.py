@@ -65,6 +65,7 @@ from netbbs.auth.users import (
     set_user_disabled,
     set_user_level,
 )
+from netbbs.backup import get_last_backup_summary
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
@@ -358,6 +359,10 @@ async def _system_menu(
             await session.write_line("")
             await _link_status_screen(session, lane, actor, link_context=link_context)
             await _draw_system_menu(session, node_controls, link_context)
+        elif choice == "k":
+            await session.write_line("")
+            await _backup_status_screen(session, lane, actor)
+            await _draw_system_menu(session, node_controls, link_context)
         else:
             await session.write(reject_keystroke())
 
@@ -366,7 +371,10 @@ async def _draw_system_menu(
     session: Session, node_controls: NodeControls | None, link_context: LinkContext | None = None
 ) -> None:
     header = colored("\r\nSystem:", fg_color=HEADER_COLOR, bold=True)
-    option_list = [menu_key("W", "elcome banner"), menu_key("U", "pdate"), menu_key("T", "imestamp format")]
+    option_list = [
+        menu_key("W", "elcome banner"), menu_key("U", "pdate"), menu_key("T", "imestamp format"),
+        menu_key("K", "backup status"),
+    ]
     if link_context is not None:
         option_list.append(menu_key("L", "ink status"))
     if node_controls is not None:
@@ -665,6 +673,37 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
 
     await lane.run(_apply)
     await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
+
+
+# -- backup status (design doc §13.4, issue #60's first operational slice) --
+
+
+async def _backup_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Read-only visibility into when this node was last backed up
+    (`netbbs.backup.get_last_backup_summary`) -- there is deliberately
+    no "back up now"/"restore" action here. Both are `python -m netbbs.
+    backup {create,restore}`, a standalone, cron-schedulable CLI, not a
+    live-session action (see that module's docstring for why: a backup
+    needs to be triggerable by an external scheduler, not only by a
+    SysOp who remembers to log in and press a key). Nothing here
+    mutates anything, so `actor` is accepted only for signature
+    consistency with this submenu's other screens, same as
+    `_link_status_screen`.
+    """
+    checked_at, path = await lane.run(get_last_backup_summary)
+
+    await session.write_line(colored("\r\nBackup status:", fg_color=HEADER_COLOR, bold=True))
+    if checked_at is not None:
+        display_format, display_timezone = await lane.run(resolve_display_preferences)
+        when = format_for_display(checked_at, override_format=display_format, override_timezone=display_timezone)
+        await session.write_line(f"Last backup: {when}")
+        await session.write_line(f"Location: {sanitize_text(path or '')}")
+    else:
+        await session.write_line(colored("No backup has been taken on this node yet.", fg_color=MUTED_COLOR))
+    await session.write_line(
+        colored("Run 'python -m netbbs.backup create --to <path>' to create one.", fg_color=MUTED_COLOR)
+    )
 
 
 # -- node-wide display format/timezone -------------------------------------
