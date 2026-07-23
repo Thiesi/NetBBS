@@ -1429,8 +1429,9 @@ Security state and unread user data must not be silently discarded.
 Issue #60 remains the authority for the incomplete production operating model,
 including:
 
-- generic persistent outbound-work items;
-- retry, backoff, dead-letter, replay, and cancellation;
+- generic persistent outbound-work items, retry, backoff, dead-letter,
+  replay, and cancellation (§13.7 specifies this — `netbbs.link.work_items`,
+  design-complete, not yet implemented);
 - sync-lag and historical/trend peer-health visibility (a read-only current-
   state view — peer count/mode, dial-reliability score, last contact, relay
   activity, board/event counters, and relay-mailbox size — is available in
@@ -1443,13 +1444,139 @@ including:
 - graceful drain of Link work during shutdown;
 - disaster recovery drills exercising a restore under realistic conditions
   (§13.4 specifies the backup/restore mechanism itself — `netbbs.backup`,
-  design-complete, not yet implemented; this bullet is the separate,
-  still-fully-open work of proving that mechanism against crash-mid-
-  transfer, corrupt-snapshot, and stale-backup scenarios, not just its
-  happy path).
+  implemented; this bullet is the separate, still-fully-open work of
+  proving that mechanism against crash-mid-transfer, corrupt-snapshot, and
+  stale-backup scenarios, not just its happy path).
 
 An externally operated persistent Link node should not be considered production
 ready before these controls exist and have been exercised.
+
+### 13.7 Outbound work items and retry (issue #60's second operational slice)
+
+**Scope decision, made here rather than assumed**: this does *not* uniformly
+cover every retry-shaped mechanism in the Link subsystem — only the two that
+actually share the same shape. Auditing what exists today:
+
+| Mechanism | Current behavior | Fits a work-item model? |
+|---|---|---|
+| Board/identity event gossip (`netbbs.link.sync`) | Every node-owned event is unconditionally re-pushed to every seed, every fixed-interval pass, forever — no attempt counter, no per-peer state at all. Safe and cheap only because the receiving side's own dedup (`link_events`) makes redundant delivery free. | **No.** There is no terminal "gave up" state that makes sense — a node's own content should be gossiped for as long as the node exists. Forcing this into a per-target attempt/backoff/dead-letter model would be inventing a failure mode (and per-peer tracking overhead) this mechanism deliberately has never needed. |
+| Relay selection/consent maintenance (`_maintain_relay_selection`) | Continuously re-evaluated every pass against an evolving reliability score (`netbbs.link.reliability`), not a single item that must eventually resolve once. | **No.** This is ongoing re-optimization among many candidates, not "keep trying this one specific thing until it succeeds or we give up." It already has its own retry-like model (score-driven re-ranking); wrapping it in a second, differently-shaped abstraction would just be two competing retry policies for the same decision. |
+| Link mail delivery (`mail_messages.link_delivery_status`) | Every `'pending'` row is re-pushed to its recipient every sync pass, forever, with **no cap** — the schema already reserves an unused `'expired'` status value for exactly this gap (round 93), never produced by any code path today. | **Yes.** A specific payload to a specific fingerprint that must eventually be confirmed or abandoned — the canonical case. |
+| Link mail acknowledgement delivery (`link_mail_acknowledgements.sent_at IS NULL`) | Identical shape and identical gap: re-pushed every pass forever, no cap, no dead-letter. | **Yes.** Same reasoning as mail delivery. |
+
+So `netbbs.link.work_items` is scoped to Link mail delivery and Link mail
+acknowledgement delivery only — the two mechanisms that are both (a) a
+specific payload addressed to a specific fingerprint, and (b) currently
+missing exactly the retry/backoff/dead-letter/inspection issue #60 asks for.
+Gossip and relay maintenance keep their existing, already-fit-for-purpose
+models unchanged.
+
+**A second scope narrowing, discovered while designing this**: a *work
+item* resolving successfully means "the payload was successfully pushed to
+the recipient's transport (or deposited at a relay)" — never "the recipient
+confirmed receipt." That confirmation, for mail specifically, is a separate,
+higher-level thing: `apply_link_message_accepted`/`apply_link_message_
+bounced` already handle it, driven by a genuine signed event coming back,
+completely unrelated to whether the push itself succeeded. Conflating the
+two was a real risk in an earlier draft of this design — a work item is
+**"pushed"** or **"dead_lettered"**/**"cancelled"**, never **"delivered"**;
+`mail_messages.link_delivery_status` keeps its own independent
+`'pending'`/`'delivered'`/`'bounced'` vocabulary, driven by accepted/bounced
+events exactly as today. The one integration point is one-directional: when
+a `link_mail_delivery` work item dead-letters or is cancelled (the payload
+could never even be successfully pushed, or a SysOp gave up on it
+manually), the caller — not `netbbs.link.work_items` itself, which stays
+completely kind-agnostic — sets `mail_messages.link_delivery_status =
+'expired'`, finally giving that reserved value a real producer. A
+successfully **pushed** work item changes nothing on `mail_messages`: it
+still waits for accepted/bounced exactly as it does today, except the sync
+loop stops wastefully re-pushing bytes that already arrived once — a real
+efficiency fix, not just new capability.
+
+**Schema** (`link_work_items`, matching this project's established Link-table
+conventions — `TEXT NOT NULL` ISO timestamps, a `status` CHECK-constraint
+enum, a partial index on the still-pending predicate):
+
+```sql
+CREATE TABLE link_work_items (
+    id                  INTEGER PRIMARY KEY,
+    kind                TEXT NOT NULL,  -- 'link_mail_delivery' | 'link_mail_ack'
+    reference_id        TEXT NOT NULL,  -- mail_messages.link_event_content_id, or the ack row's own id
+    target_fingerprint  TEXT NOT NULL,
+    status              TEXT NOT NULL
+                        CHECK (status IN ('pending', 'retrying', 'pushed', 'dead_lettered', 'cancelled')),
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    last_attempt_at     TEXT,
+    last_error          TEXT,
+    resolved_at         TEXT,
+    UNIQUE(kind, reference_id, target_fingerprint)
+);
+
+CREATE INDEX idx_link_work_items_due
+    ON link_work_items(next_attempt_at) WHERE status IN ('pending', 'retrying');
+```
+
+`reference_id` is a pointer, not a payload copy — `netbbs.link.work_items`
+never stores or looks at the actual signed event bytes; the caller (mail
+delivery/ack-push code in `sync.py`) already has those via the referenced
+row and is the only thing that knows how to actually attempt the push.
+
+**State machine**: `pending` (never attempted) → `retrying` (attempted at
+least once, not yet resolved) → one of `pushed` / `dead_lettered` /
+`cancelled` (terminal). `enqueue_work_item` is idempotent on
+`(kind, reference_id, target_fingerprint)` — creating a mail message or an
+acknowledgement always enqueues its work item at that same moment, so
+there's no separate "did we remember to schedule this" step to forget.
+
+**Backoff and dead-letter thresholds** (product judgment, not derived from
+anything load-bearing — adjustable later): each failed attempt schedules
+the next one at `min(300s * 2^attempts, 6h)` (starting at the sync loop's
+own default interval, since backing off faster than the loop even runs is
+meaningless, doubling from there, capped at six hours so a long-unreachable
+target still gets retried a few times a day rather than trailing off to
+nothing). Dead-lettered once `attempts >= 10` **or** `now - created_at >= 5
+days`, whichever comes first — the attempts cap is what actually fires in
+the common case (already ~29 hours of real spacing by the tenth attempt);
+the age cap is a safety net for a node that was itself offline for a
+stretch and so accumulated attempts slower than wall-clock time would
+suggest.
+
+**Mechanism**: no new background loop. `netbbs.link.sync.run_link_sync`'s
+existing fixed-interval loop already iterates several independently-loaded
+"pending work" lists every pass (seeds, pending mail, pending
+acknowledgements, relay candidates) — `_push_pending_link_mail`'s and the
+acknowledgement-pushing code's own `load_pending_link_mail`/
+`load_pending_link_mail_acknowledgements` calls are replaced by
+`load_due_work_items(kind=...)` (status in `pending`/`retrying` *and*
+`next_attempt_at <= now`), and each attempt's outcome is recorded via
+`record_success`/`record_failure` instead of silently falling through to
+"try again next pass regardless." Everything else about the loop — lane
+dispatch, per-item try/except-log-and-continue tolerance, the fixed sleep
+— is unchanged.
+
+**SysOp surface**: `list_work_items` (filterable by status/kind) plus
+`replay_work_item`/`cancel_work_item` (both audit-logged via
+`record_action`, matching every other SysOp-triggered mutation in this
+codebase) — a new admin-menu screen, most naturally alongside `[L]ink
+status` under `System`, listing dead-lettered/retrying items with a picker
+to inspect one and replay or cancel it. `replay_work_item` resets a
+`dead_lettered`/`cancelled` item to `pending` with `attempts = 0` and, for
+`link_mail_delivery`, is the one place the caller undoes the
+`mail_messages.link_delivery_status = 'expired'` side effect back to
+`'pending'` — symmetric with how dead-lettering set it.
+
+**Explicitly deferred, not part of this slice**: retention/purge of old
+`dead_lettered`/`cancelled`/`pushed` rows (this table will otherwise grow
+without bound — a real gap, but a generic "how long do resolved audit-
+shaped rows live" question this project doesn't have an established answer
+to yet, not specific to work items); applying this abstraction to any
+future work kind beyond the two named here without first checking it
+actually fits the shape (see the scope-decision table above — the fit
+matters more than the count of kinds); and the quotas/integrity-check/
+log-retention/upgrade-rollback/graceful-shutdown bullets in §13.6, all
+separate, still fully open pieces of issue #60.
 
 ---
 
@@ -1674,6 +1801,16 @@ Issue #56 is fully implemented; all four §6.6 subsections have shipped.
 Implement bounded persistent work queues, retry/dead-letter control, quotas,
 health/status surfaces, integrity checks, log retention, backup/restore drills,
 and upgrade/disaster recovery.
+
+First slice (backup/restore, §13.4) is designed and implemented
+(`netbbs.backup`), verified against a real running node including a
+create-wipe-restore round trip and the live-lock restore refusal. Second
+slice (outbound work items/retry/dead-letter, §13.7) is designed —
+`netbbs.link.work_items`, scoped to Link mail delivery and acknowledgement
+delivery specifically (not gossip or relay maintenance, which don't fit the
+same shape) — not yet implemented. Quotas, integrity/crash-recovery
+checks, log retention, upgrade/rollback compatibility, graceful shutdown,
+and disaster-recovery drills remain fully open.
 
 ### Issue #55 — trust and quarantine
 

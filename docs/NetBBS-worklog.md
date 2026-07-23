@@ -1051,6 +1051,46 @@ Persistent dedup/event retention policy still needs a correctness-preserving
 implementation. Purging the fast cache must not make old control events
 re-applicable or deleted/suppressed content spontaneously reappear.
 
+### Not every retry-shaped mechanism fits a generic work-item/DLQ model
+
+Designing issue #60's outbound-work-item abstraction (§13.7) required
+auditing every existing retry-shaped mechanism in `netbbs.link` first, and
+two of them turned out not to fit despite looking superficially similar:
+
+- **Board/identity event gossip** (`netbbs.link.sync`) re-pushes every
+  node-owned event to every seed, every pass, forever, with no per-peer
+  state — deliberate, not a gap, since the receiving side's own dedup
+  (`link_events`) makes redundant delivery free, and there is no correct
+  "give up" state for a node's own content.
+- **Relay selection/consent maintenance** continuously re-evaluates
+  candidates against an evolving reliability score — ongoing
+  re-optimization among many candidates, not one item that must resolve
+  once. It already has its own working retry-like model (score-driven
+  re-ranking); a second, differently-shaped retry abstraction bolted on
+  top would just compete with it.
+
+Only Link mail delivery and Link mail acknowledgement delivery actually
+fit: a specific payload addressed to a specific fingerprint, needing
+confirm-or-abandon semantics, currently missing exactly that (both retry
+forever today with zero cap — a real gap, not a deliberate choice, unlike
+gossip above). **The lesson for future "let's generalize this" work**:
+resemblance in surface behavior ("this also retries on failure") isn't
+enough — check whether the mechanism has a per-target item with a
+meaningful terminal state before folding it into a shared abstraction, or
+the abstraction ends up modeling a failure mode that was never real.
+
+A second, easy-to-miss distinction found in the same design pass: a work
+item resolving successfully means "the payload was pushed to the
+recipient's transport/relay," never "the recipient confirmed receipt."
+For Link mail specifically, confirmed receipt is a separate, existing
+concept (`apply_link_message_accepted`/`apply_link_message_bounced`,
+driven by a genuine signed event coming back) that has nothing to do with
+whether a given push attempt succeeded. Conflating "pushed" with
+"delivered" was a real mistake in an early draft of this design, caught
+before implementation — worth remembering for any future retry/delivery
+abstraction: transport-level success and domain-level confirmation are
+almost always two different questions with two different failure modes.
+
 ---
 
 ## 10. Operational constraints
