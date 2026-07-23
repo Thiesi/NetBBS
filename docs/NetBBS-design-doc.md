@@ -1594,6 +1594,58 @@ sync tests (unchanged, still passing against the refactored push loop)
 plus new dedicated tests for the state machine, the mail/ack integration,
 and the SysOp screen.
 
+### 13.8 Session lockdown, drain, and shutdown
+
+Three related but distinct SysOp `[N]ode`-menu controls over who can
+connect and who stays connected, each answering a different question:
+
+| Control | Question it answers | New logins | Already-connected sessions | Reversible | Ends the node process |
+|---|---|---|---|---|---|
+| `[S]hutdown` | "Take this node down" | Blocked for everyone, no bypass | Warned, then all disconnected (immediately, or after a grace period) | No | Yes |
+| `[M]aintenance mode` | "Stop admitting ordinary users for now" | Blocked for non-SysOps; a SysOp can still log in | Untouched | Yes — toggle again | No |
+| `[D]rain` | "Clear ordinary users off, right now" | Unaffected (not this control's job) | Non-SysOps warned, then disconnected after an operator-chosen delay; SysOps (including the issuer) untouched | N/A — one-shot action | No |
+
+`[S]hutdown`'s own sequence (round 51) already had the right order in
+code — lock out new logins and warn everyone immediately, then disconnect
+once the delay elapses — but its confirmation prompt's wording had drifted
+out of sync with that, describing disconnect happening *before* the
+lockout; fixed to match the actual, unchanged behavior.
+
+**`[M]aintenance mode`** (`netbbs.net.maintenance.MaintenanceMode.
+enable_lockdown`/`disable_lockdown`/`is_lockdown_active`) is a second,
+independent flag on the same class that already holds shutdown's
+`activate`/`is_active` — deliberately not the same flag, and deliberately
+checked at a different point in the connection lifecycle: shutdown's gate
+fires before login even begins (nothing is known yet about who's
+connecting, so no bypass is possible or desired — the whole node is going
+away regardless); lockdown is checked *after* credentials verify
+(`netbbs.net.login_flow.run_authenticated_session`), specifically so a
+SysOp can still reach the menu that turns it back off. A SysOp who logs in
+while it's active sees a `(Maintenance mode is ON.)` notice appended to
+their welcome line; a non-SysOp sees `LOCKDOWN_MESSAGE` and is disconnected
+before ever reaching the main menu. Turning lockdown on does nothing to
+sessions already connected — that is `[D]rain`'s job, a deliberately
+separate action, not an implied side effect.
+
+**`[D]rain`** (`netbbs.net.shutdown.run_drain_sequence`) borrows
+`run_shutdown_sequence`'s warn-then-disconnect shape but never touches
+`maintenance`/`shutdown_event` — the node keeps running throughout.
+`ActiveSessionRegistry.broadcast_to_all`/`disconnect_all` both gained an
+`exclude_sysops` parameter (backed by a new `is_sysop` flag recorded on
+each session's entry at `mark_authenticated` time) so a SysOp, including
+whoever issued the drain, is never warned or disconnected by it — the
+whole point is staying connected to keep managing the node while ordinary
+users clear out for a change that needs a reconnect to take effect.
+
+**The intended workflow** (Thiesi's own framing): turn on `[M]aintenance
+mode` first — if nobody else is online, or existing sessions don't need
+disturbing, that alone is enough. If someone connected already needs to be
+moved along, follow up with `[D]rain`. The two are composable, not
+coupled: `[D]rain` never enables lockdown itself, and enabling lockdown
+never triggers a drain — each is a deliberate, separate SysOp decision,
+matching how follow/membership/node-carry are kept independent elsewhere
+in this design (§6.6) rather than one silently implying another.
+
 ---
 
 ## 14. Testing and interoperability requirements

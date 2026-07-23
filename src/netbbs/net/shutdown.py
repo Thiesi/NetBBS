@@ -1,7 +1,9 @@
 """
-The deliberate node-shutdown sequence (design doc round 51), and
+The deliberate node-shutdown sequence (design doc round 51), the
+`[D]rain` sequence (design doc §13.8) that borrows its session-
+management shape without actually ending the node process, and
 `NodeControls`, the bundle an in-session SysOp command needs to trigger
-it (design doc -- node management round).
+either (design doc -- node management round).
 
 Split out of `netbbs.__main__` into its own module for the same reason
 `netbbs.net.session_registry`/`netbbs.net.maintenance` were themselves
@@ -86,3 +88,46 @@ async def run_shutdown_sequence(
         await asyncio.sleep(graceful_delay_seconds)
     await session_registry.disconnect_all()
     shutdown_event.set()
+
+
+async def run_drain_sequence(
+    *, session_registry: ActiveSessionRegistry, delay_seconds: float, message: str | None = None
+) -> None:
+    """
+    Warn every non-SysOp connected session (regardless of what screen
+    it's on, same as `run_shutdown_sequence`), wait `delay_seconds`,
+    then disconnect them -- design doc §13.8's `[D]rain`, the piece
+    that lets a SysOp clear ordinary users off the node for a change
+    that needs a reconnect to take effect, without shutting the node
+    down at all: unlike `run_shutdown_sequence`, this never touches
+    `maintenance`/`shutdown_event`, and `exclude_sysops=True` on both
+    calls below means a SysOp session (including the one that issued
+    this command) is never warned or disconnected by it.
+
+    Deliberately doesn't also enable maintenance-mode lockdown itself --
+    the two are meant to be composed explicitly by the SysOp (design doc
+    §13.8's own two-step workflow: turn on `[M]aintenance mode` first if
+    new non-SysOp logins should be blocked too, then `[D]rain` if anyone
+    already connected also needs to go), not silently implied by each
+    other.
+
+    `message`, if given, replaces the default text entirely, same
+    reasoning and same sanitization as `run_shutdown_sequence`'s own
+    `message` parameter.
+
+    Callers triggering this from within a live session must fire it as
+    an independent background task (`asyncio.create_task`), never
+    `await`ed inline -- identical self-referential-cancellation hazard
+    `run_shutdown_sequence`'s own docstring explains, since
+    `disconnect_all` here can still reach the calling session's own
+    task if it somehow isn't SysOp-attributed; the admin screen that
+    triggers this is always a real SysOp session, so in practice this
+    is defense-in-depth, not a hazard this specific caller can hit.
+    """
+    if message is not None:
+        text = f"\r\n*** {sanitize_text(message)} ***"
+    else:
+        text = f"\r\n*** This node is being drained for maintenance. You will be disconnected in {int(delay_seconds)} seconds. ***"
+    await session_registry.broadcast_to_all(text, exclude_sysops=True)
+    await asyncio.sleep(delay_seconds)
+    await session_registry.disconnect_all(exclude_sysops=True)

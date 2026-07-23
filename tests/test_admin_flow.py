@@ -539,6 +539,168 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
     asyncio.run(scenario())
 
 
+# -- maintenance mode and drain (design doc §13.8) --------------------------
+
+
+def test_node_menu_shows_maintenance_and_drain_options(db, lane, sysop):
+    node_controls = _node_controls()
+    session = FakeSession(["s", "n", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _written_text(session)
+    # menu_key wraps just the letter itself in ANSI color codes -- the
+    # rest of each label (everything after the bracketed key) is what
+    # actually appears as a clean, uncolored substring.
+    assert "aintenance mode" in text
+    assert "rain" in text
+
+
+def test_maintenance_mode_screen_turns_it_on(db, lane, sysop):
+    node_controls = _node_controls()
+    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    assert node_controls.maintenance.is_lockdown_active() is True
+    assert "Maintenance mode is now ON." in _written_text(session)
+
+
+def test_maintenance_mode_screen_turns_it_back_off(db, lane, sysop):
+    node_controls = _node_controls()
+    node_controls.maintenance.enable_lockdown()
+    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    assert node_controls.maintenance.is_lockdown_active() is False
+    assert "Maintenance mode is now off." in _written_text(session)
+
+
+def test_maintenance_mode_screen_declined_confirmation_does_nothing(db, lane, sysop):
+    node_controls = _node_controls()
+    session = FakeSession(["s", "n", "m", "n", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    assert node_controls.maintenance.is_lockdown_active() is False
+
+
+def test_maintenance_mode_screen_does_not_touch_shutdown_lockout(db, lane, sysop):
+    """Design doc §13.8: [M]aintenance mode's lockdown flag is entirely
+    separate from shutdown's own `is_active()` lockout."""
+    node_controls = _node_controls()
+    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    assert node_controls.maintenance.is_lockdown_active() is True
+    assert node_controls.maintenance.is_active() is False
+
+
+async def _wait_until_done(task: asyncio.Task, *, timeout: float = 2.0) -> None:
+    """Polls `task.done()` rather than `await`ing/`wait_for`ing the task
+    itself a second time -- a task already finished via cancellation
+    re-raises `CancelledError` to *any* subsequent awaiter, not just the
+    one it was originally cancelled under, so a caller that only wants
+    to know "has this settled yet" (to then check `.cancelled()`
+    separately) must not re-await it directly."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not task.done():
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("task never finished")
+        await asyncio.sleep(0.01)
+
+
+def test_drain_screen_triggers_the_sequence_as_a_background_task(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)
+
+        admin_session = FakeSession(["s", "n", "d", "0", "", "y", "b", "b", "b"])
+        admin_task = asyncio.create_task(
+            _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
+        )
+        await asyncio.wait_for(admin_task, timeout=2.0)
+        await _wait_until_done(other_task)
+
+        assert "Drain started" in _written_text(admin_session)
+        assert other_task.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_drain_screen_never_disconnects_the_issuing_sysop(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        admin_session = FakeSession(["s", "n", "d", "0", "", "y", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert "Drain started" in _written_text(admin_session)
+
+    asyncio.run(scenario())
+
+
+def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)
+
+        admin_session = FakeSession(
+            ["s", "n", "d", "0", "Reconnect after the upgrade.", "y", "b", "b", "b"]
+        )
+        admin_task = asyncio.create_task(
+            _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
+        )
+        await asyncio.wait_for(admin_task, timeout=2.0)
+        await _wait_until_done(other_task)
+
+        assert any("Reconnect after the upgrade" in line for line in other.written)
+
+    asyncio.run(scenario())
+
+
+def test_drain_screen_rejects_a_negative_delay(db, lane, sysop):
+    session = FakeSession(["s", "n", "d", "-5", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
+    assert "cannot be negative" in _written_text(session)
+
+
+def test_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
+    session = FakeSession(["s", "n", "d", "soon", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
+    assert "Not a number" in _written_text(session)
+
+
+def test_drain_screen_declined_confirmation_does_nothing(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)
+
+        admin_session = FakeSession(["s", "n", "d", "0", "", "n", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert "Cancelled." in _written_text(admin_session)
+        assert not other_task.done()  # drain never fired -- the other session is untouched
+
+        other_task.cancel()
+        await asyncio.gather(other_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 # -- boards & areas (design doc -- board/area management round) -----------
 
 

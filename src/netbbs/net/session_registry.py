@@ -29,10 +29,15 @@ class _Entry:
     later by `mark_authenticated` once login succeeds; a session sits
     at the login prompt (or never authenticates at all) for some of its
     lifetime, and this registry has always covered that too (see the
-    module docstring)."""
+    module docstring). `is_sysop` (design doc §13.8) defaults `False`
+    for exactly the same reason: an unauthenticated or ordinary-account
+    session is correctly treated as "not a SysOp" by `broadcast_to_all`/
+    `disconnect_all`'s `exclude_sysops` filter without needing its own
+    special case."""
 
     task: asyncio.Task
     username: str | None = None
+    is_sysop: bool = False
     connected_at: str = field(default_factory=utc_now_iso)
 
 
@@ -68,15 +73,22 @@ class ActiveSessionRegistry:
     def leave(self, session: Session) -> None:
         self._sessions.pop(session, None)
 
-    def mark_authenticated(self, session: Session, username: str) -> None:
+    def mark_authenticated(self, session: Session, username: str, *, is_sysop: bool = False) -> None:
         """Records which account `session` authenticated as, once login
-        succeeds — called from `netbbs.net.login_flow._run_authenticated_
+        succeeds — called from `netbbs.net.login_flow.run_authenticated_
         session` right where `presence.enter(user.username)` already
         happens. A no-op if `session` isn't (or is no longer)
-        registered, matching `leave`'s own tolerance of that."""
+        registered, matching `leave`'s own tolerance of that.
+
+        `is_sysop` (design doc §13.8) records whether this session's
+        account is currently SysOp-level, for `broadcast_to_all`/
+        `disconnect_all`'s `exclude_sysops` filter -- `[D]rain` targets
+        ordinary users while leaving a SysOp free to keep managing the
+        node during their own drain."""
         entry = self._sessions.get(session)
         if entry is not None:
             entry.username = username
+            entry.is_sysop = is_sysop
 
     def list_entries(self) -> list[SessionSummary]:
         """A snapshot of every currently connected session, for the
@@ -95,7 +107,7 @@ class ActiveSessionRegistry:
     def __len__(self) -> int:
         return len(self._sessions)
 
-    async def broadcast_to_all(self, text: str) -> None:
+    async def broadcast_to_all(self, text: str, *, exclude_sysops: bool = False) -> None:
         """
         Deliver `text` to every currently connected session, regardless
         of what it's blocked reading — the same "write concurrently
@@ -124,8 +136,15 @@ class ActiveSessionRegistry:
         A session that's already gone by the time its write is
         attempted just silently doesn't receive this message, rather
         than aborting the broadcast for everyone still connected.
+
+        `exclude_sysops` (design doc §13.8, `[D]rain`) skips any
+        session whose account was SysOp-level as of its own
+        `mark_authenticated` call -- a SysOp draining ordinary users off
+        the node isn't warning themselves (or another SysOp) to leave.
         """
-        for session in list(self._sessions):
+        for session, entry in list(self._sessions.items()):
+            if exclude_sysops and entry.is_sysop:
+                continue
             try:
                 if session.pinned_notice_hook is not None:
                     await session.pinned_notice_hook(text)
@@ -134,7 +153,7 @@ class ActiveSessionRegistry:
             except SessionClosedError:
                 pass
 
-    async def disconnect_all(self) -> None:
+    async def disconnect_all(self, *, exclude_sysops: bool = False) -> None:
         """
         Forcibly end every currently connected session: cancel each
         one's task (interrupting whatever it's blocked on — a menu
@@ -150,11 +169,16 @@ class ActiveSessionRegistry:
         `gather()` is waiting on — the same species of hazard round 58
         hit and fixed in `netbbs.net.chat_flow._chat_loop`. Callers
         triggering this from inside a live session (the `[N]ode` admin
-        menu's shutdown command) fire it as an independent background
-        task instead — see `netbbs.net.shutdown.run_shutdown_sequence`'s
-        own docstring.
+        menu's shutdown/drain commands) fire it as an independent
+        background task instead — see `netbbs.net.shutdown.
+        run_shutdown_sequence`/`run_drain_sequence`'s own docstrings.
+
+        `exclude_sysops` (design doc §13.8, `[D]rain`) -- see
+        `broadcast_to_all`'s identical parameter for why.
         """
-        tasks = [entry.task for entry in self._sessions.values()]
+        tasks = [
+            entry.task for entry in self._sessions.values() if not (exclude_sysops and entry.is_sysop)
+        ]
         for task in tasks:
             task.cancel()
         if tasks:

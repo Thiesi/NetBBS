@@ -22,7 +22,7 @@ from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import TransportConfig
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.net.shutdown import run_shutdown_sequence
+from netbbs.net.shutdown import NodeControls, run_drain_sequence, run_shutdown_sequence
 from tests.test_main_lifecycle import _config, _open_connection_when_ready
 
 
@@ -36,8 +36,23 @@ class _FakeSession:
     def __init__(self):
         self.written: list[str] = []
 
+    async def write(self, text: str = "") -> None:
+        self.written.append(text)
+
     async def write_line(self, text: str = "") -> None:
         self.written.append(text)
+
+    async def read_key(self, echo: bool = True) -> str:
+        # Blocks forever, like a real session genuinely idle at a menu
+        # prompt -- the §13.8 lockdown tests only need whatever was
+        # written before this point (the welcome line/lockdown notice),
+        # not the main menu loop to ever actually respond to a key.
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def read_line(self, echo: bool = True, history=None, completer=None) -> str:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 class _FailingSession:
@@ -274,6 +289,77 @@ def test_mark_authenticated_on_an_unregistered_session_does_not_raise():
     asyncio.run(scenario())
 
 
+# -- exclude_sysops (design doc §13.8, [D]rain) -----------------------------
+
+
+def test_mark_authenticated_records_is_sysop():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        session = _FakeSession()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        registry.mark_authenticated(session, "sysop", is_sysop=True)
+
+        assert registry.list_entries()[0].username == "sysop"
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_to_all_excludes_sysops_when_asked():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sysop, regular = _FakeSession(), _FakeSession()
+        tasks = [
+            asyncio.create_task(_hold_registered(registry, sysop)),
+            asyncio.create_task(_hold_registered(registry, regular)),
+        ]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sysop, "sysop", is_sysop=True)
+        registry.mark_authenticated(regular, "alice", is_sysop=False)
+
+        await registry.broadcast_to_all("draining", exclude_sysops=True)
+
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert sysop.written == []
+        assert regular.written == ["draining"]
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_all_excludes_sysops_when_asked():
+    registry = ActiveSessionRegistry()
+
+    async def scenario():
+        sysop, regular = _FakeSession(), _FakeSession()
+        tasks = [
+            asyncio.create_task(_hold_registered(registry, sysop)),
+            asyncio.create_task(_hold_registered(registry, regular)),
+        ]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sysop, "sysop", is_sysop=True)
+        registry.mark_authenticated(regular, "alice", is_sysop=False)
+
+        await registry.disconnect_all(exclude_sysops=True)
+
+        assert not tasks[0].cancelled()
+        assert tasks[1].cancelled()
+        assert len(registry) == 1  # only the SysOp session remains
+
+        tasks[0].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_list_entries_reflects_peer_address_and_connected_at():
     registry = ActiveSessionRegistry()
 
@@ -392,6 +478,37 @@ def test_activate_flips_the_flag():
     mode = MaintenanceMode()
     mode.activate()
     assert mode.is_active() is True
+
+
+# -- lockdown (design doc §13.8, [M]aintenance mode) -----------------------
+
+
+def test_lockdown_starts_inactive():
+    assert MaintenanceMode().is_lockdown_active() is False
+
+
+def test_enable_lockdown_flips_the_flag():
+    mode = MaintenanceMode()
+    mode.enable_lockdown()
+    assert mode.is_lockdown_active() is True
+
+
+def test_disable_lockdown_flips_it_back():
+    mode = MaintenanceMode()
+    mode.enable_lockdown()
+    mode.disable_lockdown()
+    assert mode.is_lockdown_active() is False
+
+
+def test_lockdown_is_independent_of_activate():
+    """The two gates must never be conflated -- shutdown's hard,
+    unconditional lockout and the SysOp-toggleable, SysOp-bypassing one
+    are different questions (design doc §13.8)."""
+    mode = MaintenanceMode()
+    mode.enable_lockdown()
+    assert mode.is_active() is False
+    mode.activate()
+    assert mode.is_lockdown_active() is True  # unaffected by the other gate
 
 
 def test_maintenance_mode_rejects_a_new_connection_before_login():
@@ -605,5 +722,199 @@ def test_run_shutdown_sequence_without_a_message_uses_the_default():
         assert any("going down now" in line for line in session.written)
 
         await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+# -- run_drain_sequence (design doc §13.8, [D]rain) -------------------------
+
+
+def test_run_drain_sequence_warns_and_disconnects_only_non_sysops():
+    async def scenario():
+        sysop, regular = _FakeSession(), _FakeSession()
+        registry = ActiveSessionRegistry()
+        tasks = [
+            asyncio.create_task(_hold_registered(registry, sysop)),
+            asyncio.create_task(_hold_registered(registry, regular)),
+        ]
+        await asyncio.sleep(0)
+        registry.mark_authenticated(sysop, "sysop", is_sysop=True)
+        registry.mark_authenticated(regular, "alice", is_sysop=False)
+
+        await run_drain_sequence(session_registry=registry, delay_seconds=0.0)
+
+        assert sysop.written == []
+        assert any("drained" in line for line in regular.written)
+        assert not tasks[0].cancelled()
+        assert tasks[1].cancelled()
+        assert len(registry) == 1  # only the SysOp session remains
+
+        tasks[0].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_custom_message_replaces_the_default():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        await run_drain_sequence(
+            session_registry=registry, delay_seconds=0.0, message="Reconnect after the upgrade."
+        )
+
+        assert any("Reconnect after the upgrade" in line for line in session.written)
+        assert not any("drained" in line for line in session.written)
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_waits_the_given_delay_before_disconnecting():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        drain_task = asyncio.create_task(
+            run_drain_sequence(session_registry=registry, delay_seconds=10.0)
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not task.cancelled()  # still connected -- delay hasn't elapsed
+
+        drain_task.cancel()
+        await asyncio.gather(drain_task, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_never_touches_maintenance_or_shutdown_event():
+    """Design doc §13.8: drain is deliberately orthogonal to [M]aintenance
+    mode and never shuts the node down -- it takes no `maintenance`/
+    `shutdown_event` parameter at all, unlike `run_shutdown_sequence`."""
+    import inspect
+
+    parameters = inspect.signature(run_drain_sequence).parameters
+    assert "maintenance" not in parameters
+    assert "shutdown_event" not in parameters
+
+
+# -- post-authentication lockdown (design doc §13.8, [M]aintenance mode) ----
+
+
+def _node_controls_with_lockdown(registry: ActiveSessionRegistry, *, lockdown: bool) -> NodeControls:
+    maintenance = MaintenanceMode()
+    if lockdown:
+        maintenance.enable_lockdown()
+    return NodeControls(
+        session_registry=registry, maintenance=maintenance,
+        shutdown_event=asyncio.Event(), graceful_delay_seconds=0.0,
+    )
+
+
+def test_lockdown_rejects_a_non_sysop_after_authentication(tmp_path):
+    from netbbs.auth.users import create_user
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import login_flow
+    from netbbs.net.maintenance import LOCKDOWN_MESSAGE
+    from netbbs.storage.database import Database
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            user = create_user(db, "alice", password="hunter2", user_level=10)
+            registry = ActiveSessionRegistry()
+            session = _FakeSession()
+            node_controls = _node_controls_with_lockdown(registry, lockdown=True)
+
+            await login_flow.run_authenticated_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), user,
+                node_controls=node_controls,
+            )
+
+            assert any(LOCKDOWN_MESSAGE in line for line in session.written)
+            assert not any("Main menu" in line for line in session.written)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_lockdown_lets_a_sysop_through(tmp_path):
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import login_flow
+    from netbbs.storage.database import Database
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+            registry = ActiveSessionRegistry()
+            session = _FakeSession()
+            node_controls = _node_controls_with_lockdown(registry, lockdown=True)
+
+            # An allowed SysOp proceeds into the main menu, which then
+            # blocks on read_key() forever (a real idle session) -- run
+            # as a background task and cancel once the welcome/notice
+            # lines have already been written, rather than awaiting
+            # inline to completion.
+            task = asyncio.create_task(
+                login_flow.run_authenticated_session(
+                    session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), sysop,
+                    node_controls=node_controls,
+                )
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert any("Welcome, sysop" in line for line in session.written)
+            assert any("Maintenance mode is ON" in line for line in session.written)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_no_lockdown_notice_when_lockdown_is_off(tmp_path):
+    from netbbs.auth.users import SYSOP_LEVEL, create_user
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import login_flow
+    from netbbs.storage.database import Database
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+            registry = ActiveSessionRegistry()
+            session = _FakeSession()
+            node_controls = _node_controls_with_lockdown(registry, lockdown=False)
+
+            task = asyncio.create_task(
+                login_flow.run_authenticated_session(
+                    session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), sysop,
+                    node_controls=node_controls,
+                )
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert not any("Maintenance mode is ON" in line for line in session.written)
+        finally:
+            db.close()
 
     asyncio.run(scenario())

@@ -121,7 +121,7 @@ from netbbs.net.chat_flow import browse_channels, has_visible_channels, list_vis
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.file_flow import browse_file_areas, enter_file_area, has_visible_areas
 from netbbs.net.mail_flow import browse_mail
-from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
+from netbbs.net.maintenance import LOCKDOWN_MESSAGE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
@@ -466,10 +466,33 @@ async def run_authenticated_session(
     from outside, and a caller bypassing `NodeControls` entirely gets
     no watcher, matching every other node-wide-registry-dependent
     feature's existing degrade-gracefully-in-tests behavior.
+
+    `[M]aintenance mode` (design doc §13.8) is checked here, after
+    credentials already verified -- unlike `handle_session`'s
+    `maintenance.is_active()` gate (shutdown's unconditional, pre-login,
+    no-bypass lockout), this one only blocks a *non-SysOp* account, so a
+    SysOp can still log in to manage the node (including turning
+    lockdown back off) while it's active. A caller bypassing
+    `node_controls` entirely (direct test call sites) gets no lockdown
+    check at all, matching this function's own established
+    degrade-gracefully convention.
     """
-    await session.write_line(
-        f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
-    )
+    if (
+        node_controls is not None
+        and node_controls.maintenance.is_lockdown_active()
+        and not meets_level(user, SYSOP_LEVEL)
+    ):
+        await session.write_line(f"\r\n{LOCKDOWN_MESSAGE}")
+        return
+
+    welcome = f"\r\nWelcome, {sanitize_text(user.username)}! You are level {user.user_level}."
+    if (
+        node_controls is not None
+        and node_controls.maintenance.is_lockdown_active()
+        and meets_level(user, SYSOP_LEVEL)
+    ):
+        welcome += " (Maintenance mode is ON.)"
+    await session.write_line(welcome)
     await _announce_pending_invitations(session, db, user)
 
     # One InputHistory per connection (design doc round 47/Track 5f),
@@ -483,7 +506,9 @@ async def run_authenticated_session(
     presence.enter(user.username)
     watcher_task: asyncio.Task | None = None
     if node_controls is not None:
-        node_controls.session_registry.mark_authenticated(session, user.username)
+        node_controls.session_registry.mark_authenticated(
+            session, user.username, is_sysop=meets_level(user, SYSOP_LEVEL)
+        )
         watcher_task = asyncio.create_task(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )

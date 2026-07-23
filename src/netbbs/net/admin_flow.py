@@ -151,7 +151,7 @@ from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
-from netbbs.net.shutdown import NodeControls, run_shutdown_sequence
+from netbbs.net.shutdown import NodeControls, run_drain_sequence, run_shutdown_sequence
 from netbbs.selfupdate import (
     UpdateError,
     check_latest_release,
@@ -1126,13 +1126,26 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _shutdown_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session)
+        elif choice == "m":
+            await session.write_line("")
+            await _maintenance_mode_screen(session, lane, actor, node_controls)
+            await _draw_node_menu(session)
+        elif choice == "d":
+            await session.write_line("")
+            await _drain_screen(session, lane, actor, node_controls)
+            await _draw_node_menu(session)
         else:
             await session.write(reject_keystroke())
 
 
 async def _draw_node_menu(session: Session) -> None:
     header = colored("Node management:", fg_color=HEADER_COLOR, bold=True)
-    options = "  ".join([menu_key("W", "ho"), menu_key("S", "hutdown"), menu_key("B", "ack")])
+    options = "  ".join(
+        [
+            menu_key("W", "ho"), menu_key("M", "aintenance mode"), menu_key("D", "rain"),
+            menu_key("S", "hutdown"), menu_key("B", "ack"),
+        ]
+    )
     await session.write_line(f"\r\n{header} {options}")
     await session.write("Choice: ")
 
@@ -1197,8 +1210,10 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
 async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     await session.write_line(
         colored(
-            "\r\nThis warns and disconnects every connected session (including this "
-            "one), then locks out new logins. This cannot be undone once confirmed.",
+            "\r\nThis locks out new logins and warns every connected session "
+            "(including this one) immediately. Everyone is then disconnected -- "
+            "either right away, or after a grace period, depending on your choice "
+            "below. This cannot be undone once confirmed.",
             fg_color=MUTED_COLOR,
         )
     )
@@ -1235,6 +1250,89 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
         )
     )
     await session.write_line("Shutdown sequence started.")
+
+
+# -- maintenance mode and drain (design doc §13.8) --------------------------
+
+
+async def _maintenance_mode_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+    """
+    Toggles `node_controls.maintenance`'s lockdown flag -- while active,
+    a non-SysOp account can no longer log in (`netbbs.net.login_flow.
+    run_authenticated_session`'s own post-authentication check), but
+    every already-connected session (SysOp or not) is left completely
+    untouched. Reversible, unlike `[S]hutdown`'s one-way lockout --
+    turning this back off is exactly the same action, run again.
+
+    Deliberately does nothing to currently-connected non-SysOp sessions
+    -- `[D]rain` is the separate, explicit action for that (design doc
+    §13.8's own two-step workflow), not an implied side effect of
+    toggling this on.
+    """
+    currently_on = node_controls.maintenance.is_lockdown_active()
+    await session.write_line(colored("\r\nMaintenance mode:", fg_color=HEADER_COLOR, bold=True))
+    await session.write_line(
+        f"Currently: {'ON' if currently_on else 'off'} -- new non-SysOp logins are "
+        f"{'blocked' if currently_on else 'allowed'}. Already-connected sessions are unaffected either way."
+    )
+
+    new_state = "off" if currently_on else "ON"
+    if not await prompt_yes_no(session, f"\r\nTurn maintenance mode {new_state}?", default=False):
+        return
+
+    if currently_on:
+        node_controls.maintenance.disable_lockdown()
+    else:
+        node_controls.maintenance.enable_lockdown()
+    await lane.run(record_action, actor=actor, action="set_maintenance_mode", detail=f"enabled={not currently_on}")
+    await session.write_line(f"Maintenance mode is now {'ON' if not currently_on else 'off'}.")
+
+
+async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+    """
+    Warns every currently-connected non-SysOp session, then disconnects
+    them after an operator-chosen delay -- never touches SysOp sessions
+    (including this one), and never shuts the node down or changes
+    `[M]aintenance mode`'s own lockdown flag (design doc §13.8: the two
+    are meant to be composed deliberately, not implied by each other).
+    """
+    await session.write_line(
+        colored(
+            "\r\nThis warns every connected non-SysOp session, waits, then disconnects "
+            "them. SysOp sessions (including this one) are never warned or "
+            "disconnected by this. The node itself is not shut down.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write("Delay in seconds before disconnecting [60]: ")
+    delay_raw = (await session.read_line()).strip()
+    try:
+        delay_seconds = float(delay_raw) if delay_raw else 60.0
+    except ValueError:
+        await session.write_line("Not a number -- cancelled.")
+        return
+    if delay_seconds < 0:
+        await session.write_line("Delay cannot be negative -- cancelled.")
+        return
+
+    await session.write("Custom broadcast message (leave blank for the default): ")
+    message_raw = (await session.read_line()).strip()
+    message = message_raw or None
+
+    if not await prompt_yes_no(session, f"\r\nConfirm drain (disconnect non-SysOps after {int(delay_seconds)}s)?", default=False):
+        await session.write_line("Cancelled.")
+        return
+
+    await lane.run(
+        record_action, actor=actor, action="trigger_drain",
+        detail=f"delay_seconds={delay_seconds}, message={message!r}",
+    )
+    asyncio.create_task(
+        run_drain_sequence(
+            session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
+        )
+    )
+    await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s.")
 
 
 # -- welcome banner (design doc -- welcome banner round, Round A of a
