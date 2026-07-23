@@ -26,6 +26,19 @@ outbound message resolves the recipient's current signing key directly
 from the persisted `link_peers` table (round 120), never from a live
 `LinkNode` -- unlike linking a board, composing a message never mutates
 `LinkNode` state, so there is no event-loop-only step here at all.
+
+**Issue #69:** because of the above, a composed-but-not-yet-pushed
+message does not exist in `LinkNode.events` yet either -- and can't,
+since no live node is in scope here at all. `netbbs.link.sync._push_
+pending_link_mail` is what actually registers it (`node.events`/`known_
+event_ids`, then persisted via `netbbs.link.store.save_event`) at the
+one point every caller of `compose_link_message` funnels through before
+a `link_message` ever leaves this node -- not here, and not at any
+individual call site of this function. Skipping that registration is
+exactly the bug #69 fixed: `_resolve_own_link_message` (`netbbs.link.
+protocol`) only ever checks `node.events`, so an unregistered message's
+own `link_message_accepted`/`_bounced` acknowledgement could never
+resolve and was rejected every time, forever.
 """
 
 from __future__ import annotations

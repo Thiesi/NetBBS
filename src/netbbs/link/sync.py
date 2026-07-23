@@ -666,6 +666,27 @@ async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: 
             await lane.run(record_success, work_item)
             continue
 
+        # Issue #69: compose_link_message (netbbs.link.mail) is DB-only
+        # and never touches a live LinkNode, so a composed message isn't
+        # in node.events yet -- register it here, the one point every
+        # caller of compose_link_message funnels through before this
+        # message ever actually leaves the node, and strictly before any
+        # possible push attempt below. Without this, _resolve_own_link_
+        # message (netbbs.link.protocol) can never recognize this node's
+        # own message when the recipient's accepted/bounced acknowledgement
+        # comes back, and rejects it every time. Guarded by known_event_ids
+        # so a work item still retrying across passes doesn't re-persist.
+        if message.content_id not in node.known_event_ids:
+            node.known_event_ids.add(message.content_id)
+            node.events[message.content_id] = message.to_dict()
+            await lane.run(
+                save_event,
+                sender_fingerprint=node.identity.fingerprint,
+                content_id=message.content_id,
+                object_type=LINK_MESSAGE_OBJECT_TYPE,
+                envelope=message.to_dict(),
+            )
+
         target_fingerprint = work_item.target_fingerprint
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False

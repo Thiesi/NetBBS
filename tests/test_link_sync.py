@@ -754,6 +754,112 @@ def test_sync_pushes_pending_link_mail_directly_to_its_known_recipient(tmp_path)
         recipient.close()
 
 
+def test_sync_completes_the_link_mail_acknowledgement_round_trip_back_to_the_sender(tmp_path):
+    """Regression for issue #69: `compose_link_message` (`netbbs.link.
+    mail`) is deliberately DB-only and never registered a composed
+    message into the sender's own `LinkNode.events`, so `_resolve_own_
+    link_message` (`netbbs.link.protocol`) could never recognize its own
+    message once the recipient's `link_message_accepted` came back --
+    the sender's own server rejected that acknowledgement with a
+    `LinkProtocolError` unconditionally, every time. Proves the full
+    round trip over real sockets and two real sync loops: dialer
+    composes and pushes; recipient delivers and queues its own
+    acknowledgement; dialer's *own* sync loop, dialing the recipient
+    again, receives and accepts that acknowledgement -- which used to
+    fail before `netbbs.link.sync._push_pending_link_mail` started
+    registering the composed message (see that function's own
+    docstring)."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    recipient_identity = bootstrap_node_identity("recipient")
+    dialer_node = LinkNode(identity=dialer_identity)
+    recipient_node = LinkNode(identity=recipient_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    recipient = _NodeDb(tmp_path, "recipient")
+
+    alice = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    create_user(recipient.db, "bob", password="hunter2", user_level=10)
+
+    async def scenario():
+        # Both sides must be directly dialable, not just the recipient
+        # (unlike the plain-delivery test above) -- the ack push path
+        # never falls back to a relay (see _push_pending_link_mail's own
+        # docstring), so the dialer has to be reachable too, or the
+        # acknowledgement could never come back regardless of this fix.
+        dialer_hello = lambda: dialer_node.build_hello(  # noqa: E731
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": dialer_server.port}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+        recipient_hello = lambda: recipient_node.build_hello(  # noqa: E731
+            addresses=[{"protocol": "http", "address": "127.0.0.1", "port": recipient_server.port}],
+            outgoing_only=False, created_at="2026-01-01T00:00:00+00:00",
+        )
+        dialer_server = LinkServer(
+            host="127.0.0.1", port=0, node=dialer_node, own_hello_provider=dialer_hello, lane=dialer.lane
+        )
+        recipient_server = LinkServer(
+            host="127.0.0.1", port=0, node=recipient_node, own_hello_provider=recipient_hello, lane=recipient.lane
+        )
+        await dialer_server.start()
+        await recipient_server.start()
+        recipient_seed = f"http://127.0.0.1:{recipient_server.port}"
+        dialer_seed = f"http://127.0.0.1:{dialer_server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Pass 1: dialer hellos recipient directly -- both sides
+                # learn each other's dialable address, since neither
+                # hello is outgoing_only here.
+                first_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [recipient_seed], dialer_hello, dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(first_pass)
+
+                message = compose_link_message(
+                    dialer.db, alice, f"bob@{recipient_identity.fingerprint}", "hello", "world",
+                    node_identity=dialer_identity,
+                )
+
+                # Pass 2: dialer's sync pushes the message directly to
+                # recipient -- this is also where the fix registers the
+                # composed message into dialer_node.events (issue #69).
+                second_pass = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [recipient_seed], dialer_hello, dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(second_pass)
+
+                # Pass 3: recipient's own sync loop pushes its queued
+                # link_message_accepted back to the dialer -- before the
+                # fix, the dialer's own _handle_events rejected this
+                # every time.
+                recipient_pass = asyncio.create_task(
+                    run_link_sync(
+                        recipient_node, session, [dialer_seed], recipient_hello, recipient.lane,
+                        interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(recipient_pass)
+        finally:
+            await dialer_server.stop()
+            await recipient_server.stop()
+
+        return message
+
+    try:
+        message = asyncio.run(scenario())
+        assert message.content_id in dialer_node.known_event_ids
+        row = dialer.db.connection.execute(
+            "SELECT link_delivery_status FROM mail_messages WHERE link_event_content_id = ?",
+            (message.content_id,),
+        ).fetchone()
+        assert row["link_delivery_status"] == "delivered"
+    finally:
+        dialer.close()
+        recipient.close()
+
+
 # -- relay selection, send-via-relay, and pickup (round 95/issue #58) --------
 
 

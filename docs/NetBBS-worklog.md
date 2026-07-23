@@ -894,6 +894,24 @@ Resolve by purpose and chain.
 Batch handling must not let an expected duplicate masquerade as a fork and
 abort all genuinely new events which follow it.
 
+**A self-originated event is not automatically in `LinkNode.events`.**
+`known_event_ids`/`events` are populated by `handle_events` (peer-received)
+and restart reconstruction (`netbbs.link.store`, itself reading back what
+`handle_events`/an explicit `save_event` call persisted) -- never implicitly
+by whatever composed the event in the first place. A DB-only composer
+(`netbbs.link.mail.compose_link_message`, deliberately never touching a live
+`LinkNode`) has no way to register its own output at all. Anything that later
+needs to recognize "an event this node itself originated" (e.g.
+`_resolve_own_link_message`, validating an incoming acknowledgement) must have
+that registration done explicitly, by whatever code path first has both a
+live `LinkNode` and the composed event in hand -- for Link mail this is
+`netbbs.link.sync._push_pending_link_mail`, chosen because it is the one
+point every composer funnels through before the event ever leaves the node,
+not any individual call site of the composer (issue #69: the missing
+registration meant a sender's own outbound `link_message` could never be
+recognized when its acknowledgement came back, so it was rejected
+unconditionally, every time).
+
 ### Linked boards
 
 A linked board uses the existing local board ID in its signed genesis; linking
