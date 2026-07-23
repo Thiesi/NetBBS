@@ -1168,6 +1168,129 @@ Persistent dedup uses exact IDs, not Bloom filters. False-positive data loss is
 unacceptable. Retention cleanup must never turn an old state-changing event into
 something re-applicable.
 
+### 8.8 Inventory/pull-based catch-up and multi-hop relay (issue #85)
+
+§8.6 named two concrete gaps in the push-only, direct-pairwise sync model:
+no pull-based catch-up, and no multi-hop propagation (a node carrying
+Alice's board events never relays them to Carol). This section specifies
+both, deliberately reusing existing machinery wherever possible rather than
+adding new protocol-verification surface.
+
+**Scope.** Board-scoped events only — `board_genesis`, `board_post`,
+`board_post_edit`, `board_origin_transfer_offer`, and
+`board_origin_transfer_accepted`, the five object types that already carry
+`payload["board_id"]` directly. Identity (`key_transition`) events are
+already gossiped to every configured seed every pass regardless (§12) and
+are small enough that this has never been the gap; Link messages are
+point-to-point by design (§10) and are explicitly excluded from any
+multi-hop relay, matching their existing "no relay from a stranger" routing
+boundary (§10.4) — nothing here changes how `link_message` is delivered.
+
+**`InventoryRequest` — a new unsigned bundle, not a canonical event.**
+Deliberately the same shape of decision `PeerListMessage` already made
+(§8.3): this is a bookkeeping request about what the requester already has,
+not durable authored content, so it needs no content-addressing, signature,
+or gossip-replay semantics of its own. A stale or malformed request costs
+nothing beyond a wasted round trip.
+
+```
+InventoryRequest {
+  boards: { board_id: [known_content_id, ...], ... }
+}
+```
+
+`boards` is keyed by every `board_id` the requester itself currently
+carries (bounded by its own `max_carried_boards` quota, §13.9 — the request
+size is therefore already bounded by an existing cap, not a new one) mapped
+to that board's full set of content IDs the requester already has for it.
+
+**Route: `POST {LINK_PATH_PREFIX}/inventory/{fingerprint}`**, mirroring
+`/events/{fingerprint}`'s existing convention (`fingerprint` names the
+requester). The response is **not** a new envelope type either — it is the
+same raw JSON event-list shape `push_events`'s request body already uses:
+
+```
+{ "events": [ <raw event dict>, ... ], "more_available": bool }
+```
+
+**Responder-side diff.** For each requested `board_id` this responder also
+currently carries, return every board-scoped event on file for that board
+(read from `link_events` regardless of `sender_fingerprint` — see the
+schema change below) whose `content_id` is not in the requester's declared
+list for that board. A `board_id` the responder does not itself carry is
+silently skipped, never an error — "not carrying this board" is already a
+legitimate, honestly-represented answer (§9.3), and the requester learns
+nothing different than if it had asked a peer that had simply never heard
+of that board. **This is the entire multi-hop mechanism**: a node that only
+*carries* board X (never originated it) can now answer an inventory
+request for X from a third node, because the diff query reads `link_events`
+directly rather than `netbbs.link.boards.load_own_board_events`'s
+origin-only scope.
+
+**Applying the response needs no new acceptance path.** The requester feeds
+the returned `events` list through `LinkNode.handle_events` exactly as it
+already does for a push response — full signature/chain verification and
+materialization are unchanged. The entire new implementation surface is (a)
+the responder's diff query and (b) a client-side loop that issues the
+request and applies the response; zero changes to event verification.
+
+**Bounded response size.** Capped at the existing `_MAX_EVENTS_PER_REQUEST`
+(200, §13.9) — the same constant `handle_events` already enforces on the
+receiving end, not a new number. If more than that many events are missing
+for the requested boards, `more_available` is `true` and the requester
+simply asks again next pass; because its own `known_content_id` list for
+each board grows after every partial response, each subsequent pass
+naturally asks for a shrinking remainder — no separate pagination cursor is
+needed.
+
+**Requester side (`netbbs.link.sync`).** Each pass, after the existing
+per-seed push loop (§12) completes for a given seed, that same seed also
+receives one `InventoryRequest` covering every board this node carries.
+Not sent to one arbitrary "best" peer — every seed already dialed that pass
+gets asked, since not every peer necessarily carries every board this node
+does, and the push loop already iterates all of them regardless. A seed
+that carries none of the requested boards simply returns an empty event
+list; this is indistinguishable from (and no more expensive than) today's
+existing per-seed push tolerance for an uncooperative peer.
+
+**No loop or amplification guard is needed beyond what already exists.**
+This is pull-based and diff-first by construction: nothing is transmitted
+unless a requester explicitly asks for a board it has already decided to
+carry, and the diff is always relative to what the requester already
+reports having. A fully-connected mesh does not flood — it converges,
+because every node's own request naturally shrinks once it has caught up,
+and dedup (`known_event_ids`) makes any redundant delivery a no-op
+regardless.
+
+**Schema change.** `link_events` gains a nullable `board_id` column,
+populated for the five object types above (read directly from each one's
+own `payload["board_id"]`) and left `NULL` for every other object type.
+Backfilled for existing rows via `json_extract` against the stored
+envelope, never requiring re-verification of already-accepted events. A
+covering index on `(board_id, object_type)` keeps the diff query cheap as
+`link_events` grows — this is exactly the kind of query the table did not
+need to serve before this issue, since nothing previously asked "everything
+for board X" rather than "everything from sender Y."
+
+**Deliberately not addressed here** — sending a requester's complete
+per-board content-ID list every pass does not scale indefinitely for a
+board with a very large post history; a compact digest (Merkle-tree-style
+or otherwise) would reduce request size for that case. Not worth building
+at this project's declared scale (§2.3: dozens-to-low-hundreds of
+concurrent sessions, small-to-medium Link deployments) — the same
+"exact IDs, not Bloom filters" simplicity §8.7 already chooses for local
+dedup storage applies here to the wire exchange too. Revisit only if a real
+deployment shows this cost is actually a problem, not preemptively.
+
+**Explicitly deferred to issue #86, not part of this issue.** No retention
+or purging of `link_events` changes as part of this work — every event
+handled here is durable, unbounded-lifetime state exactly as it already is
+today. Issue #86's retention/purge policy must be designed with this
+issue's shape in mind (a purged event a slow-to-reconnect peer still needs
+for catch-up must never be silently unavailable, or "eventually converges"
+above would stop being true) — that is precisely why #86 is sequenced
+after this issue, not the other way around.
+
 ---
 
 ## 9. Linked boards and resource lifecycle
@@ -2618,6 +2741,21 @@ separately as issue #75.
 Rehearsing these controls against a real long-running node (not just their
 original implementation tests) is tracked by the Phase 3 stabilization gate
 above, not by this issue.
+
+### Issue #85 — inventory/pull-based catch-up and multi-hop relay
+
+§8.8 now states the complete design: an unsigned `InventoryRequest` bundle
+(not a canonical event, matching `PeerListMessage`'s own precedent), a new
+`POST {LINK_PATH_PREFIX}/inventory/{fingerprint}` route whose response
+reuses the exact `push_events` raw-event-list wire shape (no new
+protocol-verification code — the response is fed through the same
+`handle_events` acceptance path a push already uses), a responder-side diff
+query against `link_events` that is genuinely multi-hop (it reads what this
+node carries, not only what it originated), and a nullable `board_id`
+column added to `link_events` to make that query cheap. Bounded by the
+existing `_MAX_EVENTS_PER_REQUEST`/`max_carried_boards` quotas, not new
+numbers. Explicitly excludes retention/purging (issue #86, sequenced
+after this one) and Link messages (already point-to-point by design, §10).
 
 ### Issue #55 — trust and quarantine
 
