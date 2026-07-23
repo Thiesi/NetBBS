@@ -1616,6 +1616,54 @@ def test_backup_status_shows_last_backup_summary(db, lane, sysop):
     assert str(destination) in text
 
 
+# -- outbox: work-item inspection/replay/cancel (design doc §13.7) ----------
+
+
+def test_outbox_option_hidden_without_link_context(db, lane, sysop):
+    session = FakeSession(["s", "o", "b", "b"])
+    _run(session, lane, sysop)  # _run's admin_menu call passes no link_context
+    bell_index = session.written.index("\b \b\a")
+    assert session.written[bell_index] == "\b \b\a"
+
+
+def test_outbox_shows_no_items_yet_message(db, lane, sysop):
+    link_context = _link_context()
+    session = FakeSession(["s", "o", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    assert "No outbound work items recorded yet." in _written_text(session)
+
+
+def test_outbox_replays_a_dead_lettered_item(db, lane, sysop):
+    from netbbs.link.work_items import KIND_LINK_MAIL_DELIVERY, _MAX_ATTEMPTS, enqueue_work_item, record_failure
+
+    item = enqueue_work_item(db, kind=KIND_LINK_MAIL_DELIVERY, reference_id="msg1", target_fingerprint="fp1")
+    for _ in range(_MAX_ATTEMPTS):
+        item = record_failure(db, item, error="unreachable")
+    assert item.status == "dead_lettered"
+
+    link_context = _link_context()
+    session = FakeSession(["s", "o", "0", "1", "y", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "dead_lettered, 10 attempt(s)" in text
+    assert "Replayed -- status is now 'pending'." in text
+
+
+def test_outbox_cancels_a_retrying_item(db, lane, sysop):
+    from netbbs.link.work_items import KIND_LINK_MAIL_ACK, enqueue_work_item, record_failure
+
+    item = enqueue_work_item(db, kind=KIND_LINK_MAIL_ACK, reference_id="ack1", target_fingerprint="fp1")
+    record_failure(db, item, error="connection refused")
+
+    link_context = _link_context()
+    session = FakeSession(["s", "o", "0", "1", "y", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Cancelled -- status is now 'cancelled'." in text
+
+
 # -- Link status (issue #60, narrow scope) -----------------------------------
 
 

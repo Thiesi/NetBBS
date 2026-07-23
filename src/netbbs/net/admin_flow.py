@@ -130,6 +130,14 @@ from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
 from netbbs.link.seedlist import get_cached_supplementary_seeds
 from netbbs.link.store import load_peer_last_contact
+from netbbs.link.mail import unexpire_link_message_delivery
+from netbbs.link.work_items import (
+    KIND_LINK_MAIL_DELIVERY,
+    WorkItem,
+    cancel_work_item,
+    list_work_items,
+    replay_work_item,
+)
 from netbbs.moderation.log import list_actions_for_target_user, record_action
 from netbbs.moderation.roles import (
     BoardPermission,
@@ -359,6 +367,10 @@ async def _system_menu(
             await session.write_line("")
             await _link_status_screen(session, lane, actor, link_context=link_context)
             await _draw_system_menu(session, node_controls, link_context)
+        elif choice == "o" and link_context is not None:
+            await session.write_line("")
+            await _outbox_screen(session, lane, actor)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "k":
             await session.write_line("")
             await _backup_status_screen(session, lane, actor)
@@ -377,6 +389,7 @@ async def _draw_system_menu(
     ]
     if link_context is not None:
         option_list.append(menu_key("L", "ink status"))
+        option_list.append(menu_key("O", "utbox"))
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
@@ -895,6 +908,79 @@ async def _link_status_screen(
     await session.write_line(
         f"This node relays for it: {'yes' if selected.fingerprint in node.relays_serving_me else 'no'}"
     )
+
+
+# -- outbox: work-item inspection/replay/cancel (design doc §13.7, ----------
+# -- issue #60's second operational slice) ----------------------------------
+
+
+async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    SysOp inspection, replay, and cancellation for outbound Link work
+    items -- scoped to exactly what `netbbs.link.work_items` itself
+    covers (Link mail delivery and acknowledgement delivery), never
+    gossip or relay maintenance, which don't fit this model (see that
+    module's own docstring for why not).
+
+    The picker only ever offers `retrying`/`dead_lettered` items --
+    `pending` will be attempted on its own within one sync pass,
+    `pushed`/`cancelled` are already resolved, so there's nothing a
+    SysOp would act on for either. Replaying a dead-lettered
+    `link_mail_delivery` item also undoes its `mail_messages.
+    link_delivery_status = 'expired'` side effect back to `'pending'`
+    -- the one place that undo happens, symmetric with `netbbs.link.
+    sync`'s own dead-letter side effect.
+    """
+    def _load(db: Database) -> list[WorkItem]:
+        return list_work_items(db)
+
+    items = await lane.run(_load)
+
+    await session.write_line(colored("\r\nOutbox:", fg_color=HEADER_COLOR, bold=True))
+    if not items:
+        await session.write_line(colored("No outbound work items recorded yet.", fg_color=MUTED_COLOR))
+        return
+
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.status] = counts.get(item.status, 0) + 1
+    await session.write_line(", ".join(f"{status}: {count}" for status, count in sorted(counts.items())))
+
+    actionable = [item for item in items if item.status in ("retrying", "dead_lettered")]
+    selected = await pick_item(
+        session, actionable,
+        name_of=lambda item: f"{item.kind} -> {item.target_fingerprint}",
+        stable_id_of=lambda item: item.id,
+        description_of=lambda item: f"{item.status}, {item.attempts} attempt(s)",
+        title="Retrying/dead-lettered work items",
+        empty_message="Nothing currently retrying or dead-lettered.",
+    )
+    if selected is None:
+        return
+
+    await session.write_line(f"\r\nKind: {sanitize_text(selected.kind)}")
+    await session.write_line(f"Target: {sanitize_text(selected.target_fingerprint)}")
+    await session.write_line(f"Status: {selected.status}, {selected.attempts} attempt(s)")
+    if selected.last_error:
+        await session.write_line(f"Last error: {sanitize_text(selected.last_error)}")
+
+    if selected.status == "dead_lettered":
+        if await prompt_yes_no(session, "\r\nReplay this work item now?", default=False):
+            def _replay(db: Database) -> WorkItem:
+                replayed = replay_work_item(db, selected.id, replayed_by=actor)
+                if replayed.kind == KIND_LINK_MAIL_DELIVERY:
+                    unexpire_link_message_delivery(db, replayed.reference_id)
+                return replayed
+
+            replayed = await lane.run(_replay)
+            await session.write_line(f"Replayed -- status is now {replayed.status!r}.")
+    else:
+        if await prompt_yes_no(session, "\r\nCancel this work item (stop retrying)?", default=False):
+            def _cancel(db: Database) -> WorkItem:
+                return cancel_work_item(db, selected.id, cancelled_by=actor)
+
+            cancelled = await lane.run(_cancel)
+            await session.write_line(f"Cancelled -- status is now {cancelled.status!r}.")
 
 
 # -- promote/demote, enable/disable ---------------------------------------

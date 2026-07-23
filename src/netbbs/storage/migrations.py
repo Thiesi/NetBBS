@@ -1618,4 +1618,56 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Outbound work items (design doc §13.7, issue #60's second "
+            "operational slice): a generic pending/retrying/pushed/"
+            "dead_lettered/cancelled tracker, scoped to exactly the two "
+            "existing Link mechanisms that fit this shape -- Link mail "
+            "delivery and Link mail acknowledgement delivery -- which "
+            "retry forever today with no cap."
+        ),
+        sql="""
+        -- reference_id is a pointer (mail_messages.link_event_content_id
+        -- for kind='link_mail_delivery', or link_mail_acknowledgements.id
+        -- as text for kind='link_mail_ack'), never a payload copy --
+        -- netbbs.link.work_items never stores or looks at the actual
+        -- signed event bytes, only the caller (netbbs.link.sync) does.
+        --
+        -- 'pushed' means the payload was successfully handed to the
+        -- recipient's transport/relay, never that the recipient confirmed
+        -- receipt -- that remains mail_messages.link_delivery_status's own
+        -- independent accepted/bounced-event-driven vocabulary. This is a
+        -- deliberate distinction (design doc §13.7): conflating "pushed"
+        -- with "delivered" would have been a real, if subtle, bug.
+        --
+        -- UNIQUE(kind, reference_id, target_fingerprint) makes
+        -- enqueue_work_item naturally idempotent -- composing the same
+        -- message/queuing the same acknowledgement twice (should never
+        -- happen, but costs nothing to make impossible) can't create a
+        -- second competing work item for the same delivery.
+        CREATE TABLE link_work_items (
+            id                  INTEGER PRIMARY KEY,
+            kind                TEXT NOT NULL,
+            reference_id        TEXT NOT NULL,
+            target_fingerprint  TEXT NOT NULL,
+            status              TEXT NOT NULL
+                                CHECK (status IN ('pending', 'retrying', 'pushed', 'dead_lettered', 'cancelled')),
+            attempts            INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at     TEXT NOT NULL,
+            created_at          TEXT NOT NULL,
+            last_attempt_at     TEXT,
+            last_error          TEXT,
+            resolved_at         TEXT,
+            UNIQUE(kind, reference_id, target_fingerprint)
+        );
+
+        -- Matches list_posts_page's own precedent for "pending work"
+        -- tables (design doc round 30): a partial index over exactly the
+        -- predicate load_due_work_items filters on, not a full-table scan
+        -- of every resolved row too.
+        CREATE INDEX idx_link_work_items_due
+            ON link_work_items(next_attempt_at) WHERE status IN ('pending', 'retrying');
+        """,
+    ),
 ]

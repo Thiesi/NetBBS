@@ -1431,7 +1431,8 @@ including:
 
 - generic persistent outbound-work items, retry, backoff, dead-letter,
   replay, and cancellation (§13.7 specifies this — `netbbs.link.work_items`,
-  design-complete, not yet implemented);
+  implemented, wired into `netbbs.link.mail`/`netbbs.link.sync`, and
+  surfaced as an `[O]utbox` SysOp screen);
 - sync-lag and historical/trend peer-health visibility (a read-only current-
   state view — peer count/mode, dial-reliability score, last contact, relay
   activity, board/event counters, and relay-mailbox size — is available in
@@ -1577,6 +1578,21 @@ actually fits the shape (see the scope-decision table above — the fit
 matters more than the count of kinds); and the quotas/integrity-check/
 log-retention/upgrade-rollback/graceful-shutdown bullets in §13.6, all
 separate, still fully open pieces of issue #60.
+
+Implemented: `netbbs.link.work_items` (schema, backoff/dead-letter,
+replay/cancel, all audit-logged); `netbbs.link.mail.compose_link_message`/
+`_queue_acknowledgement` enqueue a work item in the same transaction as
+the row it tracks; `netbbs.link.sync._push_pending_link_mail` now attempts
+only currently-due work items instead of unconditionally resending every
+pending row every pass, and already skips a push entirely once a message
+has resolved through some other path (a genuine accepted/bounced event, or
+an earlier dead-letter); a new `[O]utbox` SysOp screen (`System` submenu,
+gated on Link being configured, same as `[L]ink status`) lists
+retrying/dead-lettered items and lets a SysOp replay or cancel one.
+Verified end to end via `tests/test_link_sync.py`'s existing real-socket
+sync tests (unchanged, still passing against the refactored push loop)
+plus new dedicated tests for the state machine, the mail/ack integration,
+and the SysOp screen.
 
 ---
 
@@ -1805,12 +1821,14 @@ and upgrade/disaster recovery.
 First slice (backup/restore, §13.4) is designed and implemented
 (`netbbs.backup`), verified against a real running node including a
 create-wipe-restore round trip and the live-lock restore refusal. Second
-slice (outbound work items/retry/dead-letter, §13.7) is designed —
-`netbbs.link.work_items`, scoped to Link mail delivery and acknowledgement
-delivery specifically (not gossip or relay maintenance, which don't fit the
-same shape) — not yet implemented. Quotas, integrity/crash-recovery
-checks, log retention, upgrade/rollback compatibility, graceful shutdown,
-and disaster-recovery drills remain fully open.
+slice (outbound work items/retry/dead-letter, §13.7) is designed and
+implemented (`netbbs.link.work_items`, scoped to Link mail delivery and
+acknowledgement delivery specifically — not gossip or relay maintenance,
+which don't fit the same shape), wired into `netbbs.link.mail`/`netbbs.link.
+sync`, and surfaced as an `[O]utbox` SysOp screen. Quotas,
+integrity/crash-recovery checks, log retention, upgrade/rollback
+compatibility, graceful shutdown, and disaster-recovery drills remain
+fully open.
 
 ### Issue #55 — trust and quarantine
 

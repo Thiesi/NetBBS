@@ -49,6 +49,7 @@ from netbbs.link.events import (
     build_link_message_bounced,
 )
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
+from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, enqueue_work_item_without_commit
 from netbbs.mail import MailError
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -124,6 +125,13 @@ def compose_link_message(
             sender.id, sender.username, str(address), subject, body, created_at,
             json.dumps(message.to_dict()), message.content_id,
         ),
+    )
+    # Same transaction as the insert above (design doc §13.7): a crash
+    # between the two must never leave a message with no work item ever
+    # tracking its delivery.
+    enqueue_work_item_without_commit(
+        db, kind=KIND_LINK_MAIL_DELIVERY, reference_id=message.content_id,
+        target_fingerprint=address.node_fingerprint,
     )
     db.connection.commit()
 
@@ -272,13 +280,20 @@ def _make_room_or_report_full(db: Database, recipient: User) -> bool:
 def _queue_acknowledgement(
     db: Database, ack: LinkMessageAccepted | LinkMessageBounced, *, target_node_fingerprint: str
 ) -> None:
-    db.connection.execute(
+    cursor = db.connection.execute(
         """
         INSERT INTO link_mail_acknowledgements
             (message_content_id, target_node_fingerprint, ack_event_json, created_at)
         VALUES (?, ?, ?, ?)
         """,
         (ack.payload["message_content_id"], target_node_fingerprint, json.dumps(ack.to_dict()), utc_now_iso()),
+    )
+    # Same transaction as the insert above -- see compose_link_message's
+    # identical reasoning. reference_id is this row's own id: acks have
+    # no content-addressed id of their own to point at instead.
+    enqueue_work_item_without_commit(
+        db, kind=KIND_LINK_MAIL_ACK, reference_id=str(cursor.lastrowid),
+        target_fingerprint=target_node_fingerprint,
     )
     db.connection.commit()
 
@@ -311,54 +326,74 @@ def _set_delivery_status(db: Database, message_content_id: str, status: str) -> 
     db.connection.commit()
 
 
-def load_pending_link_mail(db: Database) -> list[tuple[str, LinkMessage]]:
-    """This node's own outbound `link_message`s still awaiting an
-    acknowledgement, paired with the recipient node fingerprint each one
-    needs to be pushed to -- what the sync loop's targeted-peer-dial
-    pass reads every cycle (round 119's "push everything, dedup handles
-    idempotency" model, applied to a *specific* recipient rather than
-    every configured seed, per the round-93 routing decision)."""
-    rows = db.connection.execute(
-        "SELECT link_event_json FROM mail_messages WHERE link_delivery_status = 'pending'"
-    ).fetchall()
-    pending: list[tuple[str, LinkMessage]] = []
-    for row in rows:
-        message = LinkMessage.from_dict(json.loads(row["link_event_json"]))
-        pending.append((message.payload["recipient"]["home_node_fingerprint"], message))
-    return pending
+# -- work-item-driven delivery (design doc §13.7, issue #60's second -------
+# -- operational slice) -- replaces this module's old "load every pending --
+# -- row, resend unconditionally every pass, no cap" functions. -----------
+#
+# `link_mail_acknowledgements.sent_at` is no longer read or written by
+# anything (`netbbs.link.work_items`' own status now tracks this) -- left
+# in the schema rather than dropped in a follow-up migration purely for
+# this round's own churn budget; it's dead, not harmful.
 
 
-def load_pending_link_mail_acknowledgements(
-    db: Database,
-) -> list[tuple[str, LinkMessageAccepted | LinkMessageBounced]]:
-    """Pending outbound `link_message_accepted`/`link_message_bounced`
-    acknowledgements, paired with the node fingerprint each one needs to
-    be pushed to."""
-    rows = db.connection.execute(
-        "SELECT ack_event_json, target_node_fingerprint FROM link_mail_acknowledgements WHERE sent_at IS NULL"
-    ).fetchall()
-    pending: list[tuple[str, LinkMessageAccepted | LinkMessageBounced]] = []
-    for row in rows:
-        raw = json.loads(row["ack_event_json"])
-        object_type = raw["envelope"]["object_type"]
-        ack: LinkMessageAccepted | LinkMessageBounced
-        if object_type == "link_message_accepted":
-            ack = LinkMessageAccepted.from_dict(raw)
-        else:
-            ack = LinkMessageBounced.from_dict(raw)
-        pending.append((row["target_node_fingerprint"], ack))
-    return pending
+def get_link_message_for_delivery(db: Database, content_id: str) -> tuple[LinkMessage, str] | None:
+    """The `LinkMessage` and current `link_delivery_status` for a due
+    work item's `reference_id` -- `None` if the row is somehow gone (it
+    never should be; `mail_messages` rows are never deleted by this
+    delivery path), which the caller (`netbbs.link.sync`) tolerates as
+    "nothing left to push" rather than treating as an error."""
+    row = db.connection.execute(
+        "SELECT link_event_json, link_delivery_status FROM mail_messages WHERE link_event_content_id = ?",
+        (content_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return LinkMessage.from_dict(json.loads(row["link_event_json"])), row["link_delivery_status"]
 
 
-def mark_link_mail_acknowledgement_sent(db: Database, ack: LinkMessageAccepted | LinkMessageBounced) -> None:
-    """Called once the sync loop successfully pushes a pending
-    acknowledgement -- stops it from being re-pushed every pass
-    indefinitely. Matched by `ack_event_json` rather than a dedicated
-    id, since the caller only ever has the `LinkMessageAccepted`/
-    `LinkMessageBounced` object `load_pending_link_mail_acknowledgements`
-    handed it, not this table's own row id."""
+def get_link_mail_acknowledgement(db: Database, ack_id: str) -> LinkMessageAccepted | LinkMessageBounced | None:
+    """The acknowledgement a due `link_mail_ack` work item's
+    `reference_id` (this table's own `id`, as text) points at -- `None`
+    if somehow gone, tolerated the same way as `get_link_message_for_
+    delivery`."""
+    row = db.connection.execute(
+        "SELECT ack_event_json FROM link_mail_acknowledgements WHERE id = ?", (int(ack_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    raw = json.loads(row["ack_event_json"])
+    if raw["envelope"]["object_type"] == "link_message_accepted":
+        return LinkMessageAccepted.from_dict(raw)
+    return LinkMessageBounced.from_dict(raw)
+
+
+def expire_link_message_delivery(db: Database, content_id: str) -> None:
+    """Called when a `link_mail_delivery` work item dead-letters or is
+    cancelled -- the payload could never even be successfully pushed
+    (or a SysOp gave up on it), so this finally gives `mail_messages.
+    link_delivery_status`'s long-reserved `'expired'` value (round 93)
+    a real producer. Guarded on the row still being `'pending'`: a
+    genuine accepted/bounced event racing in first (this node's own
+    push actually did succeed, just not yet reflected in the work item)
+    must win, never be overwritten by a stale dead-letter outcome."""
     db.connection.execute(
-        "UPDATE link_mail_acknowledgements SET sent_at = ? WHERE ack_event_json = ? AND sent_at IS NULL",
-        (utc_now_iso(), json.dumps(ack.to_dict())),
+        "UPDATE mail_messages SET link_delivery_status = 'expired' "
+        "WHERE link_event_content_id = ? AND link_delivery_status = 'pending'",
+        (content_id,),
+    )
+    db.connection.commit()
+
+
+def unexpire_link_message_delivery(db: Database, content_id: str) -> None:
+    """The other half of `expire_link_message_delivery`, called when a
+    SysOp replays a dead-lettered/cancelled `link_mail_delivery` work
+    item (`netbbs.link.work_items.replay_work_item`) -- undoes the
+    expiry so the next successful push can still lead to a genuine
+    accepted/bounced resolution, rather than the message staying
+    permanently `'expired'` even though delivery is being retried again."""
+    db.connection.execute(
+        "UPDATE mail_messages SET link_delivery_status = 'pending' "
+        "WHERE link_event_content_id = ? AND link_delivery_status = 'expired'",
+        (content_id,),
     )
     db.connection.commit()

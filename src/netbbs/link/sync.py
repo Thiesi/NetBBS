@@ -142,9 +142,9 @@ from netbbs.link.boards import load_own_board_events
 from netbbs.link.events import LINK_MESSAGE_OBJECT_TYPE, EndpointDescriptor, LinkMessage
 from netbbs.link.mail import (
     deliver_link_message,
-    load_pending_link_mail,
-    load_pending_link_mail_acknowledgements,
-    mark_link_mail_acknowledgement_sent,
+    expire_link_message_delivery,
+    get_link_mail_acknowledgement,
+    get_link_message_for_delivery,
 )
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
@@ -159,6 +159,13 @@ from netbbs.link.transport import (
     push_events,
     request_peer_list,
     request_relay_consent,
+)
+from netbbs.link.work_items import (
+    KIND_LINK_MAIL_ACK,
+    KIND_LINK_MAIL_DELIVERY,
+    load_due_work_items,
+    record_failure,
+    record_success,
 )
 from netbbs.storage.execution import DatabaseLane
 
@@ -634,8 +641,32 @@ async def _push_one(node: LinkNode, session: ClientSession, base_url: str, event
 
 
 async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: DatabaseLane) -> None:
-    pending_messages = await lane.run(load_pending_link_mail)
-    for target_fingerprint, message in pending_messages:
+    """
+    Attempts every currently-due `link_mail_delivery`/`link_mail_ack`
+    work item (design doc §13.7, issue #60's second operational slice)
+    -- replaces this function's old "reload and resend every pending
+    row, unconditionally, every pass, forever" shape. A work item not
+    yet due (still backing off after an earlier failure) is simply not
+    returned by `load_due_work_items` this pass; it'll be picked up
+    again once `next_attempt_at` has passed.
+    """
+    for work_item in await lane.run(load_due_work_items, kind=KIND_LINK_MAIL_DELIVERY):
+        result = await lane.run(get_link_message_for_delivery, work_item.reference_id)
+        if result is None:
+            # mail_messages rows are never deleted by this delivery path
+            # -- shouldn't happen, but a work item outliving its target
+            # is tolerated as "nothing left to push," not a crash.
+            await lane.run(record_success, work_item)
+            continue
+        message, delivery_status = result
+        if delivery_status != "pending":
+            # Already resolved -- a genuine accepted/bounced event (or,
+            # for 'expired', an earlier dead-letter) arrived through some
+            # other path. Further pushes serve no purpose.
+            await lane.run(record_success, work_item)
+            continue
+
+        target_fingerprint = work_item.target_fingerprint
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
         if base_urls:
@@ -651,22 +682,38 @@ async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: 
                 delivered = await _try_addresses_via(
                     relay_urls, lambda url: _deposit_one(session, url, target_fingerprint, message)
                 )
-        if not delivered:
-            _logger.warning(
-                "Link sync: could not push pending mail to %s on any known or relayed address",
-                target_fingerprint,
-            )
 
-    pending_acks = await lane.run(load_pending_link_mail_acknowledgements)
-    for target_fingerprint, ack in pending_acks:
-        base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
-        if not base_urls:
-            continue
-        delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [ack]))
-        if not delivered:
-            _logger.warning(
-                "Link sync: could not push pending acknowledgement to %s on any known address",
-                target_fingerprint,
+        if delivered:
+            await lane.run(record_success, work_item)
+        else:
+            updated = await lane.run(
+                record_failure, work_item, error="could not push on any known or relayed address"
             )
+            if updated.status == "dead_lettered":
+                await lane.run(expire_link_message_delivery, work_item.reference_id)
+                _logger.warning(
+                    "Link sync: dead-lettered mail to %s after %s attempts",
+                    target_fingerprint, updated.attempts,
+                )
+
+    for work_item in await lane.run(load_due_work_items, kind=KIND_LINK_MAIL_ACK):
+        ack = await lane.run(get_link_mail_acknowledgement, work_item.reference_id)
+        if ack is None:
+            await lane.run(record_success, work_item)
             continue
-        await lane.run(mark_link_mail_acknowledgement_sent, ack)
+
+        target_fingerprint = work_item.target_fingerprint
+        base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
+        delivered = False
+        if base_urls:
+            delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [ack]))
+
+        if delivered:
+            await lane.run(record_success, work_item)
+        else:
+            updated = await lane.run(record_failure, work_item, error="could not push on any known address")
+            if updated.status == "dead_lettered":
+                _logger.warning(
+                    "Link sync: dead-lettered acknowledgement to %s after %s attempts",
+                    target_fingerprint, updated.attempts,
+                )

@@ -26,13 +26,15 @@ from netbbs.link.mail import (
     apply_link_message_bounced,
     compose_link_message,
     deliver_link_message,
-    load_pending_link_mail,
-    load_pending_link_mail_acknowledgements,
-    mark_link_mail_acknowledgement_sent,
+    expire_link_message_delivery,
+    get_link_mail_acknowledgement,
+    get_link_message_for_delivery,
+    unexpire_link_message_delivery,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import save_peer
+from netbbs.link.work_items import KIND_LINK_MAIL_ACK, KIND_LINK_MAIL_DELIVERY, load_due_work_items, record_success
 from netbbs.mail import MailError
 from netbbs.storage.database import Database
 
@@ -328,19 +330,31 @@ def test_apply_link_message_bounced_marks_the_outbound_row_bounced(db, alice, no
     assert status == "bounced"
 
 
-# -- load_pending_link_mail / load_pending_link_mail_acknowledgements ----------
+# -- work-item integration (design doc §13.7, issue #60's second slice) -----
 
 
-def test_load_pending_link_mail_excludes_resolved_rows(db, alice, node_identity, remote_node_identity):
+def test_compose_link_message_enqueues_a_due_delivery_work_item(db, alice, node_identity, remote_node_identity):
     _seed_peer(db, remote_node_identity)
-    still_pending = compose_link_message(
+    message = compose_link_message(
         db, alice, f"bob@{remote_node_identity.fingerprint}", "pending one", "world",
         node_identity=node_identity,
     )
+
+    [work_item] = load_due_work_items(db, kind=KIND_LINK_MAIL_DELIVERY)
+    assert work_item.reference_id == message.content_id
+    assert work_item.target_fingerprint == remote_node_identity.fingerprint
+    assert work_item.status == "pending"
+
+
+def test_a_pushed_and_delivered_messages_work_item_is_no_longer_due(db, alice, node_identity, remote_node_identity):
+    _seed_peer(db, remote_node_identity)
     delivered = compose_link_message(
         db, alice, f"bob@{remote_node_identity.fingerprint}", "delivered one", "world",
         node_identity=node_identity,
     )
+    [work_item] = load_due_work_items(db, kind=KIND_LINK_MAIL_DELIVERY)
+    record_success(db, work_item)
+
     ack = build_link_message_accepted(
         signing_identity=remote_node_identity.signing_key,
         recipient_node_fingerprint=remote_node_identity.fingerprint,
@@ -349,21 +363,75 @@ def test_load_pending_link_mail_excludes_resolved_rows(db, alice, node_identity,
     )
     apply_link_message_accepted(db, ack.to_dict())
 
-    pending = load_pending_link_mail(db)
-
-    assert [m.content_id for _fp, m in pending] == [still_pending.content_id]
-    assert pending[0][0] == remote_node_identity.fingerprint
+    assert load_due_work_items(db, kind=KIND_LINK_MAIL_DELIVERY) == []
 
 
-def test_load_pending_link_mail_acknowledgements_excludes_sent(db, bob, node_identity, remote_node_identity):
+def test_deliver_link_message_enqueues_a_due_ack_work_item(db, bob, node_identity, remote_node_identity):
     message = _incoming_message(node_identity, remote_node_identity)
     deliver_link_message(db, message.to_dict(), node_identity=node_identity)
 
-    [pending] = load_pending_link_mail_acknowledgements(db)
-    fingerprint, ack = pending
-    assert fingerprint == remote_node_identity.fingerprint
+    [work_item] = load_due_work_items(db, kind=KIND_LINK_MAIL_ACK)
+    assert work_item.target_fingerprint == remote_node_identity.fingerprint
+    ack = get_link_mail_acknowledgement(db, work_item.reference_id)
     assert ack.payload["message_content_id"] == message.content_id
 
-    mark_link_mail_acknowledgement_sent(db, ack)
+    record_success(db, work_item)
 
-    assert load_pending_link_mail_acknowledgements(db) == []
+    assert load_due_work_items(db, kind=KIND_LINK_MAIL_ACK) == []
+
+
+def test_get_link_message_for_delivery_returns_message_and_status(db, alice, node_identity, remote_node_identity):
+    _seed_peer(db, remote_node_identity)
+    message = compose_link_message(
+        db, alice, f"bob@{remote_node_identity.fingerprint}", "subject", "world",
+        node_identity=node_identity,
+    )
+
+    found_message, status = get_link_message_for_delivery(db, message.content_id)
+    assert found_message.content_id == message.content_id
+    assert status == "pending"
+
+
+def test_get_link_message_for_delivery_returns_none_for_an_unknown_content_id(db):
+    assert get_link_message_for_delivery(db, "nonexistent") is None
+
+
+def test_expire_and_unexpire_link_message_delivery(db, alice, node_identity, remote_node_identity):
+    _seed_peer(db, remote_node_identity)
+    message = compose_link_message(
+        db, alice, f"bob@{remote_node_identity.fingerprint}", "subject", "world",
+        node_identity=node_identity,
+    )
+
+    expire_link_message_delivery(db, message.content_id)
+    _, status = get_link_message_for_delivery(db, message.content_id)
+    assert status == "expired"
+
+    unexpire_link_message_delivery(db, message.content_id)
+    _, status = get_link_message_for_delivery(db, message.content_id)
+    assert status == "pending"
+
+
+def test_expire_link_message_delivery_never_overwrites_a_genuine_resolution(
+    db, alice, node_identity, remote_node_identity
+):
+    """A real accepted/bounced event racing in first must win -- a
+    stale dead-letter outcome (e.g. a slow retry loop iteration) must
+    never clobber it."""
+    _seed_peer(db, remote_node_identity)
+    message = compose_link_message(
+        db, alice, f"bob@{remote_node_identity.fingerprint}", "subject", "world",
+        node_identity=node_identity,
+    )
+    ack = build_link_message_accepted(
+        signing_identity=remote_node_identity.signing_key,
+        recipient_node_fingerprint=remote_node_identity.fingerprint,
+        message_content_id=message.content_id,
+        created_at="2026-01-01T00:05:00Z",
+    )
+    apply_link_message_accepted(db, ack.to_dict())
+
+    expire_link_message_delivery(db, message.content_id)
+
+    _, status = get_link_message_for_delivery(db, message.content_id)
+    assert status == "delivered"
