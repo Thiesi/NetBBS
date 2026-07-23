@@ -207,7 +207,9 @@ netbbs/
 │   │                     issue #56)
 │   ├── search.py         Local FTS5-backed search over boards/files/
 │   │                     channel scrollback, synced from every write
-│   │                     path (§6.6, issue #56)
+│   │                     path (§6.6, issue #56); `python -m netbbs.
+│   │                     search check|rebuild --db PATH` checks for or
+│   │                     repairs index drift (issue #74)
 │   ├── selfupdate.py     Release checking, safe archive extraction, and
 │   │                     database snapshot/restore primitives (§6.7)
 │   ├── backup.py         Full node backup/restore (database, blobs,

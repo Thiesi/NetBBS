@@ -28,7 +28,9 @@ existence or content.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from netbbs.attestation import meets_age
@@ -367,3 +369,245 @@ def prune_channel_message_search(db: Database, channel_id: int) -> None:
         """,
         (channel_id, channel_id),
     )
+
+
+# -- integrity checking and rebuild (issue #74) ---------------------------
+#
+# The three FTS tables above are maintained by explicit calls from every
+# write path in netbbs.boards.posts/netbbs.files.entries/netbbs.chat.
+# scrollback, not SQL triggers or one shared transaction with the
+# authoritative write -- a crash, SQLite error, interrupted migration, or
+# a future write path that forgets to call the right reindex function can
+# leave a table stale with no supported way to detect or repair it. The
+# three `_expected_*_index` functions below are the single source of
+# truth for "what should currently be indexed," computed straight from
+# `posts`/`files`/`channel_messages`; `check_index_integrity` compares
+# that against what the FTS tables actually contain, and `rebuild_indexes`
+# replaces their contents with it outright. Both therefore agree by
+# construction -- a rebuild always converges to a clean check immediately
+# after, and neither can drift from the other the way two independently
+# written queries could.
+
+
+def _expected_post_index(db: Database) -> dict[str, tuple[int, str, str]]:
+    """`root_post_id -> (board_id, subject, body)` for the current
+    resolved version of every post -- the newest `status = 'approved'`
+    row sharing a `root_post_id`, tie-broken on `id` (GitHub issue #68),
+    exactly matching `_resolve_current_version`/`reindex_post`. Computed
+    with one query plus an ascending scan (each root's last-seen row in
+    `created_at, id` order is its newest), rather than one query per
+    root_post_id, since the table can hold many roots."""
+    rows = db.connection.execute(
+        """
+        SELECT board_id, root_post_id, subject, body
+        FROM posts WHERE status = 'approved'
+        ORDER BY created_at ASC, id ASC
+        """
+    ).fetchall()
+    resolved: dict[str, tuple[int, str, str]] = {}
+    for row in rows:
+        resolved[row["root_post_id"]] = (row["board_id"], row["subject"], row["body"])
+    return resolved
+
+
+def _expected_file_index(db: Database) -> dict[str, tuple[int, str, str | None]]:
+    """`file_id -> (area_id, filename, description)` for every currently
+    approved file. Files have no edit chain, so unlike posts this is a
+    plain one-to-one mirror of `files`, matching `reindex_file`."""
+    rows = db.connection.execute(
+        "SELECT area_id, file_id, filename, description FROM files WHERE status = 'approved'"
+    ).fetchall()
+    return {row["file_id"]: (row["area_id"], row["filename"], row["description"]) for row in rows}
+
+
+def _expected_channel_message_index(db: Database) -> dict[int, tuple[int, str]]:
+    """`message_id -> (channel_id, body)` for every currently retained
+    channel message whose `kind` counts as searchable content
+    (`_CHANNEL_CONTENT_KINDS`), matching `index_channel_message`. Channel
+    messages have no edit/approval concept -- retained in
+    `channel_messages` at all is the only criterion."""
+    placeholders = ",".join("?" * len(_CHANNEL_CONTENT_KINDS))
+    rows = db.connection.execute(
+        f"SELECT id, channel_id, body FROM channel_messages "
+        f"WHERE kind IN ({placeholders}) AND body IS NOT NULL",
+        _CHANNEL_CONTENT_KINDS,
+    ).fetchall()
+    return {row["id"]: (row["channel_id"], row["body"]) for row in rows}
+
+
+@dataclass(frozen=True)
+class IndexDrift:
+    """One table's disagreement between what's currently indexed and
+    what `_expected_*_index` says should be. Every field holds only ids
+    (`root_post_id`/`file_id`/`message_id`), never indexed text -- an
+    integrity report must not itself become a way to read otherwise-
+    inaccessible content."""
+
+    missing: tuple[str | int, ...]
+    """Should be indexed (approved/retained content) but currently isn't."""
+    stale: tuple[str | int, ...]
+    """Indexed, but with different content than the authoritative row --
+    e.g. the wrong edit-chain revision, or a filename changed since."""
+    extra: tuple[str | int, ...]
+    """Indexed but shouldn't be -- e.g. content since deleted, expired,
+    or (for posts) no longer the resolved current revision."""
+
+    @property
+    def is_clean(self) -> bool:
+        return not (self.missing or self.stale or self.extra)
+
+
+@dataclass(frozen=True)
+class SearchIndexIntegrityReport:
+    posts: IndexDrift
+    files: IndexDrift
+    channel_messages: IndexDrift
+
+    @property
+    def is_clean(self) -> bool:
+        return self.posts.is_clean and self.files.is_clean and self.channel_messages.is_clean
+
+
+def _diff_index(expected: dict, actual: dict) -> IndexDrift:
+    expected_keys = set(expected)
+    actual_keys = set(actual)
+    return IndexDrift(
+        missing=tuple(sorted(expected_keys - actual_keys, key=str)),
+        extra=tuple(sorted(actual_keys - expected_keys, key=str)),
+        stale=tuple(sorted((k for k in expected_keys & actual_keys if expected[k] != actual[k]), key=str)),
+    )
+
+
+def check_index_integrity(db: Database) -> SearchIndexIntegrityReport:
+    """Compare all three FTS tables against authoritative data without
+    rebuilding anything -- a read-only diagnostic safe to run at startup
+    or on demand. See `IndexDrift`/`SearchIndexIntegrityReport` for what
+    a caller can learn from the result; `rebuild_indexes` is the repair
+    action once drift is found."""
+    posts_actual = {
+        row["root_post_id"]: (row["board_id"], row["subject"], row["body"])
+        for row in db.connection.execute("SELECT root_post_id, board_id, subject, body FROM post_search")
+    }
+    files_actual = {
+        row["file_id"]: (row["area_id"], row["filename"], row["description"])
+        for row in db.connection.execute("SELECT file_id, area_id, filename, description FROM file_search")
+    }
+    channel_actual = {
+        row["message_id"]: (row["channel_id"], row["body"])
+        for row in db.connection.execute("SELECT message_id, channel_id, body FROM channel_message_search")
+    }
+    return SearchIndexIntegrityReport(
+        posts=_diff_index(_expected_post_index(db), posts_actual),
+        files=_diff_index(_expected_file_index(db), files_actual),
+        channel_messages=_diff_index(_expected_channel_message_index(db), channel_actual),
+    )
+
+
+def rebuild_indexes(db: Database) -> SearchIndexIntegrityReport:
+    """
+    Rebuild all three FTS tables from authoritative data, replacing their
+    entire contents. Idempotent, and safe to run at any time -- a crash
+    between an authoritative commit and its reindex call, an interrupted
+    migration, or a restored older backup can all leave these tables
+    inconsistent with no other supported repair path.
+
+    Uses the exact same `_expected_*_index` computation `check_index_
+    integrity` compares against, so the returned report (the state
+    *before* this rebuild ran, for visibility into what was actually
+    wrong) is immediately followed by a genuinely clean index -- calling
+    `check_index_integrity` again right after always reports
+    `is_clean == True`.
+    """
+    before = check_index_integrity(db)
+
+    posts_expected = _expected_post_index(db)
+    db.connection.execute("DELETE FROM post_search")
+    db.connection.executemany(
+        "INSERT INTO post_search (root_post_id, board_id, subject, body) VALUES (?, ?, ?, ?)",
+        [(root_post_id, board_id, subject, body) for root_post_id, (board_id, subject, body) in posts_expected.items()],
+    )
+
+    files_expected = _expected_file_index(db)
+    db.connection.execute("DELETE FROM file_search")
+    db.connection.executemany(
+        "INSERT INTO file_search (file_id, area_id, filename, description) VALUES (?, ?, ?, ?)",
+        [(file_id, area_id, filename, description) for file_id, (area_id, filename, description) in files_expected.items()],
+    )
+
+    channel_expected = _expected_channel_message_index(db)
+    db.connection.execute("DELETE FROM channel_message_search")
+    db.connection.executemany(
+        "INSERT INTO channel_message_search (message_id, channel_id, body) VALUES (?, ?, ?)",
+        [(message_id, channel_id, body) for message_id, (channel_id, body) in channel_expected.items()],
+    )
+
+    db.connection.commit()
+    return before
+
+
+def _print_report(report: SearchIndexIntegrityReport) -> None:
+    if report.is_clean:
+        print("Search indexes are consistent with authoritative data.")
+        return
+    for name, drift in (
+        ("post_search", report.posts),
+        ("file_search", report.files),
+        ("channel_message_search", report.channel_messages),
+    ):
+        if drift.is_clean:
+            continue
+        print(
+            f"{name}: {len(drift.missing)} missing, {len(drift.stale)} stale, "
+            f"{len(drift.extra)} extra"
+        )
+
+
+# -- CLI ---------------------------------------------------------------
+#
+# `python -m netbbs.search check|rebuild --db PATH` -- a standalone
+# maintenance command (issue #74), mirroring `python -m netbbs.backup`'s
+# own subcommand shape. Deliberately reports only counts, never the drifted
+# ids/content themselves, matching `IndexDrift`'s own "never expose
+# content" rule -- an operator who needs to see exactly what's wrong can
+# still call `check_index_integrity`/`rebuild_indexes` directly from a
+# Python shell against the same database.
+
+_DEFAULT_DB_PATH = Path("netbbs.db")
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="python -m netbbs.search", description="Check or rebuild a NetBBS node's local search indexes."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    check_parser = subparsers.add_parser("check", help="Report drift between search indexes and authoritative data.")
+    check_parser.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB_PATH, help=f"path to the node's database file (default: {_DEFAULT_DB_PATH})"
+    )
+
+    rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild all search indexes from authoritative data.")
+    rebuild_parser.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB_PATH, help=f"path to the node's database file (default: {_DEFAULT_DB_PATH})"
+    )
+
+    args = parser.parse_args(argv)
+
+    db = Database(args.db)
+    try:
+        if args.command == "check":
+            _print_report(check_index_integrity(db))
+        else:
+            before = rebuild_indexes(db)
+            if before.is_clean:
+                print("Search indexes were already consistent; rebuilt anyway.")
+            else:
+                print("Drift found before rebuild:")
+                _print_report(before)
+            print("Rebuild complete.")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()

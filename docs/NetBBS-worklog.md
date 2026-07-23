@@ -598,7 +598,15 @@ call convention) was chosen deliberately over the trigger-based pattern
 SQLite's own FTS5 documentation recommends for external-content tables.
 Any new write path added to those three modules in the future (a new
 status transition, a new bulk/sweep operation) must add its own reindex
-call; nothing enforces this structurally.
+call; nothing enforces this structurally. If one is missed, or a crash
+lands between an authoritative commit and its reindex call, `netbbs.
+search.check_index_integrity`/`rebuild_indexes` (issue #74) is the
+supported repair path: both are computed from the same "what should be
+indexed" query, so a rebuild always converges to a clean check
+immediately after, and the check reports only which ids drifted
+(missing/stale/extra), never the indexed content itself. Deliberately
+not wired into node startup, unlike `Database.check_integrity` -- see
+design doc §6.6 for why.
 
 A bulk/sweep statement (`_sweep_expired_posts`/`_sweep_expired_files`) has
 to collect the affected root/file ids with a `SELECT` *before* running the

@@ -743,6 +743,36 @@ search command) is unrelated and unchanged — it is not "search" in this
 section's sense, just incremental filtering of an already-open, already
 access-checked list.
 
+**Integrity checking and rebuild (issue #74).** Because the three FTS
+tables above are synced by explicit per-write-path calls rather than one
+shared transaction with the authoritative write, a crash between the two,
+a future write path that forgets to call the right reindex function, or a
+restored older backup can leave them stale with no prior way to detect or
+repair it. `netbbs.search.check_index_integrity(db)` reports drift
+(missing/stale/extra entries, by id only — never the drifted content
+itself) for all three tables against authoritative `posts`/`files`/
+`channel_messages` data; `netbbs.search.rebuild_indexes(db)` replaces
+their contents outright, using the exact same "what should be indexed"
+computation the check compares against, so a rebuild always converges to
+a clean check immediately after. Exposed as a standalone maintenance
+command, `python -m netbbs.search check|rebuild --db PATH`, mirroring
+`python -m netbbs.backup`'s own subcommand shape.
+
+**Explicit decision: startup detects nothing automatically.** Unlike
+`Database.check_integrity`'s `PRAGMA integrity_check` (a full-database
+scan run once at every node startup, §13's startup/crash-recovery
+rules), FTS drift checking is *not* wired into node startup. The
+database-corruption check is cheap relative to node startup and guards
+against a failure mode (disk-level corruption) that can occur at any
+time regardless of how careful this codebase's own write paths are; FTS
+drift is a narrower, rarer failure (a missed reindex call, a crash in
+one specific window) whose check cost scales with indexed content
+rather than staying close to constant. Treat it as an operator-run
+maintenance action for now — after a crash, an interrupted migration,
+or a restored backup — rather than a mandatory gate on every start.
+Wiring a summary into the `[D]iagnostic log`/SysOp status surface is
+possible future follow-up, not required by this decision.
+
 ### 6.7 Self-update
 
 The updater uses explicit GitHub Releases over HTTPS rather than arbitrary
@@ -2385,6 +2415,15 @@ and a build that doesn't fails the migration loudly rather than silently
 disabling search.
 
 Issue #56 is fully implemented; all four §6.6 subsections have shipped.
+
+### Issue #74 — FTS index integrity checks and rebuild tooling — closed
+
+§6.6's "Integrity checking and rebuild" subsection now states the
+complete design: `netbbs.search.check_index_integrity`/`rebuild_indexes`,
+a standalone `python -m netbbs.search check|rebuild` command, and the
+explicit decision that startup does not run this check automatically
+(unlike `Database.check_integrity`). Reports drift by id only, never
+indexed content, for all three FTS tables.
 
 ### Issue #60 — production operations — closed
 

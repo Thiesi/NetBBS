@@ -28,8 +28,10 @@ from netbbs.moderation import BoardPermission, grant_permissions
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _main_menu
 from netbbs.search import (
+    check_index_integrity,
     file_jump_cursor,
     post_jump_cursor,
+    rebuild_indexes,
     search_channel_messages,
     search_files,
     search_posts,
@@ -360,3 +362,155 @@ def test_find_selecting_a_file_jumps_to_it(db, lane, alice):
 def test_find_no_matches(db, lane, alice):
     session = _run_main_menu(db, lane, alice, ["f", "nonexistentterm", "l"])
     assert "No matches." in _visible_text(session)
+
+
+# -- check_index_integrity / rebuild_indexes (issue #74) -------------------
+
+
+def test_check_index_integrity_is_clean_on_freshly_indexed_content(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "hello world", "body")
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "readme.txt", b"data", description="a guide")
+    channel = create_channel(db, "lobby", creator=alice)
+    record_message(db, channel, kind="message", author_label="alice", body="hi there")
+
+    report = check_index_integrity(db)
+
+    assert report.is_clean
+    assert report.posts.missing == report.posts.stale == report.posts.extra == ()
+
+
+def test_check_index_integrity_detects_a_missing_post_entry(db, alice):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "hello world", "body")
+
+    # Simulate a write path that committed the authoritative row but
+    # never called reindex_post -- exactly the crash window issue #74
+    # is about.
+    db.connection.execute("DELETE FROM post_search WHERE root_post_id = ?", (post.root_post_id,))
+    db.connection.commit()
+
+    report = check_index_integrity(db)
+
+    assert not report.is_clean
+    assert report.posts.missing == (post.root_post_id,)
+    assert report.posts.stale == ()
+    assert report.posts.extra == ()
+    # Only the id is reported, never the drifted content itself.
+    assert "hello world" not in repr(report)
+
+
+def test_check_index_integrity_detects_a_stale_post_entry(db, alice):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "hello world", "body")
+
+    db.connection.execute(
+        "UPDATE post_search SET subject = ? WHERE root_post_id = ?", ("wrong subject", post.root_post_id)
+    )
+    db.connection.commit()
+
+    report = check_index_integrity(db)
+
+    assert report.posts.stale == (post.root_post_id,)
+    assert report.posts.missing == ()
+    assert report.posts.extra == ()
+
+
+def test_check_index_integrity_detects_an_extra_post_entry(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "hello world", "body")
+
+    db.connection.execute(
+        "INSERT INTO post_search (subject, body, board_id, root_post_id) VALUES (?, ?, ?, ?)",
+        ("orphaned", "orphaned", board.id, "a-root-post-id-that-does-not-exist"),
+    )
+    db.connection.commit()
+
+    report = check_index_integrity(db)
+
+    assert report.posts.extra == ("a-root-post-id-that-does-not-exist",)
+    assert report.posts.missing == ()
+    assert report.posts.stale == ()
+
+
+def test_check_index_integrity_detects_drift_in_files_and_channel_messages(db, alice):
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "readme.txt", b"data", description="a guide")
+    channel = create_channel(db, "lobby", creator=alice)
+    record_message(db, channel, kind="message", author_label="alice", body="hi there")
+
+    db.connection.execute("DELETE FROM file_search")
+    db.connection.execute("DELETE FROM channel_message_search")
+    db.connection.commit()
+
+    report = check_index_integrity(db)
+
+    assert not report.is_clean
+    assert len(report.files.missing) == 1
+    assert len(report.channel_messages.missing) == 1
+
+
+def test_rebuild_indexes_repairs_missing_stale_and_extra_entries(db, alice):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "hello world", "body")
+    area = create_file_area(db, "downloads", creator=alice)
+    upload_file(db, area, alice, "readme.txt", b"data", description="a guide")
+    channel = create_channel(db, "lobby", creator=alice)
+    record_message(db, channel, kind="message", author_label="alice", body="hi there")
+
+    # Corrupt all three tables at once: a missing post entry, a stale
+    # file entry, and an orphaned extra channel-message entry.
+    db.connection.execute("DELETE FROM post_search WHERE root_post_id = ?", (post.root_post_id,))
+    db.connection.execute("UPDATE file_search SET filename = 'wrong.txt'")
+    db.connection.execute(
+        "INSERT INTO channel_message_search (body, channel_id, message_id) VALUES ('orphan', ?, ?)",
+        (channel.id, 999999),
+    )
+    db.connection.commit()
+
+    before = rebuild_indexes(db)
+
+    assert not before.is_clean
+    assert before.posts.missing == (post.root_post_id,)
+    assert before.files.stale != ()
+    assert before.channel_messages.extra == (999999,)
+
+    after = check_index_integrity(db)
+    assert after.is_clean
+
+    # The repaired content is genuinely searchable again, not just
+    # reported as clean.
+    assert [hit.subject for hit in search_posts(db, alice, "hello")] == ["hello world"]
+    assert [hit.filename for hit in search_files(db, alice, "guide")] == ["readme.txt"]
+
+
+def test_rebuild_indexes_is_idempotent(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "hello world", "body")
+
+    rebuild_indexes(db)
+    first = check_index_integrity(db)
+    rebuild_indexes(db)
+    second = check_index_integrity(db)
+
+    assert first.is_clean
+    assert second.is_clean
+
+
+def test_rebuild_indexes_excludes_deleted_and_pending_content(db, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    deleted_post = create_post(db, board, alice, "will be deleted", "body")
+    delete_post(db, deleted_post, deleted_by=alice)
+
+    moderated_board = create_board(db, "modboard", creator=alice, moderated=True)
+    create_post(db, moderated_board, bob, "still pending", "body")
+
+    rebuild_indexes(db)
+
+    assert search_posts(db, alice, "deleted") == []
+    assert search_posts(db, alice, "pending") == []
+    assert check_index_integrity(db).is_clean
