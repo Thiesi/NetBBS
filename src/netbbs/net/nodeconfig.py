@@ -344,12 +344,14 @@ class NodeConfig:
             warnings.append(
                 f"NetBBS Link is configured as a full peer, advertising "
                 f"{self.link.advertised_host}:{self.link.advertised_port or self.link.port} to other "
-                "nodes -- design doc §15: Phase 3 is explicitly private/experimental federation, and "
-                "the operational-model work (issue #60) is not yet implemented (the WAN/NAT trust-"
-                "boundary work, issue #58, has landed). Not a plaintext-password risk the way Telnet/"
-                "web are (Link traffic is signed, not password-authenticated), but an externally "
-                "reachable Link listener should not be operated persistently before that remaining "
-                "work lands. Prefer outgoing_only (the default) until then."
+                "nodes -- design doc §15: Phase 3 remains explicitly private/experimental federation "
+                "with no public trust/reputation or quarantine model yet (issue #55), even though the "
+                "WAN/NAT trust-boundary work (issue #58) and operational controls (issue #60) have "
+                "landed. Not a plaintext-password risk the way Telnet/web are (Link traffic is signed, "
+                "not password-authenticated), but an externally reachable Link listener accepts hellos "
+                "from any node that dials it, with no reputation/quarantine model to fall back on yet. "
+                "Prefer outgoing_only (the default) for anything but a small, trusted, invite-your-"
+                "friends deployment."
             )
         return warnings
 

@@ -33,6 +33,19 @@ single-node BBS:
   management (who's online, disconnect a session, graceful shutdown),
   and reference-aware garbage collection for uploaded file storage.
 
+**Post-Phase-2 local additions are substantially complete:**
+
+- topic-first Communities above boards/channels/file areas, with
+  inheritance and Community-scoped blanket moderation;
+- identity attestation with minimum-age/verified-name gates;
+- local asynchronous personal mail (distinct from real-time `/msg` and
+  from Link mail);
+- per-user read cursors, follows/favourites, a `[N]ew scan` activity
+  surface, and local FTS5-backed `[F]ind` search over boards/files/chat
+  scrollback;
+- self-update foundations with scheduled release checks and safe
+  archive extraction.
+
 **Phase 3 (NetBBS Link) is active** — private/experimental federation
 between NetBBS nodes, opt-in and disabled by default. Currently working:
 
@@ -41,31 +54,34 @@ between NetBBS nodes, opt-in and disabled by default. Currently working:
 - hello/peer discovery, persisted across restarts, with live
   supplementary seed-list refresh and peer-list exchange;
 - promoting a local board to Link scope, and carrying a board received
-  from a peer (it becomes a real, locally browsable board);
+  from a peer — both the board shell and every remote post/edit
+  materialize into that node's own real, locally browsable content,
+  with a `[R]epair carried posts` SysOp tool if a crash ever leaves
+  that materialization incomplete;
 - Link mail — asynchronous, encrypted, addressed `user@node-
   fingerprint` — with accepted/bounced delivery acknowledgement;
 - automatic relay selection/consent and a bounded relay mailbox, so an
   outgoing-only node (behind NAT, no port-forward) can still be reached;
-- an operator-facing `[L]ink status`/`[O]utbox` SysOp surface, backup/
-  restore, and quotas on every remotely-influenced resource (peer
-  count, carried-board count, request rate/size).
+- an operator-facing `[L]ink status`/`[O]utbox`/`[D]iagnostic log`
+  SysOp surface, backup/restore (including a staged, validated,
+  interruption-recoverable restore), quotas on every
+  remotely-influenced resource (peer count, carried-board count,
+  request rate/size), startup integrity checking, and graceful
+  drain of in-flight Link work on shutdown.
 
 Try it yourself with the [two-node quickstart](#trying-netbbs-link-a-two-node-quickstart)
-below.
+below — every step is also exercised automatically by
+[`scripts/link_quickstart_smoke_test.py`](scripts/link_quickstart_smoke_test.py),
+so a future change that breaks this flow fails a script instead of
+just rotting this document.
 
 **What Link does not yet do** — no public federation or trust/
 reputation model (Phase 3 is explicitly a private, invite-your-friends
-federation for now); no inventory/pull-based catch-up (a node that's
-been offline doesn't yet backfill everything it missed, only what
-peers happen to still be actively re-gossiping); no linked channels or
-remote file areas (boards only, so far); and, the current sharpest
-edge — **a carried board's remote posts and edits are verified,
-accepted, and gossiped on to other peers, but not yet materialized
-into that board's own locally browsable content** (only the board
-genesis itself is; see [issue #73](https://github.com/Thiesi/NetBBS/issues/73)).
-A carrying node can see *that* a peer's board is active (event counts
-climb on the Link status screen) before it can actually show you what
-was posted.
+federation for now; see [issue #55](https://github.com/Thiesi/NetBBS/issues/55));
+no inventory/pull-based catch-up (a node that's been offline doesn't
+yet backfill everything it missed, only what peers happen to still be
+actively re-gossiping); and no linked channels or remote file areas
+(boards only, so far).
 
 See [`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md) for the
 full architecture, rationale, and phased roadmap, and
@@ -133,7 +149,7 @@ netbbs/
 │   │                     invite-only channels, mute/ban/kick, presence,
 │   │                     scrollback, per-session private-message
 │   │                     delivery, `/nick` aliases
-│   ├── link/             NetBBS Link (Phase 3, §11-13): node identity/
+│   ├── link/             NetBBS Link (Phase 3, §7-13): node identity/
 │   │                     key lifecycle (`node_identity.py`), the
 │   │                     transport-agnostic handshake/gossip protocol
 │   │                     (`protocol.py`), the real `aiohttp` transport
@@ -142,9 +158,12 @@ netbbs/
 │   │                     shapes (`events.py`), persistence/restart
 │   │                     reconstruction (`store.py`), the local-
 │   │                     origination/materialization bridge for boards
-│   │                     and mail (`boards.py`/`mail.py`), bounded
-│   │                     outbound work items/retry/dead-letter
-│   │                     (`work_items.py`), and outgoing-only
+│   │                     and mail (`boards.py`/`mail.py`, including
+│   │                     received-post/edit materialization and its
+│   │                     `[R]epair` tool), bounded outbound work
+│   │                     items/retry/dead-letter (`work_items.py`),
+│   │                     the bounded, non-permanent diagnostic log
+│   │                     (`diagnostics.py`), and outgoing-only
 │   │                     reachability (`relay_mailbox.py`/
 │   │                     `relay_selection.py`/`reliability.py`/
 │   │                     `seedlist.py`)
@@ -175,6 +194,26 @@ netbbs/
 │   ├── web/              Vendored xterm.js static assets served by
 │   │                     `netbbs.net.web`
 │   ├── directory.py      User directory / vCard-style finger lookups
+│   ├── communities.py    Topic-first Communities above boards/channels/
+│   │                     file areas: inheritance, navigation, and
+│   │                     Community-scoped blanket moderation (§6.5)
+│   ├── attestation.py    Identity attestation and minimum-age/
+│   │                     verified-name gates (§5.5)
+│   ├── mail.py           Local asynchronous personal mail: inbox/sent,
+│   │                     quotas, reply/deletion semantics (§6.4) —
+│   │                     distinct from `netbbs.link.mail`'s Link mail
+│   ├── activity.py       Per-user read cursors, follows/favourites, and
+│   │                     the `[N]ew scan` activity surface (§6.6,
+│   │                     issue #56)
+│   ├── search.py         Local FTS5-backed search over boards/files/
+│   │                     channel scrollback, synced from every write
+│   │                     path (§6.6, issue #56)
+│   ├── selfupdate.py     Release checking, safe archive extraction, and
+│   │                     database snapshot/restore primitives (§6.7)
+│   ├── backup.py         Full node backup/restore (database, blobs,
+│   │                     node identity, SSH host key, welcome banner),
+│   │                     including the staged/validated/interruption-
+│   │                     recoverable restore workflow (§13.4/§13.10)
 │   ├── user_preferences.py  Generic per-user key-value preference store
 │   │                     (fullscreen editor opt-in, chat timestamps,
 │   │                     etc. are all built on this)
@@ -189,8 +228,10 @@ netbbs/
 ├── scripts/               Dev utilities for exercising features without
 │                         a self-registration UI or full admin session —
 │                         create/block/unblock test users, boards,
-│                         channels, categories, file areas/files, and
-│                         set node config values directly
+│                         channels, categories, file areas/files, set
+│                         node config values directly, and an automated
+│                         two-node Link quickstart smoke test
+│                         (`link_quickstart_smoke_test.py`)
 ├── tests/                Test suite (pytest; conftest.py speeds up
 │                         Argon2id-heavy tests automatically)
 ├── pyproject.toml
@@ -404,14 +445,15 @@ system has been revoked." instead of reaching the main menu. Reverse with
 `python scripts/unblock_user.py netbbs.db thiesi`.
 
 **The SysOp admin menu** (`[S]ysOp` from the main menu, for any account
-at or above the SysOp level) covers user/board/area/channel/category
-management, moderator permission grants, file-storage garbage
-collection, and — under `[S]ystem` → `[N]ode` — who's online,
+at or above the SysOp level) covers user/board/area/channel/category/
+Community management, moderator permission grants, file-storage
+garbage collection, and — under `[S]ystem` → `[N]ode` — who's online,
 maintenance mode (lock out new non-SysOp logins), drain (disconnect
 already-connected non-SysOps), and graceful shutdown. `[S]ystem` also
-has `[L]ink status`/`[O]utbox` (only shown when Link is enabled — see
-the [quickstart](#trying-netbbs-link-a-two-node-quickstart) below) and
-Bac[K]up status. `python -m netbbs.admin --db netbbs.db` reaches the
+has Bac[K]up status and, only shown when Link is enabled (see the
+[quickstart](#trying-netbbs-link-a-two-node-quickstart) below):
+`[L]ink status`, `[O]utbox`, `[R]epair carried posts`, and
+`[D]iagnostic log`. `python -m netbbs.admin --db netbbs.db` reaches the
 same menu without a network connection at all.
 
 **The fullscreen editors** are opt-in per account: from `[P]rofile`,
@@ -430,10 +472,10 @@ file area work with any Zmodem-capable terminal (SyncTERM, `lrzsz`'s
 ## Trying NetBBS Link: a two-node quickstart
 
 Every step below was actually run against this repo, not just
-described — including the exact points where current behavior is
-still incomplete. Two nodes, both on `127.0.0.1` with different ports,
-running from two separate directories so each gets its own database
-and identity.
+described, including the current, deliberate limits on what Linking a
+board actually does (step 5). Two nodes, both on `127.0.0.1` with
+different ports, running from two separate directories so each gets
+its own database and identity.
 
 Install the `web` extra first (Link needs `aiohttp` — see
 Requirements above): `pip install -e ".[web]"`.
@@ -481,8 +523,10 @@ Both nodes as configured here are full peers advertising a real
 address — fine for a local loopback demo (and needed for it: the mail
 acknowledgement round trip in step 6 requires both sides reachable),
 but each will log a startup warning about it. Prefer `outgoing_only =
-true` (the default) for anything you actually run persistently, until
-issue #60's remaining operational controls land.
+true` (the default) for anything you actually run persistently: Phase 3
+still has no public trust/reputation or quarantine model (issue #55),
+so an externally reachable full peer accepts a hello from any node
+that dials it.
 
 **2. Create a SysOp on each** (`create_test_user.py <db> <username>
 <password> <level>` — 255 is the SysOp level), then start both from
@@ -501,7 +545,7 @@ paragraph above) and then its own fingerprint — you'll need node-b's
 for step 6:
 
 ```
-WARNING:__main__:NetBBS Link is configured as a full peer, advertising 127.0.0.1:7862 to other nodes -- ... Prefer outgoing_only (the default) until then.
+WARNING:__main__:NetBBS Link is configured as a full peer, advertising 127.0.0.1:7862 to other nodes -- ... Prefer outgoing_only (the default) for anything but a small, trusted, invite-your-friends deployment.
 INFO:__main__:node Link identity 'node-a': fingerprint yxfuhddkxvik35qkkyxdoexxdiqdjxuv
 INFO:__main__:NetBBS Link listening on 127.0.0.1:7862 (fingerprint yxfuhddkxvik35qkkyxdoexxdiqdjxuv, full peer)
 ```
@@ -533,17 +577,25 @@ handful of recommended settings (blank = no recommendation) and a
 finishes with `Linked 'general' -- it will be pushed to peers on the
 next sync pass.`
 
-**5. Post, then check node B — and see the current real limitation.**
-Post something new to `general` on node A (`[J]ump to...` →
-`[M]essage Boards` → pick it → `[P]ost`). Within a sync pass, node B's
-own `[L]ink status` screen shows `Linked boards: 1`, `Carried boards:
-1/500`, and a `Known events` count that includes your new post — the
-event genuinely arrived, was verified, and was accepted. But browsing
-that board on node B (`[J]ump to...` → `[M]essage Boards` → pick
-`general`) currently shows **`[general] has no posts yet.`** —
-carried-board posts/edits aren't materialized into locally browsable
-content yet (issue #73, noted in Status above). This isn't a
-misconfiguration; it's the accurate current state of the feature.
+**5. Post, then check node B.** Post something new to `general` on
+node A (`[J]ump to...` → `[M]essage Boards` → pick it → `[P]ost`).
+Within a sync pass, node B's own `[L]ink status` screen shows `Linked
+boards: 1`, `Carried boards: 1/500`, and a `Known events` count that
+includes your new post. Browsing that board on node B (`[J]ump to...`
+→ `[M]essage Boards` → pick `general`) now shows the post itself,
+attributed to `alice@<node-a's-fingerprint>`:
+
+```
+[general]
+
+[1] Hello from the quickstart -- alice@yxfuhddkxvik35qkkyxdoexxdiqdjxuv (23.07.2026 13:11)
+This is a test post for materialization verification.
+```
+
+Note what you *won't* see: any post made on node A's board **before**
+it was linked. Linking only ever promotes an existing board from that
+point forward — there is no pre-Link history backfill, so a board's
+earlier local-only posts stay exactly that, local-only.
 
 **6. Compose Link mail and watch the acknowledgement round-trip.**
 From node A as `alice`: `[E]-mail` → `[C]ompose` → address it to
