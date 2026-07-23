@@ -1701,4 +1701,50 @@ MIGRATIONS = [
         CREATE INDEX idx_link_diagnostic_log_created_at ON link_diagnostic_log(created_at);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #72: node-local arrival order for unread state, distinct "
+            "from a post/file's own authored created_at. A remote post's "
+            "claimed created_at can predate a user's existing read cursor "
+            "even though the post only just arrived after a partition/catch- "
+            "up, silently hiding it from unread counts and [N]ew scan -- "
+            "authored chronology and 'became available on this node' "
+            "chronology are different things. user_read_cursors gains "
+            "last_seen_arrival_id (nullable INTEGER): the posts/files row's "
+            "own INTEGER PRIMARY KEY rowid at the moment it became locally "
+            "visible, whether created locally (netbbs.boards.posts."
+            "create_post) or materialized from a carried Link event "
+            "(netbbs.link.boards.materialize_carried_post inserts a fresh "
+            "row the exact same way) -- no new column on posts/files "
+            "themselves, since SQLite already assigns their rowid in strict "
+            "insertion order for both origins (the same property GitHub "
+            "issue #68 already relies on for edit-chain tie-breaking). "
+            "Backfilled for every existing cursor row from the post/file it "
+            "already names via last_seen_stable_id, so existing read state "
+            "is preserved exactly, never reset to unread by this migration "
+            "itself. Channels are unaffected: channel_messages.id already "
+            "serves this role for that container (last_seen_stable_id "
+            "already stores it directly for channel cursors), which is why "
+            "channels never had this bug in the first place."
+        ),
+        sql="""
+        ALTER TABLE user_read_cursors ADD COLUMN last_seen_arrival_id INTEGER;
+
+        UPDATE user_read_cursors
+        SET last_seen_arrival_id = (
+            SELECT posts.id FROM posts WHERE posts.post_id = user_read_cursors.last_seen_stable_id
+        )
+        WHERE object_type = 'board';
+
+        UPDATE user_read_cursors
+        SET last_seen_arrival_id = (
+            SELECT files.id FROM files WHERE files.file_id = user_read_cursors.last_seen_stable_id
+        )
+        WHERE object_type = 'file_area';
+
+        UPDATE user_read_cursors
+        SET last_seen_arrival_id = CAST(last_seen_stable_id AS INTEGER)
+        WHERE object_type = 'channel';
+        """,
+    ),
 ]

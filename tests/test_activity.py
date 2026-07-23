@@ -300,3 +300,131 @@ def test_deleting_a_community_removes_its_follow_rows(db, alice, bob):
     assert db.connection.execute(
         "SELECT 1 FROM user_follows WHERE object_type = 'community' AND object_id = ?", (community.id,)
     ).fetchone() is None
+
+
+# -- issue #72: last_seen_arrival_id migration backfill ------------------
+
+
+def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path, monkeypatch):
+    """A cursor row written before this migration existed has no
+    last_seen_arrival_id of its own -- the migration must compute it
+    from the post its last_seen_stable_id already names, preserving
+    exactly what that user had already read rather than resetting
+    anyone to a fresh, all-unread state."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    db_path = tmp_path / "node.db"
+
+    # Apply every migration except the last (this one), matching the
+    # schema shape a real pre-upgrade database would have on disk.
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "hello", "world")
+    # Write the cursor row the same shape the pre-#72 code actually
+    # wrote -- record_board_seen itself now assumes last_seen_arrival_id
+    # already exists, so it can't be used against this older schema.
+    db.connection.execute(
+        "INSERT INTO user_read_cursors "
+        "(user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id, updated_at) "
+        "VALUES (?, 'board', ?, ?, ?, ?)",
+        (alice.id, board.id, post.created_at, post.post_id, post.created_at),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    # Reopen with the real, full migration list -- only the new one runs.
+    db = Database(db_path)
+    try:
+        row = db.connection.execute(
+            "SELECT last_seen_arrival_id, last_seen_stable_id FROM user_read_cursors "
+            "WHERE user_id = ? AND object_type = 'board' AND object_id = ?",
+            (alice.id, board.id),
+        ).fetchone()
+        post_row = db.connection.execute(
+            "SELECT id FROM posts WHERE post_id = ?", (row["last_seen_stable_id"],)
+        ).fetchone()
+        assert row["last_seen_arrival_id"] == post_row["id"]
+
+        # And unread counting works immediately using the backfilled value.
+        assert unread_post_count(db, alice, board) == 0
+        new_post = create_post(db, board, alice, "hello again", "world again")
+        assert unread_post_count(db, alice, board) == 1
+        record_board_seen(db, alice, board, new_post)
+        assert unread_post_count(db, alice, board) == 0
+    finally:
+        db.close()
+
+
+def test_migration_backfills_arrival_id_for_a_pre_existing_file_area_cursor(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    db_path = tmp_path / "node.db"
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=alice)
+    entry = upload_file(db, area, alice, "readme.txt", b"data")
+    db.connection.execute(
+        "INSERT INTO user_read_cursors "
+        "(user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id, updated_at) "
+        "VALUES (?, 'file_area', ?, ?, ?, ?)",
+        (alice.id, area.id, entry.created_at, entry.file_id, entry.created_at),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    db = Database(db_path)
+    try:
+        row = db.connection.execute(
+            "SELECT last_seen_arrival_id, last_seen_stable_id FROM user_read_cursors "
+            "WHERE user_id = ? AND object_type = 'file_area' AND object_id = ?",
+            (alice.id, area.id),
+        ).fetchone()
+        file_row = db.connection.execute(
+            "SELECT id FROM files WHERE file_id = ?", (row["last_seen_stable_id"],)
+        ).fetchone()
+        assert row["last_seen_arrival_id"] == file_row["id"]
+        assert unread_file_count(db, alice, area) == 0
+    finally:
+        db.close()
+
+
+def test_migration_backfills_arrival_id_for_a_pre_existing_channel_cursor(tmp_path, monkeypatch):
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    db_path = tmp_path / "node.db"
+
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(db, "lobby", creator=alice)
+    message = record_message(db, channel, kind="message", author_label="alice", body="hi")
+    db.connection.execute(
+        "INSERT INTO user_read_cursors "
+        "(user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id, updated_at) "
+        "VALUES (?, 'channel', ?, ?, ?, ?)",
+        (alice.id, channel.id, message.created_at, str(message.id), message.created_at),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    db = Database(db_path)
+    try:
+        row = db.connection.execute(
+            "SELECT last_seen_arrival_id, last_seen_stable_id FROM user_read_cursors "
+            "WHERE user_id = ? AND object_type = 'channel' AND object_id = ?",
+            (alice.id, channel.id),
+        ).fetchone()
+        assert row["last_seen_arrival_id"] == int(row["last_seen_stable_id"]) == message.id
+        assert unread_channel_count(db, alice, channel) == 0
+    finally:
+        db.close()

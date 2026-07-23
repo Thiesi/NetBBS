@@ -21,6 +21,29 @@ A cursor never retreats: paging backward into a board's history must not
 un-mark already-read content, so every `record_*_seen` call only writes
 when the new position is strictly newer than whatever is already stored.
 
+**Two different orderings, issue #72.** A post/file's own `created_at` is
+authored chronology -- for a carried Link post, the remote author's own
+claimed timestamp, which can be arbitrarily old if it only reaches this
+node after a partition or delayed catch-up. `last_seen_arrival_id`
+tracks a *different* axis: this node's own local, node-assigned
+`posts`/`files` row id (SQLite's `INTEGER PRIMARY KEY` rowid, assigned
+in strict insertion order for both a locally created row and a
+materialized carried one -- the same property GitHub issue #68 already
+relies on for edit-chain tie-breaking) at the moment content became
+locally visible. `unread_post_count`/`unread_file_count`/
+`unread_replies_to` compare against this arrival axis, not `created_at`,
+so a late-arriving post with an old claimed timestamp is still correctly
+reported as unread rather than silently sorting behind an
+already-advanced cursor. `board_read_cursor`/`file_area_read_cursor`
+(used for feed-position jump-to) are unchanged and still return
+`(created_at, stable_id)` -- jump-to positioning stays authored-
+chronology-based; only *whether something counts as unread at all*
+changed. A known consequence: jumping to "first unread" can still land
+on the ordinary newest page rather than a specific out-of-order arrival
+buried elsewhere in feed history -- see design doc §6.6's "Read/unread
+state" subsection for why that gap is an accepted, documented scope
+boundary rather than silently unhandled.
+
 Plain, synchronous, `db`-first functions (CLAUDE.md), matching
 `netbbs.user_preferences`/`netbbs.chat.membership`'s own convention: every
 write commits itself, and none of this calls `record_action` -- follow/
@@ -29,6 +52,8 @@ reasoning `user_preferences` already applies to its own writes.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
@@ -51,51 +76,92 @@ _FILE_AREA = "file_area"
 _CHANNEL_CONTENT_KINDS = ("message", "action")
 
 
-def _get_cursor(db: Database, user: User, object_type: str, object_id: int) -> tuple[str, str] | None:
+@dataclass(frozen=True)
+class _Cursor:
+    created_at: str
+    stable_id: str
+    # Node-local arrival order (issue #72) -- may be `None` only for a
+    # pre-migration cursor row whose backfill couldn't resolve it because
+    # the post/file it named was already hard-deleted at migration time.
+    # `_arrival_is_at_or_past` falls back to the pre-#72 created_at/
+    # stable_id comparison in that one rare case.
+    arrival_id: int | None
+
+
+def _get_cursor(db: Database, user: User, object_type: str, object_id: int) -> _Cursor | None:
     row = db.connection.execute(
-        "SELECT last_seen_created_at, last_seen_stable_id FROM user_read_cursors "
+        "SELECT last_seen_created_at, last_seen_stable_id, last_seen_arrival_id FROM user_read_cursors "
         "WHERE user_id = ? AND object_type = ? AND object_id = ?",
         (user.id, object_type, object_id),
     ).fetchone()
     if row is None:
         return None
-    return row["last_seen_created_at"], row["last_seen_stable_id"]
+    return _Cursor(
+        created_at=row["last_seen_created_at"],
+        stable_id=row["last_seen_stable_id"],
+        arrival_id=row["last_seen_arrival_id"],
+    )
+
+
+def _arrival_is_at_or_past(cursor: _Cursor, arrival_id: int, created_at: str, stable_id: str) -> bool:
+    """Whether `cursor` already covers `arrival_id` -- the "has this
+    content already been marked seen" comparison `unread_*_count`/
+    `unread_replies_to` use. Falls back to the legacy created_at/
+    stable_id tuple only for the rare pre-#72 cursor whose backfill left
+    `arrival_id` unresolved (see `_Cursor`'s own docstring)."""
+    if cursor.arrival_id is not None:
+        return cursor.arrival_id >= arrival_id
+    return (cursor.created_at, cursor.stable_id) >= (created_at, stable_id)
 
 
 def _record_seen_string_ordered(
-    db: Database, user: User, object_type: str, object_id: int, *, created_at: str, stable_id: str
+    db: Database, user: User, object_type: str, object_id: int, *, created_at: str, stable_id: str, arrival_id: int
 ) -> None:
     existing = _get_cursor(db, user, object_type, object_id)
-    if existing is not None and existing >= (created_at, stable_id):
+    if existing is not None and _arrival_is_at_or_past(existing, arrival_id, created_at, stable_id):
         return  # never retreat -- an older/equal page view must not un-mark newer content
-    _upsert_cursor(db, user, object_type, object_id, last_seen_created_at=created_at, last_seen_stable_id=stable_id)
+    _upsert_cursor(
+        db, user, object_type, object_id,
+        last_seen_created_at=created_at, last_seen_stable_id=stable_id, last_seen_arrival_id=arrival_id,
+    )
 
 
 def _record_seen_int_ordered(
     db: Database, user: User, object_type: str, object_id: int, *, created_at: str, stable_id: int
 ) -> None:
+    # A channel message's own id already is both the stable feed position
+    # and the arrival order (netbbs.chat.scrollback assigns it via a plain
+    # INSERT the same as everything else) -- no separate arrival axis to
+    # track here, unlike boards/file areas.
     existing = _get_cursor(db, user, object_type, object_id)
-    if existing is not None and int(existing[1]) >= stable_id:
+    if existing is not None and existing.arrival_id is not None and existing.arrival_id >= stable_id:
         return
     _upsert_cursor(
-        db, user, object_type, object_id, last_seen_created_at=created_at, last_seen_stable_id=str(stable_id)
+        db, user, object_type, object_id,
+        last_seen_created_at=created_at, last_seen_stable_id=str(stable_id), last_seen_arrival_id=stable_id,
     )
 
 
 def _upsert_cursor(
-    db: Database, user: User, object_type: str, object_id: int, *, last_seen_created_at: str, last_seen_stable_id: str
+    db: Database, user: User, object_type: str, object_id: int, *,
+    last_seen_created_at: str, last_seen_stable_id: str, last_seen_arrival_id: int,
 ) -> None:
     db.connection.execute(
         """
         INSERT INTO user_read_cursors
-            (user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id,
+             last_seen_arrival_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, object_type, object_id) DO UPDATE SET
             last_seen_created_at = excluded.last_seen_created_at,
             last_seen_stable_id = excluded.last_seen_stable_id,
+            last_seen_arrival_id = excluded.last_seen_arrival_id,
             updated_at = excluded.updated_at
         """,
-        (user.id, object_type, object_id, last_seen_created_at, last_seen_stable_id, utc_now_iso()),
+        (
+            user.id, object_type, object_id, last_seen_created_at, last_seen_stable_id,
+            last_seen_arrival_id, utc_now_iso(),
+        ),
     )
     db.connection.commit()
 
@@ -103,40 +169,76 @@ def _upsert_cursor(
 def record_board_seen(db: Database, user: User, board: Board, post: Post) -> None:
     """Advance `user`'s read cursor for `board` to (at least) `post` --
     `post` should be the newest post on whatever page was just shown
-    (its root `created_at`/`post_id`, stable across later edits)."""
-    _record_seen_string_ordered(db, user, _BOARD, board.id, created_at=post.created_at, stable_id=post.post_id)
+    (its root `created_at`/`post_id`, stable across later edits).
+
+    `post.id` (issue #72) is recorded as the arrival-order watermark too
+    -- this node's own rowid for that specific root post, not a
+    board-wide maximum. A late-arriving post elsewhere in this board's
+    history, with an older `created_at` that never makes it "the newest
+    post shown" on an ordinary feed view, therefore keeps its own higher
+    `id` above this watermark and is correctly still reported unread by
+    `unread_post_count` -- exactly the case this issue is about."""
+    _record_seen_string_ordered(
+        db, user, _BOARD, board.id, created_at=post.created_at, stable_id=post.post_id, arrival_id=post.id
+    )
 
 
 def board_read_cursor(db: Database, user: User, board: Board) -> tuple[str, str] | None:
     """`user`'s raw `(created_at, post_id)` cursor for `board`, or
     `None` if never visited -- for a caller (issue #56's `[N]ew scan`)
     that needs to jump straight to the first unread post via
-    `list_posts_page`'s own `after=` parameter, not just a count."""
-    return _get_cursor(db, user, _BOARD, board.id)
+    `list_posts_page`'s own `after=` parameter, not just a count.
+    Feed-position based, unchanged by issue #72 -- see this module's
+    own docstring for why that's a separate axis from unread counting."""
+    cursor = _get_cursor(db, user, _BOARD, board.id)
+    if cursor is None:
+        return None
+    return cursor.created_at, cursor.stable_id
 
 
 def unread_post_count(db: Database, user: User, board: Board) -> int | None:
     """`None` if `user` has never visited `board` (no baseline cursor
     yet -- distinct from `0`, which means visited and fully caught up).
     Mirrors `list_posts_page`'s own root/approved-chain eligibility
-    exactly, so this never counts a post the feed itself wouldn't show."""
+    exactly, so this never counts a post the feed itself wouldn't show.
+
+    Compares each root post's own local arrival order (`posts.id`, issue
+    #72), not `created_at` -- a carried post materialized after a
+    partition/catch-up keeps its remote author's own old claimed
+    timestamp, which must not let it silently sort behind an
+    already-advanced cursor."""
     cursor = _get_cursor(db, user, _BOARD, board.id)
     if cursor is None:
         return None
-    last_created_at, last_post_id = cursor
-    row = db.connection.execute(
-        """
-        SELECT COUNT(*) AS n FROM posts root
-        WHERE root.board_id = ? AND root.post_id = root.root_post_id
-          AND (root.created_at, root.post_id) > (?, ?)
-          AND EXISTS (
-              SELECT 1 FROM posts v
-              WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
-                AND v.status = 'approved'
-          )
-        """,
-        (board.id, last_created_at, last_post_id),
-    ).fetchone()
+    if cursor.arrival_id is not None:
+        row = db.connection.execute(
+            """
+            SELECT COUNT(*) AS n FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND root.id > ?
+              AND EXISTS (
+                  SELECT 1 FROM posts v
+                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
+                    AND v.status = 'approved'
+              )
+            """,
+            (board.id, cursor.arrival_id),
+        ).fetchone()
+    else:
+        # Legacy fallback -- see _Cursor's own docstring for when this applies.
+        row = db.connection.execute(
+            """
+            SELECT COUNT(*) AS n FROM posts root
+            WHERE root.board_id = ? AND root.post_id = root.root_post_id
+              AND (root.created_at, root.post_id) > (?, ?)
+              AND EXISTS (
+                  SELECT 1 FROM posts v
+                  WHERE v.root_post_id = root.root_post_id AND v.board_id = root.board_id
+                    AND v.status = 'approved'
+              )
+            """,
+            (board.id, cursor.created_at, cursor.stable_id),
+        ).fetchone()
     return row["n"]
 
 
@@ -166,7 +268,7 @@ def unread_replies_to(db: Database, user: User) -> list[Post]:
     unread = []
     for reply in replies:
         cursor = _get_cursor(db, user, _BOARD, reply.board_id)
-        if cursor is None or (reply.created_at, reply.post_id) > cursor:
+        if cursor is None or not _arrival_is_at_or_past(cursor, reply.id, reply.created_at, reply.post_id):
             unread.append(reply)
     return unread
 
@@ -198,31 +300,46 @@ def _root_row_to_post(row) -> Post:
 
 
 def record_file_area_seen(db: Database, user: User, area: FileArea, entry: FileEntry) -> None:
-    """Advance `user`'s read cursor for `area` to (at least) `entry`."""
-    _record_seen_string_ordered(db, user, _FILE_AREA, area.id, created_at=entry.created_at, stable_id=entry.file_id)
+    """Advance `user`'s read cursor for `area` to (at least) `entry` --
+    `entry.id` (issue #72) is the arrival-order watermark, the same
+    reasoning `record_board_seen` documents for posts."""
+    _record_seen_string_ordered(
+        db, user, _FILE_AREA, area.id, created_at=entry.created_at, stable_id=entry.file_id, arrival_id=entry.id
+    )
 
 
 def file_area_read_cursor(db: Database, user: User, area: FileArea) -> tuple[str, str] | None:
     """`user`'s raw `(created_at, file_id)` cursor for `area`, or
     `None` if never visited -- same purpose as `board_read_cursor`."""
-    return _get_cursor(db, user, _FILE_AREA, area.id)
+    cursor = _get_cursor(db, user, _FILE_AREA, area.id)
+    if cursor is None:
+        return None
+    return cursor.created_at, cursor.stable_id
 
 
 def unread_file_count(db: Database, user: User, area: FileArea) -> int | None:
     """`None` if never visited. Mirrors `list_files_page`'s own
     `status = 'approved'` filter (files have no edit-chain, unlike
-    posts)."""
+    posts). Compares each file's own local arrival order (`files.id`,
+    issue #72), not `created_at` -- see `unread_post_count`'s own
+    docstring for why."""
     cursor = _get_cursor(db, user, _FILE_AREA, area.id)
     if cursor is None:
         return None
-    last_created_at, last_file_id = cursor
-    row = db.connection.execute(
-        """
-        SELECT COUNT(*) AS n FROM files
-        WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) > (?, ?)
-        """,
-        (area.id, last_created_at, last_file_id),
-    ).fetchone()
+    if cursor.arrival_id is not None:
+        row = db.connection.execute(
+            "SELECT COUNT(*) AS n FROM files WHERE area_id = ? AND status = 'approved' AND id > ?",
+            (area.id, cursor.arrival_id),
+        ).fetchone()
+    else:
+        # Legacy fallback -- see _Cursor's own docstring for when this applies.
+        row = db.connection.execute(
+            """
+            SELECT COUNT(*) AS n FROM files
+            WHERE area_id = ? AND status = 'approved' AND (created_at, file_id) > (?, ?)
+            """,
+            (area.id, cursor.created_at, cursor.stable_id),
+        ).fetchone()
     return row["n"]
 
 
@@ -244,7 +361,7 @@ def unread_channel_count(db: Database, user: User, channel: Channel) -> int | No
     cursor = _get_cursor(db, user, _CHANNEL, channel.id)
     if cursor is None:
         return None
-    last_message_id = int(cursor[1])
+    last_message_id = int(cursor.stable_id)
     placeholders = ",".join("?" for _ in _CHANNEL_CONTENT_KINDS)
     row = db.connection.execute(
         f"""

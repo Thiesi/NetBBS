@@ -577,6 +577,43 @@ function needs its own explicit `DELETE` for both tables, the same way it
 already does for `moderator_grants`; nothing in the schema cascades this
 automatically.
 
+**Authored chronology and node-local arrival order are different axes
+(issue #72).** The `(created_at, stable_id)` tuple above is correct for
+locally originated content, but a Link-carried post's `created_at` is
+the *remote author's own claimed* timestamp, which can be arbitrarily
+old if the post only reaches this node after a partition or delayed
+catch-up — comparing against it can let a genuinely new arrival
+silently sort behind an already-advanced cursor and never surface as
+unread. `user_read_cursors.last_seen_arrival_id` tracks a second,
+independent axis: the `posts`/`files` row's own `INTEGER PRIMARY KEY`
+rowid, which SQLite assigns in strict insertion order regardless of
+whether the row was created locally or materialized from a carried
+Link event (`netbbs.link.boards.materialize_carried_post` inserts via
+a plain `INSERT`, same as `netbbs.boards.posts.create_post` — no new
+column needed on `posts`/`files` themselves, this is the same rowid
+property GitHub issue #68 already relies on). `unread_post_count`/
+`unread_file_count`/`unread_replies_to` (`netbbs.activity`) compare
+against `last_seen_arrival_id`, not `created_at`; `board_read_cursor`/
+`file_area_read_cursor` (feed-position jump-to) are deliberately
+unchanged, still `created_at`-based — jump-to precision to a specific
+out-of-order arrival is an accepted, documented scope boundary (design
+doc §6.6), not silently unhandled. `record_board_seen`/
+`record_file_area_seen` record the *specific* post/file's own arrival
+id passed to them, never a container-wide maximum — this is what lets
+a late-arriving historical post keep its own high arrival id above the
+cursor even after a user visits the board's ordinary newest page,
+since that specific old post is never "the newest post shown" on a
+normal feed view. A pre-#72 cursor row has no `last_seen_arrival_id` of
+its own; the migration backfills it from the post/file its existing
+`last_seen_stable_id` already names (`tests/test_activity.py`'s
+migration-backfill tests exercise this directly, by monkeypatching
+`netbbs.storage.database.MIGRATIONS` to a shorter list, writing a
+cursor row in the pre-migration shape, then reopening with the real
+list). `_get_cursor`'s returned `_Cursor.arrival_id` can only be `None`
+for a backfilled row whose named post/file was already hard-deleted at
+migration time — the one case every `unread_*_count` function falls
+back to the legacy tuple comparison for.
+
 ### Local search (issue #56)
 
 FTS5 availability on this project's actual NetBSD/pkgsrc target was

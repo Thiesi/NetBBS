@@ -638,6 +638,39 @@ literal `@alice` typed with no intended addressee is an accepted false
 positive, and a message directed at someone without using their exact
 username is an accepted false negative.
 
+**Node-local arrival order for carried content (issue #72).** The
+model above compares a post/file's own `created_at` against the
+cursor. That is correct for locally originated content, created in the
+same order it becomes visible, but not for a Link-carried post: a
+remote author's claimed `created_at` can be arbitrarily old if the post
+only reaches this node after a partition or a delayed catch-up, and
+comparing against it can let a genuinely new arrival silently sort
+behind an already-advanced cursor. `posts`/`files` rows already carry a
+second, distinct ordering with no schema addition needed: SQLite's own
+`INTEGER PRIMARY KEY` rowid, assigned in strict insertion order
+regardless of whether a row was created locally or materialized from a
+carried Link event (the same property GitHub issue #68 already relies
+on for edit-chain tie-breaking). `user_read_cursors` gains
+`last_seen_arrival_id`, populated from that rowid; `unread_post_count`/
+`unread_file_count`/`unread_replies_to` compare against it instead of
+`created_at`, while `board_read_cursor`/`file_area_read_cursor` (feed-
+position jump-to) are unchanged and still compare `created_at` -- the
+two concerns use different orderings on purpose, per this section's own
+distinction between authored chronology and node-local availability.
+Existing cursors are backfilled from the post/file their existing
+`last_seen_stable_id` already names, so an upgrade preserves exactly
+what a user had already read rather than resetting anyone to
+all-unread.
+
+**Accepted scope boundary:** jump-to-first-unread can still land on the
+board/area's ordinary newest page rather than navigating precisely to
+an out-of-order arrival buried elsewhere in feed history, since the
+jump cursor stays `created_at`-based. Unread *counting* and `[N]ew
+scan`'s "has unread" detection are correct either way; only precise
+jump navigation to that specific item is not yet solved. Reconciling
+jump-to with arrival order, if ever wanted, is future work, not implied
+by this fix.
+
 #### Follows and favourites
 
 Follow state is a new, separate table — `(user_id, object_type, object_id)`
@@ -2415,6 +2448,17 @@ and a build that doesn't fails the migration loudly rather than silently
 disabling search.
 
 Issue #56 is fully implemented; all four §6.6 subsections have shipped.
+
+### Issue #72 — node-local arrival order for unread state — closed
+
+§6.6's "Node-local arrival order for carried content" subsection now
+states the complete design: `user_read_cursors.last_seen_arrival_id`,
+sourced from `posts`/`files`' own rowid rather than authored
+`created_at`, with existing cursors backfilled on upgrade. The one
+accepted, documented scope boundary: jump-to-first-unread still uses
+the `created_at`-based cursor and may not navigate precisely to an
+out-of-order arrival, even though unread counting now correctly flags
+it.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 

@@ -876,3 +876,115 @@ def test_load_own_board_events_empty_when_nothing_linked(db, alice, node_identit
     create_board(db, "general", creator=alice)
 
     assert load_own_board_events(db, node_identity.fingerprint) == []
+
+
+# -- issue #72: node-local arrival order for unread state --------------
+#
+# A carried post's own claimed created_at is the remote author's
+# chronology, not this node's. These prove the real materialize_carried_
+# post path (not a simulated row) still reports a late-arriving post as
+# unread even though its authored timestamp predates a cursor that was
+# already advanced past a different, locally-visible post.
+
+
+def test_late_arriving_carried_post_with_an_old_timestamp_is_still_unread(db, alice, remote_node_identity):
+    from netbbs.activity import record_board_seen, unread_post_count
+
+    board_id = _carried_board(db, remote_node_identity)
+    board = get_board_by_name(db, "Remote Discussion")
+
+    # A normal post arrives and reaches the newest page; alice visits and
+    # her cursor advances past it.
+    normal_post = _remote_post(
+        remote_node_identity, board_id=board_id, subject="normal", body="on time",
+        created_at="2026-06-01T00:00:00Z",
+    )
+    materialized_normal = materialize_carried_post(db, normal_post, sender_fingerprint=remote_node_identity.fingerprint)
+    record_board_seen(db, alice, board, materialized_normal)
+
+    assert unread_post_count(db, alice, board) == 0
+
+    # A second post -- authored well *before* the cursor's own post, but
+    # only now materializing on this node (a partition healing, or a
+    # future inventory/pull catch-up) -- must still count as unread.
+    late_post = _remote_post(
+        remote_node_identity, board_id=board_id, subject="late", body="delayed by a partition",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    materialize_carried_post(db, late_post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert unread_post_count(db, alice, board) == 1
+
+
+def test_peer_clock_skew_cannot_hide_newly_materialized_activity(db, alice, remote_node_identity):
+    from netbbs.activity import record_board_seen, unread_post_count
+
+    board_id = _carried_board(db, remote_node_identity)
+    board = get_board_by_name(db, "Remote Discussion")
+
+    normal_post = _remote_post(
+        remote_node_identity, board_id=board_id, subject="normal", body="on time",
+        created_at="2026-06-01T00:00:00Z",
+    )
+    materialized_normal = materialize_carried_post(db, normal_post, sender_fingerprint=remote_node_identity.fingerprint)
+    record_board_seen(db, alice, board, materialized_normal)
+
+    # A wildly clock-skewed peer claims a timestamp far in the future --
+    # arrival order must not be fooled the other direction either.
+    skewed_post = _remote_post(
+        remote_node_identity, board_id=board_id, subject="skewed", body="clock skew",
+        created_at="2099-01-01T00:00:00Z",
+    )
+    materialize_carried_post(db, skewed_post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert unread_post_count(db, alice, board) == 1
+
+
+def test_duplicate_materialization_does_not_double_count_or_advance_arrival_twice(db, alice, remote_node_identity):
+    from netbbs.activity import board_read_cursor, record_board_seen, unread_post_count
+
+    board_id = _carried_board(db, remote_node_identity)
+    board = get_board_by_name(db, "Remote Discussion")
+
+    post = _remote_post(remote_node_identity, board_id=board_id, created_at="2026-01-01T00:00:00Z")
+    first = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    record_board_seen(db, alice, board, first)
+    cursor_after_first = board_read_cursor(db, alice, board)
+
+    # A retried/duplicate delivery of the identical event -- materialize_
+    # carried_post is documented idempotent, keyed on content_id.
+    second = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert second.id == first.id  # same row, not a new one
+    assert unread_post_count(db, alice, board) == 0
+    assert board_read_cursor(db, alice, board) == cursor_after_first
+
+
+def test_typo_edit_does_not_reopen_an_already_read_root_post_as_unread(db, alice, remote_node_identity):
+    from netbbs.activity import record_board_seen, unread_post_count
+
+    board_id = _carried_board(db, remote_node_identity)
+    board = get_board_by_name(db, "Remote Discussion")
+
+    post = _remote_post(remote_node_identity, board_id=board_id, created_at="2026-01-01T00:00:00Z")
+    materialized = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    record_board_seen(db, alice, board, materialized)
+    assert unread_post_count(db, alice, board) == 0
+
+    edit = build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=post.payload["author"],
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (typo fixed)",
+        body="first post",
+        created_at="2026-01-02T00:00:00Z",
+    )
+    materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    # The existing #56 rule: an edit to an already-read root must not
+    # make it unread again -- unread_post_count only ever looks at root
+    # rows, and record_board_seen's cursor already covers this root's
+    # own arrival id.
+    assert unread_post_count(db, alice, board) == 0
