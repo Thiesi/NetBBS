@@ -423,11 +423,14 @@ def materialize_carried_post(db: Database, post: BoardPost, *, sender_fingerprin
 
     db.connection.execute(
         """
-        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (post.content_id, sender_fingerprint, BOARD_POST_OBJECT_TYPE, json.dumps(post.to_dict()), utc_now_iso()),
+        (
+            post.content_id, sender_fingerprint, BOARD_POST_OBJECT_TYPE, json.dumps(post.to_dict()), utc_now_iso(),
+            payload["board_id"],
+        ),
     )
     db.connection.execute(
         """
@@ -502,11 +505,14 @@ def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_f
 
     db.connection.execute(
         """
-        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (edit.content_id, sender_fingerprint, BOARD_POST_EDIT_OBJECT_TYPE, json.dumps(edit.to_dict()), utc_now_iso()),
+        (
+            edit.content_id, sender_fingerprint, BOARD_POST_EDIT_OBJECT_TYPE, json.dumps(edit.to_dict()), utc_now_iso(),
+            payload["board_id"],
+        ),
     )
     db.connection.execute(
         """

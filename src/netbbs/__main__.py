@@ -616,6 +616,7 @@ async def run(
                         background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
                         stop_event=link_sync_stop_event,
+                        max_carried_boards=config.link.max_carried_boards,
                     )
                 )
 

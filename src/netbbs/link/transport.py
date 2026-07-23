@@ -75,13 +75,21 @@ from netbbs.link.events import (
     strict_json_loads,
 )
 from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
-from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError, PeerListMessage, PeerRecord
+from netbbs.link.protocol import (
+    _MAX_EVENTS_PER_REQUEST,
+    HelloMessage,
+    InventoryRequest,
+    LinkNode,
+    LinkProtocolError,
+    PeerListMessage,
+    PeerRecord,
+)
 from netbbs.link.relay_mailbox import (
     RelayMailboxFullError,
     deposit_relay_mailbox_envelope,
     pickup_relay_mailbox_envelopes,
 )
-from netbbs.link.store import save_candidate_descriptor, save_event, save_peer, save_relay_consent
+from netbbs.link.store import board_event_diff, save_candidate_descriptor, save_event, save_peer, save_relay_consent
 from netbbs.net.throttle import LinkRequestThrottle
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -131,6 +139,110 @@ async def _rate_limit_middleware(request: web.Request, handler):
     if throttle is not None and not throttle.allow(request.remote):
         return web.json_response({"error": "rate limit exceeded"}, status=429)
     return await handler(request)
+
+
+async def persist_accepted_events(
+    lane: DatabaseLane,
+    node: LinkNode,
+    accepted: list[str],
+    *,
+    sender_fingerprint: str,
+    max_carried_boards: int | None,
+) -> None:
+    """
+    Persist and follow up on every content_id `LinkNode.handle_events`
+    just returned as newly accepted -- shared by `LinkServer._handle_
+    events` (direct push, `sender_fingerprint` is the wire-level peer)
+    and `netbbs.link.sync`'s inventory-response handling (issue #85,
+    `sender_fingerprint` is whichever peer this node happened to pull
+    the response from -- possibly a relay, not the content's own
+    author/origin; harmless here, since this parameter only ever feeds
+    `link_events.sender_fingerprint` bookkeeping/`materialize_carried_
+    post`'s own diagnostic column, never anything `handle_events` has
+    already independently verified by the time accepted content reaches
+    this function).
+
+    `sender.transitions` growing (a `key_transition` acceptance) is
+    **not** persisted here -- callers with a real peer relationship to
+    update (`LinkServer._handle_events`) do that themselves afterward,
+    since an inventory response has no `key_transition` events to begin
+    with (design doc §8.8's board-only scope) and no single
+    `sender_fingerprint` here is guaranteed to even be an existing
+    `node.peers` entry worth re-saving.
+    """
+    for content_id in accepted:
+        envelope = node.events[content_id]
+        object_type = envelope["envelope"]["object_type"]
+        # Design doc §9.3/issue #73: board_post/board_post_edit skip
+        # the generic save_event dispatch below entirely --
+        # materialize_carried_post/_edit each persist the underlying
+        # link_events row themselves, in the same transaction as the
+        # posts projection, closing the crash window every other
+        # object type here still has between save_event and its own
+        # follow-up (materialize_carried_board's own docstring notes
+        # this same gap, not fixed for genesis).
+        if object_type == BOARD_POST_OBJECT_TYPE:
+            await lane.run(
+                materialize_carried_post, BoardPost.from_dict(envelope), sender_fingerprint=sender_fingerprint
+            )
+            continue
+        elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
+            await lane.run(
+                materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
+            )
+            continue
+
+        await lane.run(
+            save_event,
+            sender_fingerprint=sender_fingerprint,
+            content_id=content_id,
+            object_type=object_type,
+            envelope=envelope,
+        )
+        # Link messages (design doc) need real follow-up
+        # beyond persisting the envelope -- decrypt/deliver into a
+        # local mailbox or bounce, and apply an incoming
+        # acknowledgement to the outbound row it's about.
+        # Issue #53's carry-materialization gap means board_genesis
+        # and board_origin_transfer_accepted both need real follow-up
+        # too: a received genesis has nothing a local user could
+        # browse without also becoming a real Board row (see
+        # materialize_carried_board's own docstring for why this was
+        # missing even for a board this node has carried all along),
+        # and an accepted transfer must update this node's own
+        # locally-materialized copy's current-origin record even when
+        # this node was only a bystander to the transfer, not a party
+        # to it (see record_board_origin_change's own docstring).
+        if object_type == LINK_MESSAGE_OBJECT_TYPE:
+            await lane.run(deliver_link_message, envelope, node_identity=node.identity)
+        elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
+            await lane.run(apply_link_message_accepted, envelope)
+        elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
+            await lane.run(apply_link_message_bounced, envelope)
+        elif object_type == BOARD_GENESIS_OBJECT_TYPE:
+            try:
+                await lane.run(
+                    materialize_carried_board,
+                    BoardGenesis.from_dict(envelope),
+                    own_fingerprint=node.identity.fingerprint,
+                    max_carried_boards=max_carried_boards,
+                )
+            except BoardCarryLimitError as exc:
+                # Design doc §13.9: the genesis event above is
+                # already accepted/persisted (save_event, earlier in
+                # this loop) and keeps gossiping normally -- only
+                # this node's own local materialization is refused,
+                # logged rather than surfaced as a failed request
+                # (the peer that pushed it did nothing wrong; this
+                # node simply declined to carry one more board).
+                _logger.warning("Link sync: %s", exc)
+        elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
+            transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
+            await lane.run(
+                record_board_origin_change,
+                transfer_accepted.payload["board_id"],
+                transfer_accepted.payload["new_origin_fingerprint"],
+            )
 
 
 class LinkTransportError(Exception):
@@ -226,6 +338,7 @@ class LinkServer:
             f"{LINK_PATH_PREFIX}/relay-mailbox/{{fingerprint}}/deposit", self._handle_relay_mailbox_deposit
         )
         app.router.add_post(f"{LINK_PATH_PREFIX}/relay-mailbox/pickup", self._handle_relay_mailbox_pickup)
+        app.router.add_post(f"{LINK_PATH_PREFIX}/inventory/{{fingerprint}}", self._handle_inventory)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -265,85 +378,45 @@ class LinkServer:
         except (KeyError, TypeError) as exc:
             return web.json_response({"error": f"malformed events: {exc}"}, status=400)
 
-        for content_id in accepted:
-            envelope = self._node.events[content_id]
-            object_type = envelope["envelope"]["object_type"]
-            # Design doc §9.3/issue #73: board_post/board_post_edit skip
-            # the generic save_event dispatch below entirely --
-            # materialize_carried_post/_edit each persist the underlying
-            # link_events row themselves, in the same transaction as the
-            # posts projection, closing the crash window every other
-            # object type here still has between save_event and its own
-            # follow-up (materialize_carried_board's own docstring notes
-            # this same gap, not fixed for genesis).
-            if object_type == BOARD_POST_OBJECT_TYPE:
-                await self._lane.run(
-                    materialize_carried_post, BoardPost.from_dict(envelope), sender_fingerprint=fingerprint
-                )
-                continue
-            elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
-                await self._lane.run(
-                    materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=fingerprint
-                )
-                continue
-
-            await self._lane.run(
-                save_event,
-                sender_fingerprint=fingerprint,
-                content_id=content_id,
-                object_type=object_type,
-                envelope=envelope,
-            )
-            # Link messages (design doc) need real follow-up
-            # beyond persisting the envelope -- decrypt/deliver into a
-            # local mailbox or bounce, and apply an incoming
-            # acknowledgement to the outbound row it's about.
-            # Issue #53's carry-materialization gap means board_genesis
-            # and board_origin_transfer_accepted both need real follow-up
-            # too: a received genesis has nothing a local user could
-            # browse without also becoming a real Board row (see
-            # materialize_carried_board's own docstring for why this was
-            # missing even for a board this node has carried all along),
-            # and an accepted transfer must update this node's own
-            # locally-materialized copy's current-origin record even when
-            # this node was only a bystander to the transfer, not a party
-            # to it (see record_board_origin_change's own docstring).
-            if object_type == LINK_MESSAGE_OBJECT_TYPE:
-                await self._lane.run(deliver_link_message, envelope, node_identity=self._node.identity)
-            elif object_type == LINK_MESSAGE_ACCEPTED_OBJECT_TYPE:
-                await self._lane.run(apply_link_message_accepted, envelope)
-            elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
-                await self._lane.run(apply_link_message_bounced, envelope)
-            elif object_type == BOARD_GENESIS_OBJECT_TYPE:
-                try:
-                    await self._lane.run(
-                        materialize_carried_board,
-                        BoardGenesis.from_dict(envelope),
-                        own_fingerprint=self._node.identity.fingerprint,
-                        max_carried_boards=self._max_carried_boards,
-                    )
-                except BoardCarryLimitError as exc:
-                    # Design doc §13.9: the genesis event above is
-                    # already accepted/persisted (save_event, earlier in
-                    # this loop) and keeps gossiping normally -- only
-                    # this node's own local materialization is refused,
-                    # logged rather than surfaced as a failed request
-                    # (the peer that pushed it did nothing wrong; this
-                    # node simply declined to carry one more board).
-                    _logger.warning("Link sync: %s", exc)
-            elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
-                transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
-                await self._lane.run(
-                    record_board_origin_change,
-                    transfer_accepted.payload["board_id"],
-                    transfer_accepted.payload["new_origin_fingerprint"],
-                )
+        await persist_accepted_events(
+            self._lane, self._node, accepted,
+            sender_fingerprint=fingerprint, max_carried_boards=self._max_carried_boards,
+        )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
             # accepted event.
             await self._lane.run(save_peer, self._node.peers[fingerprint])
 
         return web.json_response({"accepted": accepted})
+
+    async def _handle_inventory(self, request: web.Request) -> web.Response:
+        """
+        Design doc §8.8, issue #85: the responder side of pull-based
+        catch-up. Deliberately no signature/peer-membership check here,
+        unlike `_handle_events` -- this endpoint reads and returns
+        already-accepted, already-verified events (no new signed
+        content is being asserted), so there is nothing here for a
+        signature to attest to, the same "reachability/bootstrap data
+        isn't trust-gated" reasoning `_handle_peers` already applies,
+        extended to board *content* rather than endpoint addresses.
+        Board content this node carries is already pushed to every
+        configured seed indiscriminately (§12) -- answering an
+        inventory request is not a new confidentiality exposure beyond
+        that existing behavior, only a differently-shaped read of it.
+        Bounded the same way every other route here is: the rate-limit
+        middleware and `client_max_size`, plus `board_event_diff`'s own
+        `limit` argument capping the response itself.
+        """
+        try:
+            body = await request.json(loads=strict_json_loads)
+            inventory_request = InventoryRequest.from_dict(body)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed inventory request: {exc}"}, status=400)
+
+        events, more_available = await self._lane.run(
+            board_event_diff, inventory_request.boards, limit=_MAX_EVENTS_PER_REQUEST
+        )
+        return web.json_response({"events": events, "more_available": more_available})
 
     async def _handle_peers(self, request: web.Request) -> web.Response:
         """
@@ -566,6 +639,53 @@ async def push_events(
         return body["accepted"]
     except (KeyError, TypeError) as exc:
         raise LinkTransportError(f"malformed events response from {url}: {exc}") from exc
+
+
+async def request_inventory(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    inventory_request: InventoryRequest,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[list[dict], bool]:
+    """
+    Design doc §8.8, issue #85: ask a peer at `base_url` what it has for
+    `inventory_request.boards` that this node doesn't already. Returns
+    the raw event dicts it reports (already in `push_events`'s own wire
+    shape -- the caller feeds them through `LinkNode.handle_events`
+    exactly as it would a push response, with no translation) and
+    whether more remain beyond the peer's own response cap.
+
+    Deliberately returns the raw dicts rather than applying them itself
+    -- unlike `push_events` (whose sender already trusts its own
+    events), this side must run real verification before trusting
+    anything the peer claims to have, and `handle_events` is a `LinkNode`
+    method with no I/O of its own; the caller (`netbbs.link.sync`) is
+    the one already holding both `node` and a `DatabaseLane` to persist
+    whatever gets accepted, the same shape `_pickup_relay_mail` already
+    uses for an analogous "verify and persist what a fetch returned"
+    step.
+
+    Raises `LinkTransportError` for a transport-level failure, matching
+    every other client function in this module.
+    """
+    url = f"{base_url}{LINK_PATH_PREFIX}/inventory/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json=inventory_request.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"inventory request to {url} failed: HTTP {response.status}: {text}")
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, ValueError) as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+    try:
+        return body["events"], bool(body["more_available"])
+    except (KeyError, TypeError) as exc:
+        raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
 
 
 async def request_peer_list(

@@ -35,12 +35,13 @@ from netbbs.link.events import (
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
+    BoardPost,
     BoardPostEdit,
     EndpointDescriptor,
     KeyTransition,
 )
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.protocol import LinkNode, PeerRecord
+from netbbs.link.protocol import InventoryRequest, LinkNode, PeerRecord
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -299,6 +300,15 @@ def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: Endpoi
     db.connection.commit()
 
 
+_BOARD_SCOPED_OBJECT_TYPES = frozenset(
+    {
+        BOARD_GENESIS_OBJECT_TYPE,
+        BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
+        BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+    }
+)
+
+
 def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object_type: str, envelope: dict) -> None:
     """
     Record one newly-accepted event. Called once per content_id
@@ -307,14 +317,26 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     own in-memory `known_event_ids` check already skipped it) never
     reaches here, so `ON CONFLICT ... DO NOTHING` is a defensive
     no-op, not the primary dedup mechanism.
+
+    Issue #85: `board_id` is populated directly from
+    `envelope["envelope"]["payload"]` for the three board-scoped object
+    types this function still handles
+    (`board_genesis`, `board_origin_transfer_offer`, `_accepted`) --
+    `board_post`/`board_post_edit` never reach here at all
+    (`netbbs.link.boards.materialize_carried_post`/`_edit` insert their
+    own `link_events` row directly, in the same transaction as their
+    `posts` projection, and populate `board_id` themselves the same way).
+    `None` for every other object type (`key_transition`, `link_message`
+    and its acknowledgements), which don't belong to a board.
     """
+    board_id = envelope["envelope"]["payload"].get("board_id") if object_type in _BOARD_SCOPED_OBJECT_TYPES else None
     db.connection.execute(
         """
-        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (content_id, sender_fingerprint, object_type, json.dumps(envelope), utc_now_iso()),
+        (content_id, sender_fingerprint, object_type, json.dumps(envelope), utc_now_iso(), board_id),
     )
     db.connection.commit()
 
@@ -362,3 +384,148 @@ def delete_relay_consent(db: Database, fingerprint: str, *, role: str) -> None:
         "DELETE FROM link_relay_consents WHERE fingerprint = ? AND role = ?", (fingerprint, role)
     )
     db.connection.commit()
+
+
+def carried_board_ids(db: Database) -> list[str]:
+    """
+    Every `board_id` this node currently has *some* Linked copy of
+    (design doc §8.8, issue #85) -- self-originated or merely carried,
+    the same `boards.link_genesis_json IS NOT NULL` test `netbbs.link.
+    boards.load_own_board_events` already uses, minus its own
+    `origin_fingerprint` filter (that filter exists there specifically
+    to separate "mine to re-push as my own" from "carried"; inventory
+    scope wants both, since a carrying node offering an inventory
+    request for a board it merely carries is exactly the multi-hop case
+    this issue closes)."""
+    return [
+        row["board_id"]
+        for row in db.connection.execute("SELECT board_id FROM boards WHERE link_genesis_json IS NOT NULL")
+    ]
+
+
+def build_inventory_request(db: Database) -> InventoryRequest:
+    """
+    This node's own `InventoryRequest` to send as requester (design doc
+    §8.8, issue #85): every board it currently carries
+    (`carried_board_ids`), each mapped to the full set of content IDs it
+    already has for that board -- reusing `_all_board_events` for
+    exactly the same "union self-authored, carried, and peer-received
+    sources" reasoning that function's own docstring already gives,
+    since a requester's own gap-detection needs the identical complete
+    picture a responder's diff needs, just read from the requester's own
+    database instead of the responder's."""
+    boards = {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
+    return InventoryRequest(boards=boards)
+
+
+def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
+    """
+    Every board-scoped event this node has on file for `board_id`,
+    keyed by `content_id` (so a genesis that happens to appear in two
+    sources below, see the carried-board case, collapses naturally) --
+    the full picture `board_event_diff` diffs against, unioning three
+    differently-shaped sources exactly the way `netbbs.link.boards.
+    load_own_board_events` already does for the analogous "everything
+    self-originated" case, minus that function's own-fingerprint filter
+    on genesis (inventory scope wants both self-originated and merely
+    carried boards, see `carried_board_ids`'s own docstring for why):
+
+    1. `boards.link_genesis_json`/`link_lifecycle_json` for this board's
+       own row -- covers a self-originated board's genesis (never
+       received through `handle_events`, so never in `link_events`
+       either) and this node's own lifecycle actions
+       (`offer_board_origin_transfer`/`accept_board_origin_transfer`).
+       Included unconditionally, unlike `load_own_board_events`'s own
+       origin-filtered genesis half -- a carried board's genesis is
+       *also* stored here (`materialize_carried_board` populates it),
+       redundantly with `link_events` below; the `content_id`-keyed dict
+       here is exactly what makes that redundancy harmless.
+    2. `posts.link_event_json` for every post/edit on this board --
+       `netbbs.link.boards.queue_board_post_if_linked`/`_edit_if_linked`
+       populate this column *only* for a locally-authored post/edit,
+       regardless of whether this node originated or merely carries the
+       board it's on (a local user can reply on a carried board too) --
+       never populated for a materialized/carried post, which has no
+       equivalent local-authorship event of its own to queue.
+    3. `link_events.board_id = ?` -- peer-received content: a carried
+       board's genesis (redundant with source 1 above) and every
+       `board_post`/`board_post_edit`/lifecycle event this node accepted
+       from a peer, whether it originated the board or not.
+    """
+    events: dict[str, dict] = {}
+
+    board_row = db.connection.execute(
+        "SELECT id, link_genesis_json, link_lifecycle_json FROM boards WHERE board_id = ?", (board_id,)
+    ).fetchone()
+    if board_row is None:
+        return events
+    if board_row["link_genesis_json"] is not None:
+        raw = json.loads(board_row["link_genesis_json"])
+        events[BoardGenesis.from_dict(raw).content_id] = raw
+    if board_row["link_lifecycle_json"] is not None:
+        raw = json.loads(board_row["link_lifecycle_json"])
+        object_type = raw["envelope"]["object_type"]
+        lifecycle_event = (
+            BoardOriginTransferOffer.from_dict(raw)
+            if object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE
+            else BoardOriginTransferAccepted.from_dict(raw)
+        )
+        events[lifecycle_event.content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE board_id = ? AND link_event_json IS NOT NULL", (board_row["id"],)
+    ):
+        raw = json.loads(row["link_event_json"])
+        object_type = raw["envelope"]["object_type"]
+        post_event = BoardPostEdit.from_dict(raw) if object_type == BOARD_POST_EDIT_OBJECT_TYPE else BoardPost.from_dict(raw)
+        events[post_event.content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT content_id, envelope_json FROM link_events WHERE board_id = ? ORDER BY received_at ASC", (board_id,)
+    ):
+        events.setdefault(row["content_id"], json.loads(row["envelope_json"]))
+
+    return events
+
+
+def board_event_diff(
+    db: Database, requested_boards: dict[str, list[str]], *, limit: int
+) -> tuple[list[dict], bool]:
+    """
+    The responder side of one `InventoryRequest` (design doc §8.8, issue
+    #85): for each `board_id` in `requested_boards` that this node also
+    currently carries (a `board_id` this node doesn't carry is silently
+    skipped, never an error -- §9.3's existing "not carried on this
+    node" honest-exclusion principle, applied here to a request rather
+    than a push), return every board-scoped event on file for it
+    (`_all_board_events`, above) whose `content_id` is not already in
+    that board's declared known-ID list -- this is the actual multi-hop
+    mechanism: a node that only ever *carries* board X, never originated
+    it, can still answer for it here, because `_all_board_events`
+    doesn't care who authored what it has on file, only what it has.
+
+    Bounded by `limit` (the caller's own `_MAX_EVENTS_PER_REQUEST`,
+    §13.9) across the *whole* response, not per board -- boards are
+    walked in sorted `board_id` order for determinism (this function's
+    own caller has no meaningful priority between them). Returns the
+    raw envelope dicts (exactly the wire shape `push_events` already
+    sends, so the caller can feed the combined list through `LinkNode.
+    handle_events` with no translation) plus whether more remain beyond
+    `limit` -- the caller's own next pass will ask again with a
+    by-then-larger known-ID list, so nothing here needs to track a
+    pagination cursor.
+    """
+    collected: list[dict] = []
+    truncated = False
+    for board_id in sorted(requested_boards):
+        if truncated:
+            break
+        known_ids = set(requested_boards[board_id])
+        for content_id, envelope in _all_board_events(db, board_id).items():
+            if content_id in known_ids:
+                continue
+            if len(collected) >= limit:
+                truncated = True
+                break
+            collected.append(envelope)
+    return collected, truncated

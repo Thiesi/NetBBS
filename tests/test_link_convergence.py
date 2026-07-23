@@ -7,14 +7,20 @@ Driven entirely through `tests/link_harness.py`'s `ScriptedTransport`,
 same as `tests/test_link_protocol.py` — no real socket, deterministic
 delivery order under full test control.
 
-**Scope boundary, deliberate**: no relay/flood-fill gossip exists yet
-("no relay from a stranger") — a node only ever learns about a peer it
-has *directly* exchanged a hello with. "Convergence" here means N nodes
-that each sync *directly* with every other one reach consistent state
-despite duplication, reordering, and restarts — not multi-hop
-propagation via an intermediate node, which isn't built. The
-partition/heal scenario below exists specifically to pin that boundary
-down as a tested fact, not just a documented gap.
+**Scope boundary, deliberate**: still no flood-fill gossip to a genuine
+stranger ("no relay from a stranger") — a node only ever accepts content
+whose author/origin it has *independently* exchanged a hello with at some
+point, direct delivery or relayed. Most of "convergence" below still means
+N nodes that each sync *directly* with every other one reach consistent
+state despite duplication, reordering, and restarts. The partition/heal
+scenario below exists specifically to pin that boundary down as a tested
+fact for the case where the origin is a genuine stranger to the third node
+-- not a documented gap anymore for the *other* case: design doc §8.8
+(issue #85) adds bounded inventory/pull-based catch-up that *is* genuinely
+multi-hop when the origin is already independently known to the receiving
+node (a separate deterministic test below, alongside the original
+never-relay-a-stranger boundary test, proves both halves of this same
+line).
 
 **This file's `key_transition` coverage extends to
 `board_genesis`/`board_post`/`board_post_edit`** (design doc §9.1/9.2):
@@ -56,6 +62,7 @@ import json
 
 import pytest
 
+from netbbs.link.boards import materialize_carried_board, materialize_carried_post
 from netbbs.link.events import (
     build_board_genesis,
     build_board_origin_transfer_accepted,
@@ -67,7 +74,7 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
-from netbbs.link.store import load_link_node, save_event, save_peer
+from netbbs.link.store import board_event_diff, load_link_node, save_event, save_peer
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
 
 
@@ -748,6 +755,68 @@ def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_a
     [to_c] = [m for m in transport.inbox(c) if m.sender == a.label and m.payload == payload]
     accepted = c_node.handle_events(a.fingerprint, json.loads(to_c.payload))
     assert accepted == [genesis.content_id, post.content_id]
+    assert c_node.boards["existing-local-board-id"].content_id == genesis.content_id
+
+    a.close()
+    b.close()
+    c.close()
+
+
+def test_a_node_converges_via_multi_hop_inventory_when_the_origin_is_already_known(tmp_path, clock):
+    """The other half of the module docstring's boundary line, and the
+    deterministic-harness counterpart to `tests/test_link_end_to_end.py`'s
+    real-transport proof: b carries a's board (direct sync) and stays
+    caught up; c has independently said hello to a at some point (so it
+    can verify a's signing key) but never receives a's board content
+    directly at all -- only b's own inventory response, relayed via b,
+    not a. This is exactly the boundary the test above pins down for the
+    *opposite* case (c a genuine stranger to a): here c already knows a,
+    so relay through b now succeeds instead of being refused."""
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    c = spawn_node(tmp_path, "c")
+    transport = ScriptedTransport()
+    for node in (a, b, c):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    c_node = LinkNode(identity=c.identity)
+
+    # a and c independently say hello -- c can now verify a's signing
+    # key, but this alone carries no board state (same as the healed
+    # partition test above).
+    _exchange_hellos(transport, a, a_node, c, c_node, clock)
+    # a and b sync directly: b receives and materializes a's board.
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+
+    genesis = _board_genesis(a, clock)
+    post = _board_post(a, clock)
+    payload = json.dumps([genesis.to_dict(), post.to_dict()]).encode()
+    transport.send(a, b, payload)
+    transport.deliver_all()
+    [to_b] = [m for m in transport.inbox(b) if m.sender == a.label and m.payload == payload]
+    accepted = b_node.handle_events(a.fingerprint, json.loads(to_b.payload))
+    assert accepted == [genesis.content_id, post.content_id]
+    materialize_carried_board(b.db, genesis, own_fingerprint=b.fingerprint)
+    materialize_carried_post(b.db, post, sender_fingerprint=a.fingerprint)
+
+    # c has never talked to a about the board at all, and has no
+    # relationship with b yet either.
+    assert "existing-local-board-id" not in c_node.boards
+
+    # c and b say hello, then c "requests inventory" -- b's own diff
+    # query (real DB, same function a real /inventory route calls)
+    # against what it actually carries, not a's own events.
+    _exchange_hellos(transport, b, b_node, c, c_node, clock)
+    events, more_available = board_event_diff(b.db, {"existing-local-board-id": []}, limit=200)
+    assert more_available is False
+    assert len(events) == 2  # genesis + post, nothing pre-known
+
+    # Applied exactly as a real inventory response would be: fed through
+    # handle_events keyed by b (the relay), not a (the true origin).
+    relayed_accepted = c_node.handle_events(b.fingerprint, events)
+    assert set(relayed_accepted) == {genesis.content_id, post.content_id}
     assert c_node.boards["existing-local-board-id"].content_id == genesis.content_id
 
     a.close()

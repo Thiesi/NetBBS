@@ -316,9 +316,15 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
 
     db_path = tmp_path / "node.db"
 
-    # Apply every migration except the last (this one), matching the
-    # schema shape a real pre-upgrade database would have on disk.
-    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    # Apply every migration before this one, matching the schema shape a
+    # real pre-upgrade database would have on disk. Found by description
+    # rather than MIGRATIONS[:-1] -- this migration is no longer
+    # guaranteed to be the last one in the list as later migrations
+    # (e.g. issue #85's) get appended after it.
+    arrival_id_migration_index = next(
+        i for i, m in enumerate(MIGRATIONS) if "last_seen_arrival_id" in m.description
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=alice)
@@ -336,7 +342,8 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
     db.close()
     monkeypatch.undo()
 
-    # Reopen with the real, full migration list -- only the new one runs.
+    # Reopen with the real, full migration list -- the arrival_id
+    # migration (and any later ones) now run.
     db = Database(db_path)
     try:
         row = db.connection.execute(
@@ -365,7 +372,12 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_file_area_cursor(tmp_
 
     db_path = tmp_path / "node.db"
 
-    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    # Found by description rather than MIGRATIONS[:-1] -- this migration
+    # is no longer guaranteed to be the last one in the list.
+    arrival_id_migration_index = next(
+        i for i, m in enumerate(MIGRATIONS) if "last_seen_arrival_id" in m.description
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     area = create_file_area(db, "downloads", creator=alice)
@@ -402,7 +414,12 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_channel_cursor(tmp_pa
 
     db_path = tmp_path / "node.db"
 
-    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    # Found by description rather than MIGRATIONS[:-1] -- this migration
+    # is no longer guaranteed to be the last one in the list.
+    arrival_id_migration_index = next(
+        i for i, m in enumerate(MIGRATIONS) if "last_seen_arrival_id" in m.description
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:arrival_id_migration_index])
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "lobby", creator=alice)

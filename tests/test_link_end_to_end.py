@@ -619,3 +619,177 @@ def test_linked_board_state_survives_seed_restart_using_only_persisted_state(tmp
     finally:
         dialer.close()
         seed.close()
+
+
+# -- multi-hop inventory catch-up (design doc §8.8, issue #85) --------------
+
+
+def test_linked_board_multi_hop_catch_up_via_a_third_node_over_real_transport(tmp_path):
+    """The actual multi-hop proof over real transport, real SQLite, and
+    real materialization -- `test_link_protocol.py` already proves this
+    at the in-memory protocol layer; this proves the full vertical.
+
+    `puller` catches up on posts it missed while not talking to `origin`
+    directly, by pulling them from `relay` instead -- relay never
+    originated any of this content, only carries it, and has stayed in
+    regular contact with origin the whole time puller has not. Puller
+    already independently completed a real hello with origin (during
+    the one direct sync pass that gave it the board in the first
+    place) -- the real-world precondition design doc §8.8's own
+    limitation note names: multi-hop relays *content*, it never
+    substitutes for a receiving node's own prior identity verification
+    of who ultimately signed it. This is the "board already carried,
+    fell behind on later posts" case the design doc explicitly scopes
+    this issue to -- not discovery of a wholly novel board purely
+    through a relay, which needs no direct genesis ever (see that same
+    limitation note for why this issue deliberately doesn't solve that
+    separate case)."""
+    origin_identity = bootstrap_node_identity("origin")
+    relay_identity = bootstrap_node_identity("relay")
+    puller_identity = bootstrap_node_identity("puller")
+    origin_node = LinkNode(identity=origin_identity)
+    relay_node = LinkNode(identity=relay_identity)
+    puller_node = LinkNode(identity=puller_identity)
+    origin = _NodeDb(tmp_path, "origin")
+    relay = _NodeDb(tmp_path, "relay")
+    puller = _NodeDb(tmp_path, "puller")
+
+    creator = create_user(origin.db, "alice", password="hunter2", user_level=10)
+    board = create_board(origin.db, "general", creator=creator)
+    link_board(origin.db, board, node_identity=origin_identity)
+    first_post = create_post(origin.db, board, creator, "hello world", "first post")
+    queue_board_post_if_linked(origin.db, first_post, board, node_identity=origin_identity)
+
+    async def scenario():
+        # Stage 1: origin dials *puller*'s server directly (content
+        # flows dialer -> dialed server, via ordinary push) -- gives
+        # puller the genesis and the first post, and completes a real
+        # hello between the two in the process (puller's own server
+        # processes origin's incoming hello).
+        puller_server = await _run_server(puller_node, puller.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{puller_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+        finally:
+            await puller_server.stop()
+
+        # Origin then posts more, while puller never talks to it
+        # again -- simulating puller's own connection to origin having
+        # become unreliable.
+        second_post = create_post(origin.db, board, creator, "second post", "still going")
+        queue_board_post_if_linked(origin.db, second_post, board, node_identity=origin_identity)
+        third_post = create_post(origin.db, board, creator, "third post", "and more")
+        queue_board_post_if_linked(origin.db, third_post, board, node_identity=origin_identity)
+
+        # Relay, unlike puller, stays in contact with origin and ends
+        # up with everything -- origin dials relay's server the same
+        # way it dialed puller's above. Kept running for stage 2 below
+        # too (origin's own server is never started again at this
+        # point, so anything puller ends up with genuinely came via
+        # relay's inventory response, not a disguised direct push).
+        relay_server = await _run_server(relay_node, relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{relay_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+
+                # Stage 2: puller dials relay's server.
+                await _one_pass(
+                    puller_node, session, [f"http://127.0.0.1:{relay_server.port}"],
+                    lambda: _hello_for(puller_node), puller.lane,
+                )
+        finally:
+            await relay_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        bob = create_user(puller.db, "bob", password="hunter2", user_level=10)
+        carried_board = get_board_by_name(puller.db, "general")
+        page = list_posts_page(puller.db, carried_board, bob)
+        assert {p.subject for p in page.posts} == {"hello world", "second post", "third post"}
+
+        # Genuinely visible through the same ordinary read paths the
+        # direct-delivery test above already checks, not just a raw
+        # posts-table row.
+        assert {h.subject for h in search_posts(puller.db, bob, "post")} >= {"second post", "third post"}
+    finally:
+        origin.close()
+        relay.close()
+        puller.close()
+
+
+def test_linked_board_multi_hop_catch_up_is_idempotent_across_repeated_inventory_passes(tmp_path):
+    """The identical missing posts pulled via inventory across two
+    sync passes (e.g. `more_available` still true, or simply another
+    pass running before the peer has anything new) must not create
+    duplicate rows -- the multi-hop counterpart to this file's own
+    direct-delivery duplicate-delivery test above."""
+    origin_identity = bootstrap_node_identity("origin")
+    relay_identity = bootstrap_node_identity("relay")
+    puller_identity = bootstrap_node_identity("puller")
+    origin_node = LinkNode(identity=origin_identity)
+    relay_node = LinkNode(identity=relay_identity)
+    puller_node = LinkNode(identity=puller_identity)
+    origin = _NodeDb(tmp_path, "origin")
+    relay = _NodeDb(tmp_path, "relay")
+    puller = _NodeDb(tmp_path, "puller")
+
+    creator = create_user(origin.db, "alice", password="hunter2", user_level=10)
+    board = create_board(origin.db, "general", creator=creator)
+    link_board(origin.db, board, node_identity=origin_identity)
+    first_post = create_post(origin.db, board, creator, "hello world", "first post")
+    queue_board_post_if_linked(origin.db, first_post, board, node_identity=origin_identity)
+
+    async def scenario():
+        # Stage 1: origin dials puller's server (push) -- gives puller
+        # the genesis and first post, and a completed hello with origin.
+        puller_server = await _run_server(puller_node, puller.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{puller_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+        finally:
+            await puller_server.stop()
+
+        second_post = create_post(origin.db, board, creator, "second post", "still going")
+        queue_board_post_if_linked(origin.db, second_post, board, node_identity=origin_identity)
+
+        # Origin dials relay's server (push) -- relay ends up with
+        # everything; kept running for stage 2 below too.
+        relay_server = await _run_server(relay_node, relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{relay_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+
+                # Stage 2: puller dials relay's server twice -- the
+                # second pass's own inventory request already reports
+                # the post pulled in the first pass as known, but
+                # nothing here should break if it didn't.
+                relay_url = f"http://127.0.0.1:{relay_server.port}"
+                await _one_pass(puller_node, session, [relay_url], lambda: _hello_for(puller_node), puller.lane)
+                await _one_pass(puller_node, session, [relay_url], lambda: _hello_for(puller_node), puller.lane)
+        finally:
+            await relay_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        bob = create_user(puller.db, "bob", password="hunter2", user_level=10)
+        carried_board = get_board_by_name(puller.db, "general")
+        page = list_posts_page(puller.db, carried_board, bob)
+        assert sorted(p.subject for p in page.posts) == ["hello world", "second post"]
+    finally:
+        origin.close()
+        relay.close()
+        puller.close()

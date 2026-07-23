@@ -11,6 +11,8 @@ isolation.
 
 from __future__ import annotations
 
+import json
+
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
@@ -174,6 +176,122 @@ def test_save_event_on_conflict_does_nothing(tmp_path):
     ).fetchone()
     assert "tampered" not in row["envelope_json"]
     db.close()
+
+
+def test_save_event_populates_board_id_for_board_genesis(tmp_path):
+    """Design doc §8.8, issue #85: `board_id` is populated directly from
+    the envelope at insert time for the board-scoped object types
+    `save_event` still handles (board_post/board_post_edit bypass this
+    function entirely -- see `netbbs.link.boards.materialize_carried_
+    post`/`_edit`, tested separately)."""
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = build_board_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        board_id="remote-board-id",
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    save_event(
+        db,
+        sender_fingerprint=remote_identity.fingerprint,
+        content_id=genesis.content_id,
+        object_type="board_genesis",
+        envelope=genesis.to_dict(),
+    )
+
+    row = db.connection.execute(
+        "SELECT board_id FROM link_events WHERE content_id = ?", (genesis.content_id,)
+    ).fetchone()
+    assert row["board_id"] == "remote-board-id"
+    db.close()
+
+
+def test_save_event_leaves_board_id_null_for_a_non_board_event(tmp_path):
+    db = Database(tmp_path / "node.db")
+    sender_identity = bootstrap_node_identity("bob")
+    transition = sender_identity.transitions[0]
+
+    save_event(
+        db,
+        sender_fingerprint=sender_identity.fingerprint,
+        content_id=transition.content_id,
+        object_type="key_transition",
+        envelope=transition.to_dict(),
+    )
+
+    row = db.connection.execute(
+        "SELECT board_id FROM link_events WHERE content_id = ?", (transition.content_id,)
+    ).fetchone()
+    assert row["board_id"] is None
+    db.close()
+
+
+def test_migration_backfills_board_id_for_a_pre_existing_link_events_row(tmp_path, monkeypatch):
+    """A `link_events` row written before this migration existed has no
+    `board_id` of its own -- the migration must compute it from the
+    envelope it already stores, the same "preserve existing data,
+    never reset it" discipline issue #72's own arrival_id backfill
+    test already established for a different table."""
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    db_path = tmp_path / "node.db"
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = build_board_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        board_id="remote-board-id",
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    # Apply every migration except the last (this one), matching the
+    # schema shape a real pre-upgrade database would have on disk --
+    # link_events exists, but with no board_id column yet. A carried
+    # board's genesis also always lands on the boards row itself
+    # (`materialize_carried_board`'s own real-world behavior) --
+    # reproduced here with a raw INSERT so `board_event_diff` below
+    # recognizes this board as carried the same way it would for a
+    # database that actually went through that function.
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    db = Database(db_path)
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            genesis.content_id, remote_identity.fingerprint, "board_genesis",
+            json.dumps(genesis.to_dict()), "2026-01-01T00:00:00Z",
+        ),
+    )
+    db.connection.execute(
+        "INSERT INTO boards "
+        "(board_id, name, description, min_read_level, min_write_level, category_id, pinned, "
+        " created_at, moderated, max_post_age_days, min_age, name_requirement, community_id, link_genesis_json) "
+        "VALUES (?, ?, NULL, 0, 0, NULL, 0, ?, 0, NULL, NULL, NULL, NULL, ?)",
+        ("remote-board-id", "Remote Discussion", "2026-01-01T00:00:00Z", json.dumps(genesis.to_dict())),
+    )
+    db.connection.commit()
+    db.close()
+    monkeypatch.undo()
+
+    # Reopen with the real, full migration list -- only the new one runs.
+    db = Database(db_path)
+    try:
+        row = db.connection.execute(
+            "SELECT board_id FROM link_events WHERE content_id = ?", (genesis.content_id,)
+        ).fetchone()
+        assert row["board_id"] == "remote-board-id"
+
+        # And the diff query works immediately using the backfilled value.
+        from netbbs.link.store import board_event_diff
+
+        events, _more_available = board_event_diff(db, {"remote-board-id": []}, limit=200)
+        assert len(events) == 1
+    finally:
+        db.close()
 
 
 def test_save_board_genesis_event_then_load_link_node_reconstructs_boards(tmp_path):
@@ -467,4 +585,178 @@ def test_save_peer_clears_a_matching_on_disk_candidate(tmp_path):
     assert peer_identity.fingerprint in node.peers
     assert peer_identity.fingerprint not in node.candidate_descriptors
     assert db.connection.execute("SELECT COUNT(*) FROM link_peer_candidates").fetchone()[0] == 0
+
+
+# -- carried_board_ids/build_inventory_request/board_event_diff (design doc §8.8, issue #85) --
+
+
+def _remote_genesis_for_store_tests(remote_identity, *, board_id="remote-board-id"):
+    return build_board_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        board_id=board_id,
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+
+def _remote_post_for_store_tests(remote_identity, *, board_id="remote-board-id", **kwargs):
+    return build_board_post(
+        signing_identity=remote_identity.signing_key,
+        home_node_fingerprint=remote_identity.fingerprint,
+        local_user_id="wanderer",
+        board_id=board_id,
+        subject=kwargs.pop("subject", "hello"),
+        body=kwargs.pop("body", "first post"),
+        created_at=kwargs.pop("created_at", "2026-01-01T00:00:00Z"),
+        **kwargs,
+    )
+
+
+def test_carried_board_ids_includes_both_self_originated_and_carried_boards(tmp_path):
+    from netbbs.link.boards import materialize_carried_board
+    from netbbs.link.store import carried_board_ids
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    own_board = create_board(db, "general", creator=creator)
+    link_board(db, own_board, node_identity=own_identity)
+
+    remote_identity = bootstrap_node_identity("elsewhere")
+    materialize_carried_board(db, _remote_genesis_for_store_tests(remote_identity, board_id="carried-board"))
+
+    assert set(carried_board_ids(db)) == {own_board.board_id, "carried-board"}
+    db.close()
+
+
+def test_carried_board_ids_excludes_an_unlinked_board(tmp_path):
+    from netbbs.link.store import carried_board_ids
+
+    db = Database(tmp_path / "node.db")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    create_board(db, "not-linked", creator=creator)
+
+    assert carried_board_ids(db) == []
+    db.close()
+
+
+def test_build_inventory_request_includes_self_originated_genesis_and_post(tmp_path):
+    from netbbs.link.store import build_inventory_request
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=creator)
+    genesis = link_board(db, board, node_identity=own_identity)
+    post = create_post(db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=own_identity)
+
+    request = build_inventory_request(db)
+
+    assert board.board_id in request.boards
+    assert set(request.boards[board.board_id]) == {genesis.content_id, board_post.content_id}
+    db.close()
+
+
+def test_build_inventory_request_includes_carried_content(tmp_path):
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.store import build_inventory_request
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    materialize_carried_board(db, genesis)
+    post = _remote_post_for_store_tests(remote_identity)
+    materialize_carried_post(db, post, sender_fingerprint=remote_identity.fingerprint)
+
+    request = build_inventory_request(db)
+
+    assert set(request.boards["remote-board-id"]) == {genesis.content_id, post.content_id}
+    db.close()
+
+
+def test_board_event_diff_returns_only_events_missing_from_the_requesters_known_ids(tmp_path):
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.store import board_event_diff
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    materialize_carried_board(db, genesis)
+    post = _remote_post_for_store_tests(remote_identity)
+    materialize_carried_post(db, post, sender_fingerprint=remote_identity.fingerprint)
+
+    events, more_available = board_event_diff(db, {"remote-board-id": [genesis.content_id]}, limit=200)
+
+    returned_ids = {_content_id_of(e) for e in events}
+    assert post.content_id in returned_ids
+    assert genesis.content_id not in returned_ids
+    assert more_available is False
+    db.close()
+
+
+def _content_id_of(raw_envelope: dict) -> str:
+    from netbbs.link.events import event_content_id
+
+    return event_content_id(raw_envelope["envelope"])
+
+
+def test_board_event_diff_silently_skips_a_board_id_this_node_does_not_carry(tmp_path):
+    from netbbs.link.store import board_event_diff
+
+    db = Database(tmp_path / "node.db")
+
+    events, more_available = board_event_diff(db, {"unknown-board-id": []}, limit=200)
+
+    assert events == []
+    assert more_available is False
+    db.close()
+
+
+def test_board_event_diff_respects_the_limit_and_reports_more_available(tmp_path):
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.store import board_event_diff
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_genesis_for_store_tests(remote_identity)
+    materialize_carried_board(db, genesis)
+    for i in range(3):
+        post = _remote_post_for_store_tests(
+            remote_identity, subject=f"post {i}", nonce=f"nonce-{i}", created_at="2026-01-01T00:00:00Z"
+        )
+        materialize_carried_post(db, post, sender_fingerprint=remote_identity.fingerprint)
+
+    events, more_available = board_event_diff(db, {"remote-board-id": []}, limit=2)
+
+    # 1 genesis + 3 posts = 4 total events on file; limit=2 must return
+    # exactly 2 and flag that more remain, never silently truncate
+    # without saying so.
+    assert len(events) == 2
+    assert more_available is True
+    db.close()
+
+
+def test_board_event_diff_is_genuinely_multi_hop_for_a_board_this_node_never_originated(tmp_path):
+    """The actual multi-hop proof at the store layer (design doc §8.8,
+    issue #85): a node that only *carries* board X, never originated
+    it, must still be able to answer for it -- `board_event_diff` reads
+    what this node has on file, not who authored it."""
+    from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+    from netbbs.link.store import board_event_diff
+
+    db = Database(tmp_path / "node.db")
+    origin_identity = bootstrap_node_identity("origin-node")
+    genesis = _remote_genesis_for_store_tests(origin_identity)
+    materialize_carried_board(db, genesis)
+    post = _remote_post_for_store_tests(origin_identity)
+    materialize_carried_post(db, post, sender_fingerprint=origin_identity.fingerprint)
+
+    events, _more_available = board_event_diff(db, {"remote-board-id": []}, limit=200)
+
+    returned_ids = {_content_id_of(e) for e in events}
+    assert {genesis.content_id, post.content_id} == returned_ids
+    db.close()
     db.close()

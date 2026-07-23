@@ -436,6 +436,107 @@ def test_handle_events_rejects_board_genesis_with_mismatched_origin(tmp_path, cl
     mallory.close()
 
 
+# -- issue #85: multi-hop relay -- verified against the content's own claimed
+# origin/author, not required to equal the wire-level sender_fingerprint ------
+
+
+def test_handle_events_accepts_a_board_genesis_relayed_by_a_different_known_peer(tmp_path, clock):
+    """The actual multi-hop proof at the protocol layer: charlie
+    originates a board; bob_node has independently completed a hello
+    with charlie at some point (so it can verify charlie's own signing
+    key) *and* with alice (the relay) -- alice now relays charlie's
+    genesis to bob_node (sender_fingerprint=alice, origin=charlie).
+    Must be accepted: this is exactly the case a carrying node
+    answering an inventory request produces."""
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=charlie.identity), clock=clock))
+
+    genesis = build_board_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        board_id="charlies-board",
+        name="Charlie's Board",
+        created_at=clock.now_iso(),
+    )
+
+    # Relayed by alice, not charlie -- the whole point of this test.
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.boards["charlies-board"].content_id == genesis.content_id
+
+    alice.close()
+    charlie.close()
+
+
+def test_handle_events_rejects_a_board_genesis_whose_origin_has_no_completed_hello(tmp_path, clock):
+    """The safety property multi-hop must preserve: a relay being a
+    known peer is not enough on its own -- the content's own claimed
+    origin must *independently* have a completed hello too, or this
+    would just be forgery-by-relay with extra steps."""
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")  # never says hello to bob_node
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_board_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        board_id="charlies-board",
+        name="Charlie's Board",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    alice.close()
+    charlie.close()
+
+
+def test_handle_events_accepts_a_board_post_relayed_by_a_different_known_peer(tmp_path, clock):
+    """Same multi-hop proof, for `board_post` -- the actual volume
+    content type this issue's inventory/pull mechanism exists for."""
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=charlie.identity), clock=clock))
+
+    genesis = build_board_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        board_id="charlies-board",
+        name="Charlie's Board",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(charlie.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=charlie.identity.signing_key,
+        home_node_fingerprint=charlie.fingerprint,
+        local_user_id="wanderer",
+        board_id="charlies-board",
+        subject="hello",
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    # Relayed by alice, not charlie.
+    accepted = bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    assert accepted == [post.content_id]
+
+    alice.close()
+    charlie.close()
+
+
 def test_handle_events_rejects_conflicting_board_genesis_for_same_board_id(tmp_path, clock):
     alice = spawn_node(tmp_path, "alice")
     bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)

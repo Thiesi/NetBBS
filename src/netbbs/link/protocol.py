@@ -223,6 +223,41 @@ class PeerListMessage:
 
 
 @dataclass
+class InventoryRequest:
+    """
+    "What do you have for these boards that I don't already?" (design
+    doc §8.8, issue #85) -- the same kind of decision `PeerListMessage`
+    already made: deliberately **not** a canonical `netbbs.link.events`
+    envelope of its own. This is a bookkeeping request about what the
+    requester already has, not durable authored content that needs
+    content-addressing, a signature, or gossip-replay semantics. A
+    stale or malformed request costs nothing beyond one wasted round
+    trip -- the responder's own diff query (`netbbs.link.store.
+    board_event_diff`) treats an unrecognized `board_id` exactly like
+    one it doesn't carry, silently skipped, never an error.
+
+    `boards` is keyed by every `board_id` the requester currently
+    carries (bounded by its own `max_carried_boards` quota, §13.9 --
+    this request's size is therefore already bounded by an existing
+    cap, not a new one), mapped to that board's full known-`content_id`
+    list. The response is not a new message type either -- it reuses
+    `push_events`'s existing raw-event-list wire shape, verified and
+    applied through the exact same `LinkNode.handle_events` path a push
+    response already uses (see `netbbs.link.transport`'s `/inventory`
+    route and `request_inventory`).
+    """
+
+    boards: dict[str, tuple[str, ...]]
+
+    def to_dict(self) -> dict:
+        return {"boards": {board_id: list(ids) for board_id, ids in self.boards.items()}}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "InventoryRequest":
+        return cls(boards={board_id: tuple(ids) for board_id, ids in data["boards"].items()})
+
+
+@dataclass
 class PeerRecord:
     """What this node has learned about one peer via a completed hello
     exchange — enough to independently verify any further signed
@@ -1005,11 +1040,22 @@ class LinkNode:
                 if genesis.content_id in self.known_event_ids:
                     continue
 
+                # Issue #85: verified against the *content's own claimed
+                # origin*, not required to equal sender_fingerprint --
+                # this is what makes genuine multi-hop relay (an
+                # inventory response from a node that merely carries
+                # this board) verifiable at all. The origin must still
+                # be a peer this node has *independently* completed a
+                # hello with at some point (never merely "whoever is on
+                # the other end of this HTTP call") -- "no relay from a
+                # stranger" now means the *origin*, not the *carrier*,
+                # must already be known.
                 origin_fingerprint = genesis.payload.get("origin_fingerprint")
-                if origin_fingerprint != sender_fingerprint:
+                origin_peer = self.peers.get(origin_fingerprint)
+                if origin_peer is None:
                     raise LinkProtocolError(
-                        f"{sender_fingerprint} sent a board_genesis for a different origin "
-                        f"({origin_fingerprint!r}) -- refusing (no relay from a stranger yet)"
+                        f"received a board_genesis originated by {origin_fingerprint}, which has "
+                        "no completed hello with this node -- refusing (no relay from a stranger)"
                     )
 
                 board_id = genesis.payload["board_id"]
@@ -1019,11 +1065,11 @@ class LinkNode:
                         "different genesis is already on file for it"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "board_genesis")
+                signing_verify_key = self._resolve_sender_signing_key(origin_peer, origin_fingerprint, "board_genesis")
                 if not verify_board_genesis(genesis, signing_verify_key):
                     raise LinkProtocolError(
-                        f"board_genesis from {sender_fingerprint} does not verify against its "
-                        "current signing key"
+                        f"board_genesis from origin {origin_fingerprint} does not verify against "
+                        "its current signing key"
                     )
 
                 self.board_events.record_genesis(genesis)
@@ -1051,18 +1097,23 @@ class LinkNode:
                         f"board_post author kind {author_kind!r} is not yet supported "
                         "(only node_vouched_user is built)"
                     )
+                # Issue #85: same relaxation as board_genesis above --
+                # verified against the author's own home node, which
+                # must independently be a known peer, not required to
+                # equal sender_fingerprint.
                 home_node_fingerprint = author.get("home_node_fingerprint")
-                if home_node_fingerprint != sender_fingerprint:
+                author_peer = self.peers.get(home_node_fingerprint)
+                if author_peer is None:
                     raise LinkProtocolError(
-                        f"{sender_fingerprint} sent a board_post vouching for a different home "
-                        f"node ({home_node_fingerprint!r}) -- refusing (no relay from a stranger yet)"
+                        f"received a board_post vouched for by {home_node_fingerprint}, which has "
+                        "no completed hello with this node -- refusing (no relay from a stranger)"
                     )
 
-                signing_verify_key = self._resolve_sender_signing_key(sender, sender_fingerprint, "board_post")
+                signing_verify_key = self._resolve_sender_signing_key(author_peer, home_node_fingerprint, "board_post")
                 if not verify_board_post(post, signing_verify_key):
                     raise LinkProtocolError(
-                        f"board_post from {sender_fingerprint} does not verify against its "
-                        "current signing key"
+                        f"board_post from home node {home_node_fingerprint} does not verify "
+                        "against its current signing key"
                     )
 
                 self.known_event_ids.add(post.content_id)
@@ -1091,12 +1142,14 @@ class LinkNode:
                         "doesn't match the root post's own author -- moderator edits aren't "
                         "supported yet"
                     )
+                # Issue #85: same relaxation as board_post above.
                 home_node_fingerprint = edit_author.get("home_node_fingerprint")
-                if home_node_fingerprint != sender_fingerprint:
+                edit_author_peer = self.peers.get(home_node_fingerprint)
+                if edit_author_peer is None:
                     raise LinkProtocolError(
-                        f"{sender_fingerprint} sent a board_post_edit vouching for a different "
-                        f"home node ({home_node_fingerprint!r}) -- refusing (no relay from a "
-                        "stranger yet)"
+                        f"received a board_post_edit vouched for by {home_node_fingerprint}, "
+                        "which has no completed hello with this node -- refusing (no relay "
+                        "from a stranger)"
                     )
 
                 existing_chain = self.board_events.edit_chain(root_post_id)
@@ -1116,12 +1169,12 @@ class LinkNode:
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
-                    sender, sender_fingerprint, "board_post_edit"
+                    edit_author_peer, home_node_fingerprint, "board_post_edit"
                 )
                 if not verify_board_post_edit(edit, signing_verify_key):
                     raise LinkProtocolError(
-                        f"board_post_edit from {sender_fingerprint} does not verify against its "
-                        "current signing key"
+                        f"board_post_edit from home node {home_node_fingerprint} does not verify "
+                        "against its current signing key"
                     )
 
                 self.board_events.extend_edit_chain(root_post_id, edit)
@@ -1142,12 +1195,16 @@ class LinkNode:
                         "from a stranger yet)"
                     )
 
+                # Issue #85: same relaxation as board_genesis above --
+                # the board's current origin must independently be a
+                # known peer, regardless of who relayed this offer.
                 current_origin = self.current_board_origin(board_id)
-                if sender_fingerprint != current_origin:
+                origin_peer = self.peers.get(current_origin)
+                if origin_peer is None:
                     raise LinkProtocolError(
-                        f"{sender_fingerprint} sent a board_origin_transfer_offer for board_id "
-                        f"{board_id!r}, but is not its current origin ({current_origin!r}) -- "
-                        "refusing (no relay from a stranger yet)"
+                        f"received a board_origin_transfer_offer for board_id {board_id!r} whose "
+                        f"current origin ({current_origin!r}) has no completed hello with this "
+                        "node -- refusing (no relay from a stranger)"
                     )
                 old_origin_fingerprint = offer.payload.get("old_origin_fingerprint")
                 if old_origin_fingerprint != current_origin:
@@ -1170,12 +1227,12 @@ class LinkNode:
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
-                    sender, sender_fingerprint, "board_origin_transfer_offer"
+                    origin_peer, current_origin, "board_origin_transfer_offer"
                 )
                 if not verify_board_origin_transfer_offer(offer, signing_verify_key):
                     raise LinkProtocolError(
-                        f"board_origin_transfer_offer from {sender_fingerprint} does not "
-                        "verify against its current signing key"
+                        f"board_origin_transfer_offer from current origin {current_origin} does "
+                        "not verify against its current signing key"
                     )
 
                 self.board_lifecycle.record_offer(board_id, offer)
@@ -1208,20 +1265,24 @@ class LinkNode:
                         f"board_origin_transfer_accepted for board_id {board_id!r} names a "
                         "new_origin_fingerprint that doesn't match the offer it's accepting"
                     )
-                if sender_fingerprint != new_origin_fingerprint:
+                # Issue #85: same relaxation as the offer branch above --
+                # the offer's named new origin must independently be a
+                # known peer, regardless of who relayed this acceptance.
+                new_origin_peer = self.peers.get(new_origin_fingerprint)
+                if new_origin_peer is None:
                     raise LinkProtocolError(
-                        f"{sender_fingerprint} sent a board_origin_transfer_accepted for "
-                        f"board_id {board_id!r}, but is not the offer's named new origin "
-                        f"({new_origin_fingerprint!r}) -- refusing (no relay from a stranger yet)"
+                        f"received a board_origin_transfer_accepted for board_id {board_id!r} "
+                        f"whose named new origin ({new_origin_fingerprint!r}) has no completed "
+                        "hello with this node -- refusing (no relay from a stranger)"
                     )
 
                 signing_verify_key = self._resolve_sender_signing_key(
-                    sender, sender_fingerprint, "board_origin_transfer_accepted"
+                    new_origin_peer, new_origin_fingerprint, "board_origin_transfer_accepted"
                 )
                 if not verify_board_origin_transfer_accepted(transfer_accepted, signing_verify_key):
                     raise LinkProtocolError(
-                        f"board_origin_transfer_accepted from {sender_fingerprint} does not "
-                        "verify against its current signing key"
+                        f"board_origin_transfer_accepted from new origin {new_origin_fingerprint} "
+                        "does not verify against its current signing key"
                     )
 
                 self.board_lifecycle.record_acceptance(

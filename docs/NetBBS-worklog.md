@@ -1239,15 +1239,59 @@ unverified candidate pool (`LinkNode.candidate_descriptors`). `run_link_sync`
 falls back to a small random sample of it (bounded,
 `_MAX_CANDIDATE_FALLBACK_ATTEMPTS`) only when every configured/cached seed
 fails a given pass -- never a first resort, and never more than one
-successful reconnection per pass. There is still no generic inventory/pull
-protocol, automatic relay selection, or multi-hop propagation. A node which
-learned data
-from another peer does not automatically relay that board state to a third
-node.
+successful reconnection per pass.
+
+**Inventory/pull-based catch-up and multi-hop relay (design doc §8.8, issue
+#85).** Each sync pass, in addition to the push above, a node also sends
+every seed one `InventoryRequest` naming every board it currently carries
+(`netbbs.link.store.build_inventory_request`) plus that board's own known
+content IDs; the seed's response (`board_event_diff`) is whatever board-
+scoped content it has for those boards that the requester doesn't, drawn
+from everything the seed has on file -- self-originated, locally-authored,
+or itself only carried -- not only what it originated. This is what makes
+relay genuinely multi-hop: a node that merely carries board X can answer an
+inventory request for it from a third node.
+
+This closes a narrower gap than "generic inventory exchange" might imply:
+`InventoryRequest` is keyed by boards the *requester* already carries, so a
+node with zero prior knowledge of a board has nothing to name in a request
+and will never discover that board exists this way. What it does close: a
+node that already carries a board but has fallen behind on its later
+posts/edits (its own connection to the origin became unreliable) can catch
+up via any other node it's still in regular contact with, including one
+that never originated any of the content itself. Bootstrapping a wholly
+novel board through a relay with no direct genesis ever received is a
+separate, unsolved case -- it would need a responder to proactively
+advertise boards the requester didn't ask about, not just diff the ones it
+did.
+
+**This required one correctness fix to `handle_events` itself, not zero
+protocol changes.** Every board-scoped acceptance branch previously
+resolved the signing key to verify against from the wire-level
+`sender_fingerprint`, and required it to equal the content's own claimed
+origin/author -- correct for direct delivery, but structurally
+incompatible with relay, since a relayed event's wire sender is a
+different node than its author. Each branch now resolves against the
+content's own claimed origin/author fingerprint instead, gated on that
+fingerprint *independently* already being a peer this node has completed
+a hello with at some point (`self.peers.get(...)`, raising the same "no
+relay from a stranger" error otherwise) -- the wire-level sender must
+still itself be a completed peer too, unchanged. This preserves the exact
+same safety property (nothing accepted whose signing key can't be
+independently verified via this node's own prior trust) while correctly
+relocating which fingerprint that check applies to. A real implication:
+a receiving node can only accept relayed content whose author it has
+*at some point* directly verified via its own hello -- relay substitutes
+for content delivery, never for identity verification. `key_transition`
+and the `link_message` family are untouched -- messages remain
+point-to-point by design and were never in scope for this.
 
 Persistent dedup/event retention policy still needs a correctness-preserving
-implementation. Purging the fast cache must not make old control events
-re-applicable or deleted/suppressed content spontaneously reappear.
+implementation (design doc §8.8's own note: it must be designed with the
+above in mind -- a purged event a slow-to-reconnect peer still needs for
+catch-up must never be silently unavailable). Purging the fast cache must
+not make old control events re-applicable or deleted/suppressed content
+spontaneously reappear.
 
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 

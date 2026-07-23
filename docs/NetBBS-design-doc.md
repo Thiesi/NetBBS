@@ -1141,21 +1141,23 @@ Current background sync:
 - performs hello/peer discovery;
 - pushes the complete locally originated supported event set;
 - relies on idempotent acceptance;
-- sends targeted Link mail directly or through a selected relay.
+- sends targeted Link mail directly or through a selected relay;
+- requests and applies bounded inventory/pull-based catch-up for every
+  currently-carried board, from every seed dialed that pass, genuinely
+  multi-hop for board content already carried somewhere in reach (§8.8,
+  issue #85).
 
 This is intentionally simple but incomplete.
 
 Not yet present:
 
-- generic inventory exchange and pull-based anti-entropy;
-- efficient per-peer deltas;
-- general multi-hop propagation of arbitrary carried content;
-- complete retained-event and dedup-purge policy;
+- discovery of a wholly novel board through a relay with no direct genesis
+  ever received (§8.8's own stated scope boundary — inventory/pull only
+  catches up boards the requester already carries);
+- efficient per-peer deltas beyond a full per-board known-ID list (fine at
+  this project's declared scale; a compact digest would be needed beyond it);
+- complete retained-event and dedup-purge policy (issue #86);
 - public-network backpressure and abuse handling.
-
-A node which receives Alice’s board events does not automatically relay them to
-Carol under the current direct-pairwise model unless explicit future relay/
-anti-entropy behavior is added.
 
 ### 8.7 Store-and-forward goal
 
@@ -1215,24 +1217,89 @@ same raw JSON event-list shape `push_events`'s request body already uses:
 
 **Responder-side diff.** For each requested `board_id` this responder also
 currently carries, return every board-scoped event on file for that board
-(read from `link_events` regardless of `sender_fingerprint` — see the
-schema change below) whose `content_id` is not in the requester's declared
-list for that board. A `board_id` the responder does not itself carry is
-silently skipped, never an error — "not carrying this board" is already a
-legitimate, honestly-represented answer (§9.3), and the requester learns
-nothing different than if it had asked a peer that had simply never heard
-of that board. **This is the entire multi-hop mechanism**: a node that only
+whose `content_id` is not in the requester's declared list for it —
+unioning three differently-shaped sources, not `link_events` alone: this
+node's own self-originated genesis/lifecycle (`boards.link_genesis_json`/
+`link_lifecycle_json`, never routed through `handle_events` at all, so
+never in `link_events`), any post/edit a *local* user authored on any
+Linked board regardless of whether this node originated or merely carries
+it (`posts.link_event_json`, populated only by self-authorship, per
+`netbbs.link.boards.queue_board_post_if_linked`'s own scope), and every
+peer-received event this node has accepted (`link_events`, filtered by the
+new `board_id` column — see the schema change below). A `board_id` the
+responder does not itself carry is silently skipped, never an error — "not
+carrying this board" is already a legitimate, honestly-represented answer
+(§9.3). **This is the entire multi-hop mechanism**: a node that only
 *carries* board X (never originated it) can now answer an inventory
-request for X from a third node, because the diff query reads `link_events`
-directly rather than `netbbs.link.boards.load_own_board_events`'s
-origin-only scope.
+request for X from a third node, because the diff draws from everything
+this node has on file for that board, not only what it originated.
 
-**Applying the response needs no new acceptance path.** The requester feeds
-the returned `events` list through `LinkNode.handle_events` exactly as it
-already does for a push response — full signature/chain verification and
-materialization are unchanged. The entire new implementation surface is (a)
-the responder's diff query and (b) a client-side loop that issues the
-request and applies the response; zero changes to event verification.
+**`handle_events` itself needs one correctness fix to make this
+verifiable, not zero changes.** Every board-scoped branch (`board_genesis`,
+`board_post`, `board_post_edit`, `board_origin_transfer_offer`/
+`_accepted`) previously required the wire-level `sender_fingerprint` to
+*equal* the content's own claimed origin/author, resolving the signing key
+to verify against from `self.peers[sender_fingerprint]` — correct for
+direct delivery, but structurally incompatible with relay: a genuinely
+relayed event's wire sender (the carrier) is a different node than its
+signed author/origin, so requiring equality made multi-hop content
+unconditionally unverifiable, not merely unsupported. The fix resolves each
+branch's signing key against the **content's own claimed origin/author
+fingerprint** (already present in its payload) instead of the wire sender —
+but only if that origin/author fingerprint is *itself* already a peer this
+node has independently completed a hello with (`self.peers.get(...)`,
+raising the same `LinkProtocolError` "no relay from a stranger" shape
+otherwise). This preserves the exact same safety property in spirit —
+nothing is ever accepted whose signing key this node can't independently
+verify via its own previously-established trust — while correctly relocating
+*which* fingerprint that trust check applies to: the content's author, not
+whoever happened to relay the bytes. The wire-level `sender_fingerprint`
+must still itself be a completed peer (unchanged, checked at the top of
+`handle_events` as before) — relay only ever happens between two nodes each
+independently already known, never introducing a genuine stranger on
+either end. `key_transition` and the `link_message` family are explicitly
+untouched — messages remain point-to-point by design (§10) and were never
+part of this issue's scope.
+
+**Applying the response needs no *new* acceptance path beyond that fix.**
+The requester feeds the returned `events` list through the now-corrected
+`LinkNode.handle_events` exactly as it already does for a push response —
+chain/dedup logic and materialization are otherwise unchanged. The new
+implementation surface is (a) the `handle_events` fix above, (b) the
+responder's three-source diff query, and (c) a client-side loop that issues
+the request and applies the response.
+
+**A real, worth-stating limitation this implies:** a receiving node can
+only accept relayed content whose author/origin it has *at some point*
+directly completed a hello with — multi-hop propagates *content* through
+an intermediary, but does not substitute for a receiving node's own
+independent identity verification of who ultimately signed it. In practice
+this is rarely restrictive at this project's declared scale (§14): seed
+configuration plus peer-list-driven candidate fallback (§8.3) already tend
+to bring most nodes in a small-to-medium deployment into direct contact
+with each other over time. A node that has truly never verified a given
+origin's identity by any means still cannot accept that origin's content
+via a relay, exactly as it already could not accept it directly — this
+issue does not weaken that boundary, only lets it be satisfied through a
+past hello rather than requiring the origin to be *currently* reachable.
+
+**A second, separate limitation: this closes the "missed events for a
+board I already carry" gap, not "discover a board I've never heard of
+purely through a relay."** `InventoryRequest.boards` is keyed by the
+boards the *requester* already carries (`netbbs.link.store.
+carried_board_ids`) — a node with zero prior knowledge of a board has no
+way to name it in a request in the first place, so it will never learn
+that board exists this way. This matches the more common and more
+directly valuable real case: a node that already carries board X (having
+received its genesis at some point, whether directly or via an earlier
+relay) but has fallen behind on that board's *later* posts/edits because
+its own connection to the origin became unreliable, while a third node it
+still talks to regularly has stayed current. Bootstrapping a wholly novel
+board through a relay with no direct genesis delivery ever is real,
+additional scope this issue deliberately does not solve — it would need
+the responder to proactively advertise board_ids the requester didn't ask
+about, not just diff the ones it did, which changes the wire shape and is
+better sized as its own follow-up if it turns out to matter in practice.
 
 **Bounded response size.** Capped at the existing `_MAX_EVENTS_PER_REQUEST`
 (200, §13.9) — the same constant `handle_events` already enforces on the
@@ -2498,14 +2565,16 @@ Implemented or substantially working:
   checking, diagnostic log retention, protocol/database upgrade
   compatibility, and graceful Link drain on shutdown (§13.11) — issue #60 is
   closed.
+- inventory/pull-based catch-up and multi-hop relay for already-carried
+  board content (§8.8, issue #85, closed).
 
 Still required for Phase 3 completeness:
 
-- inventory/pull-based catch-up and efficient synchronization;
-- correctness-preserving event/dedup retention;
-- linked channels and channel lifecycle;
-- remaining linked-board governance, closure, moderator edits, and tombstones;
-- remote file catalogue and on-demand chunks;
+- correctness-preserving event/dedup retention (issue #86);
+- linked channels and channel lifecycle (issue #87);
+- remaining linked-board governance, closure, moderator edits, and
+  tombstones (issue #88);
+- remote file catalogue and on-demand chunks (issue #89);
 - broader real-world multi-node deployment validation (issue #83).
 
 ### Phase 3 stabilization gate (issue #84)
@@ -2527,7 +2596,9 @@ The gate is met when all of the following hold:
   sender/receiver/acknowledgement or sender/receiver/materialization
   boundary across a restart, not only isolated unit coverage (issue #80);
 - offline/missed-event catch-up exists and demonstrably converges after a
-  partition, not only live delivery during an already-connected pass;
+  partition, not only live delivery during an already-connected pass
+  (§8.8, issue #85, closed — scoped to boards already carried, not
+  discovery of a wholly novel board through a relay);
 - retained event/dedup state has a correctness-preserving retention policy:
   purging the fast dedup cache must not make an old control event
   re-applicable, nor let suppressed or deleted content reappear;
@@ -2747,15 +2818,37 @@ above, not by this issue.
 §8.8 now states the complete design: an unsigned `InventoryRequest` bundle
 (not a canonical event, matching `PeerListMessage`'s own precedent), a new
 `POST {LINK_PATH_PREFIX}/inventory/{fingerprint}` route whose response
-reuses the exact `push_events` raw-event-list wire shape (no new
-protocol-verification code — the response is fed through the same
-`handle_events` acceptance path a push already uses), a responder-side diff
-query against `link_events` that is genuinely multi-hop (it reads what this
-node carries, not only what it originated), and a nullable `board_id`
-column added to `link_events` to make that query cheap. Bounded by the
-existing `_MAX_EVENTS_PER_REQUEST`/`max_carried_boards` quotas, not new
-numbers. Explicitly excludes retention/purging (issue #86, sequenced
-after this one) and Link messages (already point-to-point by design, §10).
+reuses the exact `push_events` raw-event-list wire shape, a responder-side
+diff query unioning three sources (self-originated, locally-authored on any
+carried board, and peer-received) so it is genuinely multi-hop, and a
+nullable `board_id` column added to `link_events` to make that query cheap.
+Bounded by the existing `_MAX_EVENTS_PER_REQUEST`/`max_carried_boards`
+quotas, not new numbers.
+
+**One necessary correctness fix, not zero protocol changes**, discovered
+while implementing: `handle_events`'s board-scoped branches previously
+required the wire-level sender to equal the content's own claimed
+origin/author, which made a genuinely relayed event structurally
+unverifiable (the relay is a different node than the author). Fixed by
+resolving each branch's signing key against the content's own claimed
+origin/author instead, gated on that fingerprint independently already
+being a completed peer — preserving the same "never accept from a stranger"
+property while correctly relocating which fingerprint it applies to. See
+§8.8's own "real, worth-stating limitation" note for what this does and
+does not enable.
+
+**Scope actually closed: missed-event catch-up for a board already
+carried, relayed through a currently-connected third node — not
+discovery of a wholly novel board through a relay with no direct genesis
+ever received.** `InventoryRequest` is keyed by what the requester already
+carries, so a node with zero prior knowledge of a board has nothing to
+name in a request. See §8.8's own second limitation note; a follow-up
+issue can pick up proactive board-genesis advertisement if that gap turns
+out to matter in practice.
+
+Explicitly excludes retention/purging (issue #86, sequenced after this one)
+and Link messages (already point-to-point by design, §10, untouched by the
+`handle_events` fix above).
 
 ### Issue #55 — trust and quarantine
 

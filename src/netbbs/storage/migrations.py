@@ -1745,4 +1745,34 @@ MIGRATIONS = [
         WHERE object_type = 'channel';
         """,
     ),
+    Migration(
+        description=(
+            "Issue #85: link_events gains a nullable board_id column, "
+            "populated for the five board-scoped object types (board_genesis, "
+            "board_post, board_post_edit, board_origin_transfer_offer, "
+            "board_origin_transfer_accepted) that already carry "
+            "payload.board_id directly -- everything else (key_transition, "
+            "link_message and its acknowledgements) stays NULL, since neither "
+            "belongs to a board. Backfilled via json_extract against the "
+            "already-stored envelope rather than re-verifying anything. "
+            "Serves the new inventory/pull-based catch-up diff query (design "
+            "doc §8.8): 'everything this node has for board X' was not a "
+            "query this table needed to answer efficiently before this issue "
+            "-- previously only sender_fingerprint was indexed, since nothing "
+            "asked 'by board' rather than 'by sender.' The covering index "
+            "keeps that query cheap as link_events grows."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN board_id TEXT;
+
+        UPDATE link_events
+        SET board_id = json_extract(envelope_json, '$.envelope.payload.board_id')
+        WHERE object_type IN (
+            'board_genesis', 'board_post', 'board_post_edit',
+            'board_origin_transfer_offer', 'board_origin_transfer_accepted'
+        );
+
+        CREATE INDEX idx_link_events_board_id ON link_events(board_id, object_type);
+        """,
+    ),
 ]

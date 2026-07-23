@@ -149,13 +149,15 @@ from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.seedlist import get_cached_supplementary_seeds
-from netbbs.link.store import delete_relay_consent, save_event, save_peer
+from netbbs.link.store import build_inventory_request, delete_relay_consent, save_event, save_peer
 from netbbs.link.transport import (
     LinkTransportError,
     deposit_into_relay_mailbox,
     dial_hello,
+    persist_accepted_events,
     pickup_from_relay_mailbox,
     push_events,
+    request_inventory,
     request_peer_list,
     request_relay_consent,
 )
@@ -187,6 +189,7 @@ async def run_link_sync(
     *,
     interval_seconds: float,
     stop_event: asyncio.Event | None = None,
+    max_carried_boards: int | None = None,
 ) -> None:
     """
     Runs until cancelled: each pass dials every seed in `seeds` (in
@@ -234,6 +237,17 @@ async def run_link_sync(
     existing caller/test that doesn't pass one, behaving exactly as the
     unconditional `while True:`/`asyncio.sleep` this replaced always
     did.
+
+    `max_carried_boards` (design doc §8.8, issue #85): threaded through
+    to `_sync_one_seed`'s own inventory-request step below, the same
+    quota `LinkServer` already enforces for a directly-pushed
+    `board_genesis` (§13.9) -- an inventory response can carry one too
+    (the multi-hop case: a board this node has never seen before,
+    carried by the seed being asked), so the same cap applies
+    regardless of which path a new genesis arrives through. `None`
+    (the default) preserves every existing caller/test, matching this
+    function's own established convention for every other optional
+    quota parameter.
     """
     while stop_event is None or not stop_event.is_set():
         supplementary = await lane.run(get_cached_supplementary_seeds)
@@ -241,7 +255,9 @@ async def run_link_sync(
         pass_seeds = list(dict.fromkeys(seeds + supplementary))
         reached_network = False
         for seed_url in pass_seeds:
-            succeeded = await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
+            succeeded = await _sync_one_seed(
+                node, session, seed_url, own_hello_provider, lane, max_carried_boards=max_carried_boards
+            )
             reached_network = reached_network or succeeded
         if not reached_network:
             # Resilience path: every configured/
@@ -289,13 +305,15 @@ async def _sync_one_seed(
     seed_url: str,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
+    *,
+    max_carried_boards: int | None = None,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
     pass" (the candidate-fallback trigger). A failed push/peer-
-    list-request afterward doesn't downgrade a successful hello back to
-    failure; those are secondary, independently-tolerated steps, not
-    the "are we isolated" signal."""
+    list-request/inventory-request afterward doesn't downgrade a
+    successful hello back to failure; those are secondary,
+    independently-tolerated steps, not the "are we isolated" signal."""
     try:
         seed_peer = await dial_hello(node, session, seed_url, own_hello_provider(), lane)
     except (LinkTransportError, LinkProtocolError) as exc:
@@ -316,6 +334,33 @@ async def _sync_one_seed(
         await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
+
+    # Design doc §8.8, issue #85: pull-based catch-up, asked of every
+    # seed this pass already reached (not one arbitrary "best" peer) --
+    # not every peer necessarily carries every board this node does,
+    # and the push loop above already iterates all of them regardless.
+    # `handle_events` (not this function) is what actually verifies the
+    # response; a seed that carries none of the requested boards simply
+    # returns an empty list, indistinguishable from -- and no more
+    # costly than -- this loop's own existing per-seed push tolerance.
+    try:
+        inventory_request = await lane.run(build_inventory_request)
+        if inventory_request.boards:
+            events, _more_available = await request_inventory(node, session, seed_url, inventory_request)
+            if events:
+                try:
+                    accepted = node.handle_events(seed_peer.fingerprint, events)
+                except LinkProtocolError as exc:
+                    _logger.warning(
+                        "Link sync: rejected an inventory response from seed %s: %s", seed_url, exc
+                    )
+                else:
+                    await persist_accepted_events(
+                        lane, node, accepted,
+                        sender_fingerprint=seed_peer.fingerprint, max_carried_boards=max_carried_boards,
+                    )
+    except LinkTransportError as exc:
+        _logger.warning("Link sync: could not request inventory from seed %s: %s", seed_url, exc)
 
     return True
 
