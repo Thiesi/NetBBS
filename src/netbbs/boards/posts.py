@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
+from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
@@ -36,22 +37,17 @@ class PostError(Exception):
     """Raised for post creation/lookup/moderation failures."""
 
 
-# Server-side content limits (GitHub issue #32): the only existing
-# input-length safeguard was the transport line editors' 4,096-char
+# Re-exported from netbbs.boards.limits (issue #79) so existing callers/
+# tests importing MAX_SUBJECT_BYTES/MAX_BODY_BYTES from this module keep
+# working unchanged. The only existing input-length safeguard before
+# this (GitHub issue #32) was the transport line editors' 4,096-char
 # single-line cap, which the fullscreen prose editor doesn't share,
 # letting an authenticated user grow an in-memory document (and
 # eventually a stored row) without bound purely by opting into that
 # editor. Enforced here, at the domain layer, rather than only in the
 # editor UI (see netbbs.net.prose_editor's own ceiling) -- a caller
 # going through create_post()/edit_post() directly must not be able to
-# bypass a UI-only restriction. Counted in encoded UTF-8 bytes, not
-# `len()` characters, since that's what actually gets stored/
-# transmitted and multi-byte characters would otherwise undercount.
-# The exact numbers are a product choice, not a correctness one: large
-# enough that no legitimate post ever comes close, small enough to
-# bound worst-case memory/disk/DB-row size to something sane.
-MAX_SUBJECT_BYTES = 300
-MAX_BODY_BYTES = 200_000
+# bypass a UI-only restriction.
 
 
 def _check_content_length(subject: str, body: str) -> None:

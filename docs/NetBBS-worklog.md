@@ -833,7 +833,11 @@ All signed and hashed Link objects use the same canonical JSON-byte function.
 
 Current rules include:
 
-- recursive Unicode NFC normalization;
+- recursive Unicode NFC normalization, applied to object member names as
+  well as values (issue #70) -- two source keys that normalize to the same
+  string are a rejected collision, not a silent last-one-wins overwrite,
+  the same "ambiguity must fail loudly" treatment already given to
+  duplicate wire-JSON keys below;
 - deterministic compact JSON representation;
 - no floats, including nested floats;
 - integers bounded to `[-(2^53 - 1), 2^53 - 1]` (the IEEE-754-double-safe
@@ -867,6 +871,28 @@ signature failure. Exact match only, never a supported range, since version
 1 has been the only version to ever exist; a future protocol bump that means
 to support mixed-version peers during a rollout needs to deliberately design
 that compatibility window here, not assume one already exists.
+
+### Shared local-domain/Link limits must have exactly one definition
+
+`netbbs.link.protocol` deliberately never imports `netbbs.boards.posts`
+(or any other local-domain module with real business logic/DB
+dependencies) — that boundary is real and worth keeping. But a numeric
+admission limit that must mean the same thing on both sides of that
+boundary (issue #79: a `board_post`'s subject/body byte limits, checked
+both by local `create_post`/`edit_post` and by `handle_events`' receive-
+side validation) is a different kind of value than "business logic" —
+it is safe, and necessary, to share a single definition for exactly that
+value. `netbbs.boards.limits` holds just the two integers with zero
+other imports, so `netbbs.link.protocol` can depend on it without
+acquiring any of `netbbs.boards.posts`' actual dependencies, while
+`netbbs.boards.posts` re-exports the same names so every existing
+caller/test importing them from that module keeps working. Before
+duplicating a numeric constant across the local-domain/Link boundary
+again "to preserve module direction," check whether a similarly narrow,
+dependency-free module already exists or should be created instead —
+duplication makes an accidental future divergence (content valid on one
+side, rejected on the other) possible by construction; a shared
+single-purpose module makes it impossible.
 
 ### Chain-order reconstruction must not trust `created_at` alone
 

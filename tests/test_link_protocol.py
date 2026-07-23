@@ -529,6 +529,59 @@ def test_handle_events_accepts_a_valid_board_post_after_genesis(tmp_path, clock)
     alice.close()
 
 
+def test_handle_events_rejects_an_oversized_board_post_body(tmp_path, clock):
+    # issue #79: the protocol layer's own size limit must actually be
+    # enforced at receive time, and (via test_link_and_local_board_post_
+    # size_limits_share_one_definition below) must be the same number
+    # netbbs.boards.posts enforces locally, not a second copy that could
+    # silently drift.
+    from netbbs.boards.limits import MAX_BODY_BYTES
+
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    oversized_post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="x" * (MAX_BODY_BYTES + 1),
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError, match="bytes this node accepts"):
+        bob_node.handle_events(alice.fingerprint, [oversized_post.to_dict()])
+
+    alice.close()
+
+
+def test_link_and_local_board_post_size_limits_share_one_definition():
+    # issue #79: netbbs.link.protocol used to hard-code its own copy of
+    # netbbs.boards.posts' subject/body byte limits. Both now import
+    # netbbs.boards.limits directly, so this can only ever fail if a
+    # future change reintroduces a second hard-coded copy in one of them.
+    import netbbs.link.protocol as protocol_module
+    from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
+    from netbbs.boards.posts import MAX_BODY_BYTES as posts_body
+    from netbbs.boards.posts import MAX_SUBJECT_BYTES as posts_subject
+
+    assert protocol_module._MAX_BOARD_POST_SUBJECT_BYTES == MAX_SUBJECT_BYTES == posts_subject
+    assert protocol_module._MAX_BOARD_POST_BODY_BYTES == MAX_BODY_BYTES == posts_body
+
+
 def test_handle_events_rejects_board_post_for_unknown_board_id(tmp_path, clock):
     alice = spawn_node(tmp_path, "alice")
     bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)

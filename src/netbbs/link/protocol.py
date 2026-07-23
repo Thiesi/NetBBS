@@ -55,6 +55,8 @@ from dataclasses import dataclass, field
 
 import nacl.signing
 
+from netbbs.boards.limits import MAX_BODY_BYTES as _MAX_BOARD_POST_BODY_BYTES
+from netbbs.boards.limits import MAX_SUBJECT_BYTES as _MAX_BOARD_POST_SUBJECT_BYTES
 from netbbs.identity.keys import fingerprint_from_verify_key
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
@@ -111,14 +113,12 @@ _MAX_CANDIDATE_DESCRIPTORS = 500
 _MAX_EVENTS_PER_REQUEST = 200
 
 # Design doc §13.9: `board_post`/`board_post_edit` had no size
-# validation at all on receive, unlike a locally created post
-# (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`). Duplicated
-# here at the same values rather than imported -- this module stays
-# free of any `netbbs.boards` dependency, the same "duplicate one small
-# piece of logic rather than reach across the module boundary" precedent
-# `netbbs.link.mail._make_room_or_bounce` already documents for itself.
-_MAX_BOARD_POST_SUBJECT_BYTES = 300
-_MAX_BOARD_POST_BODY_BYTES = 200_000
+# validation at all on receive, unlike a locally created post. Imported
+# from `netbbs.boards.limits` (issue #79) rather than hard-coded here a
+# second time -- that module is just two integers with no other
+# imports, so this stays free of `netbbs.boards.posts`' actual
+# database/business-logic dependencies while still sharing one
+# definition instead of two that could silently drift apart.
 
 
 class LinkProtocolError(Exception):
