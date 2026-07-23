@@ -178,6 +178,124 @@ def test_save_event_on_conflict_does_nothing(tmp_path):
     db.close()
 
 
+# -- purge_expired_key_transitions (design doc §8.9, issue #86) -------------
+
+
+def _backdate_link_event(db: Database, content_id: str, *, received_at: str) -> None:
+    db.connection.execute(
+        "UPDATE link_events SET received_at = ? WHERE content_id = ?", (received_at, content_id)
+    )
+    db.connection.commit()
+
+
+def test_purge_expired_key_transitions_deletes_only_rows_older_than_the_retention_window(tmp_path):
+    """Rows inserted directly via SQL, bypassing `save_event`'s own
+    inline purge-on-write -- this test wants to prove `purge_expired_
+    key_transitions` itself, in isolation from that wiring (covered
+    separately by `test_save_event_purges_expired_key_transitions_
+    inline` below)."""
+    import json as json_module
+
+    from netbbs.link.store import purge_expired_key_transitions
+
+    db = Database(tmp_path / "node.db")
+    sender_identity = bootstrap_node_identity("bob")
+    old_transition = sender_identity.transitions[0]
+    recent_identity = bootstrap_node_identity("carol")
+    recent_transition = recent_identity.transitions[0]
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+        "VALUES (?, ?, 'key_transition', ?, ?)",
+        (
+            old_transition.content_id, sender_identity.fingerprint,
+            json_module.dumps(old_transition.to_dict()), "2020-01-01T00:00:00Z",
+        ),
+    )
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+        "VALUES (?, ?, 'key_transition', ?, ?)",
+        (
+            recent_transition.content_id, recent_identity.fingerprint,
+            json_module.dumps(recent_transition.to_dict()), "2025-12-01T00:00:00Z",
+        ),
+    )
+    db.connection.commit()
+
+    deleted = purge_expired_key_transitions(db, now_iso="2026-01-01T00:00:00Z")
+
+    assert deleted == 1
+    remaining_ids = {
+        row["content_id"] for row in db.connection.execute("SELECT content_id FROM link_events")
+    }
+    assert remaining_ids == {recent_transition.content_id}
+    db.close()
+
+
+def test_purge_expired_key_transitions_leaves_every_other_object_type_alone_regardless_of_age(tmp_path):
+    """Design doc §8.9's own per-type trace: only key_transition is
+    provably redundant with a separately-durable source -- every
+    board-scoped type must survive purging regardless of how old it is,
+    since restart reconstruction and issue #85's inventory diff both
+    still depend on the row."""
+    from netbbs.link.boards import materialize_carried_board
+    from netbbs.link.events import build_board_genesis
+    from netbbs.link.store import purge_expired_key_transitions
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = build_board_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        board_id="remote-board-id",
+        name="Remote Discussion",
+        created_at="2020-01-01T00:00:00Z",
+    )
+    materialize_carried_board(db, genesis)
+    save_event(
+        db, sender_fingerprint=remote_identity.fingerprint, content_id=genesis.content_id,
+        object_type="board_genesis", envelope=genesis.to_dict(),
+    )
+    _backdate_link_event(db, genesis.content_id, received_at="2020-01-01T00:00:00Z")
+
+    deleted = purge_expired_key_transitions(db, now_iso="2026-01-01T00:00:00Z")
+
+    assert deleted == 0
+    row = db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (genesis.content_id,)
+    ).fetchone()
+    assert row is not None
+    db.close()
+
+
+def test_save_event_purges_expired_key_transitions_inline(tmp_path):
+    """The actual wiring (design doc §8.9): a new key_transition write
+    triggers the purge itself, the same 'purge on write, same table'
+    shape `LinkDiagnosticLogHandler.emit` already established -- no
+    separate scheduled task exists or is needed."""
+    db = Database(tmp_path / "node.db")
+    old_identity = bootstrap_node_identity("bob")
+    old_transition = old_identity.transitions[0]
+    save_event(
+        db, sender_fingerprint=old_identity.fingerprint, content_id=old_transition.content_id,
+        object_type="key_transition", envelope=old_transition.to_dict(),
+    )
+    _backdate_link_event(db, old_transition.content_id, received_at="2020-01-01T00:00:00Z")
+
+    new_identity = bootstrap_node_identity("carol")
+    new_transition = new_identity.transitions[0]
+    save_event(
+        db, sender_fingerprint=new_identity.fingerprint, content_id=new_transition.content_id,
+        object_type="key_transition", envelope=new_transition.to_dict(),
+    )
+
+    remaining_ids = {
+        row["content_id"] for row in db.connection.execute("SELECT content_id FROM link_events")
+    }
+    assert old_transition.content_id not in remaining_ids
+    assert new_transition.content_id in remaining_ids
+    db.close()
+
+
 def test_save_event_populates_board_id_for_board_genesis(tmp_path):
     """Design doc §8.8, issue #85: `board_id` is populated directly from
     the envelope at insert time for the board-scoped object types

@@ -74,7 +74,7 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
-from netbbs.link.store import board_event_diff, load_link_node, save_event, save_peer
+from netbbs.link.store import board_event_diff, load_link_node, purge_expired_key_transitions, save_event, save_peer
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
 
 
@@ -386,6 +386,71 @@ def test_a_restarted_node_continues_converging_after_reordered_and_duplicate_del
 
     expected_key = resolve_current_operational_key(
         second_rotation.transitions, root_verify_key=second_rotation.root.verify_key,
+        subject_fingerprint=alice.fingerprint, purpose="signing",
+    )
+    assert _resolved_signing_key(restarted_bob_node, alice.fingerprint) == expected_key
+
+    alice.close()
+    bob.close()
+
+
+def test_a_purged_key_transition_self_heals_correctly_after_a_restart(tmp_path, clock):
+    """Design doc §8.9, issue #86: the actual proof that purging
+    `key_transition` rows is safe, not merely reasoned about --
+    `known_event_ids` genuinely forgets the purged content_id after a
+    restart (nothing here fakes that), yet a resend of the exact same,
+    already-integrated transition must still be recognized as a safe
+    no-op via `sender.transitions` (persisted separately in `link_peers.
+    transitions_json`, untouched by purging `link_events`), not
+    re-verified from scratch or rejected as unknown."""
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    transport = ScriptedTransport()
+    transport.register(alice)
+    transport.register(bob)
+
+    alice_node = LinkNode(identity=alice.identity)
+    bob_node = LinkNode(identity=bob.identity)
+    _exchange_hellos(transport, alice, alice_node, bob, bob_node, clock)
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    rotation = rotate_operational_key(alice.identity, purpose="signing")
+    alice.identity = rotation
+    alice_node.identity = rotation
+    revoke, authorize = rotation.transitions[-2:]
+    accepted = bob_node.handle_events(alice.fingerprint, [revoke.to_dict(), authorize.to_dict()])
+    assert accepted == [revoke.content_id, authorize.content_id]
+    for transition in (revoke, authorize):
+        save_event(
+            bob.db, sender_fingerprint=alice.fingerprint, content_id=transition.content_id,
+            object_type="key_transition", envelope=transition.to_dict(),
+        )
+    save_peer(bob.db, bob_node.peers[alice.fingerprint])
+
+    # A real purge, not a simulated cache-clear -- backdate both rows
+    # past the retention window, then run the actual purge function.
+    for transition in (revoke, authorize):
+        bob.db.connection.execute(
+            "UPDATE link_events SET received_at = '2020-01-01T00:00:00Z' WHERE content_id = ?",
+            (transition.content_id,),
+        )
+    bob.db.connection.commit()
+    deleted = purge_expired_key_transitions(bob.db, now_iso=clock.now_iso())
+    assert deleted == 2
+
+    # -- restart: a fresh LinkNode hydrated from the now-purged database --
+    restarted_bob_node = load_link_node(bob.db, bob.identity)
+    assert revoke.content_id not in restarted_bob_node.known_event_ids
+    assert authorize.content_id not in restarted_bob_node.known_event_ids
+
+    # A legitimate resend (design doc §8.6's own "push everything every
+    # pass" model) must still self-heal, not error or re-verify from
+    # scratch as if these were brand-new.
+    resent = restarted_bob_node.handle_events(alice.fingerprint, [revoke.to_dict(), authorize.to_dict()])
+    assert resent == []  # self-healed via sender.transitions, not re-accepted as new
+
+    expected_key = resolve_current_operational_key(
+        rotation.transitions, root_verify_key=rotation.root.verify_key,
         subject_fingerprint=alice.fingerprint, purpose="signing",
     )
     assert _resolved_signing_key(restarted_bob_node, alice.fingerprint) == expected_key

@@ -1335,6 +1335,103 @@ def test_handle_events_is_idempotent_for_a_resent_origin_transfer_offer(tmp_path
     carol.close()
 
 
+# -- issue #86: chain-idempotency survives a purged known_event_ids entry ---
+# (the gap netbbs.link.store's own module docstring names as blocking any
+# future retention/purge policy -- these prove it's now closed for the two
+# object types that previously depended solely on the fast dedup cache).
+
+
+def test_handle_events_self_heals_a_resent_still_pending_offer_after_its_dedup_entry_is_purged(tmp_path, clock):
+    """Simulates what a future retention pass purging `known_event_ids`
+    would do -- the offer is still genuinely pending (never accepted),
+    so a resend (an ordinary "push everything every pass" resend, not a
+    fork attempt) must self-heal from `pending_origin_transfers`
+    (authoritative, never purged) rather than being misread as a second,
+    conflicting offer just because the fast cache forgot about the
+    first one."""
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+    assert accepted == [offer.content_id]
+
+    # Simulate a retention pass having purged this content_id from the
+    # fast dedup cache -- the offer itself is still genuinely pending.
+    bob_node.known_event_ids.discard(offer.content_id)
+
+    resent = bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    assert resent == []  # self-healed, not re-applied, not raised as a conflict
+    assert bob_node.pending_origin_transfers["existing-local-board-id"].content_id == offer.content_id
+    assert offer.content_id in bob_node.known_event_ids  # cache repaired
+
+    alice.close()
+    carol.close()
+
+
+def test_handle_events_self_heals_a_resent_already_accepted_transfer_after_its_dedup_entry_is_purged(
+    tmp_path, clock
+):
+    """Same gap, for the acceptance side: once accepted,
+    `pending_origin_transfers` no longer holds the offer at all (`record_
+    acceptance` deletes it), so the *only* pre-issue-#86 signal that this
+    was already correctly applied was the fast dedup cache -- purge that
+    and a resend would have hit the 'no outstanding offer on file' branch
+    and been rejected as if it were a stranger's forgery, not recognized
+    as an already-integrated fact recorded in `board_lifecycle_head`."""
+    alice = spawn_node(tmp_path, "alice")
+    carol = spawn_node(tmp_path, "carol")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=carol.identity), clock=clock))
+    genesis = _linked_board(alice, bob_node, clock)
+
+    offer = build_board_origin_transfer_offer(
+        signing_identity=alice.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=genesis.content_id,
+        old_origin_fingerprint=alice.fingerprint,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [offer.to_dict()])
+
+    accepted_event = build_board_origin_transfer_accepted(
+        signing_identity=carol.identity.signing_key,
+        board_id="existing-local-board-id",
+        previous_event_id=offer.content_id,
+        new_origin_fingerprint=carol.fingerprint,
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+    assert accepted == [accepted_event.content_id]
+    assert bob_node.current_board_origin("existing-local-board-id") == carol.fingerprint
+
+    # Simulate a retention pass having purged this content_id.
+    bob_node.known_event_ids.discard(accepted_event.content_id)
+
+    resent = bob_node.handle_events(carol.fingerprint, [accepted_event.to_dict()])
+
+    assert resent == []  # self-healed, not re-applied, not raised
+    assert bob_node.current_board_origin("existing-local-board-id") == carol.fingerprint
+    assert "existing-local-board-id" not in bob_node.pending_origin_transfers
+    assert accepted_event.content_id in bob_node.known_event_ids  # cache repaired
+
+    alice.close()
+    carol.close()
+
+
 # -- events: gossiping link_message (design doc §10) -------------------
 
 

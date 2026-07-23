@@ -1156,7 +1156,9 @@ Not yet present:
   catches up boards the requester already carries);
 - efficient per-peer deltas beyond a full per-board known-ID list (fine at
   this project's declared scale; a compact digest would be needed beyond it);
-- complete retained-event and dedup-purge policy (issue #86);
+- complete retained-event and dedup-purge policy — `key_transition` alone
+  is purged (§8.9, issue #86, closed); every board-scoped type stays
+  unbounded, stated explicitly as still-needed, not silently deferred;
 - public-network backpressure and abuse handling.
 
 ### 8.7 Store-and-forward goal
@@ -2625,10 +2627,12 @@ Implemented or substantially working:
   closed.
 - inventory/pull-based catch-up and multi-hop relay for already-carried
   board content (§8.8, issue #85, closed).
+- correctness-preserving `key_transition` retention, and the chain-
+  idempotency fix that made any retention provable (§8.9, issue #86,
+  closed) — board-scoped types remain intentionally unbounded.
 
 Still required for Phase 3 completeness:
 
-- correctness-preserving event/dedup retention (issue #86);
 - linked channels and channel lifecycle (issue #87);
 - remaining linked-board governance, closure, moderator edits, and
   tombstones (issue #88);
@@ -2659,7 +2663,9 @@ The gate is met when all of the following hold:
   discovery of a wholly novel board through a relay);
 - retained event/dedup state has a correctness-preserving retention policy:
   purging the fast dedup cache must not make an old control event
-  re-applicable, nor let suppressed or deleted content reappear;
+  re-applicable, nor let suppressed or deleted content reappear (§8.9,
+  issue #86, closed — `key_transition` alone is purged; every board-scoped
+  type is provably still needed and stays unbounded, not silently deferred);
 - issue #60's operational controls have been *rehearsed*, not only
   implemented: backup/restore and an upgrade/rollback have each been
   exercised against a real running node at least once beyond their original

@@ -1213,7 +1213,21 @@ class LinkNode:
                         f"old_origin_fingerprint ({old_origin_fingerprint!r}) that doesn't "
                         f"match its actual current origin ({current_origin!r})"
                     )
-                if self.board_lifecycle.pending_offer(board_id) is not None:
+                existing_offer = self.board_lifecycle.pending_offer(board_id)
+                if existing_offer is not None:
+                    if existing_offer.content_id == offer.content_id:
+                        # Issue #86: exact resend of the still-pending
+                        # offer -- a safe no-op, self-healing known_
+                        # event_ids from the authoritative pending-offer
+                        # state rather than treating a legitimate resend
+                        # ("push everything every pass," or a
+                        # purged-then-resent dedup entry) as a genuine
+                        # second, conflicting offer. Same shape key_
+                        # transition/board_post_edit already use for
+                        # their own chains.
+                        self.known_event_ids.add(offer.content_id)
+                        self.events.setdefault(offer.content_id, raw)
+                        continue
                     raise LinkProtocolError(
                         f"board_id {board_id!r} already has an outstanding, unaccepted "
                         "origin-transfer offer -- at most one may be in flight at a time"
@@ -1246,6 +1260,24 @@ class LinkNode:
                     continue
 
                 board_id = transfer_accepted.payload.get("board_id")
+                if self.board_lifecycle.board_lifecycle_head.get(board_id) == transfer_accepted.content_id:
+                    # Issue #86: exact resend of the acceptance already
+                    # recorded as this board's current lifecycle head --
+                    # a safe no-op, self-healing known_event_ids from the
+                    # authoritative board_lifecycle_head state rather
+                    # than depending solely on the fast dedup cache
+                    # still holding this content_id (the same gap key_
+                    # transition/board_post_edit/the offer branch above
+                    # already close for their own chains). Checked
+                    # *before* the "outstanding offer" lookup below,
+                    # since record_acceptance already deleted the
+                    # pending offer this event once accepted -- that
+                    # lookup alone can't distinguish "already applied"
+                    # from "no relay from a stranger."
+                    self.known_event_ids.add(transfer_accepted.content_id)
+                    self.events.setdefault(transfer_accepted.content_id, raw)
+                    continue
+
                 offer = self.board_lifecycle.pending_offer(board_id)
                 if offer is None:
                     raise LinkProtocolError(

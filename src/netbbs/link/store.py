@@ -15,23 +15,28 @@ disturb). Callers -- `netbbs.link.transport`'s `LinkServer` and
 call these functions themselves, via `DatabaseLane.run`, after a
 successful `handle_hello`/`handle_events`.
 
-No retention-window purging here (`link_events` rows
-accumulate indefinitely) -- purging is blocked on a
-real chain-idempotency gap in `netbbs.link.protocol.handle_events`
-that has to close first before purging a `key_transition` dedup entry
-would be safe.
+Issue #86: `key_transition` rows get a bounded, age-based purge
+(`purge_expired_key_transitions`, called inline on every accepted
+`key_transition` -- see that function's own docstring for why it alone,
+among every object type this table stores, is provably safe to purge).
+Every board-scoped object type stays unbounded -- restart reconstruction
+(`load_link_node`, this module) and issue #85's own inventory diff
+(`board_event_diff`) both still depend on those rows surviving; see
+design doc §8.9 for the full per-type trace.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timedelta
 
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    KEY_TRANSITION_OBJECT_TYPE,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -330,15 +335,71 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     and its acknowledgements), which don't belong to a board.
     """
     board_id = envelope["envelope"]["payload"].get("board_id") if object_type in _BOARD_SCOPED_OBJECT_TYPES else None
+    now = utc_now_iso()
     db.connection.execute(
         """
         INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (content_id, sender_fingerprint, object_type, json.dumps(envelope), utc_now_iso(), board_id),
+        (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id),
     )
     db.connection.commit()
+    if object_type == KEY_TRANSITION_OBJECT_TYPE:
+        # Issue #86: purge on write, scoped to the same object type this
+        # write just touched -- the same shape LinkDiagnosticLogHandler.
+        # emit already established for link_diagnostic_log. Only
+        # key_transition rows are purged here; see this module's own
+        # docstring and design doc §8.9 for why every other object type
+        # this table stores must stay unbounded.
+        purge_expired_key_transitions(db, now_iso=now)
+
+
+_KEY_TRANSITION_RETENTION_DAYS = 90
+
+
+def purge_expired_key_transitions(db: Database, *, now_iso: str | None = None) -> int:
+    """
+    Delete `link_events` rows older than `_KEY_TRANSITION_RETENTION_DAYS`
+    whose `object_type` is `key_transition` -- design doc §8.9, issue #86.
+
+    Provably safe, unlike every other object type this table stores:
+    `netbbs.link.store.load_link_node` never reconstructs `sender.
+    transitions` from a `key_transition`'s own `link_events` row at all --
+    `link_peers.transitions_json` (updated by `save_peer` whenever
+    `handle_events` accepts a new transition) is the actual authoritative
+    source, and `handle_events`'s own self-heal branch for a resent,
+    already-integrated transition checks `sender.transitions` directly,
+    never `known_event_ids`. The `link_events` row exists only to make a
+    resend a fast no-op via the dedup-cache check one line above the
+    self-heal branch; losing it just means a subsequent resend takes the
+    (still perfectly safe) self-heal path instead of the (also safe, one
+    check earlier) dedup-cache path.
+
+    Returns the number of rows deleted -- purely informational, no caller
+    currently needs it beyond tests.
+    """
+    now = now_iso if now_iso is not None else utc_now_iso()
+    cutoff = _days_before(now, _KEY_TRANSITION_RETENTION_DAYS)
+    cursor = db.connection.execute(
+        "DELETE FROM link_events WHERE object_type = ? AND received_at < ?",
+        (KEY_TRANSITION_OBJECT_TYPE, cutoff),
+    )
+    db.connection.commit()
+    return cursor.rowcount
+
+
+def _days_before(now_iso: str, days: int) -> str:
+    # Same "ISO-8601 timestamps sort lexically" reasoning as every other
+    # created_at/received_at column in this codebase -- no separate
+    # date-parsing needed to compare against "now minus N days" as a
+    # plain string. Duplicated from netbbs.link.diagnostics's own
+    # private helper of the same name rather than imported -- this
+    # codebase's established per-module convention for a helper this
+    # small (see e.g. tests/test_link_sync.py and tests/test_link_
+    # transport.py independently duplicating their own small fixtures).
+    parsed = datetime.fromisoformat(now_iso)
+    return (parsed - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
 
 def save_relay_consent(db: Database, fingerprint: str, *, role: str, accepted_at: str) -> None:

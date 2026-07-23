@@ -1286,12 +1286,37 @@ for content delivery, never for identity verification. `key_transition`
 and the `link_message` family are untouched -- messages remain
 point-to-point by design and were never in scope for this.
 
-Persistent dedup/event retention policy still needs a correctness-preserving
-implementation (design doc §8.8's own note: it must be designed with the
-above in mind -- a purged event a slow-to-reconnect peer still needs for
-catch-up must never be silently unavailable). Purging the fast cache must
-not make old control events re-applicable or deleted/suppressed content
-spontaneously reappear.
+**Event/dedup retention (design doc §8.9, issue #86).** Before any purging
+could be provably safe, `handle_events`' own chain-idempotency had a real
+gap: `board_origin_transfer_offer`/`_accepted` were the only two
+board-scoped types whose resend-safety depended solely on the fast
+`known_event_ids` cache, unlike `key_transition`/`board_post_edit`'s own
+self-heal against authoritative state (`sender.transitions`/`post_edits`).
+A cache purge would have made a legitimate resend of a still-pending offer
+or an already-accepted transfer misread as a genuine conflict and rejected
+-- never mis-applied, but not the idempotent no-op it should be either.
+Closed with the same self-heal shape: check the incoming event's own
+`content_id` against `pending_offer`/`board_lifecycle_head` before
+treating a second sighting as a conflict.
+
+Tracing what depends on each object type's `link_events` row surviving
+(restart reconstruction via `load_link_node`, and issue #85's own inventory
+diff) found only `key_transition` genuinely redundant with an
+already-durable separate source: `link_peers.transitions_json`, not the
+`link_events` row, is what `load_link_node` actually reconstructs `sender.
+transitions` from. Every board-scoped type -- including `board_genesis`,
+which turned out to already be redundant with `boards.link_genesis_json`
+but is deliberately left unpurged anyway to keep the rule simple -- stays
+unbounded: `board_post`/`board_post_edit`'s `link_events` row is the *only*
+durable record for a peer-received (not self-authored) post/edit, needed
+both by `board_post_edit`'s own root-post lookup and by inventory serving;
+`board_origin_transfer_offer`/`_accepted` are the *only* source
+`board_lifecycle_head`/`pending_origin_transfers` reconstruct from for a
+peer-received transfer. `netbbs.link.store.purge_expired_key_transitions`
+purges `key_transition` rows past a fixed 90-day window, called inline on
+every accepted `key_transition` write -- the same "purge on write, same
+table" shape `LinkDiagnosticLogHandler.emit` already established for
+`link_diagnostic_log`, not a separate scheduled task.
 
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
