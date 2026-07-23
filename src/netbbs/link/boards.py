@@ -75,6 +75,9 @@ class LinkConfigSnapshot:
     sync_interval_seconds: float
     relay_serving_enabled: bool
     max_relay_clients: int
+    # Design doc §13.9 (issue #60's third operational slice).
+    max_peers: int
+    max_carried_boards: int
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,22 @@ class LinkContext:
 
 class LinkBoardsError(Exception):
     """Raised for re-Linking an already-Linked board."""
+
+
+class BoardCarryLimitError(Exception):
+    """Raised by `materialize_carried_board` when this node's own `max_
+    carried_boards` quota (design doc §13.9, issue #60's third
+    operational slice) is already reached. Deliberately a distinct
+    exception, not `LinkBoardsError` -- the caller (`netbbs.link.
+    transport.LinkServer._handle_events`) must treat this differently
+    from every other rejection in that method: the underlying `board_
+    genesis` event itself was already verified, accepted, and persisted
+    (`save_event`, before this function ever runs) and keeps gossiping
+    normally to other nodes regardless -- only *this node's own* local
+    materialization is refused, an honest "not carried on this node"
+    outcome (design doc §9.3's own already-specified shape for a local
+    exclusion), never a silent, indistinguishable drop of the event
+    itself."""
 
 
 def is_board_linked(db: Database, board: Board) -> bool:
@@ -204,7 +223,30 @@ def _board_from_row(row) -> Board:
     )
 
 
-def materialize_carried_board(db: Database, genesis: BoardGenesis) -> Board:
+def carried_board_count(db: Database, own_fingerprint: str) -> int:
+    """How many boards this node currently carries -- every Linked
+    board whose own genesis names an `origin_fingerprint` other than
+    `own_fingerprint` (a board this node originated itself, via `link_
+    board`, is never counted here regardless of what `netbbs.link.
+    protocol.LinkNode.current_board_origin` might say today: origin can
+    change hands after the fact, but whether a row was created by
+    `materialize_carried_board` in the first place never does). Scans
+    and parses `link_genesis_json` in Python rather than a SQL `json_
+    extract` filter -- this codebase's established convention (see the
+    origin-succession migration's own docstring in `netbbs.storage.
+    migrations`), and cheap enough at this project's declared small-
+    network scale (design doc §14)."""
+    count = 0
+    for row in db.connection.execute("SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"):
+        genesis = json.loads(row["link_genesis_json"])
+        if genesis["envelope"]["payload"].get("origin_fingerprint") != own_fingerprint:
+            count += 1
+    return count
+
+
+def materialize_carried_board(
+    db: Database, genesis: BoardGenesis, *, own_fingerprint: str | None = None, max_carried_boards: int | None = None
+) -> Board:
     """
     Turn a *received* (not self-originated) `board_genesis` into a real,
     locally browsable `Board` row (design doc §13's default-carry
@@ -221,7 +263,10 @@ def materialize_carried_board(db: Database, genesis: BoardGenesis) -> Board:
     Idempotent, keyed on `genesis.payload["board_id"]` -- a resend of an
     already-materialized genesis, or a second peer relaying the same
     genesis this node already carries, returns the existing row
-    unchanged rather than raising or duplicating.
+    unchanged rather than raising or duplicating. Note this means the
+    idempotent case is exempt from `max_carried_boards` below by
+    construction -- a board already materialized never gets re-refused
+    just because the cap was reached sometime after it landed.
 
     Deliberately bypasses `netbbs.boards.boards.create_board` -- that
     function always mints a fresh content-addressed `board_id` from the
@@ -238,12 +283,29 @@ def materialize_carried_board(db: Database, genesis: BoardGenesis) -> Board:
     afterward via the ordinary board-edit screen, same as any other
     local board, since a carrying node's own local value always wins
     per `build_board_genesis`'s own docstring).
+
+    `own_fingerprint`/`max_carried_boards` (design doc §13.9, issue #60's
+    third operational slice): both default to `None`, preserving every
+    existing caller that doesn't pass either -- unbounded, exactly as
+    before this slice. The real caller (`netbbs.link.transport.
+    LinkServer._handle_events`) always supplies both together; `own_
+    fingerprint` is unused unless `max_carried_boards` is also given.
+    Raises `BoardCarryLimitError` for a genuinely *new* board_id once
+    the cap is reached -- see that exception's own docstring for why
+    the caller must not treat this the same as every
+    other `handle_events`-adjacent rejection.
     """
     existing = db.connection.execute(
         "SELECT * FROM boards WHERE board_id = ?", (genesis.payload["board_id"],)
     ).fetchone()
     if existing is not None:
         return _board_from_row(existing)
+
+    if max_carried_boards is not None and carried_board_count(db, own_fingerprint) >= max_carried_boards:
+        raise BoardCarryLimitError(
+            f"cannot carry board {genesis.payload['board_id']!r}: already at this node's own "
+            f"max_carried_boards limit ({max_carried_boards})"
+        )
 
     payload = genesis.payload
     db.connection.execute(

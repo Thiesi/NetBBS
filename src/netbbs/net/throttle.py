@@ -186,3 +186,37 @@ class LoginThrottle:
         whether the session went on to authenticate successfully, fail,
         or simply disconnect -- callers should do this in a `finally`."""
         self._unauthenticated_sessions -= 1
+
+
+class LinkRequestThrottle:
+    """
+    Design doc §13.9 (issue #60's third operational slice): a per-
+    source-address request-rate budget for `netbbs.link.transport.
+    LinkServer` -- before this, no Link HTTP route had any throttling
+    at all, including the two unauthenticated ones (`/hello`, `/peers`).
+
+    Deliberately much simpler than `LoginThrottle` above: one budget,
+    keyed by source address only -- there's no per-username-equivalent
+    concept for machine-to-machine Link traffic, and no global backstop
+    layer either (Link traffic is legitimately bursty in a way
+    interactive login attempts aren't, and a single node-wide ceiling
+    would let one noisy peer starve every other peer's budget, the
+    opposite of what a *per-source* limit is for). Reuses `_KeyedToken
+    Buckets` verbatim rather than reinventing it -- same bounded-memory-
+    via-LRU-eviction reasoning as `LoginThrottle`'s own per-source/
+    per-username budgets.
+    """
+
+    def __init__(self, *, capacity: float, refill_per_minute: float, max_tracked_sources: int, clock: Clock = time.monotonic):
+        self._buckets = _KeyedTokenBuckets(capacity, refill_per_minute / 60.0, max_tracked_sources, clock)
+
+    def allow(self, source: str | None) -> bool:
+        """Non-blocking; consumes one token from `source`'s own budget
+        if available. `source or "unknown"` matches `LoginThrottle.
+        allow_attempt`'s own fallback for a transport that can't supply
+        a real peer address."""
+        key = source or "unknown"
+        if not self._buckets.peek(key):
+            return False
+        self._buckets.consume(key)
+        return True

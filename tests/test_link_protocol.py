@@ -1789,3 +1789,162 @@ def test_handle_peer_list_stops_accepting_brand_new_candidates_once_at_cap(tmp_p
     bob.close()
     carol.close()
     dave.close()
+
+
+# -- quotas (design doc §13.9, issue #60's third operational slice) --------
+
+
+def test_handle_hello_rejects_a_new_peer_once_at_max_peers_cap(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    carol = spawn_node(tmp_path, "carol")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello, max_peers=1)  # under cap -- allowed
+
+    carol_hello = _hello_bytes(LinkNode(identity=carol.identity), clock=clock)
+    with pytest.raises(LinkProtocolError):
+        alice_node.handle_hello(carol_hello, max_peers=1)  # a brand new peer, at cap -- refused
+    assert carol.fingerprint not in alice_node.peers
+
+    # ...but a repeat/refresh hello from an already-known peer (bob) is
+    # still accepted despite being at the cap.
+    refreshed_bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(refreshed_bob_hello, max_peers=1)
+    assert bob.fingerprint in alice_node.peers
+
+    alice.close()
+    bob.close()
+    carol.close()
+
+
+def test_handle_hello_is_unbounded_by_default(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob = spawn_node(tmp_path, "bob")
+    alice_node = LinkNode(identity=alice.identity)
+
+    bob_hello = _hello_bytes(LinkNode(identity=bob.identity), clock=clock)
+    alice_node.handle_hello(bob_hello)  # no max_peers given -- unbounded, matches every caller predating this
+
+    assert bob.fingerprint in alice_node.peers
+
+    alice.close()
+    bob.close()
+
+
+def test_handle_events_rejects_an_oversized_event_batch(tmp_path, clock, monkeypatch):
+    import netbbs.link.protocol as protocol_module
+
+    monkeypatch.setattr(protocol_module, "_MAX_EVENTS_PER_REQUEST", 1)
+
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="board-a",
+        name="Board A",
+        created_at=clock.now_iso(),
+    )
+    other_genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="board-b",
+        name="Board B",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [genesis.to_dict(), other_genesis.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_board_post_with_an_oversized_subject(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="x" * 301,
+        body="first post",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_board_post_with_an_oversized_body(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    post = build_board_post(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        board_id="existing-local-board-id",
+        subject="hello",
+        body="x" * 200_001,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [post.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_board_post_edit_with_an_oversized_body(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+    post = _linked_board_with_post(alice, bob_node, clock)
+
+    edit = build_board_post_edit(
+        signing_identity=alice.identity.signing_key,
+        author=post.payload["author"],
+        board_id="existing-local-board-id",
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="x" * 200_001,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    alice.close()

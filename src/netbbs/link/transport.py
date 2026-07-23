@@ -45,11 +45,12 @@ lives here rather than inside `netbbs.link.protocol` itself.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from netbbs.link.boards import materialize_carried_board, record_board_origin_change
+from netbbs.link.boards import BoardCarryLimitError, materialize_carried_board, record_board_origin_change
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
@@ -79,8 +80,13 @@ from netbbs.link.relay_mailbox import (
     pickup_relay_mailbox_envelopes,
 )
 from netbbs.link.store import save_candidate_descriptor, save_event, save_peer, save_relay_consent
+from netbbs.net.throttle import LinkRequestThrottle
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
+
+_logger = logging.getLogger(__name__)
+
+_LINK_THROTTLE_APP_KEY: web.AppKey[LinkRequestThrottle] = web.AppKey("link_throttle", LinkRequestThrottle)
 
 LINK_PATH_PREFIX = "/link/v1"
 
@@ -94,6 +100,35 @@ _DEFAULT_TIMEOUT_SECONDS = 10.0
 # value for an actual running node (see `netbbs.__main__`'s own
 # `LinkServer(...)` construction).
 _DEFAULT_MAX_RELAY_CLIENTS = 20
+
+# Design doc §13.9 (issue #60's third operational slice): same "own
+# default, real config value lives in netbbs.net.nodeconfig.LinkConfig"
+# split as _DEFAULT_MAX_RELAY_CLIENTS above, for the three quotas added
+# this slice that `LinkServer` itself now enforces.
+_DEFAULT_MAX_PEERS = 1000
+_DEFAULT_MAX_CARRIED_BOARDS = 500
+
+# Turns aiohttp's implicit 1 MiB `client_max_size` default into a
+# deliberate, documented value -- sized to comfortably fit `netbbs.link.
+# protocol._MAX_EVENTS_PER_REQUEST` (200) worth of events.
+_LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
+
+
+@web.middleware
+async def _rate_limit_middleware(request: web.Request, handler):
+    """Design doc §13.9: applied to every route on this server,
+    including the two unauthenticated ones (`/hello`, `/peers`) -- a
+    stranger's request must be rate-limited before anything else runs,
+    not just an already-verified peer's. `request.app["link_throttle"]`
+    is `None` when a caller didn't supply one (every test predating this
+    middleware, plus any caller that doesn't care to tune it) -- a no-op
+    pass-through in that case, matching this project's existing
+    opt-in-by-construction convention for every other optional resource
+    cap in this module."""
+    throttle: LinkRequestThrottle | None = request.app.get(_LINK_THROTTLE_APP_KEY)
+    if throttle is not None and not throttle.allow(request.remote):
+        return web.json_response({"error": "rate limit exceeded"}, status=429)
+    return await handler(request)
 
 
 class LinkTransportError(Exception):
@@ -132,6 +167,17 @@ class LinkServer:
     (matching `own_hello_provider`'s own "deployment concerns are the
     caller's job" reasoning just above); `netbbs.__main__` is the one
     real caller that threads `LinkConfig`'s values through.
+
+    `max_peers`/`max_carried_boards`/`throttle` (design doc §13.9,
+    issue #60's third operational slice): same "plain constructor
+    parameter, safe default, real value threaded through by `netbbs.
+    __main__`" shape as `max_relay_clients` just above. `throttle`
+    (`netbbs.net.throttle.LinkRequestThrottle`) defaults to `None` --
+    unbounded, matching every other quota parameter's own default here
+    -- rather than manufacturing one internally, since its token-bucket
+    state is meant to be node-lifetime and constructed once, the same
+    reasoning `LoginThrottle` is already built once in `netbbs.__main__`
+    rather than per-server.
     """
 
     def __init__(
@@ -144,6 +190,9 @@ class LinkServer:
         *,
         relay_serving_enabled: bool = True,
         max_relay_clients: int = _DEFAULT_MAX_RELAY_CLIENTS,
+        max_peers: int | None = _DEFAULT_MAX_PEERS,
+        max_carried_boards: int | None = _DEFAULT_MAX_CARRIED_BOARDS,
+        throttle: LinkRequestThrottle | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -152,6 +201,9 @@ class LinkServer:
         self._lane = lane
         self._relay_serving_enabled = relay_serving_enabled
         self._max_relay_clients = max_relay_clients
+        self._max_peers = max_peers
+        self._max_carried_boards = max_carried_boards
+        self._throttle = throttle
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -162,7 +214,8 @@ class LinkServer:
         return self._site.port
 
     async def start(self) -> None:
-        app = web.Application()
+        app = web.Application(client_max_size=_LINK_CLIENT_MAX_SIZE_BYTES, middlewares=[_rate_limit_middleware])
+        app[_LINK_THROTTLE_APP_KEY] = self._throttle
         app.router.add_post(f"{LINK_PATH_PREFIX}/hello", self._handle_hello)
         app.router.add_post(f"{LINK_PATH_PREFIX}/events/{{fingerprint}}", self._handle_events)
         app.router.add_get(f"{LINK_PATH_PREFIX}/peers", self._handle_peers)
@@ -189,7 +242,7 @@ class LinkServer:
             return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
 
         try:
-            peer = self._node.handle_hello(hello)
+            peer = self._node.handle_hello(hello, max_peers=self._max_peers)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
@@ -243,7 +296,22 @@ class LinkServer:
             elif object_type == LINK_MESSAGE_BOUNCED_OBJECT_TYPE:
                 await self._lane.run(apply_link_message_bounced, envelope)
             elif object_type == BOARD_GENESIS_OBJECT_TYPE:
-                await self._lane.run(materialize_carried_board, BoardGenesis.from_dict(envelope))
+                try:
+                    await self._lane.run(
+                        materialize_carried_board,
+                        BoardGenesis.from_dict(envelope),
+                        own_fingerprint=self._node.identity.fingerprint,
+                        max_carried_boards=self._max_carried_boards,
+                    )
+                except BoardCarryLimitError as exc:
+                    # Design doc §13.9: the genesis event above is
+                    # already accepted/persisted (save_event, earlier in
+                    # this loop) and keeps gossiping normally -- only
+                    # this node's own local materialization is refused,
+                    # logged rather than surfaced as a failed request
+                    # (the peer that pushed it did nothing wrong; this
+                    # node simply declined to carry one more board).
+                    _logger.warning("Link sync: %s", exc)
             elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
                 transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
                 await self._lane.run(
@@ -380,7 +448,7 @@ class LinkServer:
             return web.json_response({"error": f"malformed hello: {exc}"}, status=400)
 
         try:
-            peer = self._node.handle_hello(hello)
+            peer = self._node.handle_hello(hello, max_peers=self._max_peers)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         await self._lane.run(save_peer, peer)

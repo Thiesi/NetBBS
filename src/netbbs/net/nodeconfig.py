@@ -126,6 +126,21 @@ class LinkConfig:
     they only gate `netbbs.link.transport.LinkServer`'s consent-request
     route, i.e. whether *other* nodes may successfully ask this one to
     relay for them.
+
+    `max_peers`/`max_carried_boards`/`request_rate_*` (design doc §13.9,
+    issue #60's third operational slice): issue #60's own "configurable
+    with safe defaults" wording for every remotely influenced resource,
+    applied to the three gaps that slice found with no bound at all --
+    `LinkNode.peers` (any completed hello became a permanent peer,
+    unconditionally), locally materialized carried-board count, and
+    per-source Link HTTP request rate (no throttling on any Link route
+    before this, including the two unauthenticated ones). `request_rate_
+    capacity`/`request_rate_refill_per_minute` size one `netbbs.net.
+    throttle.LinkRequestThrottle` bucket per source address;
+    `request_rate_max_tracked_sources` bounds how many distinct source
+    addresses it remembers at once (same LRU-eviction-under-attack
+    trade-off `ThrottleConfig.max_tracked_keys` already documents for
+    login throttling).
     """
 
     enabled: bool = False
@@ -138,6 +153,11 @@ class LinkConfig:
     sync_interval_seconds: float = 300.0
     relay_serving_enabled: bool = True
     max_relay_clients: int = 20
+    max_peers: int = 1000
+    max_carried_boards: int = 500
+    request_rate_capacity: float = 20.0
+    request_rate_refill_per_minute: float = 60.0
+    request_rate_max_tracked_sources: int = 10_000
 
 
 @dataclass(frozen=True)
@@ -243,6 +263,16 @@ class NodeConfig:
                 raise ConfigError(
                     f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
                 )
+            _require_positive_link = {
+                "max_peers": self.link.max_peers,
+                "max_carried_boards": self.link.max_carried_boards,
+                "request_rate_capacity": self.link.request_rate_capacity,
+                "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
+                "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
+            }
+            for name, value in _require_positive_link.items():
+                if value <= 0:
+                    raise ConfigError(f"link.{name} must be greater than 0, got {value}")
 
         t = self.throttle
         _require_positive = {
@@ -372,6 +402,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--link-max-relay-clients", dest="link_max_relay_clients", type=int, default=None
     )
+    # Design doc §13.9 (issue #60's third operational slice).
+    parser.add_argument("--link-max-peers", dest="link_max_peers", type=int, default=None)
+    parser.add_argument(
+        "--link-max-carried-boards", dest="link_max_carried_boards", type=int, default=None
+    )
+    parser.add_argument(
+        "--link-request-rate-capacity", dest="link_request_rate_capacity", type=float, default=None
+    )
+    parser.add_argument(
+        "--link-request-rate-refill-per-minute",
+        dest="link_request_rate_refill_per_minute", type=float, default=None,
+    )
+    parser.add_argument(
+        "--link-request-rate-max-tracked-sources",
+        dest="link_request_rate_max_tracked_sources", type=int, default=None,
+    )
     return parser
 
 
@@ -451,6 +497,15 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         sync_interval_seconds=float(table.get("sync_interval_seconds", current.sync_interval_seconds)),
         relay_serving_enabled=bool(table.get("relay_serving_enabled", current.relay_serving_enabled)),
         max_relay_clients=int(table.get("max_relay_clients", current.max_relay_clients)),
+        max_peers=int(table.get("max_peers", current.max_peers)),
+        max_carried_boards=int(table.get("max_carried_boards", current.max_carried_boards)),
+        request_rate_capacity=float(table.get("request_rate_capacity", current.request_rate_capacity)),
+        request_rate_refill_per_minute=float(
+            table.get("request_rate_refill_per_minute", current.request_rate_refill_per_minute)
+        ),
+        request_rate_max_tracked_sources=int(
+            table.get("request_rate_max_tracked_sources", current.request_rate_max_tracked_sources)
+        ),
     )
 
 
@@ -517,6 +572,11 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_sync_interval_seconds,
         args.link_relay_serving_enabled,
         args.link_max_relay_clients,
+        args.link_max_peers,
+        args.link_max_carried_boards,
+        args.link_request_rate_capacity,
+        args.link_request_rate_refill_per_minute,
+        args.link_request_rate_max_tracked_sources,
     )
     if any(value is not None for value in link_overrides):
         config = replace(
@@ -549,6 +609,27 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     link.max_relay_clients
                     if args.link_max_relay_clients is None
                     else args.link_max_relay_clients
+                ),
+                max_peers=(link.max_peers if args.link_max_peers is None else args.link_max_peers),
+                max_carried_boards=(
+                    link.max_carried_boards
+                    if args.link_max_carried_boards is None
+                    else args.link_max_carried_boards
+                ),
+                request_rate_capacity=(
+                    link.request_rate_capacity
+                    if args.link_request_rate_capacity is None
+                    else args.link_request_rate_capacity
+                ),
+                request_rate_refill_per_minute=(
+                    link.request_rate_refill_per_minute
+                    if args.link_request_rate_refill_per_minute is None
+                    else args.link_request_rate_refill_per_minute
+                ),
+                request_rate_max_tracked_sources=(
+                    link.request_rate_max_tracked_sources
+                    if args.link_request_rate_max_tracked_sources is None
+                    else args.link_request_rate_max_tracked_sources
                 ),
             ),
         )

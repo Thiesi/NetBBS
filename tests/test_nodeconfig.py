@@ -578,3 +578,69 @@ def test_cli_overrides_toml_relay_serving(tmp_path):
     )
     config = load_config(["--config", str(config_file), "--link-no-relay-serving"])
     assert config.link.relay_serving_enabled is False
+
+
+# -- quotas (design doc §13.9, issue #60's third operational slice) --------
+
+
+def test_default_link_config_has_safe_quota_defaults():
+    config = NodeConfig()
+    assert config.link.max_peers == 1000
+    assert config.link.max_carried_boards == 500
+    assert config.link.request_rate_capacity == 20.0
+    assert config.link.request_rate_refill_per_minute == 60.0
+    assert config.link.request_rate_max_tracked_sources == 10_000
+
+
+@pytest.mark.parametrize(
+    "field_name", [
+        "max_peers", "max_carried_boards", "request_rate_capacity",
+        "request_rate_refill_per_minute", "request_rate_max_tracked_sources",
+    ],
+)
+def test_link_nonpositive_quota_field_fails_validation(field_name):
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, **{field_name: 0})
+    )
+    with pytest.raises(ConfigError, match=f"link.{field_name}"):
+        config.validate()
+
+
+def test_cli_can_set_quota_fields():
+    config = load_config([
+        "--enable-telnet", "--enable-link",
+        "--link-max-peers", "50",
+        "--link-max-carried-boards", "25",
+        "--link-request-rate-capacity", "5",
+        "--link-request-rate-refill-per-minute", "10",
+        "--link-request-rate-max-tracked-sources", "100",
+    ])
+    assert config.link.max_peers == 50
+    assert config.link.max_carried_boards == 25
+    assert config.link.request_rate_capacity == 5
+    assert config.link.request_rate_refill_per_minute == 10
+    assert config.link.request_rate_max_tracked_sources == 100
+
+
+def test_toml_quota_fields(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        max_peers = 50
+        max_carried_boards = 25
+        request_rate_capacity = 5.0
+        request_rate_refill_per_minute = 10.0
+        request_rate_max_tracked_sources = 100
+        """
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.link.max_peers == 50
+    assert config.link.max_carried_boards == 25
+    assert config.link.request_rate_capacity == 5.0
+    assert config.link.request_rate_refill_per_minute == 10.0
+    assert config.link.request_rate_max_tracked_sources == 100

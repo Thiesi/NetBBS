@@ -119,6 +119,7 @@ from netbbs.link.boards import (
     LinkContext,
     accept_board_origin_transfer,
     board_origin_fingerprint,
+    carried_board_count,
     is_board_linked,
     is_board_origin_orphaned,
     link_board,
@@ -826,6 +827,9 @@ async def _link_status_screen(
     await session.write_line(f"Cached supplementary seeds: {len(cached_seeds)}")
 
     await session.write_line(f"Linked boards: {len(node.boards)}")
+    if config is not None:
+        carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
+        await session.write_line(f"Carried boards: {carried}/{config.max_carried_boards}")
     await session.write_line(f"Known events: {len(node.known_event_ids)}")
     await session.write_line(f"Post-edit chains: {len(node.post_edits)}")
     await session.write_line(f"Candidate (unverified) peers: {len(node.candidate_descriptors)}")
@@ -844,10 +848,14 @@ async def _link_status_screen(
         await session.write_line(colored("Relay mailbox: empty.", fg_color=MUTED_COLOR))
 
     if not node.peers:
-        await session.write_line(colored("\r\nNo verified peers.", fg_color=MUTED_COLOR))
+        no_peers_message = "No verified peers." if config is None else f"No verified peers. (max {config.max_peers})"
+        await session.write_line(colored(f"\r\n{no_peers_message}", fg_color=MUTED_COLOR))
         return
 
-    await session.write_line(f"\r\nVerified peers: {len(node.peers)}")
+    peers_line = (
+        f"Verified peers: {len(node.peers)}" if config is None else f"Verified peers: {len(node.peers)}/{config.max_peers}"
+    )
+    await session.write_line(f"\r\n{peers_line}")
 
     def _load(db: Database) -> tuple[dict[str, float], dict[str, str]]:
         return (

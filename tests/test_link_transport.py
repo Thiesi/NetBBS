@@ -28,7 +28,7 @@ import json
 import aiohttp
 import pytest
 
-from netbbs.link.events import KeyTransition, build_endpoint_descriptor, build_link_message
+from netbbs.link.events import KeyTransition, build_board_genesis, build_endpoint_descriptor, build_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import load_link_node
@@ -58,10 +58,14 @@ async def _run_server(
     *,
     relay_serving_enabled: bool = True,
     max_relay_clients: int = 20,
+    max_carried_boards: int | None = 500,
+    max_peers: int | None = 1000,
+    throttle=None,
 ) -> LinkServer:
     server = LinkServer(
         host="127.0.0.1", port=0, node=node, own_hello_provider=own_hello_provider, lane=lane,
         relay_serving_enabled=relay_serving_enabled, max_relay_clients=max_relay_clients,
+        max_carried_boards=max_carried_boards, max_peers=max_peers, throttle=throttle,
     )
     await server.start()
     return server
@@ -884,5 +888,175 @@ def test_deposit_is_refused_once_the_recipients_mailbox_is_full(tmp_path):
     try:
         with pytest.raises(LinkTransportError):
             asyncio.run(scenario())
+    finally:
+        bob.close()
+
+
+# -- quotas (design doc §13.9, issue #60's third operational slice) --------
+
+
+def test_events_push_still_succeeds_once_the_carried_board_cap_is_reached(tmp_path):
+    """A board_genesis pushed once bob is already at his own max_
+    carried_boards must still be accepted as a genuine, gossipable
+    event (HTTP 200, in known_event_ids, still reaches bob.boards) --
+    only *local materialization* (a real, locally browsable `Board`
+    row) is refused. Proves the whole point of `BoardCarryLimitError`
+    being a distinct exception from every other handle_events rejection
+    (see that class's own docstring): the request as a whole must not
+    fail just because this node declined to carry one more board."""
+    alice_identity = bootstrap_node_identity("alice")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    bob = _NodeDb(tmp_path, "bob")
+
+    genesis = build_board_genesis(
+        signing_identity=alice_identity.signing_key,
+        origin_fingerprint=alice_identity.fingerprint,
+        board_id="remote-board-id",
+        name="Remote Discussion",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane, max_carried_boards=0)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                return await push_events(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", [genesis]
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        accepted = asyncio.run(scenario())
+        assert accepted == [genesis.content_id]  # not a 500, not dropped from the response
+        assert genesis.content_id in bob_node.known_event_ids
+        assert "remote-board-id" in bob_node.boards  # protocol-level acceptance, unaffected by the cap
+
+        row = bob.db.connection.execute(
+            "SELECT 1 FROM boards WHERE board_id = ?", ("remote-board-id",)
+        ).fetchone()
+        assert row is None  # but never actually materialized locally
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_handle_hello_over_http_rejects_a_new_peer_once_bobs_max_peers_cap_is_reached(tmp_path):
+    alice_identity = bootstrap_node_identity("alice")
+    carol_identity = bootstrap_node_identity("carol")
+    bob_identity = bootstrap_node_identity("bob")
+    alice_node = LinkNode(identity=alice_identity)
+    carol_node = LinkNode(identity=carol_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "alice")
+    carol = _NodeDb(tmp_path, "carol")
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane, max_peers=1)
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Alice takes bob's one available peer slot.
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(alice_node), alice.lane
+                )
+                # Carol, a brand new fingerprint, is refused now that bob is at his own cap.
+                with pytest.raises(LinkTransportError):
+                    await dial_hello(
+                        carol_node, session, f"http://127.0.0.1:{bob_server.port}", _hello_for(carol_node), carol.lane
+                    )
+        finally:
+            await bob_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert alice_identity.fingerprint in bob_node.peers
+        assert carol_identity.fingerprint not in bob_node.peers
+    finally:
+        alice.close()
+        carol.close()
+        bob.close()
+
+
+def test_client_max_size_rejects_an_oversized_request_body(tmp_path):
+    """Design doc §13.9: turns aiohttp's implicit 1 MiB `client_max_
+    size` default into a deliberate, documented value on `LinkServer`'s
+    own `web.Application` -- proved here against a real oversized POST,
+    not just a config-value assertion."""
+    bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                oversized = b"x" * (3 * 1024 * 1024)  # bigger than _LINK_CLIENT_MAX_SIZE_BYTES (2 MiB)
+                async with session.post(
+                    f"http://127.0.0.1:{bob_server.port}{LINK_PATH_PREFIX}/hello", data=oversized
+                ) as response:
+                    return response.status
+        finally:
+            await bob_server.stop()
+
+    try:
+        status = asyncio.run(scenario())
+        assert status == 413
+    finally:
+        bob.close()
+
+
+def test_rate_limit_middleware_rejects_once_the_throttle_is_exhausted(tmp_path):
+    from netbbs.net.throttle import LinkRequestThrottle
+
+    bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
+    bob = _NodeDb(tmp_path, "bob")
+    throttle = LinkRequestThrottle(capacity=1, refill_per_minute=0.0, max_tracked_sources=100)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane, throttle=throttle)
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"http://127.0.0.1:{bob_server.port}{LINK_PATH_PREFIX}/peers"
+                async with session.get(url) as first_response:
+                    first_status = first_response.status
+                async with session.get(url) as second_response:
+                    second_status = second_response.status
+                return first_status, second_status
+        finally:
+            await bob_server.stop()
+
+    try:
+        first_status, second_status = asyncio.run(scenario())
+        assert first_status == 200
+        assert second_status == 429
+    finally:
+        bob.close()
+
+
+def test_rate_limit_middleware_is_a_no_op_when_no_throttle_is_configured(tmp_path):
+    bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
+    bob = _NodeDb(tmp_path, "bob")
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)  # throttle=None default
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"http://127.0.0.1:{bob_server.port}{LINK_PATH_PREFIX}/peers"
+                statuses = []
+                for _ in range(5):
+                    async with session.get(url) as response:
+                        statuses.append(response.status)
+                return statuses
+        finally:
+            await bob_server.stop()
+
+    try:
+        assert asyncio.run(scenario()) == [200] * 5
     finally:
         bob.close()

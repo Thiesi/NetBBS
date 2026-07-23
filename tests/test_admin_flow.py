@@ -1852,6 +1852,8 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
             sync_interval_seconds=300.0,
             relay_serving_enabled=True,
             max_relay_clients=20,
+            max_peers=1000,
+            max_carried_boards=500,
         ),
     )
     link_context.link_node.boards["board-1"] = object()

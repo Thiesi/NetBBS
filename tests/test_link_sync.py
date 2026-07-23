@@ -617,10 +617,10 @@ def test_sync_runs_a_second_pass_after_the_interval_elapses(tmp_path):
     hello_count = 0
     real_handle_hello = seed_node.handle_hello
 
-    def _counting_handle_hello(message):
+    def _counting_handle_hello(message, **kwargs):
         nonlocal hello_count
         hello_count += 1
-        return real_handle_hello(message)
+        return real_handle_hello(message, **kwargs)
 
     seed_node.handle_hello = _counting_handle_hello
 

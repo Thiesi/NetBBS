@@ -206,6 +206,19 @@ sync_interval_seconds = 300
 # max_relay_clients bounds how many peers it relays for at once.
 relay_serving_enabled = true
 max_relay_clients = 20
+# Quotas (design doc §13.9, issue #60's third operational slice) --
+# every one has a safe built-in default, shown here. max_peers bounds
+# how many verified peers this node will ever track at once (any
+# completed hello beyond it is refused); max_carried_boards bounds how
+# many boards received from peers this node will locally materialize
+# (the board_genesis event itself is still accepted/gossiped either
+# way -- only local storage is capped). request_rate_* size a per-
+# source-address token bucket applied to every Link HTTP route.
+max_peers = 1000
+max_carried_boards = 500
+request_rate_capacity = 20
+request_rate_refill_per_minute = 60
+request_rate_max_tracked_sources = 10000
 
 [throttle]
 # All optional -- shown here with their built-in defaults.

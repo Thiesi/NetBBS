@@ -110,6 +110,22 @@ from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_c
 _MAX_PEER_LIST_ENTRIES_PER_REQUEST = 100
 _MAX_CANDIDATE_DESCRIPTORS = 500
 
+# Design doc §13.9 (issue #60's third operational slice): `handle_events`
+# had no per-request cap at all, unlike `handle_peer_list` above -- a
+# single push could carry an unbounded event list. Same "reject the
+# whole batch" idiom as `_MAX_PEER_LIST_ENTRIES_PER_REQUEST`.
+_MAX_EVENTS_PER_REQUEST = 200
+
+# Design doc §13.9: `board_post`/`board_post_edit` had no size
+# validation at all on receive, unlike a locally created post
+# (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`). Duplicated
+# here at the same values rather than imported -- this module stays
+# free of any `netbbs.boards` dependency, the same "duplicate one small
+# piece of logic rather than reach across the module boundary" precedent
+# `netbbs.link.mail._make_room_or_bounce` already documents for itself.
+_MAX_BOARD_POST_SUBJECT_BYTES = 300
+_MAX_BOARD_POST_BODY_BYTES = 200_000
+
 
 class LinkProtocolError(Exception):
     """Raised for a hello or event message that fails verification: an
@@ -331,7 +347,7 @@ class LinkNode:
             descriptor=descriptor,
         )
 
-    def handle_hello(self, message: HelloMessage) -> PeerRecord:
+    def handle_hello(self, message: HelloMessage, *, max_peers: int | None = None) -> PeerRecord:
         """
         Verify and record an incoming hello. Raises `LinkProtocolError`
         if anything about the bundle doesn't check out. A hello from an
@@ -340,6 +356,30 @@ class LinkNode:
         file — round 116's "latest signed descriptor wins" rule (see
         `EndpointDescriptor`'s own docstring) applied to a *repeated*
         hello, not just the first one.
+
+        `max_peers` (design doc §13.9, issue #60's third operational
+        slice): `self.peers` had no cap at all before this -- the
+        mirror-image gap to `_MAX_CANDIDATE_DESCRIPTORS` above, since
+        any node that completes a *real* hello (not just a claimed
+        candidate) became a permanent peer unconditionally. `None`
+        (the default) means unbounded, preserving every existing caller
+        that doesn't pass it. Same admission idiom as `handle_peer_
+        list`'s own candidate cap: a hello from an already-known peer
+        (a refresh) is always accepted regardless of the count; only
+        admitting a genuinely *new* fingerprint is refused once the cap
+        is reached. Deliberately caller-supplied rather than a fixed
+        module constant like `_MAX_CANDIDATE_DESCRIPTORS` -- unlike that
+        internal bookkeeping cap, this one is meant to be a SysOp-
+        tunable quota (`netbbs.net.nodeconfig.LinkConfig.max_peers`),
+        matching issue #60's own "configurable with safe defaults"
+        wording. Only threaded into the *inbound* hello path today
+        (`netbbs.link.transport.LinkServer._handle_hello`/`_handle_
+        relay_mailbox_pickup`) -- outbound dialing (`dial_hello`) is
+        left unbounded by this specific cap, since it's already
+        indirectly bounded by `_MAX_CANDIDATE_DESCRIPTORS` plus the
+        operator's own deliberately small configured seed list, not an
+        open admission surface a stranger controls the way inbound
+        hellos are.
         """
         root_verify_key = nacl.signing.VerifyKey(message.root_public_key)
         claimed_fingerprint = fingerprint_from_verify_key(root_verify_key)
@@ -371,6 +411,12 @@ class LinkNode:
         existing = self.peers.get(claimed_fingerprint)
         if existing is not None and message.descriptor.payload["created_at"] < existing.descriptor.payload["created_at"]:
             return existing  # stale hello -- keep what's on file, not an error
+
+        if existing is None and max_peers is not None and len(self.peers) >= max_peers:
+            raise LinkProtocolError(
+                f"hello from {claimed_fingerprint} refused: already at this node's own "
+                f"max_peers limit ({max_peers})"
+            )
 
         record = PeerRecord(
             fingerprint=claimed_fingerprint,
@@ -579,6 +625,27 @@ class LinkNode:
             raise LinkProtocolError(f"rejected {kind} from {sender_fingerprint}: no currently-authorized signing key")
         return nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
 
+    def _check_board_post_content_size(self, payload: dict, sender_fingerprint: str, kind: str) -> None:
+        """Shared by the `board_post`/`board_post_edit` branches below
+        (design doc §13.9, issue #60's third operational slice): neither
+        had any size validation on receive before this, unlike a locally
+        created post (`netbbs.boards.posts.create_post`'s own `MAX_
+        SUBJECT_BYTES`/`MAX_BODY_BYTES` check) -- a peer could push an
+        arbitrarily large signed post and this node would verify,
+        accept, and persist the full envelope regardless of size."""
+        subject_bytes = len(payload.get("subject", "").encode("utf-8"))
+        if subject_bytes > _MAX_BOARD_POST_SUBJECT_BYTES:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a {kind} with a {subject_bytes}-byte subject, more "
+                f"than the {_MAX_BOARD_POST_SUBJECT_BYTES} bytes this node accepts -- refusing"
+            )
+        body_bytes = len(payload.get("body", "").encode("utf-8"))
+        if body_bytes > _MAX_BOARD_POST_BODY_BYTES:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a {kind} with a {body_bytes}-byte body, more than "
+                f"the {_MAX_BOARD_POST_BODY_BYTES} bytes this node accepts -- refusing"
+            )
+
     def _resolve_own_link_message(self, message_content_id: str | None) -> LinkMessage:
         """Shared by the `link_message_accepted`/`link_message_bounced`
         branches below: an acknowledgement is only meaningful about a
@@ -681,6 +748,12 @@ class LinkNode:
         sender = self.peers.get(sender_fingerprint)
         if sender is None:
             raise LinkProtocolError(f"received events from {sender_fingerprint}, which has no completed hello")
+        if len(raw_events) > _MAX_EVENTS_PER_REQUEST:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent {len(raw_events)} events in one request, more than "
+                f"the {_MAX_EVENTS_PER_REQUEST} this node accepts in one request -- refusing "
+                "(design doc §13.9: a genuine backlog still drains over several passes)"
+            )
 
         accepted: list[str] = []
         for raw in raw_events:
@@ -773,6 +846,7 @@ class LinkNode:
                         f"received a board_post for board_id {board_id!r}, which has no verified "
                         "board_genesis on file -- refusing (no relay from a stranger yet)"
                     )
+                self._check_board_post_content_size(post.payload, sender_fingerprint, "board_post")
 
                 author = post.payload.get("author", {})
                 author_kind = author.get("kind")
@@ -812,6 +886,7 @@ class LinkNode:
                         "unknown -- refusing (no relay from a stranger yet)"
                     )
                 root_post = BoardPost.from_dict(root_raw)
+                self._check_board_post_content_size(edit.payload, sender_fingerprint, "board_post_edit")
 
                 edit_author = edit.payload.get("author")
                 if edit_author != root_post.payload.get("author"):

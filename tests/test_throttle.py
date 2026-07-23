@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from netbbs.net.throttle import LoginThrottle
+from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 
 
 class FakeClock:
@@ -206,3 +206,47 @@ def test_leaving_unauthenticated_frees_a_slot():
     assert throttle.try_enter_unauthenticated() is False
     throttle.leave_unauthenticated()
     assert throttle.try_enter_unauthenticated() is True
+
+
+# -- LinkRequestThrottle (design doc §13.9, issue #60's third operational --
+# -- slice) -------------------------------------------------------------
+
+
+def test_link_throttle_allows_requests_within_capacity():
+    clock = FakeClock()
+    throttle = LinkRequestThrottle(capacity=3, refill_per_minute=60.0, max_tracked_sources=10, clock=clock)
+    for _ in range(3):
+        assert throttle.allow("198.51.100.7") is True
+
+
+def test_link_throttle_rejects_once_exhausted():
+    clock = FakeClock()
+    throttle = LinkRequestThrottle(capacity=3, refill_per_minute=60.0, max_tracked_sources=10, clock=clock)
+    for _ in range(3):
+        throttle.allow("198.51.100.7")
+    assert throttle.allow("198.51.100.7") is False
+
+
+def test_link_throttle_budgets_are_independent_per_source():
+    clock = FakeClock()
+    throttle = LinkRequestThrottle(capacity=1, refill_per_minute=60.0, max_tracked_sources=10, clock=clock)
+    assert throttle.allow("198.51.100.7") is True
+    assert throttle.allow("198.51.100.7") is False
+    assert throttle.allow("203.0.113.9") is True  # a different source has its own, untouched budget
+
+
+def test_link_throttle_refills_over_time():
+    clock = FakeClock()
+    throttle = LinkRequestThrottle(capacity=1, refill_per_minute=60.0, max_tracked_sources=10, clock=clock)
+    throttle.allow("198.51.100.7")
+    assert throttle.allow("198.51.100.7") is False
+
+    clock.advance(1.0)  # 1 token/sec refill rate
+    assert throttle.allow("198.51.100.7") is True
+
+
+def test_link_throttle_falls_back_to_unknown_for_a_missing_source():
+    clock = FakeClock()
+    throttle = LinkRequestThrottle(capacity=1, refill_per_minute=60.0, max_tracked_sources=10, clock=clock)
+    assert throttle.allow(None) is True
+    assert throttle.allow(None) is False

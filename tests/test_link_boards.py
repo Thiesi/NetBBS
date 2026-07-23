@@ -14,9 +14,11 @@ from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import approve_post, create_post, edit_post
 from netbbs.link.boards import (
+    BoardCarryLimitError,
     LinkBoardsError,
     accept_board_origin_transfer,
     board_origin_fingerprint,
+    carried_board_count,
     is_board_linked,
     is_board_origin_orphaned,
     link_board,
@@ -136,12 +138,12 @@ def remote_node_identity():
     return bootstrap_node_identity("elsewhere")
 
 
-def _remote_genesis(remote_node_identity, *, board_id="remote-board-id", **kwargs):
+def _remote_genesis(remote_node_identity, *, board_id="remote-board-id", name="Remote Discussion", **kwargs):
     return build_board_genesis(
         signing_identity=remote_node_identity.signing_key,
         origin_fingerprint=remote_node_identity.fingerprint,
         board_id=board_id,
-        name="Remote Discussion",
+        name=name,
         created_at="2026-01-01T00:00:00Z",
         **kwargs,
     )
@@ -194,6 +196,62 @@ def test_materialize_carried_board_is_locally_browsable(db, remote_node_identity
 
     found = get_board_by_name(db, "Remote Discussion")
     assert found.board_id == genesis.payload["board_id"]
+
+
+# -- carried-board count quota (design doc §13.9, issue #60's third --------
+# -- operational slice) -----------------------------------------------------
+
+
+def test_materialize_carried_board_rejects_a_new_board_once_at_cap(db, remote_node_identity, node_identity):
+    first_genesis = _remote_genesis(remote_node_identity, board_id="remote-board-a")
+    materialize_carried_board(
+        db, first_genesis, own_fingerprint=node_identity.fingerprint, max_carried_boards=1
+    )
+
+    second_genesis = _remote_genesis(remote_node_identity, board_id="remote-board-b")
+    with pytest.raises(BoardCarryLimitError):
+        materialize_carried_board(
+            db, second_genesis, own_fingerprint=node_identity.fingerprint, max_carried_boards=1
+        )
+
+    assert get_board_by_name(db, "Remote Discussion") is not None  # the first board is still there
+    assert (
+        len(db.connection.execute("SELECT 1 FROM boards WHERE board_id = ?", ("remote-board-b",)).fetchall()) == 0
+    )
+
+
+def test_materialize_carried_board_idempotent_resend_is_exempt_from_the_cap(db, remote_node_identity, node_identity):
+    genesis = _remote_genesis(remote_node_identity)
+    first = materialize_carried_board(
+        db, genesis, own_fingerprint=node_identity.fingerprint, max_carried_boards=1
+    )
+
+    # Already at the cap (1/1) -- a *resend* of the same, already-
+    # materialized genesis must still succeed, not be refused.
+    second = materialize_carried_board(
+        db, genesis, own_fingerprint=node_identity.fingerprint, max_carried_boards=1
+    )
+
+    assert first.id == second.id
+
+
+def test_materialize_carried_board_is_unbounded_by_default(db, remote_node_identity):
+    first = materialize_carried_board(
+        db, _remote_genesis(remote_node_identity, board_id="remote-board-a", name="Board A")
+    )
+    second = materialize_carried_board(
+        db, _remote_genesis(remote_node_identity, board_id="remote-board-b", name="Board B")
+    )
+
+    assert first.board_id != second.board_id
+
+
+def test_carried_board_count_excludes_self_originated_boards(db, alice, node_identity, remote_node_identity):
+    local_board = create_board(db, "local-board", creator=alice)
+    link_board(db, local_board, node_identity=node_identity)  # self-originated -- not "carried"
+    materialize_carried_board(db, _remote_genesis(remote_node_identity))  # genuinely carried
+
+    assert carried_board_count(db, node_identity.fingerprint) == 1
 
 
 # -- board_origin_fingerprint (design doc round 94/issue #53) ------------------

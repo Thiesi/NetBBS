@@ -32,7 +32,7 @@ from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, LinkConfig, NodeConfig, load_config
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import run_shutdown_sequence
-from netbbs.net.throttle import LoginThrottle
+from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 from netbbs.selfupdate import run_scheduled_update_check
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -62,6 +62,17 @@ def _build_throttle(config: NodeConfig) -> LoginThrottle:
         global_refill_per_minute=t.global_refill_per_minute,
         max_tracked_keys=t.max_tracked_keys,
         max_concurrent_unauthenticated_sessions=t.max_concurrent_unauthenticated_sessions,
+    )
+
+
+def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
+    """Design doc §13.9 (issue #60's third operational slice) -- same
+    "build once, node-lifetime, threaded into the one real server"
+    shape as `_build_throttle` above."""
+    return LinkRequestThrottle(
+        capacity=link_config.request_rate_capacity,
+        refill_per_minute=link_config.request_rate_refill_per_minute,
+        max_tracked_sources=link_config.request_rate_max_tracked_sources,
     )
 
 
@@ -221,6 +232,9 @@ async def _start_servers(
                     lane=link_lane,
                     relay_serving_enabled=config.link.relay_serving_enabled,
                     max_relay_clients=config.link.max_relay_clients,
+                    max_peers=config.link.max_peers,
+                    max_carried_boards=config.link.max_carried_boards,
+                    throttle=_build_link_throttle(config.link),
                 ),
             )
             # Deliberately not counted toward any_interactive_started
@@ -498,6 +512,8 @@ async def run(
                 sync_interval_seconds=config.link.sync_interval_seconds,
                 relay_serving_enabled=config.link.relay_serving_enabled,
                 max_relay_clients=config.link.max_relay_clients,
+                max_peers=config.link.max_peers,
+                max_carried_boards=config.link.max_carried_boards,
             )
             if link_node is not None else None
         )
