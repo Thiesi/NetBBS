@@ -151,9 +151,8 @@ class Session(ABC):
         other transports may differ — which is exactly why this is
         abstract rather than shared logic here.
 
-        `history` (design doc §15 Phase 2, sign-off round 47/Track 5f)
-        enables Up/Down command recall for this read — optional, and
-        ignored entirely for masked (`echo=False`) reads, which keep
+        `history` enables Up/Down command recall for this read —
+        optional, and ignored entirely for masked (`echo=False`) reads, which keep
         simple append-only editing (see `netbbs.net.char_input.
         read_line`'s docstring for why). Most callers don't pass one;
         currently only `netbbs.net.chat_flow`'s chat input loop does,
@@ -161,8 +160,8 @@ class Session(ABC):
         `netbbs.net.login_flow.handle_session`) so recall persists
         across a `/join` channel switch.
 
-        `completer` (design doc round 49/Track 5g) enables Tab
-        completion for this read, also ignored for masked reads — see
+        `completer` enables Tab completion for this read, also ignored
+        for masked reads — see
         `netbbs.net.char_input.apply_tab_completion`'s docstring for its
         exact behavior. Built fresh per call by callers that need it
         (`netbbs.net.chat_flow`'s command/username completer,
@@ -172,9 +171,9 @@ class Session(ABC):
         depends on exactly where it's called from, so there's nothing
         to persist between calls the way recalled history lines are.
 
-        `live_buffer`/`lock`/`list_candidates` (design doc round 79) are
-        pinned-input-row hooks that only `netbbs.net.chat_flow`'s chat
-        loop uses — every other caller leaves all three at their default
+        `live_buffer`/`lock`/`list_candidates` are pinned-input-row hooks
+        that only `netbbs.net.chat_flow`'s chat loop uses — every other
+        caller leaves all three at their default
         `None`, a complete no-op. See `netbbs.net.char_input.read_line`'s
         docstring for what each does.
         """

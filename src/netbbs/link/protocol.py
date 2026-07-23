@@ -1,56 +1,49 @@
 """
 Transport-agnostic NetBBS Link handshake and gossip protocol (design doc
-§11/§12/§13, rounds 116/124/125) — the first real Phase 3 protocol
-slice: bootstrap first contact between two nodes (mutual endpoint-
-descriptor exchange, §12) plus event gossip, originally exercised with
-just `key_transition` (round 116; `endpoint_descriptor` is exchanged
-directly in the hello bundle rather than gossiped as an ordinary event)
-and extended in round 125 to also accept `board_genesis`/`board_post`
-(design doc round 124) through the same `handle_events` dispatch.
-Reuses round 89/90's key-lifecycle and event-envelope machinery for
+§11/§12/§13) — bootstrap first contact between two nodes (mutual
+endpoint-descriptor exchange, §12) plus event gossip across
+`key_transition`, `board_genesis`/`board_post`/`board_post_edit`, and
+`link_message`/`link_message_accepted` event types, all through the same
+`handle_events` dispatch. Reuses the key-lifecycle and event-envelope
+machinery (`netbbs.link.node_identity`/`netbbs.link.events`) for
 verification rather than inventing a parallel path.
 
 Deliberately has no idea how a message actually reaches its peer —
 `LinkNode.build_hello()`/`handle_hello()`/`handle_events()` operate on
 plain in-memory messages, never sockets or HTTP requests, so this
 module is fully testable against `tests/link_harness.py`'s
-`ScriptedTransport` with no real network call anywhere. A real
-aiohttp-based client/server sits *outside* this module, translating
-"send this message to this peer" into an actual HTTP POST — not built
-this round; see design doc round 116 sign-off note for why the scope
-stopped here (this round is "does the handshake/gossip logic work,"
-not yet "does it work over a real wire").
+`ScriptedTransport` with no real network call anywhere. The real
+`aiohttp`-based client/server (`netbbs.link.transport`) sits *outside*
+this module, translating "send this message to this peer" into an
+actual HTTP POST.
 
-**Message-passing, not request/response** — a deliberate departure from
-this round's own earlier request/response-flavored sketch, made before
-any code was written, once the existing test harness was checked
-against it. Every interaction here is "I received a message, here is
-what I now want to send in reply" rather than a blocking call that must
-return its answer inline. This is required, not just stylistic: §7's
-store-and-forward promise ("a node offline for days/weeks... a
-returning node just resumes gossip and catches up") is incompatible
-with a model where a reply must arrive on the same call, and it maps
-directly onto `ScriptedTransport`'s existing fire-and-forget
-`send()`/`deliver()` shape with no adaptation needed. A real HTTP
-transport adapter can still implement "send" as a POST whose response
-body happens to carry the reply promptly when the peer is online —
-that's an implementation detail this layer does not need to know
-about.
+**Message-passing, not request/response.** Every interaction here is "I
+received a message, here is what I now want to send in reply" rather
+than a blocking call that must return its answer inline. This is
+required, not just stylistic: §7's store-and-forward promise ("a node
+offline for days/weeks... a returning node just resumes gossip and
+catches up") is incompatible with a model where a reply must arrive on
+the same call, and it maps directly onto `ScriptedTransport`'s existing
+fire-and-forget `send()`/`deliver()` shape with no adaptation needed. A
+real HTTP transport adapter can still implement "send" as a POST whose
+response body happens to carry the reply promptly when the peer is
+online — that's an implementation detail this layer does not need to
+know about.
 
-**This first slice deliberately does not accept events from a stranger**
+**This protocol does not accept events from a stranger**
 (`handle_events` requires a completed `handle_hello` for that sender
 first) — real flood-fill gossip (an event arriving via relay from a
-peer you've never spoken to directly) is later scope, not attempted
-here. Persistent on-disk event/dedup storage (§7: "persistent seen-
-event table, not Bloom filters") is also not attempted this round —
-`LinkNode` keeps its peer table and seen-event set in memory only; see
-the round 116 sign-off note. Round 125 applies this exact same
-boundary to the two new event types: a `board_genesis` is only
-accepted directly from its own claimed origin (`origin_fingerprint ==
-sender_fingerprint`), and a `board_post` is only accepted for a
-`board_id` this node already holds a verified `board_genesis` for,
-directly from the post's own claimed author's home node
-(`home_node_fingerprint == sender_fingerprint`) — none of this
+peer you've never spoken to directly) is not implemented. `LinkNode`
+itself keeps its live peer table and seen-event set in memory only;
+on-disk persistence and restart reconstruction are `netbbs.link.
+store`'s responsibility, not this module's — see that module for how a
+restarted node rebuilds this same in-memory state. The same "only from
+a directly verified sender" boundary applies to every event type: a
+`board_genesis` is only accepted directly from its own claimed origin
+(`origin_fingerprint == sender_fingerprint`), and a `board_post` is
+only accepted for a `board_id` this node already holds a verified
+`board_genesis` for, directly from the post's own claimed author's home
+node (`home_node_fingerprint == sender_fingerprint`) — none of this
 speculatively stores anything waiting for a genesis or hello that
 might arrive later.
 """
@@ -135,28 +128,27 @@ class LinkProtocolError(Exception):
     or event whose claimed subject doesn't match who actually sent it,
     an event from a peer with no completed hello on file, a board_post
     for a board_id with no verified board_genesis on file, a board_post
-    author kind this node doesn't yet know how to verify (design doc
-    round 124: only node_vouched_user is built), a board_genesis
-    conflicting with a different one already on file for the same
-    board_id, a board_post_edit for an unknown root post, a board_post_
-    edit whose author doesn't match the root post's own author (design
-    doc round 129: moderator edits aren't supported this round), or a
-    board_post_edit whose previous_event_id doesn't match the current
-    head of its chain (round 129: reordering is refused outright, the
-    same push-and-retry recovery model round 122 already established
-    for key_transition); a link_message not addressed to this node
-    (design doc round 93: strictly point-to-point, never speculatively
-    stored on behalf of a different intended recipient), a link_message
-    whose sender doesn't match who actually sent it, or a link_message_
-    accepted/link_message_bounced referencing a message this node never
-    actually sent, or vouching for a recipient node other than whoever
-    actually sent the acknowledgement."""
+    author kind this node doesn't yet know how to verify (only
+    node_vouched_user is built), a board_genesis conflicting with a
+    different one already on file for the same board_id, a
+    board_post_edit for an unknown root post, a board_post_edit whose
+    author doesn't match the root post's own author (moderator edits
+    aren't supported yet), or a board_post_edit whose previous_event_id
+    doesn't match the current head of its chain (reordering is refused
+    outright, the same push-and-retry recovery model already
+    established for key_transition); a link_message not addressed to
+    this node (design doc §13: strictly point-to-point, never
+    speculatively stored on behalf of a different intended recipient),
+    a link_message whose sender doesn't match who actually sent it, or
+    a link_message_accepted/link_message_bounced referencing a message
+    this node never actually sent, or vouching for a recipient node
+    other than whoever actually sent the acknowledgement."""
 
 
 def _signing_transitions(transitions: tuple[KeyTransition, ...], fingerprint: str) -> tuple[KeyTransition, ...]:
     """This node's own `"signing"`-purpose transition history — what a
-    hello bundle includes (round 116: the `"transport"`-purpose chain is
-    Noise's own concern, §11, not this handshake's)."""
+    hello bundle includes (the `"transport"`-purpose chain is Noise's
+    own concern, §11, not this handshake's)."""
     return tuple(
         t
         for t in transitions
@@ -167,7 +159,7 @@ def _signing_transitions(transitions: tuple[KeyTransition, ...], fingerprint: st
 @dataclass(frozen=True)
 class HelloMessage:
     """
-    First-contact bundle (design doc round 116): everything a receiver
+    First-contact bundle (design doc §12): everything a receiver
     needs to independently verify who's saying hello, with zero prior
     state required — the sender's root public key, its complete
     `"signing"`-purpose transition history (enough to resolve which
@@ -206,14 +198,14 @@ class HelloMessage:
 class PeerListMessage:
     """
     A bundle of `EndpointDescriptor`s shared between two already-
-    completed peers (design doc round 95, §12's "signed peer-list
-    exchange") — deliberately not a canonical `netbbs.link.events`
-    envelope of its own: this is ephemeral discovery data ("addresses
-    worth trying"), not durable state that needs content-addressing,
-    dedup, or gossip-replay semantics the way a `board_post` does.
+    completed peers (design doc §12's "signed peer-list exchange") —
+    deliberately not a canonical `netbbs.link.events` envelope of its
+    own: this is ephemeral discovery data ("addresses worth trying"),
+    not durable state that needs content-addressing, dedup, or
+    gossip-replay semantics the way a `board_post` does.
 
     Each individual descriptor inside is already self-signed by its own
-    claimed subject (round 116) — nothing here adds an outer signature
+    claimed subject — nothing here adds an outer signature
     over the bundle, since a stale or malicious bundle only ever costs
     a failed connection attempt on the receiving end (the same "connecting
     to the wrong address just fails the handshake" property §12 already
@@ -263,40 +255,40 @@ class LinkNode:
     peers: dict[str, PeerRecord] = field(default_factory=dict)
     known_event_ids: set[str] = field(default_factory=set)
     events: dict[str, dict] = field(default_factory=dict)
-    # Round 125: board_id -> the verified board_genesis on file for it.
-    # A board_post is only ever accepted for a board_id already present
+    # board_id -> the verified board_genesis on file for it. A
+    # board_post is only ever accepted for a board_id already present
     # here (module docstring's "no relay from a stranger" boundary,
     # applied to boards).
     boards: dict[str, BoardGenesis] = field(default_factory=dict)
-    # Round 129: root_post_id (a board_post's own content_id) -> its
-    # verified edit chain, oldest first. Deliberately not a generic
-    # reusable chain-walker (design doc round 129) -- a single linear
-    # list per post, ordering enforced by "does previous_event_id match
-    # the current head" alone, the same shape simpler than key_
-    # transition's two-interleaved-purposes chain.
+    # root_post_id (a board_post's own content_id) -> its verified edit
+    # chain, oldest first. Deliberately not a generic reusable
+    # chain-walker -- a single linear list per post, ordering enforced
+    # by "does previous_event_id match the current head" alone, a
+    # shape simpler than key_transition's two-interleaved-purposes
+    # chain.
     post_edits: dict[str, tuple[BoardPostEdit, ...]] = field(default_factory=dict)
-    # Round 94/issue #53: board_id -> the fingerprint currently
-    # authoritative for it, once a board_origin_transfer_accepted has
-    # been verified -- absent means "still the genesis's own origin,"
-    # see current_board_origin.
+    # issue #53: board_id -> the fingerprint currently authoritative for
+    # it, once a board_origin_transfer_accepted has been verified --
+    # absent means "still the genesis's own origin," see
+    # current_board_origin.
     board_origin: dict[str, str] = field(default_factory=dict)
-    # Round 94/issue #53: board_id -> the content_id a new lifecycle
-    # event (an offer or an acceptance) must reference as its own
+    # issue #53: board_id -> the content_id a new lifecycle event (an
+    # offer or an acceptance) must reference as its own
     # previous_event_id -- absent means "still genesis," see current_
     # board_lifecycle_head.
     board_lifecycle_head: dict[str, str] = field(default_factory=dict)
-    # Round 94/issue #53: board_id -> its single outstanding, not-yet-
-    # accepted board_origin_transfer_offer, if any -- at most one may be
-    # in flight per board at a time (see BoardOriginTransferOffer's own
-    # docstring for why this slice doesn't support more).
+    # issue #53: board_id -> its single outstanding, not-yet-accepted
+    # board_origin_transfer_offer, if any -- at most one may be in
+    # flight per board at a time (see BoardOriginTransferOffer's own
+    # docstring for why this doesn't support more).
     pending_origin_transfers: dict[str, BoardOriginTransferOffer] = field(default_factory=dict)
-    # Round 95: fingerprint -> an unverified endpoint descriptor learned
+    # fingerprint -> an unverified endpoint descriptor learned
     # secondhand via peer-list exchange -- "worth trying," never
     # promoted to `peers` until a real hello with that fingerprint
     # actually completes. See `handle_peer_list`'s own docstring for why
     # nothing here is ever cryptographically checked at receipt time.
     candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
-    # Round 95/issue #58: relay_fingerprint -> the still-outstanding
+    # issue #58: relay_fingerprint -> the still-outstanding
     # RelayConsentRequest this node itself sent and hasn't yet gotten a
     # reply to -- self-origination bookkeeping the caller sets directly
     # before dialing out (`netbbs.link.transport.request_relay_consent`),
@@ -304,18 +296,18 @@ class LinkNode:
     # never routed through handle_events" shape (see that field's own
     # docstring for the general pattern).
     pending_own_relay_requests: dict[str, RelayConsentRequest] = field(default_factory=dict)
-    # Round 95/issue #58: requester_fingerprint -> when this node (acting
-    # as the relay) agreed to serve it, once granted. Whether to grant is
-    # a resource-cap/opt-out policy decision this pure/in-memory layer
+    # issue #58: requester_fingerprint -> when this node (acting as the
+    # relay) agreed to serve it, once granted. Whether to grant is a
+    # resource-cap/opt-out policy decision this pure/in-memory layer
     # has no config to make (see `handle_relay_consent_request`'s own
     # docstring) -- the caller applies the decision to this dict directly
     # after calling that method, the same "verify here, mutate there"
     # split `record_board_origin_change` already uses for a bystander
     # node's own board state.
     relaying_for: dict[str, str] = field(default_factory=dict)
-    # Round 95/issue #58: relay_fingerprint -> when that candidate
-    # accepted this node's own relay_consent_request, once granted --
-    # what `netbbs.link.boards`-equivalent code for endpoint descriptors
+    # issue #58: relay_fingerprint -> when that candidate accepted this
+    # node's own relay_consent_request, once granted -- what
+    # `netbbs.link.boards`-equivalent code for endpoint descriptors
     # (issue #58 task #23) reads to populate this node's own published
     # `relays` field.
     relays_serving_me: dict[str, str] = field(default_factory=dict)
@@ -327,8 +319,8 @@ class LinkNode:
         `outgoing_only`/`created_at` are the caller's to supply (node
         network configuration and the current time are not this
         method's concern — see `tests/link_harness.py`'s `FakeClock`
-        for how tests keep this deterministic). `relays` (round 95/
-        issue #58) is **not** a caller-supplied parameter the way those
+        for how tests keep this deterministic). `relays` (issue #58)
+        is **not** a caller-supplied parameter the way those
         three are -- unlike deployment config, `relays_serving_me` is
         already this node's own in-memory state (populated by
         `netbbs.link.transport.request_relay_consent`), so build_hello
@@ -354,7 +346,7 @@ class LinkNode:
         if anything about the bundle doesn't check out. A hello from an
         already-known peer updates that peer's record only if its
         descriptor is newer (`created_at`) than what's currently on
-        file — round 116's "latest signed descriptor wins" rule (see
+        file — the "latest signed descriptor wins" rule (see
         `EndpointDescriptor`'s own docstring) applied to a *repeated*
         hello, not just the first one.
 
@@ -431,15 +423,15 @@ class LinkNode:
         )
         self.peers[claimed_fingerprint] = record
         # Now a real, verified peer -- an unverified candidate entry for
-        # the same fingerprint (round 95) is superseded, not left
-        # sitting alongside the real thing.
+        # the same fingerprint is superseded, not left sitting alongside
+        # the real thing.
         self.candidate_descriptors.pop(claimed_fingerprint, None)
         return record
 
     def build_peer_list(self) -> PeerListMessage:
         """This node's own currently-verified peers' endpoint
         descriptors, to share with a directly-connected peer (design
-        doc round 95, §12's "signed peer-list exchange"). Only ever
+        doc §12's "signed peer-list exchange"). Only ever
         drawn from `self.peers` (each one verified via a real completed
         hello) -- never re-shares a candidate this node itself learned
         secondhand, so a claim's provenance never grows past one hop of
@@ -457,9 +449,9 @@ class LinkNode:
         **Nothing here is cryptographically verified against a resolved
         signing key, deliberately** -- a descriptor's own signature
         can't be checked without that subject's root key/transition
-        chain, which this node doesn't have for a stranger yet (design
-        doc round 95: "a weak prior worth trying, not trusting
-        outright"). Real trust only ever happens once this node dials a
+        chain, which this node doesn't have for a stranger yet -- "a
+        weak prior worth trying, not trusting outright." Real trust
+        only ever happens once this node dials a
         candidate directly and completes its own hello with it, the
         same self-authenticating process any first contact already
         goes through.
@@ -510,13 +502,13 @@ class LinkNode:
     def handle_relay_consent_request(self, sender_fingerprint: str, request: RelayConsentRequest) -> None:
         """
         Verify an incoming `relay_consent_request` (design doc §12,
-        round 95/issue #58) from `sender_fingerprint`, who must already
+        issue #58) from `sender_fingerprint`, who must already
         be a completed peer -- the same "no relay from a stranger"
         boundary every other acceptance rule in this module applies,
         satisfied here by the mutual hello a candidate relay and a
         prospective requester must have already exchanged before either
-        one calls this (round 116's hello is mutual by construction --
-        see `handle_hello`).
+        one calls this (a hello is mutual by construction -- see
+        `handle_hello`).
 
         Raises `LinkProtocolError` if anything doesn't check out.
         **Deliberately does not decide accept/decline, and does not
@@ -617,7 +609,7 @@ class LinkNode:
     def _check_protocol_version(self, envelope: dict, *, kind: str, sender_fingerprint: str | None = None) -> None:
         """
         Design doc §13.11, issue #60: every canonical envelope already
-        carries `netbbs_protocol` (`build_envelope`, round 27) -- this
+        carries `netbbs_protocol` (`build_envelope`) -- this
         was the first thing anywhere in this codebase to actually read
         it back on receipt. Exact match only, never a supported range:
         there is nothing to be forward/backward-compatible *with* yet,
@@ -699,7 +691,7 @@ class LinkNode:
 
     def current_board_origin(self, board_id: str) -> str:
         """The fingerprint currently authoritative for `board_id`
-        (design doc §13, round 94/issue #53) -- `self.board_origin`'s
+        (design doc §13, issue #53) -- `self.board_origin`'s
         override if a transfer has ever completed, else the board's own
         genesis claim. Mirrors `netbbs.link.boards.board_origin_
         fingerprint`'s exact same two-tier resolution, applied here to
@@ -710,7 +702,7 @@ class LinkNode:
     def current_board_lifecycle_head(self, board_id: str) -> str:
         """The content_id a *new* lifecycle event for `board_id` (an
         offer or an acceptance) must reference as its own `previous_
-        event_id` (design doc §13, round 94/issue #53) -- the latest
+        event_id` (design doc §13, issue #53) -- the latest
         accepted lifecycle event if one exists, else the board's own
         genesis. Mirrors `netbbs.link.boards._current_lifecycle_head`'s
         own reasoning, applied to this node's in-memory state."""
@@ -720,31 +712,28 @@ class LinkNode:
         """
         Accept zero or more incoming signed events from a peer that has
         already completed a hello (see module docstring — a stranger's
-        events are refused this round, not queued/relayed). Returns the
+        events are refused, not queued/relayed). Returns the
         content_ids of events newly accepted; already-seen ones are
         silently skipped (§7: transport-level dedup is a performance
-        optimization, not a safety mechanism -- round 121 makes that
-        true in practice, not just in intent for `key_transition`:
-        idempotency for an already-applied one no longer depends solely
-        on `known_event_ids` still holding the entry, see below).
+        optimization, not a safety mechanism -- idempotency for an
+        already-applied event does not depend solely on `known_event_
+        ids` still holding the entry, see below).
 
-        Nine recognized `object_type`s: `key_transition` (round 116),
-        `board_genesis`/`board_post` (design doc round 124, wired up
-        here in round 125/126), `board_post_edit` (design doc round
-        129/130), `board_origin_transfer_offer`/`board_origin_transfer_
-        accepted` (design doc round 94/issue #53), and `link_message`/
-        `link_message_accepted`/`link_message_bounced` (design doc round
-        93). `board_genesis`/`board_post` have no per-object chain to
-        self-heal against (`board_post` is immutable content per round
-        90, nothing to project beyond "does it exist"; `board_genesis`
-        itself is still one-per-board, never resent as a candidate
-        extension of anything) -- for both, `known_event_ids` dedup
-        alone is what's built so far, which is already correct for
-        content that's never resent as a *candidate extension* of
-        anything. `board_post_edit` *is* a candidate extension (a single
-        linear chain per root post, round 129) and gets the same chain-
-        membership self-heal `key_transition` has had since round 121,
-        just against `self.post_edits` instead of a peer's own
+        Nine recognized `object_type`s: `key_transition`,
+        `board_genesis`/`board_post`, `board_post_edit`,
+        `board_origin_transfer_offer`/`board_origin_transfer_
+        accepted` (design doc §13, issue #53), and `link_message`/
+        `link_message_accepted`/`link_message_bounced` (design doc §13).
+        `board_genesis`/`board_post` have no per-object chain to
+        self-heal against (`board_post` is immutable content, nothing to
+        project beyond "does it exist"; `board_genesis` itself is still
+        one-per-board, never resent as a candidate extension of
+        anything) -- for both, `known_event_ids` dedup alone is what's
+        built so far, which is already correct for content that's never
+        resent as a *candidate extension* of anything. `board_post_edit`
+        *is* a candidate extension (a single linear chain per root post)
+        and gets the same chain-membership self-heal `key_transition`
+        has, just against `self.post_edits` instead of a peer's own
         `transitions`. `board_origin_transfer_offer`/`_accepted` extend
         a *different* per-board chain (`board_lifecycle_head`, starting
         from the board's own genesis) with the same "does previous_
@@ -762,7 +751,7 @@ class LinkNode:
         event_ids` dedup alone, no chain. Their acceptance rule is
         stricter than any board event's, though: a `link_message` is
         accepted only when `recipient.home_node_fingerprint` names
-        *this* node specifically (round 93's point-to-point framing,
+        *this* node specifically (a point-to-point framing,
         never "anyone carrying this board"); an accepted/bounced
         acknowledgement is accepted only when it references a
         `link_message` this node itself actually originated, from the
@@ -796,12 +785,12 @@ class LinkNode:
                     continue
 
                 if any(existing.content_id == transition.content_id for existing in sender.transitions):
-                    # Round 121: already integrated into sender's own chain
-                    # (permanent, never-purged key-lifecycle state, round 89)
-                    # even though known_event_ids doesn't currently have it
-                    # -- a legitimate resend (round 119's own "push every
-                    # transition every pass," or a future purged-then-resent
-                    # dedup entry), not a fork attempt: a genuine fork
+                    # Already integrated into sender's own chain
+                    # (permanent, never-purged key-lifecycle state) even
+                    # though known_event_ids doesn't currently have it --
+                    # a legitimate resend ("push every transition every
+                    # pass," or a future purged-then-resent dedup entry),
+                    # not a fork attempt: a genuine fork
                     # carries a *different* content_id claiming the same
                     # previous_transition_id, so it never matches here and
                     # still reaches -- and is still rejected by -- the
@@ -883,8 +872,8 @@ class LinkNode:
                 author_kind = author.get("kind")
                 if author_kind != "node_vouched_user":
                     raise LinkProtocolError(
-                        f"board_post author kind {author_kind!r} is not yet supported (design doc "
-                        "round 124: only node_vouched_user is built)"
+                        f"board_post author kind {author_kind!r} is not yet supported "
+                        "(only node_vouched_user is built)"
                     )
                 home_node_fingerprint = author.get("home_node_fingerprint")
                 if home_node_fingerprint != sender_fingerprint:
@@ -924,7 +913,7 @@ class LinkNode:
                     raise LinkProtocolError(
                         f"board_post_edit for root post {root_post_id!r} has an author that "
                         "doesn't match the root post's own author -- moderator edits aren't "
-                        "supported this round (design doc round 129)"
+                        "supported yet"
                     )
                 home_node_fingerprint = edit_author.get("home_node_fingerprint")
                 if home_node_fingerprint != sender_fingerprint:
@@ -936,8 +925,8 @@ class LinkNode:
 
                 existing_chain = self.post_edits.get(root_post_id, ())
                 if any(existing.content_id == edit.content_id for existing in existing_chain):
-                    # Exact resend of an already-integrated edit -- round 121's lesson applied
-                    # here too: a safe no-op, self-healing known_event_ids, not a fork attempt.
+                    # Exact resend of an already-integrated edit: a safe
+                    # no-op, self-healing known_event_ids, not a fork attempt.
                     self.known_event_ids.add(edit.content_id)
                     self.events.setdefault(edit.content_id, raw)
                     continue
@@ -946,7 +935,7 @@ class LinkNode:
                 if edit.payload.get("previous_event_id") != current_head:
                     raise LinkProtocolError(
                         f"board_post_edit for root post {root_post_id!r} does not extend the "
-                        f"current head ({current_head!r}) -- refusing (round 129: reordering "
+                        f"current head ({current_head!r}) -- refusing (reordering "
                         "isn't tolerated, a full resend recovers, same model as key_transition)"
                     )
 
@@ -1077,7 +1066,7 @@ class LinkNode:
                     raise LinkProtocolError(
                         f"received a link_message addressed to "
                         f"{recipient.get('home_node_fingerprint')!r}, not this node "
-                        f"({self.identity.fingerprint!r}) -- refusing (round 93: strictly "
+                        f"({self.identity.fingerprint!r}) -- refusing (strictly "
                         "point-to-point, no relay on behalf of a different recipient)"
                     )
 
@@ -1086,7 +1075,7 @@ class LinkNode:
                 if sender_kind != "node_vouched_user":
                     raise LinkProtocolError(
                         f"link_message sender kind {sender_kind!r} is not yet supported "
-                        "(design doc round 93: only node_vouched_user is built)"
+                        "(only node_vouched_user is built)"
                     )
                 home_node_fingerprint = sender_info.get("home_node_fingerprint")
                 if home_node_fingerprint != sender_fingerprint:

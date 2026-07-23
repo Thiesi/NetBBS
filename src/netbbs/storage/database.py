@@ -21,30 +21,23 @@ class Database:
     """
     Thin wrapper around a single node's SQLite connection.
 
-    One `Database` instance = one node's local SQLite file, and — this
-    is the part worth being precise about, corrected in design doc
-    round 30/issue #10 after an earlier version of this docstring
-    overclaimed what WAL mode buys here — **exactly one `sqlite3.
-    Connection`, shared for the whole node's lifetime and used
-    synchronously.** WAL mode's real-world benefit (readers and writers
-    on *separate* connections not blocking each other) does not apply
-    within a single connection: every `self.connection.execute(...)`
-    call here is a direct, synchronous DB-API call with no `await`
-    around it, so it runs to completion — and blocks the entire asyncio
-    event loop, not just the calling coroutine — before any other
-    session's coroutine gets to run. Concurrent *sessions* using this
-    node are not concurrent *database access*; they're serialized by
-    Python's own cooperative scheduling, the same as any other
-    synchronous call made from a coroutine. This is fine at today's
-    declared scale (design doc §14: dozens–low hundreds of users, small
-    fast queries) but is the real bottleneck implied by "before
-    targeting low hundreds of users, consider a bounded connection
-    pool, database actor, or off-loop execution for expensive queries"
-    (issue #10's own recommended direction) — a genuinely separate,
-    larger design question than this round attempts, deliberately not
-    taken on here (see round 30's sign-off note for the full reasoning
-    on why pagination, not a connection-model rewrite, is this round's
-    actual scope).
+    One `Database` instance = one node's local SQLite file, with
+    **exactly one `sqlite3.Connection`, shared for the whole node's
+    lifetime and used synchronously.** WAL mode's real-world benefit
+    (readers and writers on *separate* connections not blocking each
+    other) does not apply within a single connection: every
+    `self.connection.execute(...)` call here is a direct, synchronous
+    DB-API call with no `await` around it, so it runs to completion —
+    and blocks the entire asyncio event loop, not just the calling
+    coroutine — before any other session's coroutine gets to run.
+    Concurrent *sessions* using this node are not concurrent *database
+    access*; they're serialized by Python's own cooperative scheduling,
+    the same as any other synchronous call made from a coroutine. This
+    is fine at today's declared scale (design doc §14: dozens–low
+    hundreds of users, small fast queries), but scaling meaningfully
+    beyond that would need a bounded connection pool, database actor, or
+    off-loop execution for expensive queries — a genuinely separate,
+    larger design question this project has deliberately not taken on.
 
     WAL mode is still worth keeping despite the above: it *does* help
     the one place multiple independent connections against the same
@@ -80,8 +73,7 @@ class Database:
         self.connection.execute("PRAGMA synchronous = NORMAL")
         # Retry for up to 5s before raising "database is locked", rather
         # than SQLite's default of failing immediately -- the concrete
-        # fix for the separate-process contention case described above
-        # (design doc round 30, issue #10's "configure busy_timeout").
+        # fix for the separate-process contention case described above.
         # 5000ms is a conservative, commonly-used default; not
         # separately benchmarked against this project's actual access
         # patterns, since the scenario it protects is occasional
