@@ -141,6 +141,16 @@ from netbbs.rendering import (
     reject_keystroke,
     sanitize_text,
 )
+from netbbs.search import (
+    ChannelMessageSearchHit,
+    FileSearchHit,
+    PostSearchHit,
+    file_jump_cursor,
+    post_jump_cursor,
+    search_channel_messages,
+    search_files,
+    search_posts,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display
@@ -742,6 +752,11 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     file area, not gated on anything currently existing (a brand-new
     account with nothing yet visited still gets a useful "not yet
     visited" summary, matching classic BBS new-scan semantics).
+
+    `[F]ind` (issue #56's local search) is always shown alongside it --
+    unlike `[N]ew scan`, this doesn't summarize *everything* accessible;
+    it only runs once a query is actually typed, so there's no "brand-new
+    account" empty-list concern to gate on either.
     """
     for text, created_at in mailbox.flush(session):
         await session.write_line(format_with_preference(db, user, text, created_at))
@@ -756,6 +771,7 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
         option_list.append(menu_key("U", "ncategorized"))
     option_list.append(menu_key("J", "ump to..."))
     option_list.append(menu_key("N", "ew scan"))
+    option_list.append(menu_key("F", "ind"))
     option_list.extend(
         [
             menu_key("D", "irectory"),
@@ -868,6 +884,17 @@ async def _main_menu(
             else:
                 await session.write_line(
                     colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
+                )
+            await _draw_main_menu(session, db, mailbox, user)
+        elif choice == "f":
+            await session.write_line("")
+            if lane is not None:
+                await _find_screen(
+                    session, db, lane, hub, presence, mailbox, history, user, link_context=link_context
+                )
+            else:
+                await session.write_line(
+                    colored("Find is not available in this context.", fg_color=MUTED_COLOR)
                 )
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "d":
@@ -1064,6 +1091,125 @@ async def _new_scan_screen(
     else:
         cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
         await enter_file_area(session, lane, selected.file_area, user, initial_cursor=cursor)
+
+
+@dataclass(frozen=True)
+class _SearchResultItem:
+    """One row in issue #56's `[F]ind` results picker -- a matched post,
+    file, or retained channel message, already filtered to what `user`
+    can currently access (`search_posts`/`search_files`/
+    `search_channel_messages`'s own authorization). Built fresh per
+    query, never persisted -- same `stable_id_of=lambda item: id(item)`
+    idiom as `_ScanItem`."""
+
+    kind: str  # "post" | "file" | "channel_message"
+    name: str
+    description: str
+    post: PostSearchHit | None = None
+    file: FileSearchHit | None = None
+    message: ChannelMessageSearchHit | None = None
+
+
+# A channel message's whole body would otherwise stand in as its list
+# "name" -- trimmed to a scannable snippet length, same spirit as
+# _ScanItem's "replies to you" list capping at 10 (a display shaping
+# choice, unrelated to and separate from pick_item's own sanitize_text
+# call, which still runs on whatever (possibly still-long) string this
+# produces).
+_MESSAGE_SNIPPET_LENGTH = 80
+
+
+async def _find_screen(
+    session: Session,
+    db: Database,
+    lane: DatabaseLane,
+    hub: ChatHub,
+    presence: PresenceRegistry,
+    mailbox: MessageMailbox,
+    history: InputHistory,
+    user: User,
+    *,
+    link_context: LinkContext | None = None,
+) -> None:
+    """
+    Issue #56's local search: prompts for one free-text query, then
+    matches it against approved board posts (subject/body), approved
+    files (filename/description), and retained channel scrollback
+    (message body) -- `netbbs.search`'s three FTS5-backed queries, each
+    already filtered to exactly what `user` can currently access (level/
+    age/Community gates for boards and file areas, `netbbs.net.
+    chat_flow.list_visible_channels_for` for channels -- the identical
+    gates `_new_scan_screen` applies). Never touches Link: search only
+    ever queries this node's own locally carried content, and the query
+    text itself is never transmitted anywhere (see `netbbs.search`'s own
+    module docstring).
+
+    Selecting a hit jumps straight to it: a post/file lands on the exact
+    matched item (`netbbs.search.post_jump_cursor`/`file_jump_cursor`,
+    the immediately preceding item's own cursor, so the hit becomes the
+    first thing shown) rather than just opening its board/area at the
+    default newest page. A channel message instead just enters its
+    channel -- channels have no "jump to one message" concept (unlike
+    boards/files, scrollback is a bounded, revision-less ring buffer),
+    the same limitation `_new_scan_screen`'s own channel dispatch
+    already accepts.
+    """
+    await session.write("\r\nSearch (or press Enter to cancel): ")
+    query = (await session.read_line()).strip()
+    if not query:
+        await session.write_line(colored("Search cancelled.", fg_color=MUTED_COLOR))
+        return
+
+    def _load(db: Database) -> list[_SearchResultItem]:
+        items: list[_SearchResultItem] = []
+        for hit in search_posts(db, user, query):
+            items.append(
+                _SearchResultItem(
+                    kind="post", name=hit.subject, description=f"post, {hit.board.name}", post=hit,
+                )
+            )
+        for hit in search_files(db, user, query):
+            items.append(
+                _SearchResultItem(
+                    kind="file", name=hit.filename, description=f"file, {hit.area.name}", file=hit,
+                )
+            )
+        visible_channels = list_visible_channels_for(db, user)
+        for hit in search_channel_messages(db, user, query, visible_channels=visible_channels):
+            snippet = hit.body[:_MESSAGE_SNIPPET_LENGTH]
+            if len(hit.body) > _MESSAGE_SNIPPET_LENGTH:
+                snippet += "..."
+            items.append(
+                _SearchResultItem(
+                    kind="channel_message", name=snippet,
+                    description=f"chat, #{hit.channel.name} ({hit.author_label})", message=hit,
+                )
+            )
+        return items
+
+    items = await lane.run(_load)
+
+    selected = await pick_item(
+        session, items,
+        name_of=lambda item: item.name,
+        stable_id_of=lambda item: id(item),
+        description_of=lambda item: item.description,
+        title=f"Search results for {query!r}",
+        empty_message="No matches.",
+    )
+    if selected is None:
+        return
+
+    if selected.kind == "post":
+        cursor = await lane.run(post_jump_cursor, selected.post.board.id, selected.post.root_post_id)
+        await _show_board(session, db, selected.post.board, user, link_context=link_context, initial_cursor=cursor)
+    elif selected.kind == "file":
+        cursor = await lane.run(file_jump_cursor, selected.file.area.id, selected.file.file_id)
+        await enter_file_area(session, lane, selected.file.area, user, initial_cursor=cursor)
+    else:
+        await browse_channels(
+            session, lane, hub, presence, mailbox, history, user, initial_channel=selected.message.channel
+        )
 
 
 async def _login(

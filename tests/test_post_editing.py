@@ -83,6 +83,35 @@ def test_edit_creates_a_new_row_and_does_not_mutate_the_original(db, alice):
     assert still_original.body == "Original body"
 
 
+def test_feed_shows_latest_content_when_an_edit_collides_with_the_original_timestamp(db, alice, monkeypatch):
+    """GitHub issue #68: `_resolve_current_version`'s tie-break among
+    revisions sharing a root must use a row's own monotonic `id`, never
+    the content-addressed `post_id` -- a hash has no relationship to
+    creation order, so when an edit lands in the same `created_at`
+    instant as the revision it supersedes (confirmed to happen often
+    enough in practice, e.g. fast automated Link event replay, to
+    matter), a `post_id`-based tie-break picks whichever hash sorts
+    lexicographically larger, which is only actually "the latest edit"
+    about half the time. Repeated over several independent post chains,
+    each with its own forced same-instant edit, so this doesn't itself
+    depend on getting lucky with hash ordering to catch a regression."""
+    from netbbs.boards import posts as posts_module
+
+    board = create_board(db, "general", creator=alice)
+    for i in range(10):
+        frozen_time = f"2026-01-01T00:00:00.{i:06d}Z"
+        monkeypatch.setattr(posts_module, "utc_now_iso", lambda t=frozen_time: t)
+
+        original = create_post(db, board, alice, f"Subject {i}", "Original body")
+        edited = edit_post(db, original, board, subject=f"Subject {i}", body="Revised body", edited_by=alice)
+        assert original.created_at == edited.created_at  # the forced collision
+
+        page = list_posts_page(db, board, alice, limit=100)
+        current = next(p for p in page.posts if p.post_id == original.post_id)
+        assert current.body == "Revised body"
+        assert current.is_edited is True
+
+
 def test_feed_shows_latest_content_at_the_original_position(db, alice):
     board = create_board(db, "general", creator=alice)
     original = create_post(db, board, alice, "Subject", "Original body")

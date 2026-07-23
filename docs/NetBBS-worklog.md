@@ -577,6 +577,65 @@ function needs its own explicit `DELETE` for both tables, the same way it
 already does for `moderator_grants`; nothing in the schema cascades this
 automatically.
 
+### Local search (issue #56)
+
+FTS5 availability on this project's actual NetBSD/pkgsrc target was
+confirmed by tracing the pkgsrc build chain, not by empirical access to a
+NetBSD box: `lang/python312` buildlinks against `databases/sqlite3` rather
+than bundling its own amalgamation, and that package's Makefile passes
+`--fts5` unconditionally in `CONFIGURE_ARGS`. If a future pkgsrc/Python
+version change ever alters that chain (a different SQLite dependency, a
+Python build that bundles its own SQLite instead of buildlinking), re-verify
+before relying on FTS5 again — this project has no runtime feature-detection
+for it; a missing module simply fails the schema migration loudly.
+
+`post_search`/`file_search`/`channel_message_search` (`netbbs.search`) are
+kept in sync by explicit calls from every write path in
+`netbbs.boards.posts`/`netbbs.files.entries`/`netbbs.chat.scrollback`, not
+SQL triggers — this schema has no triggers anywhere else, and keeping the
+sync logic as visible Python calls (mirroring `record_action`'s own explicit-
+call convention) was chosen deliberately over the trigger-based pattern
+SQLite's own FTS5 documentation recommends for external-content tables.
+Any new write path added to those three modules in the future (a new
+status transition, a new bulk/sweep operation) must add its own reindex
+call; nothing enforces this structurally.
+
+A bulk/sweep statement (`_sweep_expired_posts`/`_sweep_expired_files`) has
+to collect the affected root/file ids with a `SELECT` *before* running the
+bulk `UPDATE`/`DELETE`, since `reindex_post`/`reindex_file` need to be
+called once per affected id afterward and a set-based statement doesn't
+otherwise expose which rows it touched.
+
+**Content-hash IDs are not orderable by recency (GitHub issue #68, fixed).**
+`_resolve_current_version` and `edit_post`'s own "current revision" lookup
+both pick the newest approved revision of a post's edit chain by ordering
+candidate rows. They used to tie-break on `post_id DESC` — but `post_id` is
+a content-addressed hash, not a recency-ordered value, so when two
+revisions land in the same `created_at` instant (confirmed to happen often
+enough in fast automated tests to matter, e.g.
+`tests/test_link_boards.py::test_queue_board_post_edit_chains_a_second_edit`
+flaked roughly 40% of the time before this fix), that tie-break picked
+whichever revision happened to hash lexicographically larger — not
+necessarily the one actually created last, silently resolving to the wrong
+"current" content and occasionally mislinking a Link edit event's
+`previous_event_id`. Fixed by tie-breaking on each row's own `id`
+(`INTEGER PRIMARY KEY`/rowid) instead — SQLite assigns it in strict
+insertion order whenever a row's `INSERT` never supplies an explicit value
+(true of every `posts` insert here), so no new column or migration was
+needed. `netbbs.search.reindex_post` mirrors the same corrected query.
+**The general lesson**: any "pick the most recent of several rows sharing
+a timestamp" query needs a genuinely monotonic tie-break (an autoincrement
+id, a sequence column) — a content hash, UUID, or other identifier with no
+relationship to insertion order will eventually pick wrong under a
+same-instant collision, and won't be caught by tests unless timestamps are
+either pinned to strictly increasing values or deliberately collided (see
+`tests/test_post_editing.py::test_feed_shows_latest_content_when_an_edit_
+collides_with_the_original_timestamp` for the deliberate-collision pattern).
+This is distinct from `list_posts_page`'s own `(created_at, post_id)`
+cursor tie-break, which orders *distinct* root posts' feed positions
+(an accepted rare-tie display-order pick, not "which revision is current")
+and was correctly left unchanged.
+
 ---
 
 ## 7. Rendering, input, and transport rules

@@ -683,29 +683,60 @@ the user's stored cursor, not a new navigation primitive.
 
 #### Local search
 
-No search beyond the item picker's simple, per-call substring name match
-(the existing `pick_item`) exists today. Local search is a new, separate
-capability:
+Implemented (issue #56's last piece). Local search is a new, separate
+capability from the item picker's simple, per-call substring name match
+(`pick_item`'s own search command, unrelated and unchanged — see below):
 
 - **scope**: only this node's own already-stored content — approved board
-  posts (subject/body), file entries (filename/description), and, lower
-  priority given its bounded/ephemeral nature, recent retained channel
-  scrollback. Never content this node does not itself carry — there is no
-  Link-wide query protocol, and this design does not imply or require one;
-- **mechanism**: SQLite FTS5 virtual tables kept in sync with the
-  corresponding content tables — a standard SQLite-native indexing
-  mechanism, not a new external dependency;
+  posts (subject/body), approved file entries (filename/description), and
+  retained channel scrollback (message body). Never content this node does
+  not itself carry — there is no Link-wide query protocol, and this design
+  does not imply or require one;
+- **mechanism**: SQLite FTS5 virtual tables (`post_search`, `file_search`,
+  `channel_message_search`), kept in sync with `posts`/`files`/
+  `channel_messages` by explicit calls from `netbbs.boards.posts`/
+  `netbbs.files.entries`/`netbbs.chat.scrollback` at every write path
+  (create/edit/approve/delete/expire/trim) — deliberately not SQL
+  triggers, matching this schema's existing convention of zero triggers
+  anywhere else and keeping the sync logic visible in Python. `post_search`
+  holds only the *resolved current* approved revision of a post's edit
+  chain (mirroring `_resolve_current_version`'s own "newest approved row
+  for this root" query) — a superseded revision, a still-pending edit, or
+  a root with no approved revision left is never indexed.
+  `channel_message_search` is pruned in the same statement that trims
+  scrollback's own ring buffer, so a search can never surface a message
+  already gone from retained scrollback.
+  FTS5 availability was traced, not just assumed, for this project's actual
+  NetBSD/pkgsrc target: `lang/python312`'s Makefile buildlinks against
+  `databases/sqlite3` (not an amalgamation bundled into Python itself), and
+  that package's own Makefile passes `--fts5` unconditionally in
+  `CONFIGURE_ARGS` — so pkgsrc's Python `sqlite3` module should always have
+  it. A build lacking it fails the schema migration loudly
+  (`sqlite3.OperationalError: no such module: fts5`) rather than degrading
+  silently, consistent with this project's "fail clearly" convention;
 - **authorization**: a search result set passes through the exact same
-  visibility rules (level gates, Community/channel access, moderation
-  status) normal browsing already enforces — search must never be a
-  side-channel that reveals a restricted resource's existence or content;
+  visibility rules (level/age/Community gates for boards and file areas,
+  `netbbs.net.chat_flow.list_visible_channels_for` for channels) normal
+  browsing already enforces — search can never be a side-channel that
+  reveals a restricted resource's existence or content;
 - **privacy, explicit**: a user's search query text is never transmitted to
   any peer or broadcast over Link, by default and without exception in this
   design. Searching a Linked board only ever searches this node's own
   locally carried copy of it. A future Link-wide search capability, if ever
   built, is a distinct protocol extension requiring its own explicit design
   (rate limits, query exposure, opt-in) — never an implied consequence of
-  local search existing.
+  local search existing;
+- **UI**: a new, always-shown `[F]ind` main-menu entry (`netbbs.net.
+  login_flow._find_screen`), alongside `[N]ew scan` — prompts for one
+  free-text query, matches it against all three content types at once, and
+  jumps straight to a selected hit: a post/file lands on the exact matched
+  item (`netbbs.search.post_jump_cursor`/`file_jump_cursor` compute the
+  `after=` cursor that makes it the first item shown, reusing the same
+  `initial_cursor` parameter `[N]ew scan` already threads through
+  board/file-area viewing) rather than just opening its board/area at the
+  default newest page. A channel message instead just enters its channel —
+  channels have no "jump to one message" concept, the same limitation
+  `[N]ew scan`'s own channel dispatch already accepts.
 
 Local, in-page substring matching over a short list (`pick_item`'s own
 search command) is unrelated and unchanged — it is not "search" in this
@@ -1463,8 +1494,6 @@ Still required for Phase 3 completeness:
 - linked channels and channel lifecycle;
 - remaining linked-board governance, closure, moderator edits, and tombstones;
 - remote file catalogue and on-demand chunks;
-- local search from issue #56 (read/unread, follows, and `[N]ew scan` are
-  done);
 - issue #60’s operational controls and recovery model;
 - broader real-world multi-node deployment validation.
 
@@ -1546,10 +1575,18 @@ the `[N]ew scan` main-menu screen, wired into board/file-area viewing and
 channel scrollback replay. Verified against a real Telnet session, not just
 scripted tests.
 
-Still open: local search (FTS5-backed, scoped to this node's own carried
-content) has no code yet -- the one piece of §6.6 deliberately deferred, since
-this codebase has never used FTS5 or confirmed it's compiled into the Python
-builds this project targets.
+Also implemented: local FTS5-backed search (`netbbs.search`) over board
+posts, files, and channel scrollback, synced from every write path, gated by
+the exact same visibility rules browsing already enforces, and surfaced as a
+new `[F]ind` main-menu entry that jumps straight to a selected hit. FTS5
+availability, this round's stated blocker, was resolved by tracing pkgsrc's
+actual build chain rather than empirical access to a NetBSD box: `lang/
+python312` buildlinks against `databases/sqlite3`, whose own Makefile passes
+`--fts5` unconditionally, so the target Python build should always have it —
+and a build that doesn't fails the migration loudly rather than silently
+disabling search.
+
+Issue #56 is fully implemented; all four §6.6 subsections have shipped.
 
 ### Issue #60 — production operations
 

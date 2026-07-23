@@ -32,6 +32,7 @@ from typing import Literal
 
 from netbbs.chat.channels import Channel
 from netbbs.config import get_config, set_config
+from netbbs.search import index_channel_message, prune_channel_message_search
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -122,7 +123,7 @@ def record_message(
         raise ValueError(f"body is required for kind={kind!r}")
 
     created_at = utc_now_iso()
-    db.connection.execute(
+    cursor = db.connection.execute(
         """
         INSERT INTO channel_messages
             (channel_id, kind, author_label, author_fingerprint, body, created_at)
@@ -130,6 +131,7 @@ def record_message(
         """,
         (channel.id, kind, author_label, author_fingerprint, body, created_at),
     )
+    message_id = cursor.lastrowid
     limit = get_scrollback_limit(db)
     db.connection.execute(
         """
@@ -143,6 +145,14 @@ def record_message(
         """,
         (channel.id, channel.id, limit),
     )
+    # Issue #56's search index: index the new message, then prune
+    # whatever the trim step just removed above -- in that order, since
+    # a scrollback limit of 1 could otherwise trim the very message just
+    # indexed before it's ever pruned back out (harmless either order
+    # here, but indexing first keeps this reading top-to-bottom with the
+    # inserts/deletes immediately above).
+    index_channel_message(db, channel.id, message_id, kind, body)
+    prune_channel_message_search(db, channel.id)
     db.connection.commit()
 
     row = db.connection.execute(

@@ -37,6 +37,7 @@ from netbbs.files.areas import FileArea
 from netbbs.files.storage import move_temp_file_into_storage, read_bytes, store_bytes
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
+from netbbs.search import reindex_file
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -197,6 +198,7 @@ def _finalize_upload(
             "could not record upload — identical content uploaded twice in the same instant?"
         ) from exc
 
+    reindex_file(db, area.id, file_id)
     return get_file(db, file_id)
 
 
@@ -421,6 +423,7 @@ def approve_file(db: Database, entry: FileEntry, *, approved_by: User) -> FileEn
         target_user_id=entry.uploader_user_id,
         detail=entry.file_id,
     )
+    reindex_file(db, entry.area_id, entry.file_id)
     return get_file(db, entry.file_id)
 
 
@@ -453,6 +456,7 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
         target_user_id=entry.uploader_user_id,
         detail=entry.file_id,
     )
+    reindex_file(db, entry.area_id, entry.file_id)
 
 
 def set_file_pinned(db: Database, entry: FileEntry, pinned: bool, *, changed_by: User) -> FileEntry:
@@ -570,6 +574,23 @@ def _sweep_expired_files(db: Database, area: FileArea) -> None:
         return
 
     expiry_cutoff = _cutoff_iso(area.max_file_age_days)
+    # Captured before either bulk statement below (issue #56's search
+    # index) -- same reasoning as netbbs.boards.posts._sweep_expired_
+    # posts, though simpler here since files have no edit chain: every
+    # affected file_id just needs its (now stale) file_search entry
+    # recomputed via reindex_file, which will remove it once its row is
+    # no longer 'approved'.
+    expiring_ids = {
+        row["file_id"]
+        for row in db.connection.execute(
+            """
+            SELECT file_id FROM files
+            WHERE area_id = ? AND status = 'approved' AND exempt_from_expiry = 0
+                  AND created_at < ?
+            """,
+            (area.id, expiry_cutoff),
+        ).fetchall()
+    }
     db.connection.execute(
         """
         UPDATE files SET status = 'expired'
@@ -581,6 +602,17 @@ def _sweep_expired_files(db: Database, area: FileArea) -> None:
 
     grace_days = get_expiry_grace_period_days(db)
     deletion_cutoff = _cutoff_iso(area.max_file_age_days + grace_days)
+    deleting_ids = {
+        row["file_id"]
+        for row in db.connection.execute(
+            """
+            SELECT file_id FROM files
+            WHERE area_id = ? AND status = 'expired' AND exempt_from_expiry = 0
+                  AND created_at < ?
+            """,
+            (area.id, deletion_cutoff),
+        ).fetchall()
+    }
     db.connection.execute(
         """
         DELETE FROM files
@@ -590,6 +622,9 @@ def _sweep_expired_files(db: Database, area: FileArea) -> None:
         (area.id, deletion_cutoff),
     )
     db.connection.commit()
+
+    for file_id in expiring_ids | deleting_ids:
+        reindex_file(db, area.id, file_id)
 
 
 def _row_to_file_entry(row: sqlite3.Row) -> FileEntry:

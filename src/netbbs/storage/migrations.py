@@ -1569,4 +1569,53 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Local search (design doc §6.6, issue #56's last piece): FTS5 "
+            "virtual tables for board posts, files, and channel messages."
+        ),
+        sql="""
+        -- Fails loudly with sqlite3.OperationalError("no such module: fts5")
+        -- on a SQLite build lacking FTS5, rather than degrading silently
+        -- (CLAUDE.md "fail clearly") -- traced, not just hoped, for this
+        -- project's actual NetBSD/pkgsrc target: lang/python312's Makefile
+        -- buildlinks against databases/sqlite3 (not an amalgamation bundled
+        -- into Python itself), and that package's own Makefile passes
+        -- --fts5 unconditionally in CONFIGURE_ARGS -- so pkgsrc's Python
+        -- sqlite3 module should always have it, not just this dev machine.
+        --
+        -- One row per currently-authoritative piece of content, kept in
+        -- sync by explicit application-level calls from
+        -- netbbs.boards.posts/netbbs.files.entries/netbbs.chat.scrollback
+        -- at every write path (create/edit/approve/delete/expire/trim) --
+        -- deliberately not SQL triggers, matching this schema's existing
+        -- convention of zero triggers anywhere else and keeping the sync
+        -- logic visible in Python rather than hidden in SQL. See
+        -- netbbs.search for the reindex functions and the query-time
+        -- authorization that reuses the exact same level/age/visibility
+        -- gates normal browsing already enforces.
+        --
+        -- A post has an edit chain (root_post_id); only the resolved
+        -- *current* approved revision for a root is ever indexed, matching
+        -- netbbs.boards.posts._resolve_current_version and
+        -- list_posts_page's own visibility -- never a superseded or
+        -- not-yet-approved revision. Files have no edit chain, so
+        -- file_search mirrors the files table one-to-one. Channel messages
+        -- are trimmed by netbbs.chat.scrollback's own bounded ring buffer;
+        -- channel_message_search is pruned the same way, so a message
+        -- search can never surface content already trimmed out of
+        -- scrollback.
+        CREATE VIRTUAL TABLE post_search USING fts5(
+            subject, body, board_id UNINDEXED, root_post_id UNINDEXED
+        );
+
+        CREATE VIRTUAL TABLE file_search USING fts5(
+            filename, description, area_id UNINDEXED, file_id UNINDEXED
+        );
+
+        CREATE VIRTUAL TABLE channel_message_search USING fts5(
+            body, channel_id UNINDEXED, message_id UNINDEXED
+        );
+        """,
+    ),
 ]

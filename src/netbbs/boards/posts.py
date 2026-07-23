@@ -27,6 +27,7 @@ from netbbs.boards.content_id import compute_content_id
 from netbbs.config import get_expiry_grace_period_days
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
+from netbbs.search import reindex_post
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -169,6 +170,7 @@ def create_post(
             "could not create post — identical content posted twice in the same instant?"
         ) from exc
 
+    reindex_post(db, board.id, post_id)  # a fresh post is its own root
     return get_post(db, post_id)
 
 
@@ -211,11 +213,14 @@ def edit_post(
         _require_board_permission(db, post, edited_by, BoardPermission.EDIT)
     _check_content_length(subject, body)
 
+    # Tie-broken on id, not post_id -- see _resolve_current_version's
+    # docstring (GitHub issue #68) for why a content-hash tie-break is
+    # wrong here.
     current = db.connection.execute(
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, post_id DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (post.root_post_id, board.id),
@@ -286,6 +291,7 @@ def edit_post(
         target_user_id=post.author_user_id,
         detail=new_post_id,
     )
+    reindex_post(db, board.id, post.root_post_id)
     return get_post(db, new_post_id)
 
 
@@ -317,12 +323,27 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     only `subject`/`body` are substituted from whichever row sharing its
     `root_post_id` is the newest currently `'approved'` one, which is
     the root row itself if it's never been edited (or no edit has been
-    approved yet)."""
+    approved yet).
+
+    Tie-broken on `id` (this row's own `INTEGER PRIMARY KEY`/rowid),
+    never `post_id` (GitHub issue #68) -- `post_id` is a content-
+    addressed hash, unrelated to creation order, so two revisions
+    landing in the same real-clock microsecond (confirmed to happen
+    often enough to matter) would otherwise let this pick whichever
+    hash sorts lexicographically larger instead of the one actually
+    created last. `id` is assigned by SQLite in strict insertion order
+    with no explicit value ever supplied on `INSERT` (`create_post`/
+    `edit_post`), so it's a genuine monotonic tie-break -- unlike
+    `list_posts_page`'s own `(created_at, post_id)` cursor tuple, which
+    orders *distinct* root posts' feed positions (an accepted rare-tie
+    display-order pick, not "which revision is the true current one"),
+    this query picks among competing revisions of the *same* post, where
+    picking wrong is a real correctness bug, not just a display quirk."""
     latest = db.connection.execute(
         """
         SELECT * FROM posts
         WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
-        ORDER BY created_at DESC, post_id DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
         (root_row["root_post_id"], root_row["board_id"]),
@@ -536,6 +557,7 @@ def approve_post(db: Database, post: Post, *, approved_by: User) -> Post:
         target_user_id=post.author_user_id,
         detail=post.post_id,
     )
+    reindex_post(db, post.board_id, post.root_post_id)
     return get_post(db, post.post_id)
 
 
@@ -594,6 +616,7 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
         target_user_id=post.author_user_id,
         detail=post.post_id,
     )
+    reindex_post(db, post.board_id, post.root_post_id)
 
 
 def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User) -> Post:
@@ -761,6 +784,24 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
         return
 
     expiry_cutoff = _cutoff_iso(board.max_post_age_days)
+    # Collected before either bulk statement runs below (issue #56's
+    # search index): both are set-based SQL, not a per-row Python loop,
+    # so the roots each one touches have to be captured with the exact
+    # same WHERE clause first -- reindex_post is then called once per
+    # affected root afterward, since a bulk status flip or hard-delete
+    # could shift, or remove entirely, which revision is the currently
+    # "resolved current" one for post_search.
+    expiring_roots = {
+        row["root_post_id"]
+        for row in db.connection.execute(
+            """
+            SELECT DISTINCT root_post_id FROM posts
+            WHERE board_id = ? AND status = 'approved' AND exempt_from_expiry = 0
+                  AND created_at < ?
+            """,
+            (board.id, expiry_cutoff),
+        ).fetchall()
+    }
     db.connection.execute(
         """
         UPDATE posts SET status = 'expired'
@@ -772,10 +813,8 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
 
     grace_days = get_expiry_grace_period_days(db)
     deletion_cutoff = _cutoff_iso(board.max_post_age_days + grace_days)
-    db.connection.execute(
-        """
-        DELETE FROM posts
-        WHERE board_id = ? AND status = 'expired' AND exempt_from_expiry = 0
+    _deletable_where = """
+        board_id = ? AND status = 'expired' AND exempt_from_expiry = 0
               AND created_at < ?
               AND NOT EXISTS (
                   SELECT 1 FROM posts child
@@ -784,10 +823,22 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
                          OR child.root_post_id = posts.post_id
                          OR child.edit_of_post_id = posts.post_id)
               )
-        """,
+    """
+    deleting_roots = {
+        row["root_post_id"]
+        for row in db.connection.execute(
+            f"SELECT DISTINCT root_post_id FROM posts WHERE {_deletable_where}",
+            (board.id, deletion_cutoff),
+        ).fetchall()
+    }
+    db.connection.execute(
+        f"DELETE FROM posts WHERE {_deletable_where}",
         (board.id, deletion_cutoff),
     )
     db.connection.commit()
+
+    for root_post_id in expiring_roots | deleting_roots:
+        reindex_post(db, board.id, root_post_id)
 
 
 def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:

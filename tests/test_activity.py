@@ -28,6 +28,7 @@ from netbbs.boards.posts import create_post, edit_post
 from netbbs.chat.channels import create_channel, delete_channel
 from netbbs.chat.scrollback import record_message
 from netbbs.communities import create_community, delete_community
+from netbbs.files import entries as entries_module
 from netbbs.files.areas import create_file_area, delete_file_area
 from netbbs.files.entries import upload_file
 from netbbs.storage.database import Database
@@ -130,7 +131,13 @@ def test_unread_file_count_is_none_before_any_visit(db, alice, bob):
 
 def test_unread_file_count_reflects_files_after_the_cursor(db, alice, bob, monkeypatch):
     area = create_file_area(db, "downloads", creator=alice)
-    _deterministic_timestamps(monkeypatch, posts_module, 2)
+    # entries_module, not posts_module -- upload_file's own utc_now_iso
+    # binding lives in netbbs.files.entries; patching the boards module
+    # here was a no-op that let two uploads race for the same real-clock
+    # microsecond, breaking (created_at, file_id) ordering unpredictably
+    # (file_id is a content hash, not creation-ordered) often enough to
+    # flake this assertion.
+    _deterministic_timestamps(monkeypatch, entries_module, 2)
     first = upload_file(db, area, alice, "a.txt", b"hello")
     upload_file(db, area, alice, "b.txt", b"world")
 
