@@ -1541,10 +1541,21 @@ including:
   body-size, and request-rate quotas, implemented. Event-retention/purging
   and node-wide disk quota are explicitly deferred out of that slice — see
   §13.9's own reasoning);
-- integrity checks and crash recovery;
-- bounded diagnostic log retention without content logging;
-- protocol/database upgrade and rollback compatibility;
-- graceful drain of Link work during shutdown;
+- integrity checks and crash recovery (§13.11 — a startup `PRAGMA integrity_
+  check`, plus confirming migration/incoming-upload/work-item crash safety
+  already held by construction — design-complete, not yet implemented);
+- bounded diagnostic log retention without content logging (§13.11 — a new
+  `link_diagnostic_log` table and `[D]iagnostic log` SysOp screen, warning-
+  level-and-above only, age/row-bounded — design-complete, not yet
+  implemented);
+- protocol/database upgrade and rollback compatibility (§13.11 — the
+  database half already done via `netbbs.selfupdate`; the wire-protocol
+  half, `netbbs_protocol` version-checked on receipt for the first time,
+  design-complete, not yet implemented);
+- graceful drain of Link work during shutdown (§13.11 — `run_link_sync`
+  finishes its current pass before stopping, bounded by the existing
+  `graceful_delay_seconds`, falling back to today's hard cancel only past
+  that bound — design-complete, not yet implemented);
 - disaster recovery drills exercising a restore under realistic conditions
   (§13.4 specifies the backup/restore mechanism itself — `netbbs.backup`,
   implemented; §13.10 replaces its original restore mechanism with a
@@ -1934,6 +1945,157 @@ enables but does not itself execute from a non-NetBSD development
 environment.
 
 Implemented.
+
+### 13.11 Closing issue #60: integrity, diagnostics, protocol compatibility, graceful Link drain
+
+Four remaining, previously-open bullets from §13.6 — audited individually
+below, same discipline §13.7/§13.9 already used, each narrower in places
+than its one-line issue wording once actually read against the code.
+
+**1. Startup integrity check and crash recovery.** Confirmed by grep: `PRAGMA
+integrity_check` exists nowhere in this codebase except inside issue #75's
+own backup-validation path — an ordinary node startup opens the database
+with no corruption check at all, so a corrupted file (disk failure, an
+interrupted non-WAL filesystem operation, bit rot) surfaces only later, the
+first time some unlucky query happens to touch the damaged page, as a raw,
+confusing `sqlite3.DatabaseError` rather than a clear diagnosis at the one
+point an operator can still act on it before real damage compounds.
+`netbbs.__main__.run()` now runs `PRAGMA integrity_check` immediately after
+`Database(config.db_path)` opens, wrapped into the same `StartupError`
+message shape that already handles "wrong build/version" — refusing to
+serve traffic against known corruption, matching round 56's own "refuses to
+start with zero SysOps" precedent for a startup condition worth failing
+loudly on rather than limping past. **Deliberately not folded into
+`Database.__init__` itself** — a full-database scan on *every* `Database()`
+construction would tax every admin script and the entire test suite (2500+
+constructions) for a check only the one long-lived node process actually
+needs once, at its own startup; `netbbs.__main__` calls it explicitly, once,
+itself.
+
+Crash recovery beyond that single check turns out to already exist,
+confirmed by reading rather than assumed: `_apply_migrations` commits a
+migration's schema change and its `user_version` bump in the *same*
+transaction, so a crash mid-migration simply leaves `user_version`
+unadvanced — the next startup resumes migrating from the correct point,
+never re-applies a partial migration, never needs new code. `purge_incoming_
+staging` already treats every leftover `.incoming` file as crash debris from
+a previous run and removes it before any listener starts. `netbbs.link.
+work_items` are DB-row-backed with their own retry/backoff already, so a
+crash mid-processing just leaves an item `pending`/`retrying`, picked up
+normally next pass. This slice adds one regression test proving the
+migration-crash-safety claim directly (kill a `Database()` open partway
+through applying migrations, confirm a fresh open resumes and completes
+correctly) rather than leaving it as an untested assertion.
+
+**2. Bounded Link diagnostic log, metadata only.** No Link operational log
+exists today beyond whatever `logging.basicConfig(level=logging.INFO)`
+sends to stderr — ephemeral, unbounded (retention is entirely the process
+supervisor's problem), and gone the moment a terminal's scrollback rotates
+or the service manager's own log rotation fires. A SysOp investigating "why
+did sync with peer X stop working three days ago" has nothing durable to
+look at. Deliberately **not** a general application-logging overhaul — the
+existing `moderation_log` table is already this project's precedent for a
+structured, DB-backed log, and the new one is explicitly its bounded,
+non-permanent counterpart: a `link_diagnostic_log` table (`id`, `level`,
+`logger_name`, `message`, `created_at`), populated by a small `logging.
+Handler` subclass attached to the `netbbs.link` logger namespace at startup
+(catching every existing `_logger.warning`/`.error` call already scattered
+across `netbbs.link.sync`/`.transport`/`.seedlist` via ordinary logger
+propagation — no per-call-site instrumentation needed) at `WARNING` level
+and above only; routine `INFO`-level chatter stays stderr-only, ephemeral,
+exactly as today. Audited every existing call site this handler will now
+capture (§13.9's own audit-before-design habit, applied here to *existing*
+log statements rather than a new feature): every one is already about
+protocol/dial/sync *events* — a URL, a fingerprint, an exception message —
+never a Link message's decrypted body, a board post's content, or any other
+user-authored payload. "Metadata only, never content" is therefore a
+property of which fourteen call sites happen to exist today, not a new
+filter this handler has to enforce — worth re-checking whenever a future
+Link module adds a new `_logger` call inside this namespace.
+
+Both `LinkConfig.diagnostic_log_max_age_days` (default 30) and
+`diagnostic_log_max_rows` (default 5,000) bound it — the handler prunes
+against both on every write, cheap at this log's realistic warning-only
+volume. Browsable via a new `[D]iagnostic log` SysOp screen under `[S]ystem`
+(alongside `[L]ink status`/`[O]utbox`/`[R]epair carried posts`, same
+`link_context is not None`-gated visibility), the same paginated-picker
+shape `[O]utbox` already uses.
+
+**3. Link wire-protocol version compatibility.** A real, confirmed gap, not
+a hypothetical: every canonical event envelope already carries `netbbs_
+protocol` (`build_envelope`, `NETBBS_PROTOCOL_VERSION = 1`, round 27) — but
+grep confirms nothing anywhere ever reads it back on receipt. A future
+protocol revision bumping this field would today be silently ignored by
+`handle_hello`/`handle_events`, which would then either crash on an
+unfamiliar payload shape with a confusing low-level error, or — worse —
+successfully parse a subset of fields that happen to still match and
+silently misinterpret the rest. `netbbs.link.protocol` gains one shared
+check, applied once per envelope at the single point `handle_events`
+already extracts `object_type` before dispatch (covering all nine event
+types from one call site, not nine), and separately against the hello
+bundle's own embedded transitions/descriptor envelopes in `handle_hello` —
+rejecting a `netbbs_protocol` that doesn't exactly equal this build's own
+`NETBBS_PROTOCOL_VERSION` with a clear `LinkProtocolError` naming both
+versions, never a raw parse failure. "Exactly equal," not a supported range
+— there is no forward/backward-compatibility promise to honor yet, since
+version 1 is the only version that has ever existed; the point of this
+slice is having a real, tested gate *before* a version 2 ever needs one, not
+guessing at compatibility rules for a wire change nobody has designed.
+
+The **database** half of "protocol/database upgrade and rollback
+compatibility" turns out to already be done, confirmed by reading `netbbs.
+selfupdate`'s own module docstring rather than assumed: round 82/95/96
+already snapshot the database before applying an update's migration and
+roll back to that snapshot if the newly started version fails to come up
+cleanly. That same docstring is explicit about the boundary this slice
+closes: *"It knows nothing about NetBBS Link protocol/schema compatibility
+-- that's explicitly deferred to whenever Phase 3 needs it."* Now is that
+moment; the wire-protocol check above is the answer, kept as its own
+concern in `netbbs.link.protocol` rather than folded into `netbbs.
+selfupdate`, which stays exactly as protocol-agnostic as its own docstring
+already declares.
+
+**4. Graceful drain of Link work during shutdown.** Today, `netbbs.__main__`
+tears down `link_sync_task` with a bare `.cancel()` the instant shutdown
+begins — no grace period at all, the one asymmetry with ordinary user-
+session shutdown, which already warns and waits before disconnecting
+anyone. `run_link_sync`'s own loop spends most of its time inside `await
+asyncio.sleep(interval_seconds)` (a 300s default), where an immediate
+cancel is harmless — but a `SIGTERM` landing squarely mid-pass, mid-HTTP-
+call, aborts that specific request against whatever peer is on the other
+end with no chance to complete, a real (if narrow) asymmetry between how
+this project treats its own users and how it treats the peers it talks to.
+`run_link_sync` gains an optional `stop_event: asyncio.Event | None`,
+checked once at the top of the outer loop (before starting a new pass, not
+mid-pass — deliberately simple: passes are normally sub-second, so the
+value of checking more granularly inside one is marginal against the
+complexity of doing so) so a currently in-flight pass, including whatever
+HTTP call it's in the middle of, is always allowed to finish naturally.
+Shutdown sets the event, then `asyncio.wait_for`s the task against the
+existing `ShutdownConfig.graceful_delay_seconds` (60s default) — reusing
+the one "how long is a graceful shutdown allowed to take" operator-facing
+number rather than adding a second, Link-specific timer to reason about —
+falling back to the pre-existing hard `.cancel()` only if that bound is
+exceeded (a pass stuck on an unreachable seed's own connect timeout, say),
+never removing the fallback, only making it the last resort instead of the
+first.
+
+**Explicitly out of scope for this bullet**: `seed_refresh_task` (fetches
+this project's own trusted release-hosting infrastructure, not a peer's
+Link endpoint — an abrupt cut has no peer-visible consequence and already
+retries on its own next-scheduled, forgiving 24h cadence) and `daybreak_
+task`/`update_check_task` (neither talks to a Link peer at all). Extending
+graceful draining to those would be solving a problem none of them actually
+have.
+
+**Closes issue #60.** Every acceptance criterion that issue names is now
+either implemented (this slice; §13.4/§13.7/§13.9/§13.10 before it) or an
+explicitly deferred, separately-tracked follow-up with its own stated
+reasoning (node-wide disk quota and event-retention/purging, §13.9;
+per-seed historical/trend health visibility, §13.6) — not a silently
+abandoned acceptance criterion.
+
+Design-complete, not yet implemented.
 
 ---
 
