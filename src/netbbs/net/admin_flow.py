@@ -373,7 +373,7 @@ async def _draw_system_menu(
     header = colored("\r\nSystem:", fg_color=HEADER_COLOR, bold=True)
     option_list = [
         menu_key("W", "elcome banner"), menu_key("U", "pdate"), menu_key("T", "imestamp format"),
-        menu_key("K", "backup status"),
+        menu_key("K", "up status", prefix="Bac"),
     ]
     if link_context is not None:
         option_list.append(menu_key("L", "ink status"))
