@@ -2203,6 +2203,23 @@ instances and serialization under applicable scenarios:
 The harness grows with real event families. A generic harness which cannot drive
 the real protocol is not sufficient.
 
+**Cross-subsystem end-to-end scenarios (issue #80).** The deterministic
+harness above proves protocol/verification logic; it does not, by
+itself, prove that a caller-visible guarantee survives the seam between
+subsystems (protocol verification, persistence, transport, local-domain
+materialization, outbound work tracking, user-visible state). Issue #69
+was exactly that: individually correct subsystems, but a self-composed
+Link message was never registered where its acknowledgement needed to
+find it. `tests/test_link_end_to_end.py` is the named home for this
+class of test: a complete real-transport (real `LinkServer`, real
+SQLite, real node identities), real-domain-read-path (an ordinary
+inbox/board read, not a raw row or `known_event_ids` check) vertical
+slice per currently implemented Link product surface, each covering
+restart-between-stages and duplicate-delivery. A future Link vertical
+slice (linked channels, remote files, tier-2 messages) is not complete
+until it adds or extends a scenario in that file, the same way it is
+not complete without unit tests for its own protocol logic.
+
 ### 14.2 Real boundaries
 
 Use real:
@@ -2475,6 +2492,20 @@ same live dicts -- zero test changes, zero wire/serialized-shape
 changes. A future state family (inventory/pull, linked-channel
 lifecycle) should follow the same shape: its own small dataclass with
 narrow methods, not a further flat field.
+
+### Issue #80 — end-to-end regression tests for cross-subsystem Link orchestration — closed
+
+§14.1's "Cross-subsystem end-to-end scenarios" subsection now states
+the complete design: `tests/test_link_end_to_end.py`, a real-transport,
+real-domain-read-path vertical slice per implemented Link product
+surface (linked boards, Link mail), each covering restart-between-
+stages and duplicate delivery; the linked-boards and Link-mail
+verticals each have one. The mail vertical also covers a dead-letter ->
+replay -> real-redelivery cycle end to end. Confirmed the consolidated
+mail scenario (and its restart variant) would fail on the pre-fix
+issue #69 implementation by temporarily reverting the fix and observing
+both fail, then restoring it. Future Link vertical slices extend this
+file before being considered complete.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 
