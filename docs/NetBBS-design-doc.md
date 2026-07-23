@@ -1585,6 +1585,109 @@ Still future or incomplete:
 - general relay/anti-entropy beyond direct peers;
 - Link-blanket governance surfaces and audit feeds.
 
+### 9.6 Linked channels (issue #87)
+
+Mirrors §9.1-§9.3's promotion/genesis/carry model as closely as possible
+rather than inventing a parallel one, with two differences that follow
+directly from how local channels already differ from local boards, not
+from anything specific to Link:
+
+**No edit chain.** Local channel messages have no edit concept at all
+(chat access is participate-or-not, no read/write split, §5.4) — there is
+no `channel_message_edit` mirroring `board_post_edit`, because there is
+nothing locally to mirror. A `channel_message` is immutable, single-shot
+content exactly like a `board_post` with no reply/parent structure (chat
+scrollback is flat and chronological, never threaded).
+
+**Origin succession is reused by reference, not reimplemented in this
+issue.** §9.4's mutual-consent transfer/orphan/fork model applies
+unchanged if a channel ever needs it — the same signed-offer-then-signed-
+acceptance shape, the same "at most one outstanding offer" rule, the same
+"orphaned means no new origin-authorized state, existing content stays"
+behavior for a channel whose origin loses all signing authority. This
+issue does not add `channel_origin_transfer_offer`/`_accepted` event
+types — genesis/promotion/materialization/messages are the actual scope
+(the "Recommended direction"'s own list), matching how governance is
+explicitly deferred to Phase 6 rather than half-built here. `channels`
+gains no `link_lifecycle_json` column in this issue for the same reason
+— add it alongside the transfer event types themselves, when and if a
+future issue actually needs it, rather than carrying an unused column now.
+
+**Event family.** Two new object types, `channel_genesis`/
+`channel_message`, structurally identical to `board_genesis`/`board_post`
+minus the fields above:
+
+- `channel_genesis`: `origin_fingerprint`, `channel_id` (the *existing*
+  local content-addressed `channel_id`, never newly minted — same "promote
+  an existing local resource" rule §9.1 already states for boards), `name`,
+  `created_at`, and optional cascading-recommendation fields mirroring
+  `Channel`'s own settable columns (`description`, `min_level`, `min_age`,
+  `name_requirement`) — no `default_min_write_level`/`default_moderated`/
+  `default_max_post_age_days` equivalents, since `Channel` has none of
+  those to recommend a default for. Signed by the origin's current signing
+  key, same as `board_genesis`. One per `channel_id`, ever — a different
+  genesis for the same `channel_id` is a conflict, identical to
+  `has_conflicting_genesis`'s existing rule.
+- `channel_message`: `channel_id`, `author` (the same tagged union
+  `board_post` uses — only `node_vouched_user` has a real build/verify
+  path today, for the same reason), `body`, `created_at`, `nonce`. No
+  `subject` (channel messages don't have one) and no
+  `parent_post_id`/reply structure (scrollback is flat).
+
+Canonical encoding, event-identity, and verification follow §7.2-§7.4
+exactly as already specified for every other event family — no new rule
+needed. `handle_events` gains two new branches following the identical
+shape `board_genesis`/`board_post` already use, including issue #85's own
+verify-against-claimed-origin-not-wire-sender fix from the start (no
+separate "add multi-hop later" step this time — channels get it on day
+one, since #85 already generalized `handle_events`'s verification model
+before this issue landed).
+
+**Carry and materialization.** A peer accepting a valid `channel_genesis`
+materializes a real, locally browsable `Channel` row —
+`materialize_carried_channel`, mirroring `materialize_carried_board`'s
+exact shape: bypasses `netbbs.chat.channels.create_channel` (which mints a
+fresh content-addressed ID from the *local* creator/timestamp, wrong for
+carried content), inserts directly using the genesis's own `channel_id`
+verbatim, seeds settings from the genesis's cascading recommendations, and
+is idempotent (a resend, or a second peer relaying the same genesis,
+returns the existing row unchanged).
+
+A `channel_message` materializes into an ordinary `channel_messages` row
+— `materialize_carried_channel_message`, using `netbbs.chat.scrollback`'s
+existing insert-and-trim shape (`record_message`'s own logic, not a
+parallel path), keyed by the event's own `content_id` as the row's local
+identity for dedup purposes the same way a `board_post`'s `content_id`
+becomes its local `post_id`. `author_label` follows the same
+`local_user_id@home_node_fingerprint` synthesis `materialize_carried_post`
+already uses; no local account is implied.
+
+**A real, worth-stating consequence of reusing the existing bounded
+scrollback rather than inventing unbounded storage for channel content:**
+`channel_messages` is a trimmed, bounded scrollback by local design
+(`netbbs.chat.scrollback`'s own configured limit, default 100), not a
+permanent archive the way `posts` is. A materialized linked message is
+subject to the exact same trim as a local one — old linked-channel history
+ages out of scrollback precisely as old local history already does. This
+is a deliberate consequence of treating a linked channel as genuinely the
+same kind of resource as a local one (bounded live chat), not a silent
+data-loss surprise unique to Link: the identical bound already applies
+today to every channel's own local messages. A self-originated message
+queued for push (`channel_messages.link_event_json`, the messages-table
+counterpart to `posts.link_event_json`) that gets trimmed before any sync
+pass ever pushes it is simply never propagated over Link — bounded,
+honestly-scoped, matching this project's own "explicit bound, defined
+behavior" principle rather than an indefinite queue.
+
+**Idempotent duplicate delivery, restart reconstruction, and inventory
+serving** all follow the identical shape §9.3 and §8.8 already establish
+for boards: `channels.link_genesis_json` (new nullable column) is the
+restart-safe source for a carried channel's genesis, read unconditionally
+the same way `boards.link_genesis_json` already is; `channel_messages.
+link_event_json` mirrors `posts.link_event_json` for self-authored
+tracking. Issue #85's inventory diff extends to `channel_id`-scoped
+`link_events` rows the same way it already covers `board_id`-scoped ones.
+
 ---
 
 ## 10. Link messages
@@ -3012,6 +3115,25 @@ self-certifying `HelloMessage` bundle exchange, reusing the same
 self-authentication property §12 already relies on), but is deliberately
 deferred rather than scoped as active work — no architectural blocker,
 just not needed to unblock or validate current Phase 3 work.
+
+### Issue #87 — linked channels
+
+§9.6 now states the complete design: `channel_genesis`/`channel_message`
+event types mirroring `board_genesis`/`board_post` minus the fields that
+don't apply (no edit chain — channel messages have no local edit concept
+at all; no `default_min_write_level`/`_moderated`/`_max_post_age_days`
+equivalents — `Channel` has none of those settings to recommend). Origin
+succession is reused by reference (§9.4's model applies unchanged, if ever
+needed) rather than a new `channel_origin_transfer_offer`/`_accepted` pair
+built in this issue — genesis, promotion, materialization, and message
+propagation are the actual scope. Carry/materialization follows §9.3's
+exact shape, with one real, stated consequence of reusing the existing
+bounded scrollback rather than inventing unbounded storage for channel
+content: a materialized linked message is subject to the same trim a
+local one already is, and a self-originated message trimmed before any
+sync pass pushes it is simply never propagated — bounded and honestly
+scoped, not a silent surprise, since the identical bound already governs
+every channel's own local history today.
 
 ### Issue #55 — trust and quarantine
 
