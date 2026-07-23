@@ -1358,6 +1358,64 @@ for catch-up must never be silently unavailable, or "eventually converges"
 above would stop being true) — that is precisely why #86 is sequenced
 after this issue, not the other way around.
 
+### 8.9 Event/dedup retention (issue #86)
+
+**Part 1: the chain-idempotency gap `netbbs.link.store` named.** Every
+board-scoped `handle_events` branch self-heals an exact resend against its
+own *authoritative* state (never against `known_event_ids` alone) — except
+`board_origin_transfer_offer`/`_accepted`, which previously depended
+entirely on the fast dedup cache still holding the content_id. A resend of
+a still-pending offer, or an already-accepted transfer, after a
+hypothetical cache purge would have been misread as a genuine conflict
+("already has an outstanding offer" / "no outstanding offer on file") and
+rejected — not a security hole (nothing is ever mis-applied), but exactly
+the gap blocking any purge policy from being provably safe. Fixed the same
+way `key_transition`/`board_post_edit` already do it: check whether the
+incoming event's own `content_id` already matches the current pending
+offer (`board_lifecycle.pending_offer`) or the current lifecycle head
+(`board_lifecycle_head`) *before* treating a second sighting as a
+conflict, self-healing `known_event_ids` from that authoritative state
+rather than erroring.
+
+**Part 2: what can actually be purged.** Before choosing a retention
+window, each object type was traced for what *else* depends on its
+`link_events` row surviving — restart reconstruction (`load_link_node`)
+and, since issue #85, this node's own ability to answer an inventory
+request for it:
+
+| Object type | Durable elsewhere? | Purgeable in this issue? |
+|---|---|---|
+| `key_transition` | Yes — `link_peers.transitions_json` is the authoritative source `load_link_node` reconstructs `sender.transitions` from; the `link_events` row exists only to fast-path a resend and was never itself load-bearing. | **Yes.** |
+| `board_genesis` | Yes — `boards.link_genesis_json` durably holds it for both self-originated and carried boards, read unconditionally by both `load_link_node` and §8.8's own `_all_board_events`. | Not in this cut (see below). |
+| `board_post` | **No**, for a peer-received post — `posts.link_event_json` is only ever populated for a *locally-authored* post (`queue_board_post_if_linked`), never for a materialized/carried one. Its `link_events` row is the *only* record `board_post_edit`'s own `self.events.get(root_post_id)` acceptance check and §8.8's inventory diff can draw on. | No. |
+| `board_post_edit` | Same gap as `board_post` for a peer-received edit — `post_edits[root_post_id]` reconstruction and inventory serving both depend on the row. | No. |
+| `board_origin_transfer_offer`/`_accepted` | **No** — `board_lifecycle_head`/`pending_origin_transfers`/`board_origin` are reconstructed *entirely* from `link_events` rows for a peer-received transfer; nothing else durably records "what the current lifecycle head is." | No. |
+| `link_message` family | Not traced in this issue — deferred with the rest of this row. | No. |
+
+**Policy actually implemented: a bounded, age-based purge for
+`key_transition` only.** `netbbs.link.store.purge_expired_key_transitions`
+deletes `link_events` rows where `object_type = 'key_transition'` and
+`received_at` is older than a fixed retention window (90 days — a plain
+module constant, not a new SysOp-configurable `LinkConfig` field, matching
+this project's own restraint principle: a low-volume event type doesn't
+need a dedicated tunable yet). Called inline on every accepted
+`key_transition`, the same "purge on write, scoped to the same table this
+write just touched" shape `LinkDiagnosticLogHandler.emit` already
+established for `link_diagnostic_log` — not a separate scheduled task.
+
+**Everything else stays unbounded in this issue, explicitly, not
+silently.** `board_genesis` turned out to already be redundant with
+`boards.link_genesis_json` and could plausibly be purged too, but is left
+alone here to keep the rule simple (nothing board-scoped is purged this
+round) rather than special-casing one board-family type while the other
+four remain load-bearing. Purging `board_post`/`board_post_edit` safely
+would need a real answer to "has every peer that might still need this via
+inventory already caught up" — a harder question than this issue's own
+scope, and a legitimate follow-up if `link_events` growth from board
+content specifically ever becomes an operational problem in practice
+(§13.6's `[L]ink status` already gives a SysOp visibility into growth via
+the database file size, per the existing diagnostic-log-growth precedent).
+
 ---
 
 ## 9. Linked boards and resource lifecycle
@@ -2849,6 +2907,23 @@ out to matter in practice.
 Explicitly excludes retention/purging (issue #86, sequenced after this one)
 and Link messages (already point-to-point by design, §10, untouched by the
 `handle_events` fix above).
+
+### Issue #86 — event/dedup retention
+
+§8.9 now states the complete design: the chain-idempotency gap was in
+`board_origin_transfer_offer`/`_accepted`, the only two board-scoped types
+whose idempotency depended solely on the fast `known_event_ids` cache
+rather than a self-heal check against their own authoritative state
+(`pending_offer`/`board_lifecycle_head`) — fixed with the same self-heal
+shape `key_transition`/`board_post_edit` already use. Tracing what else
+depends on each object type's `link_events` row surviving (restart
+reconstruction, and issue #85's own inventory diff) found only
+`key_transition` genuinely redundant with an already-durable separate
+source (`link_peers.transitions_json`); everything board-scoped stays
+unbounded in this issue, stated explicitly rather than silently assumed
+safe. `netbbs.link.store.purge_expired_key_transitions` purges on write
+(90-day fixed window), the same shape `LinkDiagnosticLogHandler.emit`
+already established for `link_diagnostic_log`.
 
 ### Issue #55 — trust and quarantine
 
