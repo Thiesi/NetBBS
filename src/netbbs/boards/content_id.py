@@ -51,25 +51,36 @@ _MIN_SAFE_INTEGER = -_MAX_SAFE_INTEGER
 class ContentIdError(Exception):
     """Raised when `fields` passed to `compute_content_id`/
     `canonical_json_bytes` violates the canonical-format rule (design
-    doc §7.2, issue #11): a `float` anywhere, or an `int` outside the
-    cross-language-safe integer range — both forbidden because their
-    serialization isn't reliably deterministic/round-trippable across
-    platforms and languages. Every current caller (board/post/channel/
-    file-area IDs, Link event payloads) already only ever passes
-    strings and small ints, so neither rule affects existing behavior."""
+    doc §7.2, issue #11): a `float` anywhere, an `int` outside the
+    cross-language-safe integer range, or two distinct object member
+    names that NFC-normalize to the same string (issue #70) — all
+    forbidden because their serialization isn't reliably deterministic/
+    round-trippable across platforms and languages. Every current
+    caller (board/post/channel/file-area IDs, Link event payloads)
+    already only ever passes strings, small ints, and ASCII field
+    names, so none of these rules affect existing behavior."""
 
 
 def _normalize_for_hashing(value):
     """
     Recursively normalize `value` per the canonicalization rule (design
-    doc §7.2): every string is Unicode-NFC-normalized, a `float` anywhere
-    raises `ContentIdError`, and an out-of-safe-range `int` raises
-    `ContentIdError` too. Dicts/lists are walked recursively so the rule
-    applies uniformly regardless of nesting depth; every other type (str
-    already handled, in-range int, bool, None) passes through unchanged —
-    `bool` is deliberately not mistaken for a numeric type here despite
-    `isinstance(True, int)` being true in Python, since JSON already
-    serializes it as `true`/`false`, never a number.
+    doc §7.2): every string is Unicode-NFC-normalized, a `float`
+    anywhere raises `ContentIdError`, and an out-of-safe-range `int`
+    raises `ContentIdError` too. Dicts/lists are walked recursively so
+    the rule applies uniformly regardless of nesting depth; every other
+    type (str already handled, in-range int, bool, None) passes through
+    unchanged — `bool` is deliberately not mistaken for a numeric type
+    here despite `isinstance(True, int)` being true in Python, since
+    JSON already serializes it as `true`/`false`, never a number.
+
+    Object member names are NFC-normalized too (issue #70), not just
+    values — the design doc's "every string is recursively normalized"
+    rule draws no distinction between a JSON object's keys and its
+    values, and an unknown-field-preserving event schema means a
+    non-ASCII key is not purely hypothetical. Two distinct source keys
+    that normalize to the same string would silently collide in the
+    output dict (one overwriting the other) with no indication anything
+    was lost, so that case raises `ContentIdError` instead.
     """
     if isinstance(value, float):
         raise ContentIdError(f"floats are forbidden in content-addressed fields: {value!r}")
@@ -85,7 +96,16 @@ def _normalize_for_hashing(value):
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
     if isinstance(value, dict):
-        return {key: _normalize_for_hashing(item) for key, item in value.items()}
+        normalized: dict = {}
+        for key, item in value.items():
+            normalized_key = unicodedata.normalize("NFC", key)
+            if normalized_key in normalized:
+                raise ContentIdError(
+                    f"object keys {key!r} and another key both normalize to "
+                    f"{normalized_key!r} -- ambiguous canonical representation"
+                )
+            normalized[normalized_key] = _normalize_for_hashing(item)
+        return normalized
     if isinstance(value, list):
         return [_normalize_for_hashing(item) for item in value]
     return value

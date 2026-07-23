@@ -61,6 +61,48 @@ def test_normalization_applies_inside_nested_dicts_and_lists():
     assert a == b
 
 
+# -- issue #70: object member names are normalized too, not just values -----
+
+
+def test_nfc_and_nfd_object_keys_produce_the_same_id():
+    nfc_key = unicodedata.normalize("NFC", "café")
+    nfd_key = unicodedata.normalize("NFD", "café")
+    assert nfc_key != nfd_key  # genuinely different keys going in
+    a = compute_content_id({nfc_key: "value"})
+    b = compute_content_id({nfd_key: "value"})
+    assert a == b
+
+
+def test_nfd_key_normalization_applies_at_nested_depth():
+    nfc_key = unicodedata.normalize("NFC", "café")
+    nfd_key = unicodedata.normalize("NFD", "café")
+    a = compute_content_id({"payload": {nfc_key: "value", "plain": "x"}})
+    b = compute_content_id({"payload": {nfd_key: "value", "plain": "x"}})
+    assert a == b
+
+
+def test_two_keys_colliding_under_normalization_raises():
+    nfc_key = unicodedata.normalize("NFC", "café")
+    nfd_key = unicodedata.normalize("NFD", "café")
+    # Two distinct Python dict keys (different codepoint sequences) that
+    # would silently overwrite one another once normalized -- must raise
+    # rather than picking whichever one Python's dict construction happens
+    # to keep.
+    with pytest.raises(ContentIdError):
+        compute_content_id({nfc_key: "first", nfd_key: "second"})
+
+
+def test_two_keys_colliding_under_normalization_at_nested_depth_raises():
+    nfc_key = unicodedata.normalize("NFC", "café")
+    nfd_key = unicodedata.normalize("NFD", "café")
+    with pytest.raises(ContentIdError):
+        compute_content_id({"payload": {nfc_key: "first", nfd_key: "second"}})
+
+
+def test_non_colliding_unicode_keys_do_not_raise():
+    compute_content_id({"café": "value", "plain": "x"})  # must not raise
+
+
 # -- round 110: floats forbidden ----------------------------------------------
 
 

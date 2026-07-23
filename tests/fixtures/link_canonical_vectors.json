@@ -59,6 +59,13 @@
       "fields": {"count": 9007199254740991},
       "canonical_hex": "7b22636f756e74223a393030373139393235343734303939317d",
       "content_id": "0ab9b84bed022a9fee56eb0859aa9cb158a4c7265f7d3345a479e506ebafd44b"
+    },
+    {
+      "name": "nfd_object_key_normalizes_to_nfc_in_canonical_bytes",
+      "description": "Issue #70: an object member name, not just a value, that arrives as an NFD-decomposed string ('cafe' + combining acute accent, U+0301) must be recursively NFC-normalized before serialization -- the canonical bytes below contain the single precomposed U+00E9 codepoint ('\\u00e9') in the key, matching how a value would normalize. See test_content_id.py for the companion case verifying an NFC-spelled key produces byte-identical output, and for the distinct case of two keys that collide under normalization, which raises rather than silently overwriting.",
+      "fields": {"payload": {"café": "value", "plain": "x"}},
+      "canonical_hex": "7b227061796c6f6164223a7b226361665c7530306539223a2276616c7565222c22706c61696e223a2278227d7d",
+      "content_id": "837b174dde06c79b65d3b8d86da82a2c3563d2c0f079e29f0813b6bf87f69c76"
     }
   ]
 }

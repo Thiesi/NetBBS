@@ -803,10 +803,15 @@ type's shape.
 
 - Compact JSON: no insignificant whitespace, `":"`/`","` separators only.
 - Object keys sorted by exact Unicode codepoint sequence, at every nesting
-  depth.
-- Every string is recursively normalized to Unicode NFC before serialization.
-  Two payloads differing only in normalization form (precomposed versus
-  combining-mark sequences) canonicalize identically and share one content ID.
+  depth, after normalization (below).
+- Every string is recursively normalized to Unicode NFC before serialization —
+  object member names as well as values, at every nesting depth, not values
+  alone. Two payloads differing only in normalization form (precomposed versus
+  combining-mark sequences) canonicalize identically and share one content ID,
+  whether the difference is in a value or in a key. Two distinct source keys
+  that would normalize to the same string are a normalization collision and
+  are rejected outright, the same way a duplicate wire key is (below) — never
+  silently resolved by whichever one happens to overwrite the other.
 - Floating-point values are forbidden anywhere in a hashed or signed field:
   float serialization is not reliably deterministic across languages and
   platforms.
