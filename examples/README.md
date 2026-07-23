@@ -26,8 +26,9 @@ that name:
 cp examples/welcome_banner_ember.ans netbbs_welcome_banner.ans
 ```
 
-Then enable it from the in-BBS SysOp admin menu (`[A]dmin` →
-`[W]elcome banner` → `[E]nable`), or from `python -m netbbs.admin` if
+Then enable it from the in-BBS SysOp admin menu (`[S]ysOp` →
+`[S]ystem` → `[W]elcome banner` → `[E]nable`), or from
+`python -m netbbs.admin` if
 the node isn't running yet. `[P]review` shows exactly what a
 connecting user would see; `[X] edit` opens the fullscreen WYSIWYG
 ANSI art editor against the current file and saves back to the same

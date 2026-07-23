@@ -46,7 +46,7 @@ _logger = logging.getLogger(__name__)
 DEFAULT_WELCOME_BANNER = colored(
     "================================================\r\n"
     "  Welcome to NetBBS\r\n"
-    "  NetBBS Link -- coming soon\r\n"
+    "  NetBBS Link -- experimental federation\r\n"
     "================================================",
     fg_color=HEADER_COLOR,
     bold=True,

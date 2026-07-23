@@ -11,8 +11,8 @@ other POSIX systems too.
 
 ## Status
 
-**Phases 1 and 2 are complete.** A genuinely full-featured standalone
-single-node BBS — no NetBBS Link connectivity yet (that's Phase 3):
+**Phases 1 and 2 are complete** — a genuinely full-featured standalone
+single-node BBS:
 
 - Keypair + password auth, three connectivity methods (Telnet, SSH,
   web/xterm.js), all hardened through a post-launch security audit
@@ -33,9 +33,44 @@ single-node BBS — no NetBBS Link connectivity yet (that's Phase 3):
   management (who's online, disconnect a session, graceful shutdown),
   and reference-aware garbage collection for uploaded file storage.
 
+**Phase 3 (NetBBS Link) is active** — private/experimental federation
+between NetBBS nodes, opt-in and disabled by default. Currently working:
+
+- signed node identity with a root/operational key-lifecycle, and a
+  real HTTP+JSON transport (`aiohttp`) between nodes;
+- hello/peer discovery, persisted across restarts, with live
+  supplementary seed-list refresh and peer-list exchange;
+- promoting a local board to Link scope, and carrying a board received
+  from a peer (it becomes a real, locally browsable board);
+- Link mail — asynchronous, encrypted, addressed `user@node-
+  fingerprint` — with accepted/bounced delivery acknowledgement;
+- automatic relay selection/consent and a bounded relay mailbox, so an
+  outgoing-only node (behind NAT, no port-forward) can still be reached;
+- an operator-facing `[L]ink status`/`[O]utbox` SysOp surface, backup/
+  restore, and quotas on every remotely-influenced resource (peer
+  count, carried-board count, request rate/size).
+
+Try it yourself with the [two-node quickstart](#trying-netbbs-link-a-two-node-quickstart)
+below.
+
+**What Link does not yet do** — no public federation or trust/
+reputation model (Phase 3 is explicitly a private, invite-your-friends
+federation for now); no inventory/pull-based catch-up (a node that's
+been offline doesn't yet backfill everything it missed, only what
+peers happen to still be actively re-gossiping); no linked channels or
+remote file areas (boards only, so far); and, the current sharpest
+edge — **a carried board's remote posts and edits are verified,
+accepted, and gossiped on to other peers, but not yet materialized
+into that board's own locally browsable content** (only the board
+genesis itself is; see [issue #73](https://github.com/Thiesi/NetBBS/issues/73)).
+A carrying node can see *that* a peer's board is active (event counts
+climb on the Link status screen) before it can actually show you what
+was posted.
+
 See [`docs/NetBBS-design-doc.md`](docs/NetBBS-design-doc.md) for the
-full architecture, rationale, and phased roadmap — Phase 3 (Link
-connectivity & sync core) is next.
+full architecture, rationale, and phased roadmap, and
+[`docs/NetBBS-worklog.md`](docs/NetBBS-worklog.md) for durable
+implementation invariants and current limitations in more detail.
 
 This is a second attempt at this project. The first attempt got a long way
 (multi-user chat, file areas, message boards) but needed a significant
@@ -58,8 +93,12 @@ history and the lessons carried forward.
     **SSH is enabled by default** (see "Running a node" below), so
     most nodes will want this.
   - `pip install -e ".[web]"` (`aiohttp`) for the web/xterm.js
-    transport.
-  - A node that only wants Telnet needs neither extra.
+    transport **and for NetBBS Link** — Link's own transport is also
+    `aiohttp`-based (HTTP+JSON between nodes), so enabling `[link]` in
+    config needs this extra too, independent of whether the web/
+    xterm.js transport itself is enabled.
+  - A node that only wants Telnet, with Link disabled, needs neither
+    extra.
 
 ## Project layout
 
@@ -94,6 +133,21 @@ netbbs/
 │   │                     invite-only channels, mute/ban/kick, presence,
 │   │                     scrollback, per-session private-message
 │   │                     delivery, `/nick` aliases
+│   ├── link/             NetBBS Link (Phase 3, §11-13): node identity/
+│   │                     key lifecycle (`node_identity.py`), the
+│   │                     transport-agnostic handshake/gossip protocol
+│   │                     (`protocol.py`), the real `aiohttp` transport
+│   │                     adapter (`transport.py`), the background sync
+│   │                     loop (`sync.py`), canonical signed event
+│   │                     shapes (`events.py`), persistence/restart
+│   │                     reconstruction (`store.py`), the local-
+│   │                     origination/materialization bridge for boards
+│   │                     and mail (`boards.py`/`mail.py`), bounded
+│   │                     outbound work items/retry/dead-letter
+│   │                     (`work_items.py`), and outgoing-only
+│   │                     reachability (`relay_mailbox.py`/
+│   │                     `relay_selection.py`/`reliability.py`/
+│   │                     `seedlist.py`)
 │   ├── rendering/        ANSI rendering framework (§4): 256-color/
 │   │                     cursor helpers, text reflow, untrusted-input
 │   │                     sanitization, and the screen-buffer/diff
@@ -349,18 +403,22 @@ Then try logging in as `thiesi` — you should see "Your access to this
 system has been revoked." instead of reaching the main menu. Reverse with
 `python scripts/unblock_user.py netbbs.db thiesi`.
 
-**The SysOp admin menu** (`[A]dmin` from the main menu, for any account
+**The SysOp admin menu** (`[S]ysOp` from the main menu, for any account
 at or above the SysOp level) covers user/board/area/channel/category
-management, moderator permission grants, node management (who's
-online, disconnect a session, trigger a graceful shutdown), and
-file-storage garbage collection. `python -m netbbs.admin --db
-netbbs.db` reaches the same menu without a network connection at all.
+management, moderator permission grants, file-storage garbage
+collection, and — under `[S]ystem` → `[N]ode` — who's online,
+maintenance mode (lock out new non-SysOp logins), drain (disconnect
+already-connected non-SysOps), and graceful shutdown. `[S]ystem` also
+has `[L]ink status`/`[O]utbox` (only shown when Link is enabled — see
+the [quickstart](#trying-netbbs-link-a-two-node-quickstart) below) and
+Bac[K]up status. `python -m netbbs.admin --db netbbs.db` reaches the
+same menu without a network connection at all.
 
 **The fullscreen editors** are opt-in per account: from `[P]rofile`,
 toggle "Fullscreen editor" on, then composing a board post or editing
 your bio opens the nano-keybound prose editor (Ctrl+O save, Ctrl+X
 quit) instead of the plain line prompt. A welcome-banner WYSIWYG ANSI
-art editor is reachable from `[A]dmin` → `[S]ystem` → `[W]elcome
+art editor is reachable from `[S]ysOp` → `[S]ystem` → `[W]elcome
 banner` → `[X] edit`; see `examples/README.md` for two ready-made
 placeholder banners to drop in and try it against instead of starting
 from a blank canvas.
@@ -368,6 +426,154 @@ from a blank canvas.
 **File transfer** uses real Zmodem — `/upload`/`/download` inside a
 file area work with any Zmodem-capable terminal (SyncTERM, `lrzsz`'s
 `rz`/`sz`, etc.), not just NetBBS-aware clients.
+
+## Trying NetBBS Link: a two-node quickstart
+
+Every step below was actually run against this repo, not just
+described — including the exact points where current behavior is
+still incomplete. Two nodes, both on `127.0.0.1` with different ports,
+running from two separate directories so each gets its own database
+and identity.
+
+Install the `web` extra first (Link needs `aiohttp` — see
+Requirements above): `pip install -e ".[web]"`.
+
+**1. Two config files.** `node-a/netbbs.toml`:
+
+```toml
+[node]
+identity_dir = "netbbs_identity"
+name = "node-a"
+
+[database]
+path = "netbbs.db"
+
+[ssh]
+enabled = false
+
+[telnet]
+enabled = true
+host = "127.0.0.1"
+port = 2323
+
+[link]
+enabled = true
+host = "127.0.0.1"
+port = 7862
+outgoing_only = false
+advertised_host = "127.0.0.1"
+advertised_port = 7862
+seeds = ["http://127.0.0.1:7863"]
+sync_interval_seconds = 5
+```
+
+`node-b/netbbs.toml` is the mirror image — `node-b`, port `2324`
+(Telnet) / `7863` (Link), seeding `http://127.0.0.1:7862`. SSH is
+turned off in both so they don't fight over the shared default port
+`2222`; `sync_interval_seconds = 5` is just for a fast demo (300s is
+the real default). **Each node seeds the other** — a one-directional
+seed (only B dialing A) lets A learn about B, but A itself would then
+never dial out, so it would never push its own boards/mail anywhere;
+both directions need a seed for a two-node loopback pair to actually
+exchange content both ways.
+
+Both nodes as configured here are full peers advertising a real
+address — fine for a local loopback demo (and needed for it: the mail
+acknowledgement round trip in step 6 requires both sides reachable),
+but each will log a startup warning about it. Prefer `outgoing_only =
+true` (the default) for anything you actually run persistently, until
+issue #60's remaining operational controls land.
+
+**2. Create a SysOp on each** (`create_test_user.py <db> <username>
+<password> <level>` — 255 is the SysOp level), then start both from
+their own directories:
+
+```sh
+python scripts/create_test_user.py node-a/netbbs.db alice hunter2 255
+python scripts/create_test_user.py node-b/netbbs.db bob hunter2 255
+
+(cd node-a && python -m netbbs --config netbbs.toml) &
+(cd node-b && python -m netbbs --config netbbs.toml) &
+```
+
+Each logs a warning about running as a full peer (expected — see the
+paragraph above) and then its own fingerprint — you'll need node-b's
+for step 6:
+
+```
+WARNING:__main__:NetBBS Link is configured as a full peer, advertising 127.0.0.1:7862 to other nodes -- ... Prefer outgoing_only (the default) until then.
+INFO:__main__:node Link identity 'node-a': fingerprint yxfuhddkxvik35qkkyxdoexxdiqdjxuv
+INFO:__main__:NetBBS Link listening on 127.0.0.1:7862 (fingerprint yxfuhddkxvik35qkkyxdoexxdiqdjxuv, full peer)
+```
+
+**3. Confirm they found each other.** Telnet to node A
+(`telnet 127.0.0.1 2323`, log in as `alice`), then `S` (SysOp) → `S`
+(System) → `L` (Link status). Within one `sync_interval_seconds` pass:
+
+```
+Link status:
+This node's fingerprint: yxfuhddkxvik35qkkyxdoexxdiqdjxuv
+Mode: full peer
+...
+Verified peers: 1/1000
+
+Verified peers (page 1/1, 1 total)
+  01. (#...) 4mfuq3hiuumvg4tvbow7ccvt7hityzwi - full peer
+```
+
+**4. Link a board.** "Linking" only ever *promotes* an existing local
+board to Link scope — it never creates one from nothing — so make one
+first, on node A: `python scripts/create_test_board.py node-a/netbbs.db general "General discussion"`
+(or interactively: `[S]ysOp` → `[M]anage boards/areas/channels` →
+`[M]essage boards` → `[C]reate`). Then, from that board's own detail
+screen (`[S]ysOp` → `[M]anage boards/areas/channels` → `[M]essage
+boards` → `[L]ist` → pick it): `[L]ink this board`. It'll prompt for a
+handful of recommended settings (blank = no recommendation) and a
+"fork of an existing Linked board?" question (`n` here) — answering
+finishes with `Linked 'general' -- it will be pushed to peers on the
+next sync pass.`
+
+**5. Post, then check node B — and see the current real limitation.**
+Post something new to `general` on node A (`[J]ump to...` →
+`[M]essage Boards` → pick it → `[P]ost`). Within a sync pass, node B's
+own `[L]ink status` screen shows `Linked boards: 1`, `Carried boards:
+1/500`, and a `Known events` count that includes your new post — the
+event genuinely arrived, was verified, and was accepted. But browsing
+that board on node B (`[J]ump to...` → `[M]essage Boards` → pick
+`general`) currently shows **`[general] has no posts yet.`** —
+carried-board posts/edits aren't materialized into locally browsable
+content yet (issue #73, noted in Status above). This isn't a
+misconfiguration; it's the accurate current state of the feature.
+
+**6. Compose Link mail and watch the acknowledgement round-trip.**
+From node A as `alice`: `[E]-mail` → `[C]ompose` → address it to
+`bob@<node-b's-fingerprint-from-step-2>`, subject and body as normal
+(a blank line ends the body). Within a couple of sync passes:
+
+- On node B, `bob`'s `[I]nbox` shows the message, from
+  `alice@<node-a's-fingerprint>`.
+- Back on node A, the message's delivery state (the `mail_messages.
+  link_delivery_status` column — no dedicated UI display for it yet)
+  flips from `pending` to `delivered` once node B's signed
+  acknowledgement makes it back to node A. If you don't see that
+  happen, you've found a regression — this exact round trip used to
+  fail unconditionally (issue #69) until the sender started
+  registering its own composed message so it could recognize the
+  acknowledgement addressed back to it.
+
+**7. Restart node A** (`Ctrl+C`, then the same `python -m netbbs
+--config netbbs.toml` again) and confirm the startup log reports the
+*same* fingerprint as before, and `[L]ink status` still lists node B
+as a verified peer without needing a fresh hello — both the identity
+and the peer table are persisted, not regenerated.
+
+**Further reading, not covered above:** an `outgoing_only = true` node
+(the default, and the recommended setting for anything but a loopback
+demo) never advertises a reachable address of its own — it relies on
+another full peer agreeing to relay for it (`relay_serving_enabled`/
+`max_relay_clients` in `[link]`, design doc §12). Proving that path
+needs a third node acting as relay; see `tests/test_link_sync.py`'s
+relay-round-trip tests for a fully worked example.
 
 ## Development
 
