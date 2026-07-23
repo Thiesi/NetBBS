@@ -1073,7 +1073,100 @@ event types and advanced governance.
 
 A peer accepting a valid board genesis materializes a real local board copy so
 users can browse carried content through the normal board UI. Carrying is more
-than retaining raw protocol events.
+than retaining raw protocol events — the same principle extends to a carried
+board's *content*, not just the board shell itself (issue #73): an accepted
+`board_post`/`board_post_edit` must become an ordinary local `posts` row, not
+remain a protocol-layer record a caller-facing screen can never reach. Before
+this, a carried board could verifiably receive posts while still showing
+empty to every reader — `link_events` is necessary for protocol verification
+and replay safety, but it is not the product database.
+
+**Mechanism.** `netbbs.link.boards` gains `materialize_carried_post`/
+`materialize_carried_post_edit`, mirroring `materialize_carried_board`'s own
+shape: idempotent (keyed on the event's own `content_id`), bypassing
+`netbbs.boards.posts.create_post`/`edit_post` entirely (those require a local
+`User` author and mint a fresh local ID, neither of which fits received
+content) in favor of a direct insert using the **event's own `content_id`
+verbatim as the local `post_id`** — the same "never mint a second ID for the
+same thing" precedent `materialize_carried_board` already established for
+`board_id`. This has a valuable side effect: since a `board_post_edit`'s own
+`root_post_id`/`previous_event_id` payload fields already name other events'
+`content_id`s, and those become the corresponding local `post_id`s verbatim,
+`posts.root_post_id`/`edit_of_post_id` resolve directly from the Link
+payload with no separate ID-translation table.
+
+Unlike `materialize_carried_board` (a separate `lane.run` call from the
+`save_event` that persists the underlying signed event — a real, pre-existing
+crash-window gap for genesis materialization, not newly introduced but not
+closed here either), the new functions perform the `link_events` insert and
+the `posts` projection in the same call, one transaction, one commit: a crash
+between them is no longer possible for posts/edits specifically. `LinkServer.
+_handle_events` calls the combined function once per accepted `board_post`/
+`board_post_edit`, replacing today's separate `save_event` dispatch for those
+two object types.
+
+A reply's `parent_post_id` is set only if that parent is *already* locally
+materialized — the same "no backfill, no speculative storage" rule this
+project already applies everywhere gossip can arrive out of order (§8, §9.1):
+an orphaned reply is materialized as a top-level post rather than blocked or
+queued waiting for a parent that may never arrive.
+
+**Author identity.** A materialized post's `author_user_id` is `NULL` — no
+local account is implied or required by carrying content (issue #73's own
+required test scenario) — with `author_label` synthesized as `local_user_id@
+home_node_fingerprint` (the same address shape Link mail already uses) and
+`author_fingerprint` left `NULL` (that column is a *local* user's own
+personal keypair fingerprint, a different concept from a remote node's
+fingerprint — never conflated). This requires a prerequisite fix: `Post.
+author_user_id` is currently typed as a required `int` even though the
+column has been nullable since the account-deletion migration (round 60's
+`ON DELETE SET NULL`) — display code (`netbbs.net.login_flow`'s post-reading
+screen, notably) currently calls `get_user_by_id(db, post.author_user_id)`
+unconditionally. Widening the type to `int | None` and guarding every such
+call site is corrected as part of this work, not deferred — a locally
+deleted user's own old posts were already silently exercising this exact gap
+before a remote author's posts could.
+
+**Display and resolution.** No new resolution logic is needed:
+`_resolve_current_version`'s existing `root_post_id`/`created_at DESC, id
+DESC` query already picks the correct latest revision for a materialized
+chain, since materialization always processes a verified edit chain in
+accepted order — local `id` (strict insertion order) therefore agrees with
+logical edit recency even when the remote-claimed `created_at` doesn't (clock
+skew, out-of-order network delivery), the same tie-break reasoning issue #68
+already established for purely local edits. `created_at` on a materialized
+row is the *authored* timestamp from the signed event, never the local
+arrival time — see the separate node-local-arrival-order issue (#72) for why
+unread/New Scan ordering is a distinct concern from this display field.
+
+**Local moderation stays event-history-safe by construction.** `delete_post`
+only ever touches `posts`, never `link_events` — deleting a materialized
+post's local row (subject to its own existing FK-blocker rules: no deleting a
+post with local replies or edit-chain descendants) already cannot rewrite or
+lose the signed record needed for replay safety, with no new mechanism
+required. Origin recommendations (§9.1) never override this local policy,
+exactly as they never override any other local access/moderation/retention
+decision on a carried board.
+
+**Idempotency, New Scan, and search.** Duplicate delivery of an
+already-materialized event is a no-op (existing `post_id` found, row returned
+unchanged) — no duplicate local posts or revisions. `[N]ew scan`/unread
+counts (`netbbs.activity`, issue #56) need no new wiring at all: they compare
+a stored cursor against `posts` rows directly, with no separate
+"mark as new" call site, so any newly materialized row is automatically new
+activity. Local search does need an explicit call — `netbbs.search.
+reindex_post(db, board_id, root_post_id)`, the same call every other
+`posts` write path already makes, right after each materialization.
+
+**Repairing a gap.** Because persistence and projection are now atomic for
+new events, the only way a `board_post`/`board_post_edit` in `link_events`
+can lack a corresponding `posts` row is a node that carried boards *before*
+this feature shipped. A repair pass — scan `link_events` for `board_post`/
+`board_post_edit` rows with no matching `posts.post_id`, and materialize them
+in chain order — closes that one-time gap and doubles as the "supported
+rebuild path" issue #73's own acceptance criteria ask for, the same
+"derived state must be rebuildable from authoritative data" principle issue
+#74 applies to FTS indexes.
 
 Linked resources are carried by default within the supported topology, with a
 visible local exclusion option. A local exclusion must be represented honestly
@@ -1829,14 +1922,18 @@ Implemented or substantially working:
 - configured seeds, live seed refresh, peer-list exchange, and candidate
   fallback;
 - deterministic multi-node fault harness;
-- linked-board genesis, posts, self-authored edits, local materialization, and
-  origin transfer/orphan/fork behavior;
+- linked-board genesis, posts, self-authored edits, and origin transfer/
+  orphan/fork behavior; local materialization of the board itself (a carried
+  board is a real, browsable local board), but not yet of received posts/
+  edits (§9.3 specifies this; tracked as issue #73);
 - tier-1 Link messages with accepted/bounced delivery state;
 - reliability scoring, relay consent, automatic relay selection, and bounded
   relay mailboxes for outgoing-only recipients.
 
 Still required for Phase 3 completeness:
 
+- materializing received board_post/board_post_edit into ordinary local
+  posts (§9.3, issue #73);
 - inventory/pull-based catch-up and efficient synchronization;
 - correctness-preserving event/dedup retention;
 - linked channels and channel lifecycle;
