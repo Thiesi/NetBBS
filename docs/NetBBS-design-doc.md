@@ -1656,6 +1656,72 @@ Mailboxes, relay storage, retries, and pending acknowledgements are bounded.
 Blocking and quota failures must be explicit; unread data is not silently
 removed to make delivery appear successful.
 
+### 10.6 Tier-2 recipient scope (issue #90) — deferred, not permanently
+
+**Not to be confused with `tier2_personal_key` (§10.2).** That is a
+different, already-decided, permanently-out-of-scope concept: client-side
+end-to-end encryption against the home node itself, blocked by a hard
+architectural constraint (no client-side decryption exists). This section
+is only about *recipient reachability* — delivering `tier1_home_node_key`
+messages to a peer the sender has never directly, verifiably completed a
+hello with — which has no equivalent hard blocker, just isn't built yet.
+
+**What §10.4's "no total strangers" boundary actually rests on.** A
+`HelloMessage` bundle is *self-authenticating* by construction (§12): a
+peer that didn't hold the claimed root key's private half could not have
+produced a transitions chain that both verifies against that root and
+whose resolved current signing key matches the descriptor's own
+signature. Verifying someone's identity has never required trusting
+*who* handed you the bundle — only the bundle's own internal
+cryptographic consistency. Today's requirement that this always happens
+via a completed two-way hello is a stronger condition than the
+verification itself actually needs.
+
+**Issue #85 does not provide tier-2 reachability, and was never going to.**
+It was tempting to assume inventory/pull-based relay already closes this
+gap, since it does let a node receive board content authored by someone
+it never directly synced with. It doesn't generalize to messages: #85's
+own `handle_events` fix requires the content's claimed origin/author to
+*already* be a peer this node has independently completed a hello with
+(`self.peers.get(origin_fingerprint)`) — it relays already-authored
+*content* between two ends that both already know the author, it never
+bootstraps a receiving node's knowledge of a brand-new peer's identity.
+Nothing in this codebase today lets a node learn a *new* peer's verified
+root key/transition chain except a direct hello.
+
+**What a real tier-2 design would require, concretely.** Because
+`HelloMessage`s are self-certifying, a third party *could* safely relay
+one on a peer's behalf — the sender would verify it exactly as if that
+peer had dialed in directly, independent of whether the relaying node is
+honest, since a tampered or fabricated bundle simply fails verification
+rather than being silently trusted. The same applies in reverse for the
+recipient verifying the sender. This would need: a new relayed-hello
+bundle exchange (distinct from `PeerListMessage`'s own unverified
+address-only exchange, §8.3 — this one must carry the *complete*
+self-certifying bundle, not just an address worth trying), and encryption
+proceeding once independent verification succeeds, with no other change
+to §10.2's confidentiality model.
+
+**Confidentiality and abuse implications, if built.** No new
+confidentiality exposure to message *content* — encryption still targets
+the real recipient's real key, independently verified, regardless of who
+relayed the bundle that made verification possible. The exposure is
+metadata: a relay learns that someone is asking about a specific
+fingerprint, an availability/traffic-analysis concern rather than a
+confidentiality break of any message body. A dishonest relay can only
+withhold or refuse to relay a bundle (availability), never forge one
+(self-certification), matching the same "worth trying, never blindly
+trusted" property peer-list exchange already established for addresses.
+
+**Decision: deferred, not scoped as active work.** Unlike
+`tier2_personal_key`, this is not a permanent non-goal — there is no
+architectural blocker, only that it is not needed to unblock or validate
+current Phase 3 work, and building it now would add real new wire surface
+(a relayed-hello bundle exchange) ahead of the cadence discipline §84
+already states. Revisit if a real deployment need appears (e.g. issue #83's
+dogfood run surfaces callers who actually want to message someone they've
+never directly synced with) rather than building it speculatively now.
+
 ---
 
 ## 11. Remote file areas
@@ -2519,9 +2585,11 @@ SQLite, real node identities), real-domain-read-path (an ordinary
 inbox/board read, not a raw row or `known_event_ids` check) vertical
 slice per currently implemented Link product surface, each covering
 restart-between-stages and duplicate-delivery. A future Link vertical
-slice (linked channels, remote files, tier-2 messages) is not complete
-until it adds or extends a scenario in that file, the same way it is
-not complete without unit tests for its own protocol logic.
+slice (linked channels, remote files) is not complete until it adds or
+extends a scenario in that file, the same way it is not complete
+without unit tests for its own protocol logic. Tier-2 message routing
+is deliberately not in that list — see §10.6 for why it remains
+deferred rather than an active future slice.
 
 ### 14.2 Real boundaries
 
@@ -2930,6 +2998,20 @@ unbounded in this issue, stated explicitly rather than silently assumed
 safe. `netbbs.link.store.purge_expired_key_transitions` purges on write
 (90-day fixed window), the same shape `LinkDiagnosticLogHandler.emit`
 already established for `link_diagnostic_log`.
+
+### Issue #90 — tier-2 Link message routing scope — deferred
+
+§10.6 now states the complete answer: distinct from the unrelated,
+already-decided `tier2_personal_key` non-goal (§10.2, a hard architectural
+blocker); this is a recipient-*reachability* question with no equivalent
+blocker, just not built. Confirmed that issue #85's inventory/relay work
+does *not* provide tier-2 reachability — it relays content whose author
+must already be a directly-known peer, never bootstraps a new peer's
+identity. A real design exists if this is ever picked up (a relayed,
+self-certifying `HelloMessage` bundle exchange, reusing the same
+self-authentication property §12 already relies on), but is deliberately
+deferred rather than scoped as active work — no architectural blocker,
+just not needed to unblock or validate current Phase 3 work.
 
 ### Issue #55 — trust and quarantine
 
