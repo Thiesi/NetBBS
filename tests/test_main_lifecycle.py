@@ -470,8 +470,16 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
 
         # Waited out roughly the configured grace period (not an
         # instant cancel) before the hard-cancel fallback took over, and
-        # didn't hang indefinitely on the wedged pass.
-        assert 0.3 <= elapsed < 8.0
+        # didn't hang indefinitely on the wedged pass. The lower bound
+        # tolerates a few milliseconds under the nominal 0.3s: real
+        # asyncio timers (wait_for/call_later) are not perfectly
+        # precise, and prior awaits before this node's own wait_for
+        # starts its countdown add a small, variable amount of slack in
+        # both directions -- confirmed flaky at the exact 0.3 threshold
+        # (observed 0.297 in one run) before this tolerance was added.
+        # The point of the lower bound is only "not an instant cancel,"
+        # not pinning down sub-10ms scheduler jitter.
+        assert 0.3 - 0.05 <= elapsed < 8.0
 
     asyncio.run(scenario())
 
