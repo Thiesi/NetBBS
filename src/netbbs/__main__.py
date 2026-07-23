@@ -23,6 +23,7 @@ from netbbs.backup import remove_pid_file, write_pid_file
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
+from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.link.seedlist import run_scheduled_seed_refresh
@@ -35,7 +36,7 @@ from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import run_shutdown_sequence
 from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 from netbbs.selfupdate import run_scheduled_update_check
-from netbbs.storage.database import Database
+from netbbs.storage.database import Database, DatabaseIntegrityError
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
 
@@ -314,6 +315,22 @@ async def run(
             "side, make sure each one is paired with its own separate database file."
         ) from exc
 
+    # Design doc §13.11, issue #60: a corrupted database file otherwise
+    # surfaces only later, the first time some unlucky query touches the
+    # damaged page, as a confusing raw error rather than a clear
+    # diagnosis at the one point an operator can still act on it. Run
+    # once, here, not inside Database.__init__ (see check_integrity's
+    # own docstring for why every other caller -- admin scripts, the
+    # whole test suite -- must not pay for a full scan they don't need).
+    try:
+        db.check_integrity()
+    except DatabaseIntegrityError as exc:
+        db.close()
+        raise StartupError(
+            f"{exc} -- restore from a known-good backup (see docs/NetBBS-disaster-recovery-"
+            "drill.md) rather than starting against a corrupted database."
+        ) from exc
+
     # Design doc round 91/issue #57: the foreground DatabaseLane -- a
     # second, independent connection to the same database file (WAL
     # mode makes this safe), off the event loop, that migrated features
@@ -465,7 +482,14 @@ async def run(
     servers: list = []
     link_sync_task: asyncio.Task | None = None
     link_sync_session = None
+    # Design doc §13.11, issue #60: the graceful-drain half of run_link_
+    # sync's own cooperative stop_event parameter -- created unconditionally
+    # (harmless to .set() even when link_sync_task never ends up created)
+    # so the shutdown finally block below never needs an extra None check
+    # beyond the ones it already has for link_sync_task itself.
+    link_sync_stop_event = asyncio.Event()
     seed_refresh_task: asyncio.Task | None = None
+    link_diagnostic_log_handler: LinkDiagnosticLogHandler | None = None
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
@@ -508,6 +532,20 @@ async def run(
         # same reasoning node_identity/count_sysops(db) already read
         # synchronously at this point in startup.
         link_node = load_link_node(db, node_identity) if config.link.enabled else None
+
+        # Design doc §13.11, issue #60: attached once, here, only when
+        # Link is actually enabled -- a disabled node has no netbbs.link
+        # activity to ever log a warning about in the first place.
+        # Removed in the matching finally block below via handler.close()
+        # (also closes its own independent sqlite3 connection -- see that
+        # class's own docstring for why it doesn't share db.connection).
+        if config.link.enabled:
+            link_diagnostic_log_handler = LinkDiagnosticLogHandler(
+                config.db_path,
+                max_age_days=config.link.diagnostic_log_max_age_days,
+                max_rows=config.link.diagnostic_log_max_rows,
+            )
+            logging.getLogger(LINK_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
 
         # Issue #60's SysOp Link-status screen needs a handful of
         # netbbs.net.nodeconfig.LinkConfig fields for display -- built
@@ -577,6 +615,7 @@ async def run(
                         _build_own_hello_provider(link_node, config.link),
                         background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
+                        stop_event=link_sync_stop_event,
                     )
                 )
 
@@ -645,14 +684,30 @@ async def run(
             pass
         except Exception:
             pass
-        # Design doc round 119: same cancel-await-swallow shape as
-        # daybreak_task just above, for the same reason (issue #48) --
-        # already logged by _log_link_sync_failure if it failed on its
-        # own, so safe to swallow here too.
+        # Design doc §13.11, issue #60: graceful drain, not an
+        # unconditional hard cancel -- an in-flight dial/push otherwise
+        # gets torn out of half-done at whatever await happens to be
+        # outstanding the instant shutdown fires, unlike every other
+        # task drained below (none of which talk to a Link peer, see
+        # run_link_sync's own stop_event docstring for why only this
+        # one gets this treatment). Setting the event lets run_link_
+        # sync finish its *current* pass normally and exit its own loop
+        # before the next one starts; bounded by the same graceful_
+        # delay_seconds budget user-session shutdown already uses, so a
+        # wedged dial can't hang shutdown indefinitely -- past that
+        # bound, fall back to the same cancel-await-swallow shape as
+        # daybreak_task above (already logged by _log_link_sync_failure
+        # if it failed on its own, so safe to swallow here too).
         if link_sync_task is not None:
-            link_sync_task.cancel()
+            link_sync_stop_event.set()
             try:
-                await link_sync_task
+                await asyncio.wait_for(link_sync_task, timeout=config.shutdown.graceful_delay_seconds)
+            except asyncio.TimeoutError:
+                # wait_for already cancelled link_sync_task and awaited
+                # that cancellation through to completion before raising
+                # this -- nothing further to clean up, same end state as
+                # every other task's cancel-await-swallow shape here.
+                pass
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -675,6 +730,9 @@ async def run(
         foreground_lane.close()
         background_lane.close()
         db.close()
+        if link_diagnostic_log_handler is not None:
+            logging.getLogger(LINK_LOGGER_NAME).removeHandler(link_diagnostic_log_handler)
+            link_diagnostic_log_handler.close()
         remove_pid_file(config.db_path)
         _logger.info("NetBBS node shut down cleanly")
 

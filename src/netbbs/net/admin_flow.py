@@ -127,6 +127,7 @@ from netbbs.link.boards import (
     queue_board_post_if_linked,
     rebuild_carried_post_materialization,
 )
+from netbbs.link.diagnostics import list_diagnostic_log_entries
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
@@ -377,6 +378,10 @@ async def _system_menu(
             await session.write_line("")
             await _repair_carried_posts_screen(session, lane)
             await _draw_system_menu(session, node_controls, link_context)
+        elif choice == "d" and link_context is not None:
+            await session.write_line("")
+            await _diagnostic_log_screen(session, lane)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "k":
             await session.write_line("")
             await _backup_status_screen(session, lane, actor)
@@ -397,6 +402,7 @@ async def _draw_system_menu(
         option_list.append(menu_key("L", "ink status"))
         option_list.append(menu_key("O", "utbox"))
         option_list.append(menu_key("R", "epair carried posts"))
+        option_list.append(menu_key("D", "iagnostic log"))
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
@@ -995,6 +1001,41 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
 
             cancelled = await lane.run(_cancel)
             await session.write_line(f"Cancelled -- status is now {cancelled.status!r}.")
+
+
+async def _diagnostic_log_screen(session: Session, lane: DatabaseLane) -> None:
+    """
+    Read-only SysOp inspection of the bounded Link diagnostic log
+    (design doc §13.11, issue #60) -- `netbbs.link.diagnostics.
+    LinkDiagnosticLogHandler` populates this from every existing
+    `netbbs.link` `_logger.warning`/`.error` call (dial failures, sync
+    failures, materialization refusals, and similar), pruned against
+    operator-configured age/row bounds on every write. No action to
+    take on an entry here, unlike `[O]utbox` -- purely "what has this
+    node's own Link activity been complaining about lately."
+    """
+    entries = await lane.run(list_diagnostic_log_entries)
+
+    await session.write_line(colored("\r\nDiagnostic log:", fg_color=HEADER_COLOR, bold=True))
+    if not entries:
+        await session.write_line(colored("Nothing logged yet.", fg_color=MUTED_COLOR))
+        return
+
+    selected = await pick_item(
+        session, entries,
+        name_of=lambda entry: f"{entry.created_at}  {entry.level}",
+        stable_id_of=lambda entry: entry.id,
+        description_of=lambda entry: sanitize_text(entry.message),
+        title="Diagnostic log (most recent first)",
+        empty_message="Nothing logged yet.",
+    )
+    if selected is None:
+        return
+
+    await session.write_line(f"\r\nWhen: {selected.created_at}")
+    await session.write_line(f"Level: {selected.level}")
+    await session.write_line(f"Logger: {sanitize_text(selected.logger_name)}")
+    await session.write_line(f"Message: {sanitize_text(selected.message)}")
 
 
 async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane) -> None:

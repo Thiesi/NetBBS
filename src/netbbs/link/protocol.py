@@ -73,6 +73,7 @@ from netbbs.link.events import (
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
+    NETBBS_PROTOCOL_VERSION,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -384,6 +385,10 @@ class LinkNode:
         root_verify_key = nacl.signing.VerifyKey(message.root_public_key)
         claimed_fingerprint = fingerprint_from_verify_key(root_verify_key)
 
+        for transition in message.transitions:
+            self._check_protocol_version(transition.envelope, kind="key_transition", sender_fingerprint=claimed_fingerprint)
+        self._check_protocol_version(message.descriptor.envelope, kind="endpoint_descriptor", sender_fingerprint=claimed_fingerprint)
+
         try:
             current_signing_key_b64 = resolve_current_operational_key(
                 message.transitions,
@@ -609,6 +614,31 @@ class LinkNode:
                 "current signing key"
             )
 
+    def _check_protocol_version(self, envelope: dict, *, kind: str, sender_fingerprint: str | None = None) -> None:
+        """
+        Design doc §13.11, issue #60: every canonical envelope already
+        carries `netbbs_protocol` (`build_envelope`, round 27) -- this
+        was the first thing anywhere in this codebase to actually read
+        it back on receipt. Exact match only, never a supported range:
+        there is nothing to be forward/backward-compatible *with* yet,
+        since `NETBBS_PROTOCOL_VERSION` has only ever been `1` -- the
+        point of this check is having a real, tested gate in place
+        *before* a version 2 ever exists, not guessing at compatibility
+        rules for a wire change nobody has designed. Called once per
+        envelope at `handle_events`' own single object_type-extraction
+        point (covering all nine event types from one call site) and
+        against `handle_hello`'s own embedded transitions/descriptor
+        envelopes -- never duplicated per object type.
+        """
+        version = envelope.get("netbbs_protocol")
+        if version != NETBBS_PROTOCOL_VERSION:
+            source = f"{sender_fingerprint} sent" if sender_fingerprint is not None else "received"
+            raise LinkProtocolError(
+                f"{source} a {kind} with netbbs_protocol={version!r}, this node only "
+                f"understands {NETBBS_PROTOCOL_VERSION!r} -- refusing rather than risk "
+                "misinterpreting an incompatible payload shape"
+            )
+
     def _resolve_sender_signing_key(self, sender: "PeerRecord", sender_fingerprint: str, kind: str) -> nacl.signing.VerifyKey:
         """Shared by the `board_genesis`/`board_post` branches below:
         resolve `sender`'s *current* signing key from its own tracked
@@ -758,6 +788,7 @@ class LinkNode:
         accepted: list[str] = []
         for raw in raw_events:
             object_type = raw["envelope"]["object_type"]
+            self._check_protocol_version(raw["envelope"], kind=object_type, sender_fingerprint=sender_fingerprint)
 
             if object_type == KEY_TRANSITION_OBJECT_TYPE:
                 transition = KeyTransition.from_dict(raw)

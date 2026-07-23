@@ -8,6 +8,8 @@ a socket or makes an HTTP call.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from netbbs.link.events import (
@@ -1946,5 +1948,105 @@ def test_handle_events_rejects_a_board_post_edit_with_an_oversized_body(tmp_path
 
     with pytest.raises(LinkProtocolError):
         bob_node.handle_events(alice.fingerprint, [edit.to_dict()])
+
+    alice.close()
+
+
+# -- netbbs_protocol version compatibility (design doc §13.11, issue #60) --
+
+
+def test_handle_events_rejects_an_event_with_a_mismatched_protocol_version(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+    raw = genesis.to_dict()
+    raw["envelope"]["netbbs_protocol"] = 999
+
+    with pytest.raises(LinkProtocolError, match="netbbs_protocol"):
+        bob_node.handle_events(alice.fingerprint, [raw])
+
+    # A board that never got past the version check should never have
+    # been recorded as accepted.
+    assert "existing-local-board-id" not in bob_node.boards
+
+    alice.close()
+
+
+def test_handle_events_still_accepts_a_matching_protocol_version(tmp_path, clock):
+    # Regression guard: the version check must not itself break the
+    # ordinary accepted path every other test in this file relies on.
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+    bob_node.handle_hello(alice_hello)
+
+    genesis = build_board_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        board_id="existing-local-board-id",
+        name="Vintage Computing",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+
+    alice.close()
+
+
+def test_handle_hello_rejects_a_transition_with_a_mismatched_protocol_version(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+
+    tampered_transition = replace(
+        alice_hello.transitions[0],
+        envelope={**alice_hello.transitions[0].envelope, "netbbs_protocol": 999},
+    )
+    tampered_hello = replace(alice_hello, transitions=(tampered_transition,))
+
+    with pytest.raises(LinkProtocolError, match="netbbs_protocol"):
+        bob_node.handle_hello(tampered_hello)
+
+    alice.close()
+
+
+def test_handle_hello_rejects_a_descriptor_with_a_mismatched_protocol_version(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+
+    tampered_descriptor = replace(
+        alice_hello.descriptor,
+        envelope={**alice_hello.descriptor.envelope, "netbbs_protocol": 999},
+    )
+    tampered_hello = replace(alice_hello, descriptor=tampered_descriptor)
+
+    with pytest.raises(LinkProtocolError, match="netbbs_protocol"):
+        bob_node.handle_hello(tampered_hello)
+
+    alice.close()
+
+
+def test_handle_hello_still_accepts_a_matching_protocol_version(tmp_path, clock):
+    # Regression guard, mirroring test_handle_events_still_accepts_a_
+    # matching_protocol_version above.
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    alice_hello = _hello_bytes(LinkNode(identity=alice.identity), clock=clock)
+
+    record = bob_node.handle_hello(alice_hello)
+
+    assert record.fingerprint == alice.fingerprint
 
     alice.close()

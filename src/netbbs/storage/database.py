@@ -10,6 +10,13 @@ from pathlib import Path
 from netbbs.storage.migrations import MIGRATIONS
 
 
+class DatabaseIntegrityError(Exception):
+    """Raised by `Database.check_integrity` when `PRAGMA integrity_check`
+    finds a genuinely corrupted file -- distinct from `Database.
+    __init__`'s own plain `RuntimeError` for a too-new schema version,
+    which is a build mismatch, not corruption."""
+
+
 class Database:
     """
     Thin wrapper around a single node's SQLite connection.
@@ -112,6 +119,31 @@ class Database:
                 if self.connection.in_transaction:
                     self.connection.rollback()
                 raise
+
+    def check_integrity(self) -> None:
+        """
+        Runs SQLite's own `PRAGMA integrity_check` against this
+        connection (design doc §13.11, issue #60) -- deliberately not
+        called from `__init__`, and not something most callers should
+        ever need to call at all: a full-database scan on *every*
+        `Database()` construction would tax every admin script and this
+        project's entire test suite (thousands of constructions) for a
+        check only the one long-lived node process actually needs, once,
+        at its own startup (`netbbs.__main__.run`'s one real call site).
+
+        Raises `DatabaseIntegrityError`, naming every problem found (a
+        healthy database returns exactly one row, the literal string
+        `"ok"` -- anything else, including more than one row, describes
+        a real problem), rather than letting corruption surface later as
+        a confusing raw `sqlite3` error the first time some unlucky
+        query happens to touch the damaged page.
+        """
+        rows = self.connection.execute("PRAGMA integrity_check").fetchall()
+        problems = [row[0] for row in rows if row[0] != "ok"]
+        if problems:
+            raise DatabaseIntegrityError(
+                f"database at {self.path} failed integrity check: " + "; ".join(problems)
+            )
 
     def close(self) -> None:
         self.connection.close()

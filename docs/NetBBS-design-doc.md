@@ -1543,19 +1543,19 @@ including:
   §13.9's own reasoning);
 - integrity checks and crash recovery (§13.11 — a startup `PRAGMA integrity_
   check`, plus confirming migration/incoming-upload/work-item crash safety
-  already held by construction — design-complete, not yet implemented);
+  already held by construction — implemented);
 - bounded diagnostic log retention without content logging (§13.11 — a new
   `link_diagnostic_log` table and `[D]iagnostic log` SysOp screen, warning-
-  level-and-above only, age/row-bounded — design-complete, not yet
-  implemented);
+  level-and-above only, age/row-bounded — implemented);
 - protocol/database upgrade and rollback compatibility (§13.11 — the
   database half already done via `netbbs.selfupdate`; the wire-protocol
   half, `netbbs_protocol` version-checked on receipt for the first time,
-  design-complete, not yet implemented);
+  implemented);
 - graceful drain of Link work during shutdown (§13.11 — `run_link_sync`
-  finishes its current pass before stopping, bounded by the existing
-  `graceful_delay_seconds`, falling back to today's hard cancel only past
-  that bound — design-complete, not yet implemented);
+  finishes its current pass before stopping, including waking early from
+  its own idle interval sleep rather than waiting it out, bounded by the
+  existing `graceful_delay_seconds`, falling back to today's hard cancel
+  only past that bound — implemented);
 - disaster recovery drills exercising a restore under realistic conditions
   (§13.4 specifies the backup/restore mechanism itself — `netbbs.backup`,
   implemented; §13.10 replaces its original restore mechanism with a
@@ -2059,26 +2059,42 @@ already declares.
 tears down `link_sync_task` with a bare `.cancel()` the instant shutdown
 begins — no grace period at all, the one asymmetry with ordinary user-
 session shutdown, which already warns and waits before disconnecting
-anyone. `run_link_sync`'s own loop spends most of its time inside `await
-asyncio.sleep(interval_seconds)` (a 300s default), where an immediate
-cancel is harmless — but a `SIGTERM` landing squarely mid-pass, mid-HTTP-
-call, aborts that specific request against whatever peer is on the other
-end with no chance to complete, a real (if narrow) asymmetry between how
-this project treats its own users and how it treats the peers it talks to.
-`run_link_sync` gains an optional `stop_event: asyncio.Event | None`,
-checked once at the top of the outer loop (before starting a new pass, not
-mid-pass — deliberately simple: passes are normally sub-second, so the
-value of checking more granularly inside one is marginal against the
-complexity of doing so) so a currently in-flight pass, including whatever
-HTTP call it's in the middle of, is always allowed to finish naturally.
-Shutdown sets the event, then `asyncio.wait_for`s the task against the
-existing `ShutdownConfig.graceful_delay_seconds` (60s default) — reusing
-the one "how long is a graceful shutdown allowed to take" operator-facing
-number rather than adding a second, Link-specific timer to reason about —
-falling back to the pre-existing hard `.cancel()` only if that bound is
-exceeded (a pass stuck on an unreachable seed's own connect timeout, say),
-never removing the fallback, only making it the last resort instead of the
+anyone. A `SIGTERM` landing squarely mid-pass, mid-HTTP-call, aborts that
+specific request against whatever peer is on the other end with no chance
+to complete — a real (if narrow) asymmetry between how this project treats
+its own users and how it treats the peers it talks to. `run_link_sync`
+gains an optional `stop_event: asyncio.Event | None`, checked once at the
+top of the outer loop (before starting a new pass, not mid-pass —
+deliberately simple: passes are normally sub-second, so the value of
+checking more granularly inside one is marginal against the complexity of
+doing so) so a currently in-flight pass, including whatever HTTP call it's
+in the middle of, is always allowed to finish naturally. Shutdown sets the
+event, then `asyncio.wait_for`s the task against the existing
+`ShutdownConfig.graceful_delay_seconds` (60s default) — reusing the one
+"how long is a graceful shutdown allowed to take" operator-facing number
+rather than adding a second, Link-specific timer to reason about — falling
+back to the pre-existing hard `.cancel()` only if that bound is exceeded (a
+pass stuck on an unreachable seed's own connect timeout, say), never
+removing the fallback, only making it the last resort instead of the
 first.
+
+The loop's own trailing `await asyncio.sleep(interval_seconds)` turned out
+to need the same treatment, contrary to this bullet's original assumption
+above that an immediate cancel there is harmless — harmless to *correctness*,
+yes, but not to shutdown *latency*: `sync_interval_seconds` defaults to
+300s, routinely dwarfing `graceful_delay_seconds` itself, and the node
+spends most of its time asleep between passes, not mid-pass. Leaving that
+sleep uninterrupted would have meant an ordinary shutdown — almost always
+landing during the sleep, not during a pass — silently waited out however
+much of the interval remained, then hard-cancelled anyway once
+`graceful_delay_seconds` ran out regardless, delivering neither a graceful
+finish nor a prompt exit. `stop_event`-provided callers now wait on `stop_
+event.wait()` bounded by `asyncio.wait_for(..., timeout=interval_seconds)`
+in place of the plain sleep, waking immediately once shutdown signals
+rather than waiting out the full interval; an idle sleep has no in-flight
+work to protect, so cutting it short costs nothing the way interrupting a
+live HTTP call would. Callers that don't pass a `stop_event` (`None`, the
+default) still get the original unconditional `asyncio.sleep`, unchanged.
 
 **Explicitly out of scope for this bullet**: `seed_refresh_task` (fetches
 this project's own trusted release-hosting infrastructure, not a peer's
@@ -2095,7 +2111,7 @@ reasoning (node-wide disk quota and event-retention/purging, §13.9;
 per-seed historical/trend health visibility, §13.6) — not a silently
 abandoned acceptance criterion.
 
-Design-complete, not yet implemented.
+Implemented.
 
 ---
 

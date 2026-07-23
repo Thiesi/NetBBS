@@ -1922,6 +1922,34 @@ def test_repair_carried_posts_screen_materializes_a_missing_gap(db, lane, sysop)
     assert row["subject"] == "hello"
 
 
+def test_diagnostic_log_screen_reports_nothing_logged_yet(db, lane, sysop):
+    link_context = _link_context()
+
+    session = FakeSession(["s", "d", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Diagnostic log:" in text
+    assert "Nothing logged yet." in text
+
+
+def test_diagnostic_log_screen_lists_and_shows_entry_detail(db, lane, sysop):
+    link_context = _link_context()
+    db.connection.execute(
+        "INSERT INTO link_diagnostic_log (level, logger_name, message, created_at) "
+        "VALUES ('WARNING', 'netbbs.link.sync', 'could not complete hello with seed X', '2026-01-01T00:00:00Z')"
+    )
+    db.connection.commit()
+
+    session = FakeSession(["s", "d", "0", "1", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "netbbs.link.sync" in text
+    assert "could not complete hello with seed X" in text
+    assert "WARNING" in text
+
+
 def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
     from netbbs.link.events import build_endpoint_descriptor
     from netbbs.link.node_identity import bootstrap_node_identity

@@ -1134,3 +1134,81 @@ def test_full_relay_round_trip_delivers_a_message_to_an_outgoing_only_recipient(
         alice.close()
         bob.close()
         carol.close()
+
+
+# -- graceful drain via stop_event (design doc §13.11, issue #60) ---------
+
+
+def test_sync_exits_normally_once_stop_event_is_set_mid_sleep(tmp_path):
+    """The cooperative counterpart to test_sync_is_cleanly_cancellable_
+    mid_sleep above: setting stop_event lets the task finish its
+    current pass and return normally -- no CancelledError, no explicit
+    .cancel() needed -- once the loop notices the signal at the top of
+    its next iteration."""
+    dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
+    dialer = _NodeDb(tmp_path, "dialer")
+    stop_event = asyncio.Event()
+
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            task = asyncio.create_task(
+                run_link_sync(
+                    dialer_node, session, [], lambda: _hello_for(dialer_node), dialer.lane,
+                    interval_seconds=60.0, stop_event=stop_event,
+                )
+            )
+            await asyncio.sleep(0.05)  # past the (empty) seed pass, into the sleep
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=5.0)
+            assert task.cancelled() is False
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        dialer.close()
+
+
+def test_sync_runs_no_pass_at_all_when_stop_event_is_already_set(tmp_path):
+    """A stop_event set before the task ever starts must return
+    immediately, without dialing anything -- confirms the check really
+    is "at the top of the loop," not merely "somewhere before the next
+    sleep returns.\""""
+    dialer_node = LinkNode(identity=bootstrap_node_identity("dialer"))
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    hello_count = 0
+    real_handle_hello = seed_node.handle_hello
+
+    def _counting_handle_hello(message, **kwargs):
+        nonlocal hello_count
+        hello_count += 1
+        return real_handle_hello(message, **kwargs)
+
+    seed_node.handle_hello = _counting_handle_hello
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane,
+                        interval_seconds=60.0, stop_event=stop_event,
+                    )
+                )
+                await asyncio.wait_for(task, timeout=5.0)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert hello_count == 0
+    finally:
+        dialer.close()
+        seed.close()

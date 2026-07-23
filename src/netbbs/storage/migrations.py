@@ -1670,4 +1670,35 @@ MIGRATIONS = [
             ON link_work_items(next_attempt_at) WHERE status IN ('pending', 'retrying');
         """,
     ),
+    Migration(
+        description=(
+            "Bounded Link diagnostic log (design doc §13.11, issue #60): "
+            "distinct from moderation_log, which is a permanent audit trail "
+            "-- this one is deliberately non-permanent, pruned by "
+            "netbbs.link.diagnostics.LinkDiagnosticLogHandler on every "
+            "write against operator-configured age/row bounds "
+            "(LinkConfig.diagnostic_log_max_age_days/max_rows). Populated "
+            "by attaching a logging.Handler to the netbbs.link logger "
+            "namespace at WARNING level and above -- catches every "
+            "existing _logger.warning/.error call already scattered across "
+            "netbbs.link.sync/.transport/.seedlist via ordinary logger "
+            "propagation, no per-call-site instrumentation needed. Every "
+            "one of those existing calls is already about protocol/dial/ "
+            "sync events (a URL, a fingerprint, an exception message), "
+            "never a Link message's decrypted body or a board post's "
+            "content -- 'metadata only' is a property of which call sites "
+            "exist today, confirmed by audit, not a filter this table "
+            "enforces itself."
+        ),
+        sql="""
+        CREATE TABLE link_diagnostic_log (
+            id           INTEGER PRIMARY KEY,
+            level        TEXT NOT NULL,
+            logger_name  TEXT NOT NULL,
+            message      TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        CREATE INDEX idx_link_diagnostic_log_created_at ON link_diagnostic_log(created_at);
+        """,
+    ),
 ]

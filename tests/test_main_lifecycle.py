@@ -167,6 +167,44 @@ def test_startup_fails_cleanly_on_a_database_from_a_newer_build(tmp_path):
     asyncio.run(scenario())
 
 
+def test_startup_fails_cleanly_on_a_corrupted_database(tmp_path):
+    """Design doc §13.11, issue #60: a corrupted database must be
+    refused loudly at startup, not left to surface later as a
+    confusing raw error the first time some unlucky query touches the
+    damaged page."""
+    config = _config(tmp_path, telnet=TransportConfig(True, "127.0.0.1", 12406))
+
+    # Enough real rows, spread across several pages, that a late-offset
+    # corruption lands in table data rather than the header/schema page
+    # -- same technique as tests/test_storage.py's own integrity-check
+    # coverage, see that test for why the offset matters.
+    conn = sqlite3.connect(str(config.db_path))
+    for i in range(500):
+        conn.execute(
+            "INSERT INTO node_config (key, value) VALUES (?, ?)", (f"key-{i}", "x" * 200)
+        )
+    conn.commit()
+    conn.close()
+    with config.db_path.open("r+b") as handle:
+        handle.seek(0, 2)
+        file_size = handle.tell()
+        handle.seek(file_size - 500)
+        handle.write(b"\xff" * 200)
+
+    async def scenario():
+        shutdown_event = asyncio.Event()
+        with pytest.raises(StartupError, match="failed integrity check"):
+            await run(config, shutdown_event=shutdown_event)
+
+    asyncio.run(scenario())
+
+    # The database connection was closed on the way out, not leaked --
+    # a fresh, unrelated connection can still open the (still-corrupt,
+    # but not locked) file immediately afterward.
+    conn = sqlite3.connect(str(config.db_path))
+    conn.close()
+
+
 # -- listeners actually start and are reachable ------------------------------
 
 
@@ -287,6 +325,153 @@ def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
             await seed_server.stop()
             seed_lane.close()
             seed_db.close()
+
+    asyncio.run(scenario())
+
+
+def test_link_sync_failures_reach_the_bounded_diagnostic_log(tmp_path):
+    """Design doc §13.11, issue #60: LinkDiagnosticLogHandler is
+    actually attached during a real run() -- not just unit-tested in
+    isolation (tests/test_link_diagnostics.py) -- confirmed here against
+    a genuine dial failure a real running node produces on its own."""
+    async def scenario():
+        # A closed port -- nothing is listening, so every dial attempt
+        # fails immediately with a real connection error, exactly the
+        # sync.py call site (`_logger.warning("Link sync: could not
+        # complete hello with seed %s: %s", ...)`) this test means to
+        # exercise.
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12407),
+            link=LinkConfig(
+                enabled=True, host="127.0.0.1", port=12408,
+                seeds=["http://127.0.0.1:1"], sync_interval_seconds=60.0,
+            ),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12407)
+
+            # Other Link background tasks (e.g. the scheduled seed-list
+            # refresh, which also logs a warning trying to reach its own
+            # real endpoint) can legitimately write to the same log
+            # concurrently -- poll for the *specific* sync.py dial
+            # failure this test means to exercise, not just "any row."
+            deadline = asyncio.get_event_loop().time() + 5.0
+            matching_row = None
+            while matching_row is None:
+                if asyncio.get_event_loop().time() >= deadline:
+                    raise AssertionError("no diagnostic log entry appeared for the failed dial")
+                conn = sqlite3.connect(str(config.db_path))
+                try:
+                    rows = conn.execute(
+                        "SELECT level, logger_name, message FROM link_diagnostic_log"
+                    ).fetchall()
+                finally:
+                    conn.close()
+                matching_row = next((row for row in rows if row[1] == "netbbs.link.sync"), None)
+                if matching_row is None:
+                    await asyncio.sleep(0.05)
+        finally:
+            shutdown_event.set()
+            await task
+
+        assert matching_row[0] == "WARNING"
+        assert "could not complete hello" in matching_row[2]
+
+    asyncio.run(scenario())
+
+
+def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path):
+    """Design doc §13.11, issue #60's graceful-drain piece: proves the
+    fix through a real run(), not just the run_link_sync-level unit
+    test (tests/test_link_sync.py) -- a first version of this feature
+    only interrupted the loop's *top-of-pass* check, leaving the
+    trailing `asyncio.sleep(sync_interval_seconds)` to run to
+    completion regardless, which meant shutdown would silently wait out
+    however much of a five-minute default interval remained (routinely
+    longer than `graceful_delay_seconds` itself) before ever falling
+    back to a hard cancel. `sync_interval_seconds` here is deliberately
+    far longer than `graceful_delay_seconds` -- if shutdown were still
+    waiting out that sleep, this test's own generous ceiling below
+    would catch it."""
+    async def scenario():
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12409),
+            link=LinkConfig(
+                enabled=True, host="127.0.0.1", port=12410,
+                seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
+            ),
+            shutdown=ShutdownConfig(graceful_delay_seconds=20.0),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12409)
+            # Let the first pass finish and the sync task settle into its
+            # (long) trailing sleep before signalling shutdown.
+            await asyncio.sleep(0.3)
+
+            start = asyncio.get_event_loop().time()
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=5.0)
+            elapsed = asyncio.get_event_loop().time() - start
+        finally:
+            if not task.done():
+                shutdown_event.set()
+                await task
+
+        # Well under both graceful_delay_seconds (20s) and
+        # sync_interval_seconds (120s) -- the sleep was woken early, not
+        # waited out.
+        assert elapsed < 2.0
+
+    asyncio.run(scenario())
+
+
+def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(tmp_path, monkeypatch):
+    """The fallback half of the same graceful-drain piece: a pass that
+    never returns on its own (a wedged dial) must still not hang
+    shutdown forever -- past `graceful_delay_seconds`, today's
+    unconditional hard `.cancel()` remains the backstop."""
+    import netbbs.link.sync as sync_module
+
+    async def _hang_forever(*args, **kwargs):
+        await asyncio.sleep(999)
+
+    monkeypatch.setattr(sync_module, "_sync_one_seed", _hang_forever)
+
+    async def scenario():
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12411),
+            link=LinkConfig(
+                enabled=True, host="127.0.0.1", port=12412,
+                seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
+            ),
+            shutdown=ShutdownConfig(graceful_delay_seconds=0.3),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12411)
+            await asyncio.sleep(0.1)  # into the now-hanging first pass
+
+            start = asyncio.get_event_loop().time()
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=10.0)
+            elapsed = asyncio.get_event_loop().time() - start
+        finally:
+            if not task.done():
+                shutdown_event.set()
+                await task
+
+        # Waited out roughly the configured grace period (not an
+        # instant cancel) before the hard-cancel fallback took over, and
+        # didn't hang indefinitely on the wedged pass.
+        assert 0.3 <= elapsed < 8.0
 
     asyncio.run(scenario())
 

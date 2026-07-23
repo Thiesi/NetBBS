@@ -811,6 +811,18 @@ Graceful shutdown:
 Cleanup writes to an already-dead client are best-effort and may not replace
 the exception which caused cleanup.
 
+A cooperative `stop_event` checked only at the top of a polling loop is not
+enough to drain that loop promptly if the loop's own idle wait (a sleep
+between passes) is long relative to the shutdown grace budget — the loop
+won't re-check the event until the sleep itself returns. If the idle wait
+has no in-flight work to protect (unlike a live network call mid-pass), make
+the wait itself interruptible by the same event (e.g. `asyncio.wait_for(stop_
+event.wait(), timeout=interval_seconds)` in place of a plain `asyncio.sleep`)
+rather than only gating the top of the loop. `netbbs.link.sync.run_link_
+sync`'s `stop_event` parameter does this: it lets its own 5-minute-default
+`sync_interval_seconds` sleep be woken early, while still letting an
+in-flight dial/push pass finish untouched.
+
 ---
 
 ## 9. Link protocol invariants
@@ -844,6 +856,17 @@ independent canonicalization implementations. Design doc §7.2's golden
 vectors (`tests/fixtures/link_canonical_vectors.json`) pin exact canonical
 bytes/content IDs for representative payloads; update them only alongside a
 deliberate canonicalization change.
+
+Every envelope's `netbbs_protocol` field is checked for an exact match
+against this build's own `NETBBS_PROTOCOL_VERSION` (`LinkNode._check_
+protocol_version`, design doc §13.11) at `handle_events`' single per-event
+`object_type`-extraction point and against `handle_hello`'s embedded
+transitions/descriptor envelopes -- before signature verification, so a
+mismatched version is rejected on its own terms rather than surfacing as a
+signature failure. Exact match only, never a supported range, since version
+1 has been the only version to ever exist; a future protocol bump that means
+to support mixed-version peers during a rollout needs to deliberately design
+that compatibility window here, not assume one already exists.
 
 ### Chain-order reconstruction must not trust `created_at` alone
 
@@ -1235,10 +1258,25 @@ Startup should fail clearly for:
 - corrupt or inconsistent key-transition state;
 - operational key files which disagree with the verified chain;
 - listener/configuration failures;
-- database integrity failures once that gate is implemented.
+- database integrity failures (`Database.check_integrity`, `PRAGMA integrity_
+  check`, called once by `netbbs.__main__.run()` right after opening the
+  database — deliberately not from `Database.__init__`, which every admin
+  script and the entire test suite also goes through and would otherwise pay
+  a full-scan cost for on every construction).
 
 Purge only known-safe staging artifacts before accepting traffic. Unexpected
 directories and symlinks are not ordinary stale upload files.
+
+A corruption regression test must corrupt bytes actually reachable only by a
+full scan, not bytes near the file header. Corrupting near the start of the
+file (e.g. offset ~100) breaks `PRAGMA journal_mode = WAL` itself during
+`Database.__init__`/`_configure_pragmas`, so the test never reaches the
+integrity check it means to exercise — it fails for the wrong reason, before
+`check_integrity()` is ever called. Insert enough real rows to span multiple
+pages first, then corrupt bytes near the *end* of the file, so the damage
+lands in table data an already-fully-migrated `Database.__init__` never
+touches, and only an explicit full-table-scanning `PRAGMA integrity_check`
+catches it.
 
 ---
 

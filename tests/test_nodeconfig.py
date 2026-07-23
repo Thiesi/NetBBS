@@ -644,3 +644,49 @@ def test_toml_quota_fields(tmp_path):
     assert config.link.request_rate_capacity == 5.0
     assert config.link.request_rate_refill_per_minute == 10.0
     assert config.link.request_rate_max_tracked_sources == 100
+
+
+# -- diagnostic log (design doc §13.11, issue #60's remaining pieces) -------
+
+
+def test_default_link_config_has_safe_diagnostic_log_defaults():
+    config = NodeConfig()
+    assert config.link.diagnostic_log_max_age_days == 30
+    assert config.link.diagnostic_log_max_rows == 5_000
+
+
+@pytest.mark.parametrize("field_name", ["diagnostic_log_max_age_days", "diagnostic_log_max_rows"])
+def test_link_nonpositive_diagnostic_log_field_fails_validation(field_name):
+    config = NodeConfig(
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, **{field_name: 0})
+    )
+    with pytest.raises(ConfigError, match=f"link.{field_name}"):
+        config.validate()
+
+
+def test_cli_can_set_diagnostic_log_fields():
+    config = load_config([
+        "--enable-telnet", "--enable-link",
+        "--link-diagnostic-log-max-age-days", "7",
+        "--link-diagnostic-log-max-rows", "500",
+    ])
+    assert config.link.diagnostic_log_max_age_days == 7
+    assert config.link.diagnostic_log_max_rows == 500
+
+
+def test_toml_diagnostic_log_fields(tmp_path):
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        """
+        [telnet]
+        enabled = true
+
+        [link]
+        enabled = true
+        diagnostic_log_max_age_days = 7
+        diagnostic_log_max_rows = 500
+        """
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.link.diagnostic_log_max_age_days == 7
+    assert config.link.diagnostic_log_max_rows == 500

@@ -141,6 +141,13 @@ class LinkConfig:
     addresses it remembers at once (same LRU-eviction-under-attack
     trade-off `ThrottleConfig.max_tracked_keys` already documents for
     login throttling).
+
+    `diagnostic_log_max_age_days`/`diagnostic_log_max_rows` (design doc
+    §13.11, issue #60's remaining pieces): bound `netbbs.link.
+    diagnostics.LinkDiagnosticLogHandler`'s own bounded, non-permanent
+    `link_diagnostic_log` table -- whichever limit is stricter in
+    practice actually governs, both are enforced independently on every
+    write.
     """
 
     enabled: bool = False
@@ -158,6 +165,8 @@ class LinkConfig:
     request_rate_capacity: float = 20.0
     request_rate_refill_per_minute: float = 60.0
     request_rate_max_tracked_sources: int = 10_000
+    diagnostic_log_max_age_days: int = 30
+    diagnostic_log_max_rows: int = 5_000
 
 
 @dataclass(frozen=True)
@@ -269,6 +278,8 @@ class NodeConfig:
                 "request_rate_capacity": self.link.request_rate_capacity,
                 "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
                 "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
+                "diagnostic_log_max_age_days": self.link.diagnostic_log_max_age_days,
+                "diagnostic_log_max_rows": self.link.diagnostic_log_max_rows,
             }
             for name, value in _require_positive_link.items():
                 if value <= 0:
@@ -418,6 +429,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--link-request-rate-max-tracked-sources",
         dest="link_request_rate_max_tracked_sources", type=int, default=None,
     )
+    # Design doc §13.11 (issue #60's remaining pieces).
+    parser.add_argument(
+        "--link-diagnostic-log-max-age-days", dest="link_diagnostic_log_max_age_days", type=int, default=None
+    )
+    parser.add_argument(
+        "--link-diagnostic-log-max-rows", dest="link_diagnostic_log_max_rows", type=int, default=None
+    )
     return parser
 
 
@@ -506,6 +524,10 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         request_rate_max_tracked_sources=int(
             table.get("request_rate_max_tracked_sources", current.request_rate_max_tracked_sources)
         ),
+        diagnostic_log_max_age_days=int(
+            table.get("diagnostic_log_max_age_days", current.diagnostic_log_max_age_days)
+        ),
+        diagnostic_log_max_rows=int(table.get("diagnostic_log_max_rows", current.diagnostic_log_max_rows)),
     )
 
 
@@ -577,6 +599,8 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_request_rate_capacity,
         args.link_request_rate_refill_per_minute,
         args.link_request_rate_max_tracked_sources,
+        args.link_diagnostic_log_max_age_days,
+        args.link_diagnostic_log_max_rows,
     )
     if any(value is not None for value in link_overrides):
         config = replace(
@@ -630,6 +654,16 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     link.request_rate_max_tracked_sources
                     if args.link_request_rate_max_tracked_sources is None
                     else args.link_request_rate_max_tracked_sources
+                ),
+                diagnostic_log_max_age_days=(
+                    link.diagnostic_log_max_age_days
+                    if args.link_diagnostic_log_max_age_days is None
+                    else args.link_diagnostic_log_max_age_days
+                ),
+                diagnostic_log_max_rows=(
+                    link.diagnostic_log_max_rows
+                    if args.link_diagnostic_log_max_rows is None
+                    else args.link_diagnostic_log_max_rows
                 ),
             ),
         )

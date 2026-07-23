@@ -187,6 +187,7 @@ async def run_link_sync(
     lane: DatabaseLane,
     *,
     interval_seconds: float,
+    stop_event: asyncio.Event | None = None,
 ) -> None:
     """
     Runs until cancelled: each pass dials every seed in `seeds` (in
@@ -212,8 +213,30 @@ async def run_link_sync(
     the network once a live fetch succeeds, without needing a restart.
     Re-read from the lane every pass, not captured once at startup, or
     "live" refresh would only ever take effect after a restart.
+
+    `stop_event` (design doc §13.11, issue #60's graceful-drain piece):
+    an optional cooperative stop signal, checked once per pass at the
+    top of the loop below -- deliberately *not* mid-pass, so a pass
+    already underway (a dial, a push) always finishes normally rather
+    than being torn out of half-done. `netbbs.__main__`'s shutdown
+    sequence sets it, then bounds its own wait with `asyncio.wait_for`
+    against `ShutdownConfig.graceful_delay_seconds`, falling back to
+    today's unconditional hard `.cancel()` only if that bound is
+    exceeded (e.g. a dial wedged on a dead peer that never times out).
+
+    The trailing `interval_seconds` sleep is itself woken early by
+    `stop_event` too -- unlike an in-flight dial/push, an idle sleep has
+    no partial work to protect, and `sync_interval_seconds` (five
+    minutes by default) is routinely far longer than `graceful_delay_
+    seconds` (one minute by default); waiting out a full ordinary sleep
+    before ever re-checking the loop condition would make shutdown
+    linger for no benefit and then hard-cancel anyway once the grace
+    period ran out regardless. `None` (the default) preserves every
+    existing caller/test that doesn't pass one, behaving exactly as the
+    unconditional `while True:`/`asyncio.sleep` this replaced always
+    did.
     """
-    while True:
+    while stop_event is None or not stop_event.is_set():
         supplementary = await lane.run(get_cached_supplementary_seeds)
         # De-duplicated, order-preserving: operator-configured first.
         pass_seeds = list(dict.fromkeys(seeds + supplementary))
@@ -248,7 +271,17 @@ async def run_link_sync(
             await _maintain_relay_selection(node, session, own_hello_provider, lane)
             await _pickup_relay_mail(node, session, own_hello_provider, lane)
         await _push_pending_link_mail(node, session, lane)
-        await asyncio.sleep(interval_seconds)
+        if stop_event is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            # Woken early by stop_event (see this function's own
+            # docstring for why an idle sleep, unlike an in-flight
+            # pass, is safe to cut short) -- otherwise identical to the
+            # plain asyncio.sleep(interval_seconds) above.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            except asyncio.TimeoutError:
+                pass
 
 
 async def _sync_one_seed(
