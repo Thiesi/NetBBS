@@ -96,7 +96,60 @@ NetBBS is not intended to:
 
 ### 2.1 Target platform and stack
 
-- Primary target: **NetBSD**, distributed eventually through pkgsrc.
+**Platform support tiers (issue #81).** Without an explicit contract,
+portability becomes accidental — a NetBSD-specific detail creeping into
+core code, or Linux/macOS breakage going unnoticed, or (the opposite
+failure) primary-target constraints getting quietly weakened to
+accommodate a platform that was never meant to drive architecture.
+Four tiers, in order:
+
+- **Tier 1 / primary — NetBSD, via pkgsrc.** Every design and
+  dependency choice must work here; this is the platform "does this
+  work?" defaults to. Existing Tier-1-driven decisions: PyNaCl over
+  `cryptography` below (avoids imposing a Rust toolchain on pkgsrc
+  without a compelling benefit); FTS5 availability confirmed by tracing
+  pkgsrc's actual `lang/python312` → `databases/sqlite3` build chain
+  (worklog §6), not assumed.
+- **Tier 2 / supported — mainstream Linux distributions**, using
+  ordinary Python packaging (venv/pip) and system service managers
+  (systemd). A regression here is a real bug — *unless* fixing it would
+  weaken a Tier-1 constraint, in which case Tier-1 wins; Tier 2 never
+  gets to relax what Tier 1 needs.
+- **Tier 3 / best-effort — other POSIX systems** (macOS, FreeBSD,
+  illumos, etc.), until a maintainer or user demonstrates a build/run
+  exercised with some regularity. No dedicated design effort beyond
+  staying ordinary POSIX-portable Python.
+- **Development-only compatibility — Windows.** Convenient for local
+  development and testing (this project's own dev sandbox routinely
+  runs here) — never a target for production semantics that depend on
+  POSIX facilities: real signal delivery (`asyncio.loop.
+  add_signal_handler`), `os.kill(pid, 0)`-style liveness probes, POSIX
+  file permission bits, `termios`/`tty` raw-mode terminal control.
+  Existing platform branches — `netbbs.net.local_terminal` (raw-mode
+  input), `netbbs.backup._process_is_running` (restore's liveness
+  probe), `netbbs.__main__`'s signal-handler setup — already draw
+  exactly this line, each with its own `sys.platform`/`os.name` check
+  and a comment naming Windows as the dev/test fallback, never the
+  deployment target; this tier list makes that existing practice an
+  explicit policy rather than an implicit one three separate modules
+  happened to agree on.
+
+Consequences of the tier list, not separate rules:
+
+- A new dependency is evaluated against the Tier-1 target *before*
+  adoption: does it need a Rust toolchain, a C extension with no
+  pkgsrc package, or an assumption unlikely to hold on NetBSD? Tier-2/3
+  convenience is never sufficient justification by itself.
+- Platform-specific code stays isolated in a small number of narrow
+  modules/functions (the three named above), never scattered
+  `sys.platform`/`os.name` checks through domain code. Core/domain/
+  protocol modules (`netbbs.boards`, `netbbs.link`, etc.) are plain
+  POSIX-portable Python with no platform branching at all.
+- Packaging/service examples (issue #82) are written for Tier 1
+  (pkgsrc/rc.d) and Tier 2 (systemd) explicitly; a Tier-3 or
+  development-only path is documented as such, never presented as an
+  equally-supported option.
+
 - Runtime: Python 3.11+ with asyncio.
 - Storage: one SQLite database per node, using WAL mode.
 - Cryptography: PyNaCl/libsodium. Avoid dependencies which impose a Rust
@@ -2506,6 +2559,20 @@ mail scenario (and its restart variant) would fail on the pre-fix
 issue #69 implementation by temporarily reverting the fix and observing
 both fail, then restoring it. Future Link vertical slices extend this
 file before being considered complete.
+
+### Issue #81 — supported platform tiers — closed
+
+§2.1's "Platform support tiers" subsection now states the complete
+policy: NetBSD/pkgsrc (Tier 1, primary), mainstream Linux/systemd
+(Tier 2, supported), other POSIX systems (Tier 3, best-effort), and
+Windows (development-only, no production-semantics promise). Auditing
+every existing `sys.platform`/`os.name` branch (`netbbs.net.
+local_terminal`, `netbbs.backup._process_is_running`,
+`netbbs.__main__`'s signal-handler setup) found the codebase already
+drew exactly this line in practice, each in its own narrow, already-
+isolated function — this closes the gap between that existing practice
+and an explicit, written contributor-facing policy, rather than
+requiring code changes.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 

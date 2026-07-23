@@ -6,8 +6,16 @@ network that lets independent NetBBS nodes discover each other, exchange
 message boards and personal messages, and (later) real-time chat, without
 requiring any central authority.
 
-Primary deployment target: **NetBSD** (via pkgsrc). Expected to run on
-other POSIX systems too.
+**Platform support (design doc §2.1):** NetBSD via pkgsrc is Tier 1/
+primary — every design and dependency choice must work there. Mainstream
+Linux (ordinary Python packaging, systemd) is Tier 2/supported — a
+regression there is a real bug unless fixing it would weaken a Tier-1
+constraint. Other POSIX systems (macOS, FreeBSD, etc.) are Tier 3/
+best-effort. Windows is development-only: convenient for local dev and
+testing (this project's own dev sandbox routinely runs there), never a
+target for production semantics that depend on POSIX facilities (real
+signal delivery, `os.kill`-style liveness checks, POSIX file
+permissions, raw-mode terminal control).
 
 ## Status
 

@@ -1423,6 +1423,25 @@ lands in table data an already-fully-migrated `Database.__init__` never
 touches, and only an explicit full-table-scanning `PRAGMA integrity_check`
 catches it.
 
+### Platform-specific code stays in exactly three narrow places (issue #81)
+
+A full-repo audit (`grep` for `sys.platform`/`os.name` across `src/`)
+found only three call sites with any platform branching at all:
+`netbbs.net.local_terminal` (raw-mode terminal input for the local
+SysOp CLI), `netbbs.backup._process_is_running` (restore's real-vs-
+Windows-dev liveness probe), and `netbbs.__main__`'s signal-handler
+setup (`add_signal_handler` with a `signal.signal` fallback). All three
+already existed with the same shape before design doc §2.1's platform-
+tier policy was written down: a narrow, isolated function, its own
+`sys.platform`/`os.name` check, and a comment naming Windows as this
+project's own dev/test environment, never the deployment target. The
+tier policy is a formalization of practice that was already consistent
+across three independently-written modules, not a correction. Any new
+platform branch should keep this shape: a small, named function/module,
+never a `sys.platform` check inline inside domain logic (`netbbs.
+boards`, `netbbs.link`, etc., none of which have any platform
+branching today and should stay that way).
+
 ---
 
 ## 11. Testing and validation policy
