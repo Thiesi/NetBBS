@@ -1076,6 +1076,25 @@ of one cryptographic identity.
 Before an update which can migrate the schema, snapshot the database so binary
 and schema can be rolled back together.
 
+A node's recoverable state is five artifacts, not three — beyond the
+database, content blobs, and node identity already named above, a complete
+backup also needs the SSH host key
+(`db_path.parent / f"{db_path.stem}_ssh_host_key"`, `netbbs.net.ssh.
+ensure_host_key`) and the welcome banner
+(`db_path.parent / f"{db_path.stem}_welcome_banner.ans"`) — both derived,
+`db_path`-relative paths with no dedicated config field, easy to miss if a
+backup procedure is designed by re-deriving "what does a node write to disk"
+from memory rather than grepping for every `db.path.parent /` call site.
+`netbbs.selfupdate.snapshot_database`/`restore_database` are the proven
+primitive for the database half of this (`sqlite3.Connection.backup()`,
+never a raw file copy) — reuse them rather than re-implementing; see design
+doc §13.4 for the full `netbbs.backup` module design (blobs must be copied
+strictly after the DB snapshot, never before or concurrently — the
+DB-references-a-blob invariant only holds in that direction) and the
+restore-time precondition check (`sqlite3.connect(db_path, timeout=0)` +
+`BEGIN IMMEDIATE`, refusing loudly if a live process already holds the
+write lock, rather than silently overwriting bytes out from under it).
+
 ### Bounds and visibility
 
 Every remotely influenced queue, mailbox, transfer, retry set, and retained

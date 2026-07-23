@@ -1318,22 +1318,98 @@ A database from a newer build must fail startup clearly. A matching
 manual schema mutation is unsupported unless a future schema fingerprint is
 introduced.
 
-### 13.4 Backup and restore
+### 13.4 Backup and restore (issue #60's first operational slice)
 
-Use SQLite’s online backup API; never copy a live WAL database as one inert file.
+A node's recoverable state is not only its database — it is five artifacts,
+today scattered across derived, `db_path`-relative filenames with no single
+existing tool that treats them as one recoverable set:
 
-Backup order:
+| Artifact | Location | Written by |
+|---|---|---|
+| Database | `db_path` | every domain write |
+| Content blobs | `db_path.parent / f"{db_path.stem}_files"` (git-style `xx/xxxx...` sharding; excludes its own `.incoming/` staging subdirectory, which is always crash-orphan garbage — see `purge_incoming_staging`) | `netbbs.files.storage` |
+| Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
+| SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
+| Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
 
-1. database snapshot;
-2. content blobs;
-3. node identity material as part of the same recoverable set.
+A backup covering only the database silently loses the SSH host key (every
+client gets a MITM warning on next connect after restore) and, far more
+seriously, the Link node identity (root-key custody is explicitly "part of
+ordinary node backup and restore" per §4.5's node identity model, not a
+separate ceremony) — so this design treats all five as one atomic backup
+operation, never a DB-only one.
 
-This order may leave harmless unreferenced blobs but must not leave database
-references to absent blob files.
+**Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no
+`Database` wrapper needed, since a backup must be safely takeable against a
+*live, running* node, not only an offline one) with two entry points, plus a
+`python -m netbbs.backup {create,restore}` CLI in the same spirit as
+`python -m netbbs.admin` — deliberately a standalone process rather than an
+interactive SysOp-menu action, since backups need to be cron-schedulable
+(this project has no background scheduler anywhere, and won't grow one just
+for this — matching `_sweep_expired_posts`'s and `files.gc`'s own precedent
+of "the operator/an external trigger drives it, not a built-in timer").
 
-Restoration resumes the same node identity. Running the old and restored
-instances simultaneously is unsupported and can create two active copies of one
-cryptographic identity.
+`create_backup(*, db_path, identity_dir, destination)`:
+
+1. **Database**: reuses `netbbs.selfupdate.snapshot_database` verbatim
+   (`sqlite3.Connection.backup()`, already proven safe against a live WAL
+   database in `test_snapshot_and_restore_database_round_trip`) — written to
+   `destination/netbbs.db`. Never a raw file copy.
+2. **Content blobs**: `shutil.copytree` of the blob root into
+   `destination/files/`, `.incoming/` excluded. Must run strictly *after*
+   step 1, not before or concurrently — this is what makes the DB-then-
+   blobs ordering below actually safe, not just a stated convention:
+   `netbbs.files.entries`'s own invariant is that a `files` row is only ever
+   created after its bytes are already durably written to storage, never
+   the other way around. So every blob a given DB snapshot's rows could
+   possibly reference was already on disk before that snapshot was even
+   taken — copying blobs afterward is guaranteed to include all of them,
+   plus possibly a few newer, still-unreferenced ones from uploads that
+   landed in between (harmless — an orphaned blob a future GC pass could
+   still reclaim, never a dangling reference). Reversing the order would
+   risk the opposite, genuinely broken case: a DB snapshot referencing a
+   blob the copy hadn't reached yet.
+3. **Node identity, SSH host key, welcome banner**: plain file copies (each
+   is either static after creation or already rewritten via its own
+   atomic-replace pattern — `node_identity.py`'s `transitions.json`, notably
+   — so no read-tearing hazard). The welcome banner is the one exception
+   with no atomicity guarantee on its own writes; a backup landing mid-edit
+   could capture a half-written banner. Accepted as-is: purely cosmetic, no
+   correctness consequence, not worth an atomic-write retrofit just for
+   backup's sake.
+
+Writes `destination/manifest.json` last (timestamp, `netbbs.__version__`,
+the database's own `PRAGMA user_version`, and the five source paths as
+recorded) — lets an operator (or a future restore-time check) confirm what a
+given backup directory actually is before trusting it. Also records
+`last_backup_at`/`last_backup_path` into the live node's own `node_config`
+table (same key-value store `netbbs.selfupdate`'s update-check state already
+uses) — purely for a future read-only SysOp status line (`_system_menu`,
+alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
+for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
+required for restore itself.
+
+`restore_backup(*, source, db_path, identity_dir)` reverses the five copies.
+**Precondition, checked, not just documented**: before writing anything,
+attempts `sqlite3.connect(str(db_path), timeout=0)` followed by
+`BEGIN IMMEDIATE` against any existing `db_path` — if that fails (a live
+node already holds the write lock), refuses the entire restore with a clear
+error rather than silently overwriting bytes out from under a running
+process's open connection. This catches the same-machine, currently-running
+case; it cannot catch — and this remains an accepted, documented operator
+responsibility, unchanged from this section's prior wording — a second
+instance of the same identity already running on a *different* machine.
+Restoration always resumes the same node identity; there is still no
+supported way to run an old and a restored instance simultaneously.
+
+**Explicitly deferred, not part of this slice**: encrypting backup
+contents at rest (identity material is already unencrypted-by-default on a
+live node — see §4.5 — and this tool preserves whatever it finds rather
+than changing that policy); off-site/remote transport of a completed backup
+directory; retention/rotation of old backups; and any form of automatic
+scheduling. All are operator/cron responsibilities this tool deliberately
+does not take on, the same boundary `files.gc`'s SysOp-triggered-only
+design already draws for blob garbage collection.
 
 ### 13.5 Bounded remote influence
 
@@ -1365,7 +1441,12 @@ including:
 - bounded diagnostic log retention without content logging;
 - protocol/database upgrade and rollback compatibility;
 - graceful drain of Link work during shutdown;
-- disaster recovery from stale backups.
+- disaster recovery drills exercising a restore under realistic conditions
+  (§13.4 specifies the backup/restore mechanism itself — `netbbs.backup`,
+  design-complete, not yet implemented; this bullet is the separate,
+  still-fully-open work of proving that mechanism against crash-mid-
+  transfer, corrupt-snapshot, and stale-backup scenarios, not just its
+  happy path).
 
 An externally operated persistent Link node should not be considered production
 ready before these controls exist and have been exercised.
