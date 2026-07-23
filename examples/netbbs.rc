@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# rc.d script for running a NetBBS node under NetBSD (design doc §2.1
+# Tier 1, issue #82).
+#
+# PROVIDE: netbbs
+# REQUIRE: NETWORKING SERVERS
+# KEYWORD: shutdown
+#
+# rc.conf(5) variables:
+#
+#	netbbs=YES			# enable the service
+#	netbbs_user="netbbs"		# unprivileged user to run as
+#	netbbs_config="/usr/pkg/etc/netbbs/netbbs.toml"
+#	netbbs_python="/usr/pkg/bin/python3.12"
+#
+# Install: copy this file to /usr/pkg/share/examples/rc.d/netbbs (the
+# pkgsrc convention), symlink or copy it to /etc/rc.d/netbbs, add
+# netbbs=YES to /etc/rc.conf, then `service netbbs start`.
+#
+# NOT YET BUILD/RUN-TESTED ON REAL NetBSD HARDWARE (design doc §2.1):
+# written to follow standard rc.subr(8) conventions and reviewed
+# against them, but not yet exercised on this project's actual Tier-1
+# target. Please report back (or send a fix) if this needs adjustment
+# on a real box.
+
+. /etc/rc.subr
+
+name="netbbs"
+rcvar=${name}
+: ${netbbs_user:="netbbs"}
+: ${netbbs_config:="/usr/pkg/etc/netbbs/netbbs.toml"}
+: ${netbbs_python:="/usr/pkg/bin/python3.12"}
+
+pidfile="/var/run/${name}.pid"
+procname="${netbbs_python}"
+
+# NetBBS deliberately never daemonizes itself (design doc §13.8): it
+# runs in the foreground and expects a supervisor to background and
+# restart it. daemon(8) (in the NetBSD base system since 8.0) does
+# exactly that -- forks the command into the background, writes the
+# real child's pid to $pidfile, and redirects its stdio -- so rc.subr's
+# ordinary start/stop/status logic works against that pidfile as usual.
+command="/usr/bin/daemon"
+command_args="-p ${pidfile} -u ${netbbs_user} -- ${netbbs_python} -m netbbs --config ${netbbs_config}"
+
+load_rc_config $name
+run_rc_command "$1"

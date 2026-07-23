@@ -33,6 +33,9 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from netbbs import __version__
+from netbbs.storage.migrations import MIGRATIONS
+
 _LOOPBACK_HOSTNAMES = {"localhost"}
 
 
@@ -359,8 +362,21 @@ class NodeConfig:
 _TRANSPORTS = ("telnet", "ssh", "web")
 
 
+def _version_string() -> str:
+    """`netbbs <release version> (schema version N)` -- issue #82: an
+    operator upgrading a package-managed install needs a fast way to
+    confirm what they actually have installed and what database schema
+    it expects, without starting a node. The schema number is this
+    build's own `len(MIGRATIONS)` (`netbbs.storage.migrations`), the
+    exact value `Database.__init__` compares a database's `PRAGMA
+    user_version` against -- independent of the release version
+    string, which is why both are shown rather than just one."""
+    return f"netbbs {__version__} (schema version {len(MIGRATIONS)})"
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="netbbs", description="Run a NetBBS node.")
+    parser.add_argument("--version", action="version", version=_version_string())
     parser.add_argument("--config", type=Path, default=None, help="path to a TOML config file")
     parser.add_argument("--db", type=Path, default=None, help="path to the node's SQLite database")
     parser.add_argument(

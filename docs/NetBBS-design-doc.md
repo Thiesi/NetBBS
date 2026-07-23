@@ -2574,6 +2574,24 @@ isolated function — this closes the gap between that existing practice
 and an explicit, written contributor-facing policy, rather than
 requiring code changes.
 
+### Issue #82 — operator-ready installation and release path — closed
+
+`docs/NetBBS-operator-guide.md` is the complete operator lifecycle:
+install (a real, tested non-editable wheel build/install with no
+source-checkout dependency, plus a documented-but-not-yet-submitted
+pkgsrc sketch), first-SysOp bootstrap via the existing `netbbs.admin`
+CLI, running under systemd/rc.d (`examples/netbbs.service`/`netbbs.rc`,
+the rc.d script not yet run-tested on real NetBSD hardware), persistent
+state paths, backup/restore (linking the existing disaster-recovery
+drill), upgrading, version/schema compatibility, and uninstalling
+without losing data. `python -m netbbs --version` (issue #82) prints
+the release version and expected schema number together. Documented,
+not implemented: `netbbs.selfupdate`'s existing download/snapshot/
+rollback plumbing has no wired apply-and-restart command yet — a
+deliberate prior deferral (that module's own docstrings), not a gap
+this issue asked to close; the package-manager upgrade path is what's
+actually supported today.
+
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 
 §6.6's "Integrity checking and rebuild" subsection now states the

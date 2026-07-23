@@ -690,3 +690,19 @@ def test_toml_diagnostic_log_fields(tmp_path):
     config = load_config(["--config", str(config_file)])
     assert config.link.diagnostic_log_max_age_days == 7
     assert config.link.diagnostic_log_max_rows == 500
+
+
+# -- --version (issue #82) ---------------------------------------------------
+
+
+def test_version_flag_prints_release_and_schema_version_and_exits(capsys):
+    from netbbs import __version__
+    from netbbs.storage.migrations import MIGRATIONS
+
+    with pytest.raises(SystemExit) as excinfo:
+        load_config(["--version"])
+    assert excinfo.value.code == 0
+
+    output = capsys.readouterr().out
+    assert __version__ in output
+    assert f"schema version {len(MIGRATIONS)}" in output

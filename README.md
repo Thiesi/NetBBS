@@ -258,6 +258,15 @@ connection just to fix a stuck account. `src/netbbs/net/local_cli.py`/
 
 ## Running a node
 
+**Operating a persistent node?** See
+[`docs/NetBBS-operator-guide.md`](docs/NetBBS-operator-guide.md) for the
+complete install-through-running path: a tested non-editable pip
+install, a NetBSD/pkgsrc path, first-SysOp bootstrap, running under
+systemd/rc.d (`examples/netbbs.service`/`examples/netbbs.rc`),
+persistent state paths, upgrading, and uninstalling without losing
+data. The rest of this section is the quick, source-checkout version
+for trying NetBBS out or developing on it.
+
 `python -m netbbs` is configuration-driven (design doc round 28), not a
 positional `db_path` argument anymore. What listens where, and the
 login-throttling policy protecting it, come from an optional TOML config
@@ -367,6 +376,11 @@ foreground and let the service supervisor manage backgrounding/restart
 transport enabled at all, an unreadable/malformed file) is reported as a
 clear one-line error and a non-zero exit, not a raw traceback or a node
 silently listening for nobody.
+
+**Version (issue #82):** `python -m netbbs --version` prints the
+installed release version alongside the database schema version this
+build expects (`len(MIGRATIONS)`) — useful for confirming what's
+actually installed before an upgrade, without starting a node.
 
 ## Manually testing a node
 

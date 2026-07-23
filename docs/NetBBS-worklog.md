@@ -1381,6 +1381,37 @@ one deliberately-left-behind trace of an in-progress restore, and a
 subsequent restore attempt refuses to start a second one over it rather
 than compounding the mess.
 
+### Self-update: checking is wired up, applying is not (issue #82)
+
+`netbbs.selfupdate` has real, fully unit-tested plumbing for a
+git-checkout-style deployment to check GitHub Releases
+(`check_latest_release`/`is_newer`) and download/extract a new release
+tarball with a DB-snapshot-before-migration safety net and a pending/
+confirm/rollback state machine (`prepare_update`/`confirm_update`/
+`roll_back_update`/`download_and_extract_release`). Grepping the whole
+`src/` tree confirms these four functions have **zero callers anywhere
+outside `selfupdate.py` itself** — only `check_latest_release` is
+actually wired into product code, and only as a read-only "is a newer
+release available" check surfaced in the SysOp menu's manual
+update-check screen and the daily scheduled check
+(`run_scheduled_update_check`). Nothing anywhere calls `prepare_update`
+to actually start applying an update.
+
+This is confirmed intentional, not an overlooked gap:
+`run_scheduled_update_check`'s own docstring already states the
+apply/restart flow "isn't safely wired up yet, a real, substantially
+higher-stakes decision deliberately not bundled into this." The
+operator-facing upgrade path documented in
+`docs/NetBBS-operator-guide.md` is therefore the package-manager route
+(pip/pkgsrc upgrade, relying on `Database.__init__`'s own automatic-
+migration-or-fail-clearly behavior for schema safety), not this
+module's tarball/execv mechanism. Wiring `prepare_update`/
+`confirm_update`/`roll_back_update` into an actual command someday
+needs its own deliberate design pass (process re-exec semantics under a
+service supervisor in particular), not an assumption that it's most of
+the way there just because the pieces already exist and are tested in
+isolation.
+
 ### Bounds and visibility
 
 Every remotely influenced queue, mailbox, transfer, retry set, and retained
