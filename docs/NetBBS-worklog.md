@@ -872,6 +872,80 @@ in-flight dial/push pass finish untouched.
 
 ## 9. Link protocol invariants
 
+### LinkNode internal state organization (issue #78)
+
+`LinkNode` (`netbbs.link.protocol`) grew a live projection or piece of
+protocol bookkeeping for every Phase 3 feature landed on it, one flat
+dict/set field at a time, until it held eleven independent state
+families with nothing but "this is Link state" in common. Before adding
+the next one (inventory/pull catch-up, linked-channel lifecycle), the
+existing families were grouped by actual coherence, each behind its own
+small dataclass:
+
+- `PeerDirectory` (`peer_directory`): `peers` (verified, from a
+  completed hello) and `candidate_descriptors` (unverified, from
+  peer-list exchange) -- grouped together because a fingerprint's
+  presence in one changes what the other means for it (`admit`
+  supersedes a candidate the moment the same fingerprint completes a
+  real hello).
+- `BoardEventState` (`board_events`): `boards` (verified board_genesis
+  per board_id) and `post_edits` (each post's verified edit chain).
+- `BoardLifecycleState` (`board_lifecycle`): `board_origin`/
+  `board_lifecycle_head`/`pending_origin_transfers` -- origin
+  succession, issue #53. Kept separate from `BoardEventState` because it
+  has its own chain (starting from the board's own genesis) with its
+  own mutual-consent rule, distinct from a `board_post_edit`'s per-post
+  chain.
+- `RelayState` (`relay_state`): `pending_own_relay_requests`/
+  `relaying_for`/`relays_serving_me`, issue #58. Mostly mutated by
+  callers *outside* `LinkNode` (`netbbs.link.transport`'s relay-consent
+  routes) -- grouping it still gives that externally-driven policy
+  state one named home instead of three loose fields.
+
+`known_event_ids`/`events` deliberately stay directly on `LinkNode`
+itself, not inside any of the above: they are the shared dedup/event
+store every object type uses (`key_transition`, `link_message`, board
+events alike), not owned by one family. `identity` stays there too, as
+the façade's own irreducible state.
+
+**Every external consumer keeps reading the old flat names, unchanged.**
+`netbbs.link.store`'s restart reconstruction, `netbbs.link.sync`'s
+background loop, `netbbs.link.transport`'s HTTP handlers,
+`netbbs.link.relay_selection`, `netbbs.net.admin_flow`'s SysOp screens,
+and every existing test all access `node.peers[x]`, `node.boards.get(...)`,
+`len(node.relaying_for)`, `node.board_lifecycle_head[board_id] = ...`,
+etc. directly, exactly as before this split -- confirmed by grepping
+every file that references `LinkNode` for direct field access before
+starting, then running the entire existing Link test suite afterward
+with **zero test changes**. This works because `LinkNode` exposes each
+old name as a `@property` returning the *same live dict* the new
+grouped object owns (never a copy) -- `node.peers` after the split is
+`self.peer_directory.peers`, the identical mutable object, so
+`node.peers[x] = y` from outside still mutates the real state. The
+split moves where each dict is *defined*; it does not change what it
+means to read or mutate it from outside `LinkNode`.
+
+Internally, `LinkNode`'s own methods were only rewired at the specific
+points that are a real invariant, not merely a container: `handle_hello`
+now calls `PeerDirectory.admit` (peer admission + superseding a
+candidate, one operation); `handle_peer_list`'s loop calls
+`PeerDirectory.record_candidate` (staleness + cap check, previously
+~10 inline lines per iteration); the `board_genesis`/`board_post_edit`/
+`board_origin_transfer_offer`/`_accepted` branches of `handle_events`
+call `BoardEventState`/`BoardLifecycleState`'s own narrow methods
+(`record_genesis`, `extend_edit_chain`, `record_offer`,
+`record_acceptance`, etc.) instead of mutating three or four dicts by
+hand inline. Plain reads with no owned invariant (e.g. `self.boards.get(
+board_id)` used only to check existence) were left as direct property
+access rather than rewritten for uniformity's own sake -- the goal was
+giving real invariants a named, narrow home, not maximizing how much
+code routes through the new types.
+
+Adding a future Link state family should follow the same shape: a new
+small dataclass with narrow methods for its own invariants, not a
+fourteenth flat field on `LinkNode` and not a generic "state container"
+framework applied uniformly to everything above.
+
 ### Canonical events
 
 All signed and hashed Link objects use the same canonical JSON-byte function.

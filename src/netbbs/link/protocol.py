@@ -243,18 +243,60 @@ class PeerRecord:
 
 
 @dataclass
-class LinkNode:
-    """
-    This node's own Link protocol state: its identity, what it's
-    learned about its peers, and which events it's already seen.
-    Transport-agnostic (see module docstring) — a caller wires this up
-    to however messages actually travel.
-    """
+class PeerDirectory:
+    """Peer/discovery state (issue #78): verified peers from a completed
+    hello, and unverified endpoint-descriptor candidates learned
+    secondhand via peer-list exchange. Kept together because a
+    fingerprint's presence in one changes what the other means for it
+    (see `admit`) -- but each dict is still exactly the shape it was
+    directly on `LinkNode` before this split; nothing about the wire
+    protocol or persisted shape changes."""
 
-    identity: NodeIdentity
-    peers: dict[str, PeerRecord] = field(default_factory=dict)
-    known_event_ids: set[str] = field(default_factory=set)
-    events: dict[str, dict] = field(default_factory=dict)
+    # fingerprint -> a completed, cryptographically verified hello.
+    peers: dict[str, "PeerRecord"] = field(default_factory=dict)
+    # fingerprint -> an unverified endpoint descriptor learned
+    # secondhand via peer-list exchange -- "worth trying," never
+    # promoted to `peers` until a real hello with that fingerprint
+    # actually completes. See `handle_peer_list`'s own docstring for why
+    # nothing here is ever cryptographically checked at receipt time.
+    candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
+
+    def admit(self, record: "PeerRecord") -> None:
+        """Record a newly (or freshly re-)verified peer. Clears any
+        unverified candidate entry for the same fingerprint -- now
+        superseded by the real thing, never left sitting alongside it."""
+        self.peers[record.fingerprint] = record
+        self.candidate_descriptors.pop(record.fingerprint, None)
+
+    def record_candidate(self, fingerprint: str, descriptor: EndpointDescriptor, *, max_candidates: int) -> bool:
+        """Record a secondhand, unverified descriptor. Returns whether it
+        was actually recorded -- skipped if `fingerprint` is already a
+        verified peer (nothing gained from a secondhand claim about
+        someone already directly known), if a candidate already on file
+        for it has an equal-or-newer `created_at`, or if it would be a
+        brand-new entry past `max_candidates` (refreshing an existing
+        candidate's own descriptor is still allowed past the cap)."""
+        if fingerprint in self.peers:
+            return False
+        existing = self.candidate_descriptors.get(fingerprint)
+        if existing is not None and descriptor.payload.get("created_at", "") <= existing.payload.get(
+            "created_at", ""
+        ):
+            return False
+        if existing is None and len(self.candidate_descriptors) >= max_candidates:
+            return False
+        self.candidate_descriptors[fingerprint] = descriptor
+        return True
+
+
+@dataclass
+class BoardEventState:
+    """Board/event projection state (issue #78): verified board_genesis
+    per board, and each board_post's verified board_post_edit chain.
+    `known_event_ids`/`events` deliberately stay directly on `LinkNode`
+    -- they're the shared dedup/store substrate every object type uses
+    (key_transition, link_message, ...), not a board-specific concern."""
+
     # board_id -> the verified board_genesis on file for it. A
     # board_post is only ever accepted for a board_id already present
     # here (module docstring's "no relay from a stranger" boundary,
@@ -267,34 +309,98 @@ class LinkNode:
     # shape simpler than key_transition's two-interleaved-purposes
     # chain.
     post_edits: dict[str, tuple[BoardPostEdit, ...]] = field(default_factory=dict)
+
+    def genesis_for(self, board_id: str) -> BoardGenesis | None:
+        return self.boards.get(board_id)
+
+    def has_conflicting_genesis(self, board_id: str, content_id: str) -> bool:
+        """Whether a *different* genesis is already on file for
+        `board_id` -- one board_id may never acquire two distinct
+        geneses."""
+        existing = self.boards.get(board_id)
+        return existing is not None and existing.content_id != content_id
+
+    def record_genesis(self, genesis: BoardGenesis) -> None:
+        self.boards[genesis.payload["board_id"]] = genesis
+
+    def edit_chain(self, root_post_id: str) -> tuple[BoardPostEdit, ...]:
+        return self.post_edits.get(root_post_id, ())
+
+    def extend_edit_chain(self, root_post_id: str, edit: BoardPostEdit) -> None:
+        self.post_edits[root_post_id] = self.edit_chain(root_post_id) + (edit,)
+
+
+@dataclass
+class BoardLifecycleState:
+    """Board lifecycle/origin state (issue #78, issue #53): board-origin
+    succession, tracked separately from the board/event projection
+    above because it has its own chain (`board_lifecycle_head`,
+    starting from the board's own genesis) with its own mutual-consent
+    rule, distinct from a `board_post_edit`'s per-post chain."""
+
     # issue #53: board_id -> the fingerprint currently authoritative for
     # it, once a board_origin_transfer_accepted has been verified --
     # absent means "still the genesis's own origin," see
-    # current_board_origin.
+    # current_origin.
     board_origin: dict[str, str] = field(default_factory=dict)
     # issue #53: board_id -> the content_id a new lifecycle event (an
     # offer or an acceptance) must reference as its own
-    # previous_event_id -- absent means "still genesis," see current_
-    # board_lifecycle_head.
+    # previous_event_id -- absent means "still genesis," see
+    # current_lifecycle_head.
     board_lifecycle_head: dict[str, str] = field(default_factory=dict)
     # issue #53: board_id -> its single outstanding, not-yet-accepted
     # board_origin_transfer_offer, if any -- at most one may be in
     # flight per board at a time (see BoardOriginTransferOffer's own
     # docstring for why this doesn't support more).
     pending_origin_transfers: dict[str, BoardOriginTransferOffer] = field(default_factory=dict)
-    # fingerprint -> an unverified endpoint descriptor learned
-    # secondhand via peer-list exchange -- "worth trying," never
-    # promoted to `peers` until a real hello with that fingerprint
-    # actually completes. See `handle_peer_list`'s own docstring for why
-    # nothing here is ever cryptographically checked at receipt time.
-    candidate_descriptors: dict[str, EndpointDescriptor] = field(default_factory=dict)
+
+    def current_origin(self, board_id: str, genesis_origin_fingerprint: str) -> str:
+        """The fingerprint currently authoritative for `board_id` --
+        `board_origin`'s override if a transfer has ever completed, else
+        the caller-supplied genesis claim (`LinkNode.current_board_
+        origin` supplies `self.board_events.boards[board_id].payload
+        ["origin_fingerprint"]`, keeping this type independent of
+        `BoardEventState`)."""
+        return self.board_origin.get(board_id, genesis_origin_fingerprint)
+
+    def current_lifecycle_head(self, board_id: str, genesis_content_id: str) -> str:
+        """The content_id a *new* lifecycle event for `board_id` must
+        reference as its own `previous_event_id` -- the latest accepted
+        lifecycle event if one exists, else the caller-supplied genesis
+        content_id."""
+        return self.board_lifecycle_head.get(board_id, genesis_content_id)
+
+    def pending_offer(self, board_id: str) -> BoardOriginTransferOffer | None:
+        return self.pending_origin_transfers.get(board_id)
+
+    def record_offer(self, board_id: str, offer: BoardOriginTransferOffer) -> None:
+        self.pending_origin_transfers[board_id] = offer
+        self.board_lifecycle_head[board_id] = offer.content_id
+
+    def record_acceptance(self, board_id: str, *, new_origin_fingerprint: str, accepted_content_id: str) -> None:
+        self.board_origin[board_id] = new_origin_fingerprint
+        self.board_lifecycle_head[board_id] = accepted_content_id
+        del self.pending_origin_transfers[board_id]
+
+
+@dataclass
+class RelayState:
+    """Relay/reachability state (issue #78, issue #58): this node's own
+    outstanding/granted relay relationships in both directions. Mostly
+    mutated by callers *outside* this module (`netbbs.link.transport`'s
+    relay-consent routes) -- `handle_relay_consent_request`/`_response`'s
+    own docstrings describe why this layer verifies but deliberately
+    does not decide accept/decline here. Grouping these three dicts
+    gives that external policy state one named home instead of three
+    loose fields directly on `LinkNode`."""
+
     # issue #58: relay_fingerprint -> the still-outstanding
     # RelayConsentRequest this node itself sent and hasn't yet gotten a
     # reply to -- self-origination bookkeeping the caller sets directly
     # before dialing out (`netbbs.link.transport.request_relay_consent`),
-    # mirroring `pending_origin_transfers`' own "this node's own request,
-    # never routed through handle_events" shape (see that field's own
-    # docstring for the general pattern).
+    # mirroring `BoardLifecycleState.pending_origin_transfers`' own
+    # "this node's own request, never routed through handle_events"
+    # shape.
     pending_own_relay_requests: dict[str, RelayConsentRequest] = field(default_factory=dict)
     # issue #58: requester_fingerprint -> when this node (acting as the
     # relay) agreed to serve it, once granted. Whether to grant is a
@@ -311,6 +417,88 @@ class LinkNode:
     # (issue #58 task #23) reads to populate this node's own published
     # `relays` field.
     relays_serving_me: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LinkNode:
+    """
+    This node's own Link protocol state: its identity, what it's
+    learned about its peers, and which events it's already seen.
+    Transport-agnostic (see module docstring) — a caller wires this up
+    to however messages actually travel.
+
+    Internal state is grouped by concern (issue #78) rather than one
+    ever-growing flat collection of unrelated dicts: `peer_directory`
+    (peer/discovery), `board_events` (board/event projection),
+    `board_lifecycle` (board origin/succession), `relay_state` (relay/
+    reachability). `known_event_ids`/`events` stay directly here as the
+    shared substrate every object type uses, not owned by any one
+    family. A future state family (inventory/pull catch-up, linked-
+    channel lifecycle) should become its own such grouped type, not a
+    thirteenth flat field here.
+
+    The flat `peers`/`boards`/`post_edits`/`board_origin`/`board_
+    lifecycle_head`/`pending_origin_transfers`/`candidate_descriptors`/
+    `pending_own_relay_requests`/`relaying_for`/`relays_serving_me`
+    properties below exist purely for external backward compatibility:
+    `netbbs.link.store`/`.sync`/`.transport`/`.relay_selection` and
+    `netbbs.net.admin_flow` (plus their own tests) read and mutate these
+    by direct attribute access -- `node.peers[x] = y`, `node.relaying_
+    for.pop(...)`, `len(node.board_lifecycle_head)`. Each property
+    returns the exact same live dict the grouped state object owns,
+    never a copy, so every existing external access pattern keeps
+    working unchanged -- this refactor moves where the data is
+    *defined*, not what it means to read or mutate it from outside
+    `LinkNode`.
+    """
+
+    identity: NodeIdentity
+    known_event_ids: set[str] = field(default_factory=set)
+    events: dict[str, dict] = field(default_factory=dict)
+    peer_directory: PeerDirectory = field(default_factory=PeerDirectory)
+    board_events: BoardEventState = field(default_factory=BoardEventState)
+    board_lifecycle: BoardLifecycleState = field(default_factory=BoardLifecycleState)
+    relay_state: RelayState = field(default_factory=RelayState)
+
+    @property
+    def peers(self) -> dict[str, "PeerRecord"]:
+        return self.peer_directory.peers
+
+    @property
+    def candidate_descriptors(self) -> dict[str, EndpointDescriptor]:
+        return self.peer_directory.candidate_descriptors
+
+    @property
+    def boards(self) -> dict[str, BoardGenesis]:
+        return self.board_events.boards
+
+    @property
+    def post_edits(self) -> dict[str, tuple[BoardPostEdit, ...]]:
+        return self.board_events.post_edits
+
+    @property
+    def board_origin(self) -> dict[str, str]:
+        return self.board_lifecycle.board_origin
+
+    @property
+    def board_lifecycle_head(self) -> dict[str, str]:
+        return self.board_lifecycle.board_lifecycle_head
+
+    @property
+    def pending_origin_transfers(self) -> dict[str, BoardOriginTransferOffer]:
+        return self.board_lifecycle.pending_origin_transfers
+
+    @property
+    def pending_own_relay_requests(self) -> dict[str, RelayConsentRequest]:
+        return self.relay_state.pending_own_relay_requests
+
+    @property
+    def relaying_for(self) -> dict[str, str]:
+        return self.relay_state.relaying_for
+
+    @property
+    def relays_serving_me(self) -> dict[str, str]:
+        return self.relay_state.relays_serving_me
 
     def build_hello(
         self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str
@@ -332,7 +520,7 @@ class LinkNode:
             addresses=addresses,
             outgoing_only=outgoing_only,
             created_at=created_at,
-            relays=list(self.relays_serving_me.keys()) or None,
+            relays=list(self.relay_state.relays_serving_me.keys()) or None,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),
@@ -421,11 +609,7 @@ class LinkNode:
             transitions=message.transitions,
             descriptor=message.descriptor,
         )
-        self.peers[claimed_fingerprint] = record
-        # Now a real, verified peer -- an unverified candidate entry for
-        # the same fingerprint is superseded, not left sitting alongside
-        # the real thing.
-        self.candidate_descriptors.pop(claimed_fingerprint, None)
+        self.peer_directory.admit(record)
         return record
 
     def build_peer_list(self) -> PeerListMessage:
@@ -437,7 +621,7 @@ class LinkNode:
         secondhand, so a claim's provenance never grows past one hop of
         "someone I've actually talked to vouches this address is worth
         trying.\""""
-        return PeerListMessage(descriptors=tuple(peer.descriptor for peer in self.peers.values()))
+        return PeerListMessage(descriptors=tuple(peer.descriptor for peer in self.peer_directory.peers.values()))
 
     def handle_peer_list(self, sender_fingerprint: str, message: PeerListMessage) -> list[str]:
         """
@@ -484,19 +668,10 @@ class LinkNode:
                 continue
             if candidate_fingerprint == self.identity.fingerprint:
                 continue
-            if candidate_fingerprint in self.peers:
-                continue
-
-            existing = self.candidate_descriptors.get(candidate_fingerprint)
-            if existing is not None and descriptor.payload.get("created_at", "") <= existing.payload.get(
-                "created_at", ""
+            if self.peer_directory.record_candidate(
+                candidate_fingerprint, descriptor, max_candidates=_MAX_CANDIDATE_DESCRIPTORS
             ):
-                continue
-            if existing is None and len(self.candidate_descriptors) >= _MAX_CANDIDATE_DESCRIPTORS:
-                continue
-
-            self.candidate_descriptors[candidate_fingerprint] = descriptor
-            recorded.append(candidate_fingerprint)
+                recorded.append(candidate_fingerprint)
         return recorded
 
     def handle_relay_consent_request(self, sender_fingerprint: str, request: RelayConsentRequest) -> None:
@@ -697,7 +872,9 @@ class LinkNode:
         fingerprint`'s exact same two-tier resolution, applied here to
         this node's in-memory state instead of a DB row -- both must
         agree, since the DB-side version is this same fact persisted."""
-        return self.board_origin.get(board_id, self.boards[board_id].payload["origin_fingerprint"])
+        return self.board_lifecycle.current_origin(
+            board_id, self.board_events.boards[board_id].payload["origin_fingerprint"]
+        )
 
     def current_board_lifecycle_head(self, board_id: str) -> str:
         """The content_id a *new* lifecycle event for `board_id` (an
@@ -706,7 +883,7 @@ class LinkNode:
         accepted lifecycle event if one exists, else the board's own
         genesis. Mirrors `netbbs.link.boards._current_lifecycle_head`'s
         own reasoning, applied to this node's in-memory state."""
-        return self.board_lifecycle_head.get(board_id, self.boards[board_id].content_id)
+        return self.board_lifecycle.current_lifecycle_head(board_id, self.board_events.boards[board_id].content_id)
 
     def handle_events(self, sender_fingerprint: str, raw_events: list[dict]) -> list[str]:
         """
@@ -836,8 +1013,7 @@ class LinkNode:
                     )
 
                 board_id = genesis.payload["board_id"]
-                existing_genesis = self.boards.get(board_id)
-                if existing_genesis is not None and existing_genesis.content_id != genesis.content_id:
+                if self.board_events.has_conflicting_genesis(board_id, genesis.content_id):
                     raise LinkProtocolError(
                         f"received a conflicting board_genesis for board_id {board_id!r} -- a "
                         "different genesis is already on file for it"
@@ -850,7 +1026,7 @@ class LinkNode:
                         "current signing key"
                     )
 
-                self.boards[board_id] = genesis
+                self.board_events.record_genesis(genesis)
                 self.known_event_ids.add(genesis.content_id)
                 self.events[genesis.content_id] = raw
                 accepted.append(genesis.content_id)
@@ -861,7 +1037,7 @@ class LinkNode:
                     continue
 
                 board_id = post.payload.get("board_id")
-                if board_id not in self.boards:
+                if self.board_events.genesis_for(board_id) is None:
                     raise LinkProtocolError(
                         f"received a board_post for board_id {board_id!r}, which has no verified "
                         "board_genesis on file -- refusing (no relay from a stranger yet)"
@@ -923,7 +1099,7 @@ class LinkNode:
                         "stranger yet)"
                     )
 
-                existing_chain = self.post_edits.get(root_post_id, ())
+                existing_chain = self.board_events.edit_chain(root_post_id)
                 if any(existing.content_id == edit.content_id for existing in existing_chain):
                     # Exact resend of an already-integrated edit: a safe
                     # no-op, self-healing known_event_ids, not a fork attempt.
@@ -948,7 +1124,7 @@ class LinkNode:
                         "current signing key"
                     )
 
-                self.post_edits[root_post_id] = existing_chain + (edit,)
+                self.board_events.extend_edit_chain(root_post_id, edit)
                 self.known_event_ids.add(edit.content_id)
                 self.events[edit.content_id] = raw
                 accepted.append(edit.content_id)
@@ -959,7 +1135,7 @@ class LinkNode:
                     continue
 
                 board_id = offer.payload.get("board_id")
-                if board_id not in self.boards:
+                if self.board_events.genesis_for(board_id) is None:
                     raise LinkProtocolError(
                         f"received a board_origin_transfer_offer for board_id {board_id!r}, "
                         "which has no verified board_genesis on file -- refusing (no relay "
@@ -980,7 +1156,7 @@ class LinkNode:
                         f"old_origin_fingerprint ({old_origin_fingerprint!r}) that doesn't "
                         f"match its actual current origin ({current_origin!r})"
                     )
-                if board_id in self.pending_origin_transfers:
+                if self.board_lifecycle.pending_offer(board_id) is not None:
                     raise LinkProtocolError(
                         f"board_id {board_id!r} already has an outstanding, unaccepted "
                         "origin-transfer offer -- at most one may be in flight at a time"
@@ -1002,8 +1178,7 @@ class LinkNode:
                         "verify against its current signing key"
                     )
 
-                self.pending_origin_transfers[board_id] = offer
-                self.board_lifecycle_head[board_id] = offer.content_id
+                self.board_lifecycle.record_offer(board_id, offer)
                 self.known_event_ids.add(offer.content_id)
                 self.events[offer.content_id] = raw
                 accepted.append(offer.content_id)
@@ -1014,7 +1189,7 @@ class LinkNode:
                     continue
 
                 board_id = transfer_accepted.payload.get("board_id")
-                offer = self.pending_origin_transfers.get(board_id)
+                offer = self.board_lifecycle.pending_offer(board_id)
                 if offer is None:
                     raise LinkProtocolError(
                         f"received a board_origin_transfer_accepted for board_id {board_id!r}, "
@@ -1049,9 +1224,11 @@ class LinkNode:
                         "verify against its current signing key"
                     )
 
-                self.board_origin[board_id] = new_origin_fingerprint
-                self.board_lifecycle_head[board_id] = transfer_accepted.content_id
-                del self.pending_origin_transfers[board_id]
+                self.board_lifecycle.record_acceptance(
+                    board_id,
+                    new_origin_fingerprint=new_origin_fingerprint,
+                    accepted_content_id=transfer_accepted.content_id,
+                )
                 self.known_event_ids.add(transfer_accepted.content_id)
                 self.events[transfer_accepted.content_id] = raw
                 accepted.append(transfer_accepted.content_id)

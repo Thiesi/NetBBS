@@ -2460,6 +2460,22 @@ the `created_at`-based cursor and may not navigate precisely to an
 out-of-order arrival, even though unread counting now correctly flags
 it.
 
+### Issue #78 — decompose LinkNode protocol state — closed
+
+The engineering record's "LinkNode internal state organization" entry
+(§9) is the design pass this issue asked for: which of `LinkNode`'s
+eleven flat fields belong together (`PeerDirectory`, `BoardEventState`,
+`BoardLifecycleState`, `RelayState`), and which stay directly on the
+façade (`identity`, `known_event_ids`, `events`, as the shared
+substrate every object type uses). Every external consumer
+(`netbbs.link.store`/`.sync`/`.transport`/`.relay_selection`,
+`netbbs.net.admin_flow`, and their tests) still reads the old flat
+attribute names unchanged, via backward-compatible properties over the
+same live dicts -- zero test changes, zero wire/serialized-shape
+changes. A future state family (inventory/pull, linked-channel
+lifecycle) should follow the same shape: its own small dataclass with
+narrow methods, not a further flat field.
+
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 
 §6.6's "Integrity checking and rebuild" subsection now states the
