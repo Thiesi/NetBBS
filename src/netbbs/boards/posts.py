@@ -69,7 +69,15 @@ class Post:
     post_id: str
     board_id: int
     parent_post_id: str | None
-    author_user_id: int
+    # Nullable since round 60's account-deletion migration (ON DELETE
+    # SET NULL) -- also, since design doc §9.3/issue #73, the shape a
+    # materialized Link-carried post's remote author naturally takes:
+    # no local account is implied or required by carrying content.
+    # Every reader of this field already treats it as optional in
+    # practice (netbbs.net.login_flow._author_display_name/get_user_by_id
+    # degrade to author_label correctly for either case) -- this only
+    # makes the type honest about behavior that already existed.
+    author_user_id: int | None
     author_label: str
     author_fingerprint: str | None
     subject: str

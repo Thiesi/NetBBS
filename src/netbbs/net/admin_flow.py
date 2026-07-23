@@ -125,6 +125,7 @@ from netbbs.link.boards import (
     link_board,
     offer_board_origin_transfer,
     queue_board_post_if_linked,
+    rebuild_carried_post_materialization,
 )
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.relay_mailbox import mailbox_sizes
@@ -372,6 +373,10 @@ async def _system_menu(
             await session.write_line("")
             await _outbox_screen(session, lane, actor)
             await _draw_system_menu(session, node_controls, link_context)
+        elif choice == "r" and link_context is not None:
+            await session.write_line("")
+            await _repair_carried_posts_screen(session, lane)
+            await _draw_system_menu(session, node_controls, link_context)
         elif choice == "k":
             await session.write_line("")
             await _backup_status_screen(session, lane, actor)
@@ -391,6 +396,7 @@ async def _draw_system_menu(
     if link_context is not None:
         option_list.append(menu_key("L", "ink status"))
         option_list.append(menu_key("O", "utbox"))
+        option_list.append(menu_key("R", "epair carried posts"))
     if node_controls is not None:
         option_list.append(menu_key("N", "ode"))
     option_list.append(menu_key("B", "ack"))
@@ -989,6 +995,36 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
 
             cancelled = await lane.run(_cancel)
             await session.write_line(f"Cancelled -- status is now {cancelled.status!r}.")
+
+
+async def _repair_carried_posts_screen(session: Session, lane: DatabaseLane) -> None:
+    """
+    Design doc §9.3/issue #73's own "supported rebuild path" acceptance
+    criterion, exposed the same way `_gc_screen` exposes reference-aware
+    blob reclaim: an explicit, SysOp-triggered maintenance action, no
+    background scheduler (this codebase's established convention).
+    Unlike GC, this is purely additive -- it can only fill in a missing
+    `posts` row from an already-accepted, already-verified signed event,
+    never delete or rewrite anything -- so there's no dry-run/confirm
+    step needed, just run it and report what happened.
+
+    Only ever finds work for a node that carried boards *before* this
+    feature shipped (`rebuild_carried_post_materialization`'s own
+    docstring) -- persistence and projection are atomic for every new
+    event going forward, so a freshly upgraded node reporting 0 here is
+    the expected steady state, not a sign anything is broken.
+    """
+    rebuilt = await lane.run(rebuild_carried_post_materialization)
+    if rebuilt == 0:
+        await session.write_line(
+            colored(
+                "\r\nRepair carried posts: nothing to do -- every accepted board_post/"
+                "board_post_edit already has a local posts row.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+    else:
+        await session.write_line(f"\r\nRepair carried posts: materialized {rebuilt} missing row(s).")
 
 
 # -- promote/demote, enable/disable ---------------------------------------

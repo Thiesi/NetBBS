@@ -50,10 +50,18 @@ from typing import Callable
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-from netbbs.link.boards import BoardCarryLimitError, materialize_carried_board, record_board_origin_change
+from netbbs.link.boards import (
+    BoardCarryLimitError,
+    materialize_carried_board,
+    materialize_carried_post,
+    materialize_carried_post_edit,
+    record_board_origin_change,
+)
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+    BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
@@ -266,6 +274,25 @@ class LinkServer:
         for content_id in accepted:
             envelope = self._node.events[content_id]
             object_type = envelope["envelope"]["object_type"]
+            # Design doc §9.3/issue #73: board_post/board_post_edit skip
+            # the generic save_event dispatch below entirely --
+            # materialize_carried_post/_edit each persist the underlying
+            # link_events row themselves, in the same transaction as the
+            # posts projection, closing the crash window every other
+            # object type here still has between save_event and its own
+            # follow-up (materialize_carried_board's own docstring notes
+            # this same gap, not fixed for genesis).
+            if object_type == BOARD_POST_OBJECT_TYPE:
+                await self._lane.run(
+                    materialize_carried_post, BoardPost.from_dict(envelope), sender_fingerprint=fingerprint
+                )
+                continue
+            elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
+                await self._lane.run(
+                    materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=fingerprint
+                )
+                continue
+
             await self._lane.run(
                 save_event,
                 sender_fingerprint=fingerprint,
@@ -276,9 +303,7 @@ class LinkServer:
             # Link messages (design doc round 93) need real follow-up
             # beyond persisting the envelope -- decrypt/deliver into a
             # local mailbox or bounce, and apply an incoming
-            # acknowledgement to the outbound row it's about. board_post/
-            # board_post_edit need none of this; persistence alone is
-            # enough for them (round 126's own finding) -- but round 94/
+            # acknowledgement to the outbound row it's about. Round 94/
             # issue #53's carry-materialization gap means board_genesis
             # and board_origin_transfer_accepted both need real follow-up
             # too now: a received genesis has nothing a local user could

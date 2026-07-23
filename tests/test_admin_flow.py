@@ -1871,6 +1871,57 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "No verified peers." in text
 
 
+def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):
+    link_context = _link_context()
+
+    session = FakeSession(["s", "r", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Repair carried posts" in text
+    assert "nothing to do" in text
+
+
+def test_repair_carried_posts_screen_materializes_a_missing_gap(db, lane, sysop):
+    import json
+
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.events import build_board_post
+
+    link_context = _link_context()
+    board = create_board(db, "General", creator=sysop)
+    link_board(db, board, node_identity=link_context.node_identity)
+
+    post = build_board_post(
+        signing_identity=link_context.node_identity.signing_key,
+        home_node_fingerprint=link_context.node_identity.fingerprint,
+        local_user_id="wanderer",
+        board_id=board.board_id,
+        subject="hello",
+        body="world",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    # Simulate the pre-materialization-feature gap directly (this
+    # screen's own job is exercising rebuild_carried_post_materialization
+    # through the UI, not proving that function's own logic -- see
+    # tests/test_link_boards.py for that).
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+        "VALUES (?, ?, 'board_post', ?, ?)",
+        (post.content_id, "some-peer-fingerprint", json.dumps(post.to_dict()), "2026-01-01T00:00:00Z"),
+    )
+    db.connection.commit()
+
+    session = FakeSession(["s", "r", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "materialized 1 missing row" in text
+    row = db.connection.execute("SELECT subject FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
+    assert row["subject"] == "hello"
+
+
 def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
     from netbbs.link.events import build_endpoint_descriptor
     from netbbs.link.node_identity import bootstrap_node_identity

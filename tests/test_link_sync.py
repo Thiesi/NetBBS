@@ -492,6 +492,60 @@ def test_sync_pushes_own_linked_board_genesis_and_post_to_a_real_seed(tmp_path):
         seed.close()
 
 
+def test_sync_materializes_a_received_post_into_the_seeds_own_browsable_board(tmp_path):
+    """Design doc §9.3/issue #73 regression: the carried board on the
+    receiving side must not just track the board_post event
+    (known_event_ids) -- it must become a real, locally browsable
+    `posts` row, over the exact same real-socket push path the
+    sibling test above already proves reaches the peer at all."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    post = create_post(dialer.db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(dialer.db, post, board, node_identity=dialer_identity)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        row = seed.db.connection.execute(
+            "SELECT subject, body, author_user_id, author_label FROM posts WHERE post_id = ?",
+            (board_post.content_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["subject"] == "hello"
+        assert row["body"] == "world"
+        assert row["author_user_id"] is None
+        assert row["author_label"] == f"alice@{dialer_identity.fingerprint}"
+        # Indexed for local search too, the same call every other posts
+        # write path already makes.
+        search_row = seed.db.connection.execute(
+            "SELECT 1 FROM post_search WHERE root_post_id = ?", (board_post.content_id,)
+        ).fetchone()
+        assert search_row is not None
+    finally:
+        dialer.close()
+        seed.close()
+
+
 def test_sync_pushes_a_self_authored_board_post_edit_to_a_real_seed(tmp_path):
     """Round 130: `load_own_board_events` also gathers this node's own
     `board_post_edit` events (stored on the edited revision's own
@@ -530,6 +584,65 @@ def test_sync_pushes_a_self_authored_board_post_edit_to_a_real_seed(tmp_path):
         assert board_post.content_id in seed_node.known_event_ids
         assert edit.content_id in seed_node.known_event_ids
         assert seed_node.post_edits[board_post.content_id][-1].content_id == edit.content_id
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_sync_materializes_a_received_edit_as_the_seeds_resolved_current_version(tmp_path):
+    """Design doc §9.3/issue #73 regression: a received, self-authored
+    edit must update what a reader on the carrying node actually sees
+    -- not just extend `seed_node.post_edits` in memory."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    board = create_board(dialer.db, "general", creator=creator)
+    link_board(dialer.db, board, node_identity=dialer_identity)
+    post = create_post(dialer.db, board, creator, "hello", "world")
+    board_post = queue_board_post_if_linked(dialer.db, post, board, node_identity=dialer_identity)
+    edited = edit_post(dialer.db, post, board, subject="hello (edited)", body="world, edited", edited_by=creator)
+    edit = queue_board_post_edit_if_linked(dialer.db, edited, board, node_identity=dialer_identity, edited_by=creator)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        root_row = seed.db.connection.execute(
+            "SELECT subject FROM posts WHERE post_id = ?", (board_post.content_id,)
+        ).fetchone()
+        assert root_row["subject"] == "hello"  # the root row itself is never mutated in place
+
+        current = seed.db.connection.execute(
+            """
+            SELECT subject, body FROM posts
+            WHERE root_post_id = ? AND status = 'approved'
+            ORDER BY created_at DESC, id DESC LIMIT 1
+            """,
+            (board_post.content_id,),
+        ).fetchone()
+        assert current["subject"] == "hello (edited)"
+        assert current["body"] == "world, edited"
+
+        edit_row = seed.db.connection.execute(
+            "SELECT edit_of_post_id FROM posts WHERE post_id = ?", (edit.content_id,)
+        ).fetchone()
+        assert edit_row["edit_of_post_id"] == board_post.content_id
     finally:
         dialer.close()
         seed.close()

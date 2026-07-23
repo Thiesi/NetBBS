@@ -1166,7 +1166,12 @@ this feature shipped. A repair pass — scan `link_events` for `board_post`/
 in chain order — closes that one-time gap and doubles as the "supported
 rebuild path" issue #73's own acceptance criteria ask for, the same
 "derived state must be rebuildable from authoritative data" principle issue
-#74 applies to FTS indexes.
+#74 applies to FTS indexes. Exposed as `[R]epair carried posts` in the
+SysOp `[S]ystem` submenu (only shown when Link is enabled), the same
+explicit-SysOp-trigger-only shape `netbbs.files.gc`'s reference-aware blob
+reclaim already established — purely additive (fills in a missing row from
+an already-verified signed event, never deletes or rewrites anything), so
+unlike blob reclaim it needs no dry-run/confirm step.
 
 Linked resources are carried by default within the supported topology, with a
 visible local exclusion option. A local exclusion must be represented honestly

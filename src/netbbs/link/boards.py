@@ -37,6 +37,7 @@ from netbbs.boards.posts import Post
 from netbbs.link.events import (
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_OBJECT_TYPE,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
@@ -51,6 +52,7 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
 from netbbs.link.protocol import LinkNode, PeerRecord
+from netbbs.search import reindex_post
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -335,6 +337,246 @@ def materialize_carried_board(
     return _board_from_row(
         db.connection.execute("SELECT * FROM boards WHERE board_id = ?", (payload["board_id"],)).fetchone()
     )
+
+
+def _post_from_row(row) -> Post:
+    """Local row->`Post` mapping, mirroring `_board_from_row`'s own
+    "direct SQL, don't reach into another module's private helper"
+    reasoning (see that function's own docstring)."""
+    return Post(
+        id=row["id"], post_id=row["post_id"], board_id=row["board_id"],
+        parent_post_id=row["parent_post_id"], author_user_id=row["author_user_id"],
+        author_label=row["author_label"], author_fingerprint=row["author_fingerprint"],
+        subject=row["subject"], body=row["body"], created_at=row["created_at"],
+        status=row["status"], pinned=bool(row["pinned"]), exempt_from_expiry=bool(row["exempt_from_expiry"]),
+        root_post_id=row["root_post_id"], edit_of_post_id=row["edit_of_post_id"],
+    )
+
+
+def materialize_carried_post(db: Database, post: BoardPost, *, sender_fingerprint: str) -> Post | None:
+    """
+    Turn a *received* `board_post` into a real, locally browsable
+    `posts` row (design doc §9.3, issue #73) -- before this, an
+    accepted `board_post` was verified and persisted into `link_events`
+    only, leaving a carried board that could verifiably receive posts
+    while still showing empty to every reader. Called once per newly
+    accepted `board_post`, from `netbbs.link.transport.LinkServer.
+    _handle_events`, replacing that method's own generic `save_event`
+    dispatch for this object type (see below for why).
+
+    Idempotent, keyed on `post.content_id`, which becomes the local
+    `post_id` **verbatim** -- the same "never mint a second ID for the
+    same thing" precedent `materialize_carried_board` already
+    established for `board_id`.
+
+    Persists the underlying signed event (the `link_events` row
+    `netbbs.link.store.save_event` would otherwise write) and the
+    `posts` projection in this one call/one transaction -- unlike
+    `materialize_carried_board`, which is a separate `lane.run` call
+    from its own `save_event` (a real, pre-existing crash-window gap
+    for genesis materialization this function does not repeat).
+
+    Returns `None`, not an error, if `payload["board_id"]` names a
+    board this node's own protocol layer has accepted a genesis for
+    (`handle_events` already required that before ever accepting this
+    event) but has no *locally materialized* `boards` row for -- a
+    real, normal state (a crash between genesis materialization and
+    this post arriving, or issue #60's `max_carried_boards` cap
+    refusing to carry it) that must not crash the whole request, the
+    same "not carried on this node" honest-exclusion principle §9.3
+    already establishes for the board-level cap.
+
+    A reply's `parent_post_id` is only set if that parent is already
+    locally materialized -- an orphaned reply (parent not yet received,
+    or never will be) is materialized as a top-level post rather than
+    blocked or speculatively queued, the same "no backfill, no
+    speculative storage" rule this project applies everywhere gossip
+    can arrive out of order.
+
+    `netbbs.search.reindex_post` is called here, not left to a
+    follow-up step -- the same "every `posts` write path indexes
+    itself" convention `netbbs.boards.posts.create_post` already
+    follows.
+    """
+    existing = db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
+    if existing is not None:
+        return _post_from_row(existing)
+
+    payload = post.payload
+    board_row = db.connection.execute(
+        "SELECT id FROM boards WHERE board_id = ?", (payload["board_id"],)
+    ).fetchone()
+    if board_row is None:
+        return None
+    board_local_id = board_row["id"]
+
+    parent_post_id = payload.get("parent_post_id")
+    if parent_post_id is not None:
+        parent_exists = db.connection.execute(
+            "SELECT 1 FROM posts WHERE post_id = ? AND board_id = ?", (parent_post_id, board_local_id)
+        ).fetchone()
+        if parent_exists is None:
+            parent_post_id = None
+
+    author = payload["author"]
+    author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
+
+    db.connection.execute(
+        """
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(content_id) DO NOTHING
+        """,
+        (post.content_id, sender_fingerprint, BOARD_POST_OBJECT_TYPE, json.dumps(post.to_dict()), utc_now_iso()),
+    )
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status, root_post_id)
+        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, 'approved', ?)
+        """,
+        (
+            post.content_id, board_local_id, parent_post_id, author_label,
+            payload["subject"], payload["body"], payload["created_at"], post.content_id,
+        ),
+    )
+    reindex_post(db, board_local_id, post.content_id)
+    db.connection.commit()
+
+    return _post_from_row(
+        db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
+    )
+
+
+def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_fingerprint: str) -> Post | None:
+    """
+    Turn a *received* `board_post_edit` into a new `posts` revision row
+    (design doc §9.3, issue #73) -- the edit-side counterpart of
+    `materialize_carried_post`, same call site, same reasoning.
+
+    `edit.content_id` becomes the new row's local `post_id`, exactly as
+    `materialize_carried_post` does for a root -- with a direct payoff
+    here: since a `board_post_edit`'s own `root_post_id`/`previous_
+    event_id` payload fields already name other events' `content_id`s,
+    and those became the corresponding local `post_id`s the same way,
+    `posts.root_post_id`/`edit_of_post_id` resolve straight from the
+    Link payload with no separate ID-translation table.
+
+    Returns `None` (not an error) if the root post or the immediate
+    predecessor this edit extends (`payload["previous_event_id"]`) is
+    not yet locally materialized -- `handle_events` already verified
+    this edit correctly extends *its own peer's* view of the chain
+    before ever accepting it, but this node's own local materialization
+    can still lag that (a gap `rebuild_carried_post_materialization`
+    closes later, not something to force here by inserting a `posts.
+    edit_of_post_id` foreign key this node can't yet satisfy).
+
+    `author_label`/`parent_post_id` are re-derived from this edit's own
+    payload/the root row rather than copied from whichever row
+    `previous_event_id` pointed at -- both are invariant across a
+    chain (`handle_events` already enforces the author never changes;
+    a `board_post_edit` never carries reply information at all), so
+    reading them from the root is exactly as correct and simpler than
+    threading them through every intermediate revision.
+    """
+    existing = db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
+    if existing is not None:
+        return _post_from_row(existing)
+
+    payload = edit.payload
+    root_row = db.connection.execute(
+        "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
+    ).fetchone()
+    if root_row is None:
+        return None
+    predecessor_exists = db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
+    ).fetchone()
+    if predecessor_exists is None:
+        return None
+
+    board_local_id = root_row["board_id"]
+    author = payload["author"]
+    author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
+
+    db.connection.execute(
+        """
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(content_id) DO NOTHING
+        """,
+        (edit.content_id, sender_fingerprint, BOARD_POST_EDIT_OBJECT_TYPE, json.dumps(edit.to_dict()), utc_now_iso()),
+    )
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status,
+             root_post_id, edit_of_post_id)
+        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, 'approved', ?, ?)
+        """,
+        (
+            edit.content_id, board_local_id, root_row["parent_post_id"], author_label,
+            payload["subject"], payload["body"], payload["created_at"],
+            payload["root_post_id"], payload["previous_event_id"],
+        ),
+    )
+    reindex_post(db, board_local_id, payload["root_post_id"])
+    db.connection.commit()
+
+    return _post_from_row(
+        db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
+    )
+
+
+def rebuild_carried_post_materialization(db: Database) -> int:
+    """
+    Repair pass (design doc §9.3, issue #73's own "supported rebuild
+    path" acceptance criterion): materializes every accepted
+    `board_post`/`board_post_edit` in `link_events` that has no
+    corresponding `posts` row yet.
+
+    Only needed for a gap that predates this feature (persistence and
+    projection are atomic for every *new* event going forward, via
+    `materialize_carried_post`/`_edit` themselves -- see their own
+    docstrings) or a chain with more than one missing link at once.
+    Loops until a full pass makes no further progress, so a multi-edit
+    gap resolves in dependency order in one call rather than needing
+    one invocation per missing link; terminates either because
+    everything is caught up or because whatever remains is permanently
+    unmaterializable (e.g. a board this node never carried), the same
+    "derived state rebuildable from authoritative data" principle
+    issue #74 applies to FTS indexes. Returns how many rows were newly
+    materialized.
+    """
+    rebuilt = 0
+    while True:
+        progressed = 0
+        gaps = db.connection.execute(
+            """
+            SELECT content_id, sender_fingerprint, object_type, envelope_json
+            FROM link_events
+            WHERE object_type IN (?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
+            ORDER BY received_at ASC
+            """,
+            (BOARD_POST_OBJECT_TYPE, BOARD_POST_EDIT_OBJECT_TYPE),
+        ).fetchall()
+        for row in gaps:
+            envelope = json.loads(row["envelope_json"])
+            if row["object_type"] == BOARD_POST_OBJECT_TYPE:
+                result = materialize_carried_post(
+                    db, BoardPost.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                )
+            else:
+                result = materialize_carried_post_edit(
+                    db, BoardPostEdit.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                )
+            if result is not None:
+                progressed += 1
+        rebuilt += progressed
+        if progressed == 0:
+            return rebuilt
 
 
 def board_origin_fingerprint(db: Database, board: Board) -> str:

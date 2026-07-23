@@ -24,9 +24,12 @@ from netbbs.link.boards import (
     link_board,
     load_own_board_events,
     materialize_carried_board,
+    materialize_carried_post,
+    materialize_carried_post_edit,
     offer_board_origin_transfer,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
+    rebuild_carried_post_materialization,
     record_board_origin_change,
 )
 from netbbs.link.events import (
@@ -34,6 +37,8 @@ from netbbs.link.events import (
     BoardPostEdit,
     build_board_genesis,
     build_board_origin_transfer_offer,
+    build_board_post,
+    build_board_post_edit,
     build_key_transition,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -252,6 +257,245 @@ def test_carried_board_count_excludes_self_originated_boards(db, alice, node_ide
     materialize_carried_board(db, _remote_genesis(remote_node_identity))  # genuinely carried
 
     assert carried_board_count(db, node_identity.fingerprint) == 1
+
+
+# -- materialize_carried_post/_edit (design doc §9.3, issue #73) -----------
+
+
+def _carried_board(db, remote_node_identity, *, board_id="remote-board-id"):
+    genesis = _remote_genesis(remote_node_identity, board_id=board_id)
+    materialize_carried_board(db, genesis)
+    return board_id
+
+
+def _remote_post(remote_node_identity, *, board_id="remote-board-id", **kwargs):
+    return build_board_post(
+        signing_identity=remote_node_identity.signing_key,
+        home_node_fingerprint=remote_node_identity.fingerprint,
+        local_user_id="wanderer",
+        board_id=board_id,
+        subject=kwargs.pop("subject", "hello"),
+        body=kwargs.pop("body", "first post"),
+        created_at=kwargs.pop("created_at", "2026-01-01T00:00:00Z"),
+        **kwargs,
+    )
+
+
+def test_materialize_carried_post_creates_a_local_row(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    materialized = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized is not None
+    assert materialized.post_id == post.content_id
+    assert materialized.root_post_id == post.content_id
+    assert materialized.subject == "hello"
+    assert materialized.body == "first post"
+    assert materialized.status == "approved"
+    assert materialized.author_user_id is None
+    assert materialized.author_label == f"wanderer@{remote_node_identity.fingerprint}"
+
+    row = db.connection.execute(
+        "SELECT 1 FROM link_events WHERE content_id = ?", (post.content_id,)
+    ).fetchone()
+    assert row is not None  # the underlying signed event was persisted too, same call
+
+
+def test_materialize_carried_post_is_idempotent(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    first = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    second = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert first.id == second.id
+    assert len(db.connection.execute("SELECT 1 FROM posts WHERE post_id = ?", (post.content_id,)).fetchall()) == 1
+
+
+def test_materialize_carried_post_returns_none_if_board_not_locally_carried(db, remote_node_identity):
+    # No _carried_board call -- the board was never materialized (e.g.
+    # refused by issue #60's max_carried_boards cap), even though the
+    # protocol layer might otherwise have accepted the post's own
+    # board_genesis.
+    post = _remote_post(remote_node_identity, board_id="never-materialized-board-id")
+
+    result = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert result is None
+    assert db.connection.execute("SELECT 1 FROM posts").fetchone() is None
+
+
+def test_materialize_carried_post_orphaned_reply_becomes_top_level(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    # References a parent that was never itself materialized.
+    post = _remote_post(remote_node_identity, board_id=board_id, parent_post_id="never-arrived-content-id")
+
+    materialized = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.parent_post_id is None
+
+
+def test_materialize_carried_post_sets_parent_when_already_materialized(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    parent = _remote_post(remote_node_identity, board_id=board_id, subject="root")
+    materialize_carried_post(db, parent, sender_fingerprint=remote_node_identity.fingerprint)
+
+    reply = _remote_post(
+        remote_node_identity, board_id=board_id, subject="reply",
+        created_at="2026-01-01T00:01:00Z", parent_post_id=parent.content_id,
+    )
+    materialized = materialize_carried_post(db, reply, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized.parent_post_id == parent.content_id
+
+
+def test_materialize_carried_post_indexes_for_search(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id, subject="unique-searchable-subject")
+
+    materialized = materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    row = db.connection.execute(
+        "SELECT root_post_id FROM post_search WHERE root_post_id = ?", (materialized.root_post_id,)
+    ).fetchone()
+    assert row is not None
+
+
+def test_materialize_carried_post_edit_creates_a_new_revision(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    edit = build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=post.payload["author"],
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="hello (edited)",
+        body="first post, edited",
+        created_at="2026-01-01T00:05:00Z",
+    )
+
+    materialized = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized is not None
+    assert materialized.post_id == edit.content_id
+    assert materialized.root_post_id == post.content_id
+    assert materialized.edit_of_post_id == post.content_id
+    assert materialized.subject == "hello (edited)"
+
+    # The resolved current version (what a reader actually sees) reflects the edit.
+    current = db.connection.execute(
+        "SELECT subject FROM posts WHERE root_post_id = ? AND status = 'approved' ORDER BY created_at DESC, id DESC LIMIT 1",
+        (post.content_id,),
+    ).fetchone()
+    assert current["subject"] == "hello (edited)"
+
+
+def test_materialize_carried_post_edit_is_idempotent(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    edit = build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=post.payload["author"],
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="edited",
+        body="edited",
+        created_at="2026-01-01T00:05:00Z",
+    )
+
+    first = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+    second = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert first.id == second.id
+    assert len(db.connection.execute("SELECT 1 FROM posts WHERE post_id = ?", (edit.content_id,)).fetchall()) == 1
+
+
+def test_materialize_carried_post_edit_returns_none_if_root_missing(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    edit = build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author={"kind": "node_vouched_user", "home_node_fingerprint": remote_node_identity.fingerprint, "local_user_id": "wanderer"},
+        board_id=board_id,
+        root_post_id="never-materialized-root",
+        previous_event_id="never-materialized-root",
+        subject="edited",
+        body="edited",
+        created_at="2026-01-01T00:05:00Z",
+    )
+
+    result = materialize_carried_post_edit(db, edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert result is None
+
+
+def test_rebuild_carried_post_materialization_repairs_a_gap(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+
+    # Simulate the pre-this-feature gap: the event was persisted (as
+    # save_event alone used to do) but never projected into posts.
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+        "VALUES (?, ?, 'board_post', ?, ?)",
+        (post.content_id, remote_node_identity.fingerprint, json.dumps(post.to_dict()), "2026-01-01T00:00:00Z"),
+    )
+    db.connection.commit()
+    assert db.connection.execute("SELECT 1 FROM posts").fetchone() is None
+
+    rebuilt = rebuild_carried_post_materialization(db)
+
+    assert rebuilt == 1
+    row = db.connection.execute("SELECT subject FROM posts WHERE post_id = ?", (post.content_id,)).fetchone()
+    assert row["subject"] == "hello"
+
+
+def test_rebuild_carried_post_materialization_resolves_a_multi_step_gap(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    edit = build_board_post_edit(
+        signing_identity=remote_node_identity.signing_key,
+        author=post.payload["author"],
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="edited",
+        body="edited",
+        created_at="2026-01-01T00:05:00Z",
+    )
+    # Both the root and its edit are un-materialized gaps -- a single
+    # pass that processes them in the wrong order would fail to attach
+    # the edit; rebuild_carried_post_materialization must still resolve
+    # both since it orders by received_at and loops until no progress.
+    for event, object_type, received_at in [
+        (post, "board_post", "2026-01-01T00:00:00Z"),
+        (edit, "board_post_edit", "2026-01-01T00:05:00Z"),
+    ]:
+        db.connection.execute(
+            "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (event.content_id, remote_node_identity.fingerprint, object_type, json.dumps(event.to_dict()), received_at),
+        )
+    db.connection.commit()
+
+    rebuilt = rebuild_carried_post_materialization(db)
+
+    assert rebuilt == 2
+    assert db.connection.execute("SELECT 1 FROM posts WHERE post_id = ?", (post.content_id,)).fetchone() is not None
+    assert db.connection.execute("SELECT 1 FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone() is not None
+
+
+def test_rebuild_carried_post_materialization_is_a_noop_when_nothing_is_missing(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert rebuild_carried_post_materialization(db) == 0
 
 
 # -- board_origin_fingerprint (design doc round 94/issue #53) ------------------

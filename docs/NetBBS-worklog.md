@@ -946,20 +946,32 @@ build and persist events, but must not mutate the shared live LinkNode from a
 worker thread.
 
 **"Carrying" a board and having a locally browsable copy of it are different
-things, and the gap between them was invisible until origin transfer needed
-it.** Before issue #53, a node that received and stored a peer's
-`board_genesis`/`board_post` events had nothing a local user could actually
-read or post through -- no `boards` row was ever created for it, only
-`LinkNode.boards`/`link_events`. `netbbs.link.boards.materialize_carried_board`
-closes this: any node accepting a `board_genesis` it didn't originate now gets
-a real local `Board` row, seeded from that genesis's own `default_*`
-recommendations, using the genesis's exact `board_id` (never minted fresh --
-`netbbs.boards.boards.create_board` cannot be reused for this, since it always
-mints a new content-addressed ID from the *local* creator/timestamp). Any
-future feature that assumes "every carrying node has a working local copy" of
-Linked content should check whether that assumption is actually true yet for
-the object type in question, rather than trusting the default-carry policy's
-own description of intent.
+things.** `netbbs.link.boards.materialize_carried_board` (issue #53) gives a
+node accepting a `board_genesis` it didn't originate a real local `Board`
+row; `materialize_carried_post`/`materialize_carried_post_edit` (issue #73)
+do the equivalent for `board_post`/`board_post_edit` into real `posts` rows.
+All three reuse the signed event's own `content_id` verbatim as the local
+`board_id`/`post_id` -- never minted fresh (`netbbs.boards.boards.create_
+board`/`netbbs.boards.posts.create_post` can't be reused for this, since
+both always mint a new content-addressed ID from the *local* creator/
+timestamp) -- which is what lets `posts.root_post_id`/`edit_of_post_id`
+resolve directly from a `board_post_edit`'s own `root_post_id`/`previous_
+event_id` payload fields with no separate ID-translation table. Any future
+Link object type that needs a caller-facing local projection should check
+whether that projection actually exists yet, rather than trusting a
+"carrying" or "default-carry" description of intent alone -- `link_events`
+proves the protocol accepted something; it says nothing about whether any
+other table has ever heard about it.
+
+**Post/edit materialization closed a crash-window genesis materialization
+still has.** `materialize_carried_board` is a separate `lane.run` call from
+the `save_event` that persists its own underlying signed event -- a crash
+between the two leaves an accepted-but-unmaterialized genesis, with no repair
+path today. `materialize_carried_post`/`_edit` do both writes in one call,
+one transaction, closing that window for posts/edits specifically (and
+`rebuild_carried_post_materialization` repairs the one-time gap on a node
+upgrading from before this existed) -- genesis's own gap is unfixed, and
+worth remembering before assuming "it's accepted" implies "it's carried."
 
 **A self-originated Link event's effect on `LinkNode` state must be applied
 directly by whichever caller built it -- it never flows through that same
