@@ -1438,7 +1438,11 @@ including:
   activity, board/event counters, and relay-mailbox size — is available in
   the SysOp menu's `[L]ink status` screen; per-seed health has nothing to
   show yet, since no per-seed success/failure tracking exists);
-- disk, event, mailbox, relay, and bandwidth quotas;
+- disk, event, mailbox, relay, and bandwidth quotas (§13.9 specifies peer-
+  count, events-per-request, carried-board-count, received-post-size,
+  request-body-size, and request-rate quotas; design-complete, not yet
+  implemented. Event-retention/purging and node-wide disk quota are
+  explicitly deferred out of that slice — see §13.9's own reasoning);
 - integrity checks and crash recovery;
 - bounded diagnostic log retention without content logging;
 - protocol/database upgrade and rollback compatibility;
@@ -1645,6 +1649,74 @@ coupled: `[D]rain` never enables lockdown itself, and enabling lockdown
 never triggers a drain — each is a deliberate, separate SysOp decision,
 matching how follow/membership/node-carry are kept independent elsewhere
 in this design (§6.6) rather than one silently implying another.
+
+### 13.9 Quotas: closing the remaining bounded-remote-influence gaps (issue #60's third operational slice)
+
+**Audit before design, same discipline §13.7 used for work items.** §13.5
+already states the general rule (every remotely influenced resource needs an
+explicit limit, defined rejection behavior, and SysOp visibility); this
+section is the concrete audit of where that rule is and isn't met yet, and
+the scope decision for what this slice actually closes.
+
+**Already bounded, no change needed here** — peer-list entries per request
+(`_MAX_PEER_LIST_ENTRIES_PER_REQUEST = 100`), unverified candidate
+descriptors (`_MAX_CANDIDATE_DESCRIPTORS = 500`, new-fingerprint admission
+capped but refreshing an already-tracked candidate is always allowed),
+relay-serving slots (`max_relay_clients`, decline-not-error), relay mailbox
+envelopes per recipient (`MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50`, HTTP 507
+on overflow, no eviction), Link mail delivery/acknowledgement retry
+(§13.7's backoff-then-dead-letter), local mailbox size (`MAX_MAIL_PER_
+RECIPIENT`, evict-oldest-read/refuse-if-all-unread — already applied to
+incoming Link mail too, bouncing rather than silently dropping), and Zmodem
+upload size (`max_upload_bytes`, checked against both claimed and actual
+running size).
+
+**Gaps this slice closes** — every currently-uncapped *admission* point in
+the Link protocol, plus the two content-validation gaps that most directly
+let one peer impose unbounded cost on another node:
+
+| Gap | Fix | Enforcement idiom |
+|---|---|---|
+| `LinkNode.peers`/`link_peers` — any node that completes a hello becomes a permanent peer, no cap (mirror-image gap to candidate descriptors, which *are* capped) | New `LinkConfig.max_peers` (default 1000 — generous relative to §14's declared small-network scale, but no longer infinite) | Same shape as candidate descriptors: admitting a genuinely *new* fingerprint past the cap is refused; a hello from an *already-known* peer (key rotation, descriptor refresh) is always accepted regardless of the count. `handle_hello` stays a pure verify-and-record method with no config access (unchanged boundary) — the accept/decline policy decision is made by the caller (`LinkServer._handle_hello`/`dial_hello`), the same "verify here, decide there" split `handle_relay_consent_request` already established. |
+| `handle_events` batch size — no per-request cap, unlike peer-list's own `_MAX_PEER_LIST_ENTRIES_PER_REQUEST` from the same design round | New `_MAX_EVENTS_PER_REQUEST = 200` beside the existing constant in `protocol.py` | Reject the whole batch with `LinkProtocolError`, identical to the peer-list precedent — a genuine sync backlog still drains over several passes rather than one unbounded request. |
+| `board_post`/`board_post_edit` content size — zero validation on receive, unlike locally created posts (`netbbs.boards.posts.MAX_SUBJECT_BYTES`/`MAX_BODY_BYTES`) | Apply the same two constants inside `handle_events`'s `board_post`/`board_post_edit` branches | `LinkProtocolError`, matching every other malformed-event rejection already in that method. |
+| Carried-board count — `materialize_carried_board` turns any verified `board_genesis` into a local `Board` row unconditionally | New `LinkConfig.max_carried_boards` | The `board_genesis` event is still verified, accepted, and gossiped on past this node (dedup and chain integrity for *other* nodes must not depend on this node's own local storage choices) — only *materializing* a local, browsable `Board` row is refused once the cap is hit. This is the exact shape §9.3 already specifies for a local exclusion: represented honestly as "not carried on this node," never a silent, indistinguishable drop. |
+| Link HTTP request body size — neither `LinkServer` nor `WebServer` sets `client_max_size`, so both silently inherit aiohttp's implicit 1 MiB default | Set `client_max_size` explicitly on `LinkServer`'s `web.Application()`, sized to comfortably fit `_MAX_EVENTS_PER_REQUEST` worth of events (2 MiB) | Turns an accidental library default into a deliberate, documented value; aiohttp's own 413 response is unchanged (not worth reshaping into a `LinkProtocolError` payload for a request that was rejected before any handler ran). |
+| Link HTTP request rate — no throttling on any Link route at all, including the two unauthenticated ones (`/hello`, `/peers`) | Reuse `netbbs.net.throttle`'s existing `_TokenBucket`/`_KeyedTokenBuckets` machinery, keyed by source address, wired into `LinkServer` the same way `LoginThrottle` is threaded into `netbbs.net.login_flow`/`ssh.py` today (constructed once in `netbbs.__main__`, passed in) | A new `LinkConfig` throttle sub-section (own token-bucket rate/burst, not reusing login's numbers — Link traffic is machine-to-machine and legitimately bursty in a way interactive login attempts aren't). Exceeding it returns a plain HTTP 429, no signed payload needed (an unauthenticated-route response can't be signed meaningfully anyway). |
+
+**Explicitly deferred, not part of this slice** — following §13.7's own
+precedent of naming what's excluded and why, rather than silently narrowing
+scope:
+
+- **`link_events` retention/purging.** The two places this gap already exists
+  in code (`storage/migrations.py`, `link/store.py`) both name the same
+  blocker themselves: purging has to reckon with `handle_events`'s own
+  chain-idempotency self-heal logic for `key_transition`/`board_post_edit`/
+  lifecycle events first, or a purge could resurrect a fork-detection false
+  positive for an event this node legitimately already integrated. That is
+  its own design pass, not a quota default.
+- **Node-wide disk quota on blob storage** — the literal "disk" word in issue
+  #60's own bullet, and still the single largest true gap (no `shutil.disk_
+  usage`, no running byte counter, no code anywhere aware of aggregate
+  storage consumption). Needs genuinely new disk-usage-tracking machinery
+  this codebase doesn't have yet, not a threshold check against an existing
+  number — sized as its own future slice rather than folded in here.
+- **`link_work_items` terminal-row retention.** Locally driven growth (a
+  node's own composed mail history), not remote-influenced admission — pairs
+  more naturally with issue #60's separate "log retention" bullet than with
+  quotas, and every individual item is already bounded by dead-lettering.
+- **Zmodem transfer-rate (time) limiting.** The existing byte-size cap plus
+  `ThrottleConfig`'s connection/session limits already bound the worst case
+  tolerably; true transfer-rate instrumentation isn't worth building until a
+  real problem is observed.
+
+**SysOp visibility.** `[L]ink status` gains a peer-count line showing
+`current/max_peers` (matching the existing `relaying_for`-slots-in-use
+display precedent) and a carried-boards `current/max_carried_boards` line;
+rate-limit rejections are logged the same way `LoginThrottle` rejections
+already are, not surfaced as a separate screen in this slice.
+
+Design-complete, not yet implemented.
 
 ---
 
