@@ -1,9 +1,9 @@
 """
-Transparent chat display aliases (design doc round 32, points 7-10;
-sign-off rounds 41/53): `/nick` sets a persistent, node-wide
+Transparent chat display aliases (design doc, points 7-10):
+`/nick` sets a persistent, node-wide
 presentation alias — not identity.
 
-Two distinct rendering forms exist, deliberately, since round 53:
+Two distinct rendering forms exist, deliberately:
 `display_label` (`nick|username`, both forms together) is used
 everywhere a *directory*-style listing needs to unambiguously show who
 someone really is alongside how they've chosen to present themselves
@@ -17,12 +17,12 @@ forms on every single line of live chat added clutter without adding
 safety, since the directory commands already provide canonical identity
 on demand.
 
-Stored via `netbbs.user_preferences` (the generic per-user store
-introduced in round 38), not a dedicated table — one more small typed
+Stored via `netbbs.user_preferences` (the generic per-user store),
+not a dedicated table — one more small typed
 wrapper around it, same as `netbbs.directory`'s bio fields.
 
 Deliberately its own module, not folded into `netbbs.directory`:
-design doc round 32 discusses `/nick` alongside `/me`/`/away` as chat
+the design doc discusses `/nick` alongside `/me`/`/away` as chat
 presentation, not as part of the user-directory/vCard feature — a
 different concern, even though both happen to sit on the same generic
 storage underneath.
@@ -40,8 +40,8 @@ _NICK_KEY = "nick"
 MAX_NICK_LENGTH = 32
 
 # Wraps a nick in the live chat stream (`chat_stream_label`) to mark it
-# as a stand-in name, distinct from the account's canonical username —
-# design doc round 53. Plain ASCII, not a Unicode glyph, for the same
+# as a stand-in name, distinct from the account's canonical username.
+# Plain ASCII, not a Unicode glyph, for the same
 # reason italics was ruled out as a *styling* option there: guaranteed
 # to render identically on a CP437-only classic BBS client, not
 # font/encoding-dependent. `~` doesn't collide with anything else this
@@ -62,10 +62,10 @@ def set_nick(db: Database, user: User, nick: str) -> None:
     `get_nick`) — a bare `/nick` in the chat command maps to this.
 
     Validates length, that `nick` doesn't exactly match another
-    account's canonical username, case-insensitively (design doc round
-    32, point 8: "preserves freedom of presentation without allowing
+    account's canonical username, case-insensitively (design doc,
+    point 8: "preserves freedom of presentation without allowing
     an alias to impersonate an authenticated local identity"), and
-    (round 53) that it doesn't contain `NICK_MARKER` — reserved so
+    that it doesn't contain `NICK_MARKER` — reserved so
     `chat_stream_label`'s marker can never be confused with something a
     user actually typed into their own alias. Setting your own username
     as your own nick is harmless and allowed — only *other* accounts'
@@ -105,11 +105,11 @@ def display_label(db: Database, user: User) -> str:
     used by directory-style listings (`/who`, `/whois`, `/names`) that
     need canonical identity unambiguously visible alongside however the
     account has chosen to present itself. The live conversational
-    stream itself uses `chat_stream_label` instead (design doc round
-    53) — see that function's docstring for why the two diverge.
+    stream itself uses `chat_stream_label` instead —
+    see that function's docstring for why the two diverge.
     Deliberately not used for moderation transparency notices (mute/
     ban/kick/etc.) or command targeting either way — those always show/
-    resolve canonical identity only (design doc round 32, point 7/9),
+    resolve canonical identity only (design doc, point 7/9),
     by calling `user.username` directly instead of either of these two
     functions.
     """
@@ -120,8 +120,8 @@ def display_label(db: Database, user: User) -> str:
 def chat_stream_label(db: Database, user: User) -> str:
     """
     The alias alone, visually marked (`~nick~`, colored via
-    `NICK_COLOR`) if `user` has one set, else plain `username` —
-    design doc round 53. Used in the live chat stream itself (regular
+    `NICK_COLOR`) if `user` has one set, else plain `username`.
+    Used in the live chat stream itself (regular
     messages, `/me`, join/leave, scrollback replay): showing both forms
     on *every single line* of live conversation was judged cluttered in
     practice, not just in theory, once actually tried — the canonical
@@ -132,7 +132,7 @@ def chat_stream_label(db: Database, user: User) -> str:
     be confused with something a user actually typed into their own
     alias.
 
-    Sanitizes (design doc round 29) the underlying nick/username
+    Sanitizes the underlying nick/username
     *before* applying `NICK_COLOR`, never after — this function owns
     both concerns itself rather than leaving sanitization to the
     caller the way `display_label` does, specifically so a caller never

@@ -207,12 +207,10 @@ def test_unknown_command_letter_sounds_bell_and_stays_in_picker():
 
 def test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell():
     """
-    Design doc round 52 (revising round 48): an invalid keystroke gets
-    genuinely *nothing* beyond the bell -- no reprinted "Choice: "
-    prompt, no synthetic newline. Round 48's own fix still reprinted
-    the prompt after the bell, which Thiesi later judged added no
-    value (the prompt was already visible, reprinting it communicates
-    nothing new) -- this replaces that behavior, not just this test.
+    An invalid keystroke gets genuinely *nothing* beyond the bell --
+    no reprinted "Choice: " prompt, no synthetic newline. Reprinting
+    the prompt after the bell would add no value (the prompt is
+    already visible, and reprinting it communicates nothing new).
     """
     result = {}
     items = ["a"]
@@ -236,9 +234,9 @@ def test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell():
             second = await _read_until_quiet(reader)
             # The echoed character, immediately erased, plus a bell --
             # nothing else, each time, regardless of how many invalid
-            # keys precede it (round 67: echo happens inside read_key
-            # before pick_item ever sees the key, so rejecting it also
-            # erases the already-echoed character via reject_keystroke()).
+            # keys precede it (echo happens inside read_key before
+            # pick_item ever sees the key, so rejecting it also erases
+            # the already-echoed character via reject_keystroke()).
             assert first == b"z\b \b\a"
             assert second == b"y\b \b\a"
             writer.write(b"b")
@@ -417,7 +415,7 @@ def test_search_matches_name_case_insensitively():
     assert result["value"] == "Apple"
 
 
-# -- search: Tab completion (design doc round 49/Track 5g) ------------------
+# -- search: Tab completion --------------------------------------------------
 
 
 def test_search_tab_completes_a_single_matching_candidate():
@@ -484,9 +482,9 @@ def test_search_tab_with_no_matching_candidates_does_not_change_the_query():
 
 
 def test_search_tab_completion_reflects_the_current_working_set_not_the_full_list():
-    # Candidates for Tab are drawn from `working_set` (design doc round
-    # 49/Track 5g) -- confirms a completion offered mid-search doesn't
-    # ever suggest an item already filtered out by an earlier search.
+    # Candidates for Tab are drawn from `working_set` -- confirms a
+    # completion offered mid-search doesn't ever suggest an item already
+    # filtered out by an earlier search.
     result = {}
     items = ["alpha", "alligator", "amber"]
 

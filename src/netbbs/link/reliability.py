@@ -1,6 +1,6 @@
 """
-Local, direct-observation peer reliability tracking (design doc §12
-round 95, issue #58) -- the "reliability scoring reuses §6's existing
+Local, direct-observation peer reliability tracking (design doc §12,
+issue #58) -- the "reliability scoring reuses §6's existing
 local-reputation mechanism" the design doc describes turned out, on
 inspection, to have nothing existing to reuse: §6's own reputation/
 trust system is design-only, no data model or table exists anywhere in
@@ -14,7 +14,7 @@ hop-count/topology awareness was explicitly rejected as disproportionate
 complexity for this project's declared scale (§14).
 
 Direct observation only, exactly like `node.candidate_descriptors`
-itself (§12 round 95's own "second-hand reliability claims... treated
+itself (§12's own "second-hand reliability claims... treated
 as a weak prior worth trying, not trusting outright" framing) -- this
 module has no notion of a peer *telling* this node how reliable a third
 party is; every row here reflects only this node's own dial attempts.

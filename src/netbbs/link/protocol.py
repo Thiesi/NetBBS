@@ -96,8 +96,8 @@ from netbbs.link.events import (
 )
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError, resolve_current_operational_key
 
-# Round 95: bounds on remotely-influenced peer-list state (design doc's
-# own "every remotely influenced ... collection needs an explicit
+# Bounds on remotely-influenced peer-list state (design doc's own
+# "every remotely influenced ... collection needs an explicit
 # bound" principle). A single request carrying an absurd number of
 # descriptors is refused outright, matching other malformed/abusive-
 # input rejection in this module; the total candidate set this node

@@ -1,5 +1,5 @@
 """
-Node runtime configuration (design doc round 28, issues #15/#1/#3).
+Node runtime configuration (design doc, issues #15/#1/#3).
 
 Replaces the hardcoded settings `netbbs.__main__` used to carry
 directly (fixed `0.0.0.0` binds, Telnet always started, SSH/web started
@@ -78,7 +78,7 @@ class TransportConfig:
 @dataclass(frozen=True)
 class LinkConfig:
     """
-    NetBBS Link's own transport (design doc §11/§12, round 118) --
+    NetBBS Link's own transport (design doc §11/§12) --
     distinct from `TransportConfig` because "am I dialable" and "what
     do I claim about how to reach me" are two independent questions
     for Link in a way they aren't for an interactive transport: a node
@@ -86,7 +86,7 @@ class LinkConfig:
     peers *it* dials can reply over the same connection, while still
     being unreachable from anywhere else (`outgoing_only=True`, §12's
     common NAT/residential case) -- `outgoing_only` controls what this
-    node's own `endpoint_descriptor` (round 116) claims, never whether
+    node's own `endpoint_descriptor` claims, never whether
     the local listener runs at all.
 
     `advertised_host`/`advertised_port` are only meaningful when
@@ -97,29 +97,29 @@ class LinkConfig:
     port` defaults to `port` when unset; `advertised_host` has no
     default -- see `NodeConfig.validate`.
 
-    `seeds` (design doc §12, round 119) is this node's operator-
+    `seeds` (design doc §12) is this node's operator-
     configured seed list -- a plain list of base URLs (e.g.
     `"http://198.51.100.7:7862"`) `netbbs.link.sync`'s background loop
     dials every `sync_interval_seconds`. Just the fixed/operator-
     configured half of §12's bootstrap model -- `netbbs.link.seedlist.
-    run_scheduled_seed_refresh` (round 97) fetches a live supplementary
+    run_scheduled_seed_refresh` fetches a live supplementary
     list over the same channel `netbbs.selfupdate` uses and
     `run_link_sync` merges it in every pass, "a supplement to -- never a
-    replacement for" this list, exactly as round 97's own design framed
+    replacement for" this list, exactly as that design framed
     it. Empty by default -- Link can run accepting inbound traffic
-    (round 118) with nothing configured here at all, relying entirely on
+    with nothing configured here at all, relying entirely on
     the live-fetched list (or peer-list-exchange-discovered candidates,
     once something consumes those) to ever reach the network.
 
     Defaults to disabled, matching §15's "Phase 3 is explicitly
     private/experimental federation" framing -- an operator opts in.
 
-    `relay_serving_enabled`/`max_relay_clients` (design doc §12, round
-    95/issue #58) govern this node's own willingness to *act as a
+    `relay_serving_enabled`/`max_relay_clients` (design doc §12,
+    issue #58) govern this node's own willingness to *act as a
     relay* for other outgoing-only nodes -- entirely separate from
     `outgoing_only` above, which governs whether *this* node needs a
     relay itself. Defaults to serving enabled with a conservative cap
-    (round 95: "relay-serving defaults to on, with a conservative
+    ("relay-serving defaults to on, with a conservative
     resource cap... and an easy opt-out — confirmed with Thiesi over
     defaulting off," since an opt-in-only default would leave a young
     or small Link without enough relays for outgoing-only nodes to ever
@@ -195,7 +195,7 @@ class ThrottleConfig:
 
 @dataclass(frozen=True)
 class ShutdownConfig:
-    """Design doc round 51: how long a *graceful* shutdown (SIGTERM)
+    """Design doc: how long a *graceful* shutdown (SIGTERM)
     waits, after broadcasting the warning, before forcibly disconnecting
     everyone still connected — an immediate shutdown (SIGINT) skips this
     wait entirely. Operator-overridable via `[shutdown]`, matching
@@ -207,7 +207,7 @@ class ShutdownConfig:
 @dataclass(frozen=True)
 class NodeConfig:
     db_path: Path = Path("netbbs.db")
-    # Design doc round 89/111: the node's own key-lifecycle state (root
+    # Design doc: the node's own key-lifecycle state (root
     # key + signing/transport operational keys + transition history,
     # see netbbs.link.node_identity) — a directory, not a single file,
     # since it holds three key files plus a transition-history file.
@@ -394,7 +394,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         parser.add_argument(f"--{transport}-host", dest=f"{transport}_host", default=None)
         parser.add_argument(f"--{transport}-port", dest=f"{transport}_port", type=int, default=None)
 
-    # Link (round 118): special-cased, not folded into the _TRANSPORTS
+    # Link: special-cased, not folded into the _TRANSPORTS
     # loop above -- LinkConfig carries outgoing_only/advertised_host/
     # advertised_port beyond bare TransportConfig's enabled/host/port.
     link_group = parser.add_mutually_exclusive_group()
@@ -411,7 +411,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--link-advertised-host", dest="link_advertised_host", default=None)
     parser.add_argument("--link-advertised-port", dest="link_advertised_port", type=int, default=None)
-    # Round 119: --link-seed is repeatable (netbbs --link-seed
+    # --link-seed is repeatable (netbbs --link-seed
     # http://a:7862 --link-seed http://b:7862 ...) -- when given at all,
     # it *replaces* the config file's [link] seeds list entirely,
     # matching every other setting's "CLI wins, full override" behavior
@@ -420,7 +420,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--link-sync-interval-seconds", dest="link_sync_interval_seconds", type=float, default=None
     )
-    # Round 95/issue #58: relay-serving opt-out + resource cap.
+    # issue #58: relay-serving opt-out + resource cap.
     relay_serving_group = parser.add_mutually_exclusive_group()
     relay_serving_group.add_argument(
         "--link-relay-serving", dest="link_relay_serving_enabled", action="store_true", default=None

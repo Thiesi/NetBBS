@@ -1,6 +1,6 @@
 """
-Node key-lifecycle model (design doc §5, round 89 — the node tier;
-round 110 gives it a concrete on-wire/on-disk shape).
+Node key-lifecycle model (design doc §5 — the node tier, with a
+concrete on-wire/on-disk shape).
 
 A node's Link identity is its long-lived **root key**: the fingerprint
 that never changes for as long as the node exists. The root key never
@@ -10,14 +10,14 @@ events (`netbbs.link.events`) that authorize or revoke the two
 else. Root and operational keys all auto-generate silently at first
 bootstrap; rotation is one function call producing one more pair of
 transition events (revoke old, authorize new) rather than a manual
-ceremony — matching round 89's explicit "ceremony stripped out" goal.
+ceremony — matching the explicit "ceremony stripped out" goal.
 
-**Root-key loss or compromise has no cryptographic recovery** (round 89,
-stated plainly rather than engineered around) — this module doesn't
+**Root-key loss or compromise has no cryptographic recovery**,
+stated plainly rather than engineered around — this module doesn't
 attempt to build one. Root-key custody is an operator backup concern
-(design doc round 95/issue #60), not this module's job.
+(design doc, issue #60), not this module's job.
 
-User keys (the opt-in personal-keypair tier, round 89 point 2) are a
+User keys (the opt-in personal-keypair tier) are a
 single flat `netbbs.identity.keys.Identity` with no root/operational
 split and no transition-record machinery at all — this module is
 node-only.
@@ -150,8 +150,8 @@ def bootstrap_node_identity(label: str) -> NodeIdentity:
     """
     Generate a brand-new node identity: a fresh root key, plus initial
     signing and transport operational keys, each authorized by its own
-    `key_transition` signed by the freshly generated root (design doc
-    round 89) — silent, no manual ceremony. Does not save anything to
+    `key_transition` signed by the freshly generated root (design doc)
+    — silent, no manual ceremony. Does not save anything to
     disk; see `load_or_bootstrap_node_identity` for the usual entry
     point at node startup.
     """
@@ -194,7 +194,7 @@ def load_or_bootstrap_node_identity(
     from `directory` if one is already there, else bootstrap a brand-new
     one and save it — so a node's first-ever startup and every
     subsequent one both just work, with no separate "init" step an
-    operator has to remember to run first (design doc round 89's
+    operator has to remember to run first (design doc's
     "auto-generate silently at first node bootstrap").
     """
     if (directory / _ROOT_FILENAME).exists():
@@ -206,7 +206,7 @@ def load_or_bootstrap_node_identity(
 
 def rotate_operational_key(identity: NodeIdentity, *, purpose: str) -> NodeIdentity:
     """
-    Rotate `purpose`'s operational key (design doc round 89: "rotation
+    Rotate `purpose`'s operational key (design doc: "rotation
     is a single guided admin-menu/CLI action") — generates a fresh
     operational key, revokes the current one and authorizes the new one
     via two chained `key_transition` events (both signed by the root,
@@ -216,7 +216,7 @@ def rotate_operational_key(identity: NodeIdentity, *, purpose: str) -> NodeIdent
     call `.save()` on the result.
 
     The revoke-then-authorize pair is deliberately two events, not one
-    combined "rotate" event type — matches round 89's own wording
+    combined "rotate" event type — matches the design doc's own wording
     ("one record either authorizes... or marks one revoked") and lets a
     future emergency revoke-without-replacement reuse the exact same
     `action="revoke"` event this rotation's first half already is.
@@ -280,7 +280,7 @@ def _verify_and_order_chain(
 
     Walks the chain by `previous_transition_id` linkage — not by
     whatever order `transitions` happens to be given in — so this
-    actually exercises round 90's head-pointer chaining, not just a
+    actually exercises the head-pointer chaining, not just a
     signature check plus trust in list order. Raises `NodeIdentityError`
     for an invalid signature, a fork (two transitions both claiming the
     same predecessor), or a disconnected/broken chain (a transition
@@ -351,8 +351,8 @@ def resolve_current_operational_key(
     no key is currently authorized (either no transitions exist yet, or
     the most recent one for this chain is an unreplaced `revoke`).
 
-    This is a *computed* value, not stored separately anywhere — round
-    89's node tier deliberately has no independent "current key" pointer
+    This is a *computed* value, not stored separately anywhere — the
+    node tier deliberately has no independent "current key" pointer
     that could drift from what the verified chain actually says; the
     current key is always this function's answer.
     """

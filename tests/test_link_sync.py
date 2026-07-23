@@ -1,16 +1,16 @@
 """
-Tests for `netbbs.link.sync` (design doc §12, round 119) — the
-background loop that makes a node *originate* outbound Link activity.
-Drives real `LinkServer` instances (`tests/test_link_transport.py`'s
-own real-server/real-client convention) rather than `ScriptedTransport`,
+Tests for `netbbs.link.sync` (design doc §12) — the background loop
+that makes a node *originate* outbound Link activity. Drives real
+`LinkServer` instances (`tests/test_link_transport.py`'s own
+real-server/real-client convention) rather than `ScriptedTransport`,
 since the whole point is proving the loop actually reaches a peer over
 a real socket, pushes real events, and tolerates a real peer being
 unreachable or rejecting it.
 
-Round 120: `run_link_sync`/`dial_hello` persist through a
-`DatabaseLane`, so every node here gets a real, separately-opened
-`Database` file too -- see `tests/test_link_transport.py`'s module
-docstring for why a `Database`/`DatabaseLane` pair, not just one.
+`run_link_sync`/`dial_hello` persist through a `DatabaseLane`, so
+every node here gets a real, separately-opened `Database` file too --
+see `tests/test_link_transport.py`'s module docstring for why a
+`Database`/`DatabaseLane` pair, not just one.
 """
 
 from __future__ import annotations
@@ -104,16 +104,16 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
         seed_node_after = asyncio.run(scenario())
         assert dialer_identity.fingerprint in seed_node_after.peers
         peer_record = seed_node_after.peers[dialer_identity.fingerprint]
-        # Both halves of the rotation (revoke + authorize, design doc round
-        # 116's own ordering note) reached the seed -- via the hello (which
-        # already carried them, since the rotation happened before the
-        # first sync pass) and via push_events (round 119: pushes *all* of
-        # identity.transitions, including the not-yet-seen transport-purpose
-        # transition, which lands after them in the flat tuple -- round
-        # 121: no longer a duplicate-signing_orig rejection, so this
-        # assertion checks membership, not tuple position, which was never
-        # a meaningful proxy for "current head" once more than one purpose
-        # is interleaved in the same flat PeerRecord.transitions tuple).
+        # Both halves of the rotation (revoke + authorize, per the
+        # design doc's own ordering note) reached the seed -- via the
+        # hello (which already carried them, since the rotation
+        # happened before the first sync pass) and via push_events
+        # (pushes *all* of identity.transitions, including the
+        # not-yet-seen transport-purpose transition, which lands after
+        # them in the flat tuple). This assertion checks membership,
+        # not tuple position, which was never a meaningful proxy for
+        # "current head" once more than one purpose is interleaved in
+        # the same flat PeerRecord.transitions tuple.
         peer_content_ids = {t.content_id for t in peer_record.transitions}
         for transition in dialer_node.identity.transitions:
             assert transition.content_id in peer_content_ids
@@ -123,8 +123,8 @@ def test_sync_completes_a_hello_and_pushes_events_to_a_real_seed(tmp_path):
 
 
 def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
-    """Round 95: _sync_one_seed also asks the seed who else it knows,
-    right after the hello -- the seed here already has carol as a
+    """_sync_one_seed also asks the seed who else it knows, right
+    after the hello -- the seed here already has carol as a
     completed peer of its own; one sync pass should leave the dialer
     with carol as a recorded (unverified) candidate, on disk too."""
     dialer_identity = bootstrap_node_identity("dialer")
@@ -164,7 +164,7 @@ def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
 
 
 def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tmp_path):
-    """Round 97: a seed the operator never configured, but that a
+    """A seed the operator never configured, but that a
     (simulated) live seed-list refresh already cached, still gets
     dialed -- proves the per-pass merge actually happens, not just that
     the cache-read function exists."""
@@ -202,7 +202,7 @@ def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tm
         seed.close()
 
 
-# -- candidate fallback (design doc round 95) --------------------------------
+# -- candidate fallback (design doc §8.3) --------------------------------
 
 
 def _seed_candidate(dialer_node: LinkNode, candidate_identity, *, port: int) -> None:
@@ -299,7 +299,7 @@ def test_sync_tries_a_candidates_second_address_when_its_first_is_dead(tmp_path)
 
 
 def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
-    """The brand-new-node case round 97/95 both name as the one this
+    """The brand-new-node case the design doc names as the one this
     resilience path matters most for."""
     dialer_identity = bootstrap_node_identity("dialer")
     candidate_identity = bootstrap_node_identity("candidate")
@@ -333,9 +333,9 @@ def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
 
 def test_sync_does_not_fall_back_when_a_seed_succeeds(tmp_path):
     """A candidate must never be dialed via *fallback* just because it's
-    known -- only when every seed this pass genuinely failed. Round 95/
-    issue #58's separate relay-selection mechanism also dials known
-    candidates, but only for an outgoing-only node (design doc §12: a
+    known -- only when every seed this pass genuinely failed. Issue
+    #58's separate relay-selection mechanism also dials known
+    candidates, but only for an outgoing-only node (design doc §8.5: a
     full peer never needs relays) -- this dialer is deliberately built
     as a full peer here so that mechanism stays out of this test's way,
     keeping it scoped to fallback specifically (relay selection has its
@@ -450,7 +450,7 @@ def test_sync_respects_the_fallback_attempt_cap(tmp_path, monkeypatch):
 
 
 def test_sync_pushes_own_linked_board_genesis_and_post_to_a_real_seed(tmp_path):
-    """Round 128: `_sync_one_seed` also pushes this node's own `board_
+    """`_sync_one_seed` also pushes this node's own `board_
     genesis`/`board_post` events, read fresh off the `boards`/`posts`
     tables (`netbbs.link.boards.load_own_board_events`) via the same
     `lane` already used for `dial_hello`'s own persistence -- proves
@@ -547,7 +547,7 @@ def test_sync_materializes_a_received_post_into_the_seeds_own_browsable_board(tm
 
 
 def test_sync_pushes_a_self_authored_board_post_edit_to_a_real_seed(tmp_path):
-    """Round 130: `load_own_board_events` also gathers this node's own
+    """`load_own_board_events` also gathers this node's own
     `board_post_edit` events (stored on the edited revision's own
     `posts.link_event_json` column) -- proves one actually reaches a
     real peer and lands correctly in `seed_node.post_edits`."""
@@ -786,7 +786,7 @@ def test_sync_is_cleanly_cancellable_mid_sleep(tmp_path):
 
 
 def test_sync_pushes_pending_link_mail_directly_to_its_known_recipient(tmp_path):
-    """Round 93's routing decision, proved over a real socket: a pending
+    """The routing decision, proved over a real socket: a pending
     `link_message` is pushed straight to its own recipient node using
     the address already on file for it (from a prior hello), not to
     whichever seeds happen to be configured. Uses the recipient itself
@@ -973,7 +973,7 @@ def test_sync_completes_the_link_mail_acknowledgement_round_trip_back_to_the_sen
         recipient.close()
 
 
-# -- relay selection, send-via-relay, and pickup (round 95/issue #58) --------
+# -- relay selection, send-via-relay, and pickup (design doc §8.5/issue #58) --------
 
 
 def _seed_peer(db, identity, *, created_at="2026-01-01T00:00:00+00:00"):
@@ -998,7 +998,7 @@ def _seed_peer(db, identity, *, created_at="2026-01-01T00:00:00+00:00"):
 
 def test_full_relay_round_trip_delivers_a_message_to_an_outgoing_only_recipient(tmp_path):
     """
-    Round 95/issue #58 end-to-end sync-loop wiring: carol is outgoing-
+    Issue #58 end-to-end sync-loop wiring: carol is outgoing-
     only. bob is a full peer willing to relay. alice already knows
     carol (a prior direct hello, persisted -- not something this test
     is trying to prove) but has no way to dial her now. Proves the

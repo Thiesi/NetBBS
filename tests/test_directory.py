@@ -1,5 +1,5 @@
 """Tests for netbbs.directory — vCard bio/visibility and finger-style
-lookup (design doc §13, sign-off round 38)."""
+lookup (design doc §13)."""
 
 from __future__ import annotations
 

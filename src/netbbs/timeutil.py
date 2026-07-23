@@ -159,7 +159,7 @@ def get_node_timezone(db: Database) -> ZoneInfo:
 def resolve_display_preferences(db: Database) -> tuple[str, str]:
     """
     The node-wide `(format, timezone)` pair, resolved and validated once
-    — design doc round 91/issue #57: once a DB read only happens via
+    — design doc/issue #57: once a DB read only happens via
     `netbbs.storage.execution.DatabaseLane.run`, a caller building
     several `format_for_display` calls in a batch (e.g. every row of a
     `netbbs.net.picker.pick_item` listing) needs to fetch the node's

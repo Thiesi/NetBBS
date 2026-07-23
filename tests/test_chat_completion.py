@@ -1,15 +1,15 @@
 """
-Tests for the BBS-specific Tab completer built in netbbs.net.chat_flow
-(design doc round 49/Track 5g): command-name completion (permission-
-aware for moderation commands), and username completion for /msg,
-/private (online accounts only) vs /whois, /finger (any registered
-account works when typed in full, but *completion suggestions* are
-narrowed to this channel's current roster -- offering every registered
-account on a node with hundreds of users from one typed character is
-noise, not help). The generic word-replacement mechanics themselves are
-covered separately in tests/test_char_input_completion.py; this file
-only exercises what `_build_completer`'s closure returns for a given
-line of text. `/query` was removed in round 54.
+Tests for the BBS-specific Tab completer built in netbbs.net.chat_flow:
+command-name completion (permission-aware for
+moderation commands), and username completion for /msg, /private
+(online accounts only) vs /whois, /finger (any registered account
+works when typed in full, but *completion suggestions* are narrowed to
+this channel's current roster -- offering every registered account on
+a node with hundreds of users from one typed character is noise, not
+help). The generic word-replacement mechanics themselves are covered
+separately in tests/test_char_input_completion.py; this file only
+exercises what `_build_completer`'s closure returns for a given line of
+text. `/query` has been removed as a command.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def test_unrelated_command_prefix_matches_nothing(db, lane, hub, presence, alice
     assert completer("/zzz") == []
 
 
-# -- membership-admin commands (design doc round 33 points 8/11, Track 5h) --
+# -- membership-admin commands (design doc §8) -------------------------------
 
 
 def test_non_manager_does_not_see_membership_admin_commands_suggested(db, lane, hub, presence, alice, channel):
@@ -202,7 +202,7 @@ def test_private_completes_the_same_way_as_msg(db, lane, hub, presence, alice, b
 
 
 def test_query_is_no_longer_a_recognized_command_prefix(db, lane, hub, presence, alice, bob, channel):
-    # design doc round 54: /query removed -- no longer completes at all.
+    # /query has been removed -- no longer completes at all.
     presence.enter("bob")
     completer = asyncio.run(chat_flow._build_completer(lane, hub, presence, channel, alice))
     assert completer("/query bo") == []
@@ -259,7 +259,7 @@ def test_whois_completion_matches_multiple_candidates(db, lane, hub, presence, a
     assert set(completer("/whois ")) == {"alice", "bob", "carol"}
 
 
-# -- /invite: registered users who aren't already members (Track 5h) -----
+# -- /invite: registered users who aren't already members --------------------
 
 
 def test_invite_completes_against_offline_users_too(db, lane, hub, presence, alice, bob, channel):

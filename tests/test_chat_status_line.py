@@ -1,7 +1,7 @@
 """
-Tests for the chat status line (design doc round 75): a pinned row at
-the bottom of the terminal, kept out of ordinary scrolling via a VT100
-scroll region (`netbbs.rendering.set_scroll_region`), showing the
+Tests for the chat status line: a pinned row at the bottom of the
+terminal, kept out of ordinary scrolling via a VT100 scroll region
+(`netbbs.rendering.set_scroll_region`), showing the
 current channel, live participant count, this user's own away/mute
 state, and a clock.
 
@@ -285,9 +285,9 @@ def test_render_shows_timed_mute_indicator_with_expiry(db, hub, presence, channe
 
 
 def test_render_clock_is_time_only_not_a_full_date(db, hub, presence, channel, alice):
-    """Deliberately a bare HH:MM (design doc round 75), not the node's
-    full configured display format (which includes the date) --
-    wasted width on a bar that only ever shows the current moment."""
+    """Deliberately a bare HH:MM, not the node's full configured
+    display format (which includes the date) -- wasted width on a bar
+    that only ever shows the current moment."""
     import re
 
     text = _plain(chat_flow._render_chat_status_line(db, hub, presence, channel, alice))
@@ -441,10 +441,10 @@ def test_chat_loop_resets_the_scroll_region_on_exit(lane, hub, presence, mailbox
 
 
 def test_chat_loop_clears_the_screen_on_exit(lane, hub, presence, mailbox, channel, alice):
-    """Design doc round 77 bugfix: neither the channel picker (/leave)
-    nor the main menu (/quit) ever clear the screen themselves, so
-    without an exit-side clear here the last screenful of chat stayed
-    visible until unrelated output happened to overwrite it."""
+    """Neither the channel picker (/leave) nor the main menu (/quit)
+    ever clear the screen themselves, so without an exit-side clear
+    here the last screenful of chat stays visible until unrelated
+    output happens to overwrite it."""
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     assert _written_text(session).endswith("\x1b[r\x1b[2J\x1b[H")
 

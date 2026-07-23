@@ -1,5 +1,5 @@
 """
-Tests for netbbs.mail (design doc round 93): local asynchronous
+Tests for netbbs.mail: local asynchronous
 personal mail -- deliberately a different mechanism from /msg
 (netbbs.chat.mailbox), which stays ephemeral and online-only.
 """
@@ -190,7 +190,7 @@ def test_recipient_delete_is_idempotent(db, alice, bob):
     assert list_inbox(db, bob) == []
 
 
-# -- quota: bounce-not-silently-drop-unread (design doc round 93) ----------
+# -- quota: bounce-not-silently-drop-unread ----------------------------------
 
 
 def test_quota_evicts_the_oldest_already_read_message(db, alice, bob, monkeypatch):

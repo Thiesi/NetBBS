@@ -50,16 +50,16 @@ _DUMMY_PASSWORD_HASH = (
 
 _T = TypeVar("_T")
 
-# The top of the user_level range, reserved for SysOps (design doc --
-# SysOp foundation round). A level, not a separate flag/table, so it
-# composes with the existing meets_level/require_level gating everywhere
-# else already uses levels. 255 rather than some lower round number was
-# a deliberate choice (Thiesi's own) to make it visually unmistakable as
-# "the top of the range" rather than just another elevated tier.
+# The top of the user_level range, reserved for SysOps (design doc).
+# A level, not a separate flag/table, so it composes with the existing
+# meets_level/require_level gating everywhere else already uses levels.
+# 255 rather than some lower number was a deliberate choice (Thiesi's
+# own) to make it visually unmistakable as "the top of the range" rather
+# than just another elevated tier.
 SYSOP_LEVEL = 255
 
 # The reserved username self-service registration is triggered by
-# (design doc round 76) -- typed at Telnet/web's ordinary username
+# (design doc) -- typed at Telnet/web's ordinary username
 # prompt, or connected as directly over SSH to trigger keyboard-
 # interactive registration (see netbbs.net.ssh._NetBBSSSHServer). Kept
 # here, not in netbbs.net.login_flow, so _validate_username can refuse
@@ -114,16 +114,15 @@ class User:
     last_login_at: str | None
     # Trailing, defaulted so existing direct User(...) construction call
     # sites (e.g. tests/test_permissions.py's _make_user) keep working
-    # unmodified. NULL/None = not disabled (design doc -- SysOp
-    # foundation round).
+    # unmodified. NULL/None = not disabled (design doc).
     disabled_at: str | None = None
     # True while a self-registered account is still awaiting SysOp
-    # approval (design doc round 76) -- always False for accounts
+    # approval (design doc) -- always False for accounts
     # created via the admin screen/CLI, and for every account that
     # existed before this column was added (migration default 0).
     pending_approval: bool = False
     # A narrow, SysOp-grantable permission independent of the four
-    # moderator scope tiers (design doc §18, round 85 point 6) --
+    # moderator scope tiers (design doc §18) --
     # verifying a real-world fact about a person isn't authority over
     # any specific board/area/channel. See netbbs.attestation.
     can_verify_identity: bool = False
@@ -184,10 +183,10 @@ def create_user(
     the bounded worker path before returning to the event-loop thread for all
     SQLite work.
 
-    `pending_approval` (design doc round 76) is set by self-service
+    `pending_approval` (design doc) is set by self-service
     registration (`netbbs.net.login_flow._register_new_account`,
     `netbbs.net.ssh._NetBBSSSHServer`) when the node's `registration_mode`
-    (`netbbs.config`, round 96) is `APPROVAL_REQUIRED` -- always `False`
+    (`netbbs.config`) is `APPROVAL_REQUIRED` -- always `False`
     for every other caller (the admin screen, the standalone CLI, dev
     bootstrap scripts), which is exactly the default.
     """
@@ -264,7 +263,7 @@ def _validate_username(username: str) -> None:
         raise AuthError(f"username too long: max {_MAX_USERNAME_LENGTH} characters, got {len(username)}")
     # Case-insensitive, matching the NOCASE uniqueness index below --
     # "New" must be refused exactly as "new" is, or self-service
-    # registration's sentinel (design doc round 76) could be shadowed by
+    # registration's sentinel (design doc) could be shadowed by
     # a real account a case away from the trigger word.
     if username.lower() in RESERVED_USERNAMES:
         raise AuthError(f"{username!r} is a reserved username and cannot be registered")
@@ -348,8 +347,8 @@ def account_still_active(db: Database, user: User) -> bool:
 def list_users(db: Database) -> list[User]:
     """
     Every registered account, ordered by username — the user
-    directory's underlying listing (design doc §13, sign-off round
-    38). Not paginated, unlike `netbbs.boards.posts.list_posts_page`:
+    directory's underlying listing (design doc §13). Not paginated,
+    unlike `netbbs.boards.posts.list_posts_page`:
     total registered users is naturally bounded at this project's
     declared scale (§14, dozens-low hundreds), unlike posts/files,
     which can grow unboundedly over time.
@@ -526,8 +525,8 @@ def get_user_by_id(db: Database, user_id: int) -> User | None:
     that need to look up a live account behind a *denormalized* label
     (e.g. `netbbs.boards.posts.Post.author_label`) and must handle "the
     account no longer exists" as a normal, expected case (the account
-    was deleted, but the post's own label survives it -- design doc
-    round 57) rather than an error.
+    was deleted, but the post's own label survives it -- design doc)
+    rather than an error.
     """
     row = db.connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return _row_to_user(row) if row is not None else None
@@ -666,9 +665,9 @@ def set_user_disabled(db: Database, target: User, disabled: bool, *, changed_by:
 
 def approve_pending_user(db: Database, target: User, *, approved_by: User) -> User:
     """
-    Clear a self-registered account's pending-approval gate (design doc
-    round 76), letting it log in -- the SysOp-side counterpart to the
-    node's `registration_mode` (`netbbs.config`, round 96) being set to
+    Clear a self-registered account's pending-approval gate (design
+    doc), letting it log in -- the SysOp-side counterpart to the
+    node's `registration_mode` (`netbbs.config`) being set to
     `APPROVAL_REQUIRED`. A no-op returning `target` unchanged if it isn't actually pending
     (e.g. a double-click on the approve action), mirroring
     `set_user_level`'s own no-op-if-unchanged shape rather than logging
@@ -687,7 +686,7 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
 def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, changed_by: User) -> User:
     """
     Grant or revoke `target`'s identity-verification permission (design
-    doc §18, round 85 point 6) -- a plain per-user boolean, independent
+    doc §18) -- a plain per-user boolean, independent
     of `netbbs.moderation.roles`'s four moderator scope tiers, since
     verifying a real-world fact about a person isn't authority over any
     specific board/area/channel. No last-SysOp-style lockout guard is

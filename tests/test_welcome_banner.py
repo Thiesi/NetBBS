@@ -1,5 +1,5 @@
-"""Tests for netbbs.net.welcome_banner (design doc -- welcome banner
-round) -- the loader/status functions, in isolation from the
+"""Tests for netbbs.net.welcome_banner -- the loader/status functions,
+in isolation from the
 netbbs.net.admin_flow UI that drives them (covered separately in
 tests/test_admin_flow.py) and the login-flow integration point
 (covered separately below via a direct handle_session smoke test)."""

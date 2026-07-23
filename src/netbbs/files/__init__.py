@@ -8,7 +8,7 @@ accessible via `netbbs.files.categories` directly, not re-exported
 here — matches the precedent set by `netbbs.boards`/`netbbs.chat`
 (their categories modules aren't re-exported from the package
 `__init__` either). Moderator/permission grants and the moderated-area
-approval/expiry lifecycle (§13, sign-off round 36) live in
+approval/expiry lifecycle (§13) live in
 `netbbs.files.entries`.
 """
 

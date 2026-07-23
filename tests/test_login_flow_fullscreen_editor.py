@@ -1,6 +1,6 @@
 """
 Integration tests for the fullscreen-prose-editor wiring in
-netbbs.net.login_flow (design doc -- prose editor round B2): the
+netbbs.net.login_flow: the
 Profile screen's on/off toggle, and that composing a post / editing a
 bio actually routes through netbbs.net.prose_editor.edit_prose once a
 user has opted in, instead of the plain read_line() flow every account

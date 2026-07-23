@@ -11,11 +11,11 @@ only the signing/relay machinery gets added on top then, not the
 identity scheme itself.
 
 The canonicalization rule below (sorted keys, NFC-normalized strings, no
-floats) is design doc round 110's formalization of what this function
-already did informally since round 7 — extended, not replaced, so every
+floats) formalizes what this function already did informally —
+extended, not replaced, so every
 Phase 1/2 content-ID already computed under the old (sorted-key-only)
 rule for genuinely ASCII/already-NFC content is unaffected. `netbbs.link.
-events` (round 110/111) reuses `canonical_json_bytes` directly for
+events` reuses `canonical_json_bytes` directly for
 signing Link event envelopes, rather than maintaining a second
 canonicalization implementation.
 """
@@ -114,16 +114,16 @@ def _normalize_for_hashing(value):
 def canonical_json_bytes(fields: dict) -> bytes:
     """
     The exact canonical UTF-8 bytes `compute_content_id` hashes —
-    exposed separately (round 110/111) so a caller that needs to *sign*
+    exposed separately so a caller that needs to *sign*
     the same canonical representation (`netbbs.link.events`, Phase 3
     event envelopes), not just hash it, can do so without a second,
     potentially-divergent canonicalization implementation.
 
     Canonicalized as NFC-normalized, sorted-key, compact-separator,
-    ASCII-escaped JSON (round 110) — sorted keys so the same logical
+    ASCII-escaped JSON — sorted keys so the same logical
     content always produces the same bytes regardless of what order the
     fields happened to be constructed in; NFC normalization and the
-    float ban close the two ambiguities round 27/90 had left open since
+    float ban close two ambiguities that would otherwise remain since
     this function only had local, non-cryptographic-signing stakes.
     """
     normalized = _normalize_for_hashing(fields)

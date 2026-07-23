@@ -182,11 +182,10 @@ class TelnetSession(Session):
         arrives — see the module docstring for why this replaced relying
         on the client's own local line editing. Actual character-by-
         character logic, including cursor-addressable editing, `history`
-        recall (design doc round 47/Track 5f), and `completer`-driven Tab
-        completion (design doc round 49/Track 5g), lives in
-        `netbbs.net.char_input`, shared with SSH; this method just
-        supplies the byte source. `live_buffer`/`lock`/`list_candidates`
-        (design doc round 79) pass straight through to
+        recall (design doc), and `completer`-driven Tab completion
+        (design doc), lives in `netbbs.net.char_input`, shared with SSH;
+        this method just supplies the byte source.
+        `live_buffer`/`lock`/`list_candidates` pass straight through to
         `char_input.read_line` unchanged.
         """
         return await char_input.read_line(

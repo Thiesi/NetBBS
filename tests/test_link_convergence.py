@@ -1,56 +1,53 @@
 """
-Multi-node convergence and fault-injection tests for `netbbs.link`
-(design doc round 122, closing issue #59's harness gate: "expanded to
-cover at least 3 nodes, duplicate/reordered delivery, restart, partition,
-and convergence... before the first end-to-end Linked feature is treated
-as complete"). Driven entirely through `tests/link_harness.py`'s
-`ScriptedTransport`, same as `tests/test_link_protocol.py` — no real
-socket, deterministic delivery order under full test control.
+Multi-node convergence and fault-injection tests for `netbbs.link`,
+closing issue #59's harness gate: "expanded to cover at least 3 nodes,
+duplicate/reordered delivery, restart, partition, and convergence...
+before the first end-to-end Linked feature is treated as complete".
+Driven entirely through `tests/link_harness.py`'s `ScriptedTransport`,
+same as `tests/test_link_protocol.py` — no real socket, deterministic
+delivery order under full test control.
 
 **Scope boundary, deliberate**: no relay/flood-fill gossip exists yet
-(round 116's "no relay from a stranger," still open in every round's own
-gap list) — a node only ever learns about a peer it has *directly*
-exchanged a hello with. "Convergence" here means N nodes that each sync
-*directly* with every other one reach consistent state despite
-duplication, reordering, and restarts — not multi-hop propagation via an
-intermediate node, which isn't built. The partition/heal scenario below
-exists specifically to pin that boundary down as a tested fact, not just
-a documented gap.
+("no relay from a stranger") — a node only ever learns about a peer it
+has *directly* exchanged a hello with. "Convergence" here means N nodes
+that each sync *directly* with every other one reach consistent state
+despite duplication, reordering, and restarts — not multi-hop
+propagation via an intermediate node, which isn't built. The
+partition/heal scenario below exists specifically to pin that boundary
+down as a tested fact, not just a documented gap.
 
-**Round 134 extends this file's existing `key_transition` coverage to
-`board_genesis`/`board_post`/`board_post_edit`** (design doc rounds
-124/129, implemented rounds 125/130) — named as "still open" in every
-worklog round since 129: those three event types had unit/protocol
-coverage (`tests/test_link_protocol.py`) but had never been run through
-this module's multi-node fault-injection harness the way `key_transition`
-has, so they hadn't actually cleared issue #59's harness gate yet. No
-production code changes this round — `LinkNode.handle_events` and
-`netbbs.link.store` already handled all of this correctly (traced, not
-assumed); this closes a test-coverage gap, not a design or implementation
-one. One real asymmetry worth noting, discovered while writing the
-partition/heal scenario below: a `key_transition` rotation rides along in
-a peer's *hello* (its `transitions` bundle is resent on every hello, round
-89), so a healed partition converges automatically the moment two nodes
-say hello again. `board_genesis`/`board_post`/`board_post_edit` carry no
-such bundle — a hello only ever carries key-lifecycle state — so healing
-a partition for linked-board state requires an explicit resend of the
-board events themselves, not just a fresh hello. The partition/heal test
-below makes that resend explicit rather than leaving it implied.
+**This file's `key_transition` coverage extends to
+`board_genesis`/`board_post`/`board_post_edit`** (design doc §9.1/9.2):
+those three event types had unit/protocol coverage (`tests/
+test_link_protocol.py`) but had never been run through this module's
+multi-node fault-injection harness the way `key_transition` has, so
+they hadn't actually cleared issue #59's harness gate yet.
+`LinkNode.handle_events` and `netbbs.link.store` already handle all of
+this correctly (traced, not assumed); this closes a test-coverage gap,
+not a design or implementation one. One real asymmetry worth noting,
+discovered while writing the partition/heal scenario below: a
+`key_transition` rotation rides along in a peer's *hello* (its
+`transitions` bundle is resent on every hello), so a healed partition
+converges automatically the moment two nodes say hello again.
+`board_genesis`/`board_post`/`board_post_edit` carry no such bundle — a
+hello only ever carries key-lifecycle state — so healing a partition
+for linked-board state requires an explicit resend of the board events
+themselves, not just a fresh hello. The partition/heal test below makes
+that resend explicit rather than leaving it implied.
 
 **This file also extends coverage to `link_message`/`link_message_
-accepted`/`link_message_bounced`** (design doc round 93, wired up in the
-same round as this extension). Unlike board events, a link_message has
-no natural "N-node convergence" or "reordered chain" shape (design doc
-round 93: exactly one intended recipient, no per-object chain to
-extend) -- the scenarios below are reshaped to fit what this event
-family actually does rather than mechanically forcing the same five
-categories: a full point-to-point round trip (message out, accepted
-back) with an uninvolved third node confirmed to never learn anything
-about it (the meaningful equivalent of "partition" for something that
-was never broadcast in the first place), duplicate delivery of both the
-message and its acknowledgement, and restart-mid-sequence (proving
-`load_link_node`'s existing generic `link_events` restoration is
-already sufficient here, with no round-127-shaped gap to fix).
+accepted`/`link_message_bounced`** (design doc §10). Unlike board
+events, a link_message has no natural "N-node convergence" or
+"reordered chain" shape (exactly one intended recipient, no per-object
+chain to extend) -- the scenarios below are reshaped to fit what this
+event family actually does rather than mechanically forcing the same
+five categories: a full point-to-point round trip (message out,
+accepted back) with an uninvolved third node confirmed to never learn
+anything about it (the meaningful equivalent of "partition" for
+something that was never broadcast in the first place), duplicate
+delivery of both the message and its acknowledgement, and
+restart-mid-sequence (proving `load_link_node`'s existing generic
+`link_events` restoration is already sufficient here).
 """
 
 from __future__ import annotations
@@ -81,8 +78,8 @@ def _hello_bytes(node: LinkNode, *, clock: FakeClock, outgoing_only: bool = True
 def _exchange_hellos(transport: ScriptedTransport, a, a_node: LinkNode, b, b_node: LinkNode, clock: FakeClock) -> None:
     """Mutual hello between two harness nodes, delivered and applied
     immediately -- the harness-level equivalent of a real dial_hello's
-    single round trip (round 117), expressed as two directed messages
-    since ScriptedTransport has no built-in request/response shape."""
+    single round trip, expressed as two directed messages since
+    ScriptedTransport has no built-in request/response shape."""
     transport.send(a, b, json.dumps(_hello_bytes(a_node, clock=clock).to_dict()).encode())
     transport.send(b, a, json.dumps(_hello_bytes(b_node, clock=clock).to_dict()).encode())
     transport.deliver_all()
@@ -177,8 +174,8 @@ def test_duplicate_delivery_of_the_same_event_is_a_pure_no_op(tmp_path, clock):
     payload = json.dumps(pair).encode()
 
     # The network delivers the same message twice -- two independent
-    # sends of identical bytes, not one message replayed (round 122:
-    # ScriptedTransport needs no new primitive for this).
+    # sends of identical bytes, not one message replayed
+    # (ScriptedTransport needs no new primitive for this).
     transport.send(alice, bob, payload)
     transport.send(alice, bob, payload)
     transport.deliver_all()
@@ -203,8 +200,8 @@ def test_reordered_delivery_is_rejected_then_converges_on_a_full_resend(tmp_path
     delivered out of order: the second-in-chain one (authorize) arrives
     first and must be safely rejected (its previous_transition_id points
     at a revoke bob doesn't have yet), not silently misapplied. A later
-    resend of *both together, in order* -- round 119's actual "push
-    everything every pass" design -- converges correctly. This is the
+    resend of *both together, in order* -- the actual "push everything
+    every pass" design -- converges correctly. This is the
     project's real recovery model: push-and-retry, not reorder-tolerant
     single-message delivery."""
     alice = spawn_node(tmp_path, "alice")
@@ -237,9 +234,9 @@ def test_reordered_delivery_is_rejected_then_converges_on_a_full_resend(tmp_path
     assert accepted == [revoke_transition.content_id]
     assert _resolved_signing_key(bob_node, alice.fingerprint) is None  # revoked, nothing authorized yet
 
-    # Recovery: a full resend of everything, in order (round 119's real
-    # sync behavior), converges -- revoke is now a no-op (round 121),
-    # authorize is newly accepted.
+    # Recovery: a full resend of everything, in order (the real sync
+    # behavior), converges -- revoke is now a no-op, authorize is
+    # newly accepted.
     full_pair = [revoke_transition.to_dict(), authorize_transition.to_dict()]
     accepted = bob_node.handle_events(alice.fingerprint, full_pair)
     assert accepted == [authorize_transition.content_id]
@@ -260,8 +257,8 @@ def test_reordered_delivery_is_rejected_then_converges_on_a_full_resend(tmp_path
 def test_a_partitioned_node_never_relays_and_converges_only_after_a_direct_hello(tmp_path, clock):
     """A and C never exchange a message directly during the "partition"
     phase, even though both talk fine to B -- confirms today's real
-    architectural boundary (no relay, round 116) as a tested fact: B
-    learning something about A must never let C learn it too. Healing
+    architectural boundary (no relay) as a tested fact: B learning
+    something about A must never let C learn it too. Healing
     the partition (A and C finally say hello directly) is the only way
     they converge."""
     a = spawn_node(tmp_path, "a")
@@ -314,9 +311,9 @@ def test_a_partitioned_node_never_relays_and_converges_only_after_a_direct_hello
 
 
 def test_a_restarted_node_continues_converging_after_reordered_and_duplicate_delivery(tmp_path, clock):
-    """Combines round 120's real persistence with harness-level fault
-    injection: bob accepts alice's first rotation, "restarts" (a fresh
-    LinkNode hydrated from the same on-disk database, not the original
+    """Combines real persistence with harness-level fault injection:
+    bob accepts alice's first rotation, "restarts" (a fresh LinkNode
+    hydrated from the same on-disk database, not the original
     in-memory object), then a *second* rotation arrives duplicated and
     reordered -- the restarted node must still converge correctly.
     Uses netbbs.link.store's plain sync functions directly (no
@@ -324,7 +321,7 @@ def test_a_restarted_node_continues_converging_after_reordered_and_duplicate_del
     synchronous, matching netbbs.link.transport's own persistence calls
     without the real-socket machinery around them)."""
     alice = spawn_node(tmp_path, "alice")
-    bob = spawn_node(tmp_path, "bob")  # HarnessNode.db is a real Database (round 92)
+    bob = spawn_node(tmp_path, "bob")  # HarnessNode.db is a real Database
     transport = ScriptedTransport()
     transport.register(alice)
     transport.register(bob)
@@ -527,9 +524,8 @@ def test_reordered_board_post_edit_chain_is_rejected_then_converges_on_a_full_re
     rejected (its previous_event_id points at an edit bob doesn't have
     yet), not silently misapplied. A later resend of *both together, in
     order* converges correctly -- the same push-and-retry recovery model
-    round 122 already established for key_transition, applied here to
-    board_post_edit's own single-linear-chain shape (design doc round
-    129)."""
+    already established for key_transition, applied here to
+    board_post_edit's own single-linear-chain shape (design doc §9.2)."""
     alice = spawn_node(tmp_path, "alice")
     bob = spawn_node(tmp_path, "bob")
     transport = ScriptedTransport()
@@ -604,9 +600,9 @@ def test_reordered_board_post_edit_chain_is_rejected_then_converges_on_a_full_re
 def test_a_restarted_node_continues_converging_on_linked_board_state_after_reordered_and_duplicate_delivery(
     tmp_path, clock
 ):
-    """Combines round 120's real persistence with harness-level fault
-    injection, the same shape as the key_transition restart test above,
-    applied to board_genesis/board_post/board_post_edit: bob accepts
+    """Combines real persistence with harness-level fault injection,
+    the same shape as the key_transition restart test above, applied
+    to board_genesis/board_post/board_post_edit: bob accepts
     alice's genesis and first post, "restarts" (a fresh LinkNode hydrated
     from the same on-disk database), then a chained edit arrives
     duplicated and reordered -- the restarted node must still converge
@@ -702,8 +698,8 @@ def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_a
 ):
     """A and C never exchange a message directly during the "partition"
     phase, even though both talk fine to B -- the same real boundary the
-    key_transition partition test above already confirms (no relay,
-    round 116), now pinned down for `node.boards`/`node.events` state
+    key_transition partition test above already confirms (no relay),
+    now pinned down for `node.boards`/`node.events` state
     too, not just `node.peers`. Unlike a key_transition rotation (which
     rides along in every hello's transitions bundle, per this module's
     docstring), board_genesis/board_post carry no such bundle -- healing
@@ -759,7 +755,7 @@ def test_a_partitioned_node_never_learns_linked_board_state_and_converges_only_a
     c.close()
 
 
-# -- board_origin_transfer_offer/accepted (design doc round 94/issue #53) -----
+# -- board_origin_transfer_offer/accepted (design doc §9.4/issue #53) -----
 
 
 def test_a_bystander_node_correctly_witnesses_a_full_origin_transfer(tmp_path, clock):
@@ -857,7 +853,7 @@ def test_link_message_full_round_trip_and_an_uninvolved_third_node_never_learns_
     a link_message_accepted; alice accepts that. carol -- a fully
     hello-connected third node -- never receives either event and never
     learns anything about the exchange, since neither event is
-    broadcast the way a board_post is (design doc round 93: exactly one
+    broadcast the way a board_post is (design doc §10: exactly one
     intended recipient each way). The meaningful equivalent of
     "partition" for something that was never multi-node gossip in the
     first place."""
@@ -886,7 +882,7 @@ def test_link_message_full_round_trip_and_an_uninvolved_third_node_never_learns_
 
     # alice must already know about her own message to accept an ack
     # about it -- self-origination never passes through handle_events
-    # (same as board_genesis/board_post local origination, round 128).
+    # (same as board_genesis/board_post local origination).
     alice_node.known_event_ids.add(message.content_id)
     alice_node.events[message.content_id] = message.to_dict()
 
@@ -986,10 +982,10 @@ def test_duplicate_delivery_of_a_link_message_accepted_is_a_pure_no_op(tmp_path,
 
 def test_a_restarted_node_still_correctly_processes_a_link_message_and_its_acknowledgement(tmp_path, clock):
     """Proves `netbbs.link.store.load_link_node`'s existing generic
-    `link_events` restoration (round 126's own finding: "already
-    persists any accepted event generically... no type-specific code of
-    its own") is already sufficient for `link_message`/`link_message_
-    accepted` -- no round-127-shaped restart gap to fix here."""
+    `link_events` restoration ("already persists any accepted event
+    generically... no type-specific code of its own") is already
+    sufficient for `link_message`/`link_message_accepted` -- no
+    restart gap to fix here."""
     alice = spawn_node(tmp_path, "alice")
     bob = spawn_node(tmp_path, "bob")
     transport = ScriptedTransport()

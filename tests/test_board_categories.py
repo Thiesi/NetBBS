@@ -46,10 +46,9 @@ def test_create_subcategory(db, creator):
 def test_third_level_nesting_rejected(db, creator):
     """
     The core design constraint: at most two levels ever exist. Verified
-    directly (see design doc round 17 sign-off notes) rather than
-    assumed — this is the rule that guarantees the cap, enforced in
-    application code since SQLite can't express a self-join depth
-    constraint as a plain CHECK.
+    directly rather than assumed — this is the rule that guarantees the
+    cap, enforced in application code since SQLite can't express a
+    self-join depth constraint as a plain CHECK.
     """
     parent = create_category(db, "Vintage Computing", created_by=creator)
     child = create_category(db, "Commodore", parent_category_id=parent.id, created_by=creator)
@@ -122,7 +121,7 @@ def test_subcategories_can_share_names_across_different_parents(db, creator):
         create_category(db, "General", parent_category_id=parent_b.id, created_by=creator)
 
 
-# -- delete_category (design doc -- board/area management round) ----------
+# -- delete_category ----------
 
 
 def test_delete_category_sets_boards_using_it_to_uncategorized(db, creator):

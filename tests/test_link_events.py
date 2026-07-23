@@ -1,5 +1,5 @@
-"""Tests for netbbs.link.events — the canonical event envelope (design
-doc rounds 27/90/110) and the key_transition event specifically."""
+"""Tests for netbbs.link.events — the canonical event envelope and the
+key_transition event specifically."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def root():
     return Identity.generate(IdentityKind.NODE, "roanoke")
 
 
-# -- envelope shape (round 27) ------------------------------------------------
+# -- envelope shape -------------------------------------------------------
 
 
 def test_build_envelope_shape():
@@ -148,7 +148,7 @@ def test_previous_transition_id_omitted_when_none(root):
         previous_transition_id=None,
         created_at="2026-01-01T00:00:00Z",
     )
-    # round 110 point 6: omitted entirely, never present as null
+    # omitted entirely, never present as null
     assert "previous_transition_id" not in transition.payload
 
 
@@ -198,7 +198,7 @@ def test_key_transition_to_dict_from_dict_roundtrip(root):
     assert verify_key_transition(restored, root.verify_key)
 
 
-# -- board_genesis construction (design doc round 124) ------------------------
+# -- board_genesis construction (design doc §9.1) ------------------------
 
 
 @pytest.fixture
@@ -230,7 +230,7 @@ def test_board_genesis_rejects_wrong_signing_key(origin_signing):
 
 
 def test_board_genesis_references_existing_board_id_not_a_new_one(origin_signing):
-    # Round 124's central decision: board_genesis announces an *existing*
+    # Central decision: board_genesis announces an *existing*
     # local board_id rather than minting a fresh one.
     genesis = build_board_genesis(
         signing_identity=origin_signing,
@@ -250,7 +250,7 @@ def test_board_genesis_optional_fields_omitted_when_none(origin_signing):
         name="Vintage Computing",
         created_at="2026-01-01T00:00:00Z",
     )
-    # round 110 point 6: omitted entirely, never present as null
+    # omitted entirely, never present as null
     for field in (
         "description",
         "default_min_read_level",
@@ -301,8 +301,8 @@ def test_board_genesis_rejects_invalid_default_name_requirement(origin_signing):
 
 def test_board_genesis_no_previous_event_id_field(origin_signing):
     # board_genesis is the head of its lifecycle chain -- nothing to
-    # extend yet (design doc round 124: closure/transfer are later,
-    # separately-scoped object types).
+    # extend yet (design doc: closure/transfer are later, separately-
+    # scoped object types).
     genesis = build_board_genesis(
         signing_identity=origin_signing,
         origin_fingerprint="origin-fp",
@@ -351,7 +351,7 @@ def test_board_genesis_forked_from_included_when_given(origin_signing):
     assert genesis.payload["forked_from"] == "original-board-id"
 
 
-# -- board_post construction (design doc round 124) ---------------------------
+# -- board_post construction (design doc §9.2) ---------------------------
 
 
 @pytest.fixture
@@ -476,7 +476,7 @@ def test_board_post_to_dict_from_dict_roundtrip(home_node_signing):
     assert verify_board_post(restored, home_node_signing.verify_key)
 
 
-# -- board_post_edit construction (design doc round 129) -----------------------
+# -- board_post_edit construction (design doc §9.2) -----------------------
 
 
 _ROOT_AUTHOR = {"kind": "node_vouched_user", "home_node_fingerprint": "home-fp", "local_user_id": "alice"}
@@ -574,7 +574,7 @@ def test_board_post_edit_to_dict_from_dict_roundtrip(home_node_signing):
     assert verify_board_post_edit(restored, home_node_signing.verify_key)
 
 
-# -- board_origin_transfer_offer/accepted construction (design doc round 94/#53) --
+# -- board_origin_transfer_offer/accepted construction (design doc §9.4/#53) --
 
 
 @pytest.fixture
@@ -706,7 +706,7 @@ def test_board_origin_transfer_accepted_to_dict_from_dict_roundtrip(new_origin_s
     assert verify_board_origin_transfer_accepted(restored, new_origin_signing.verify_key)
 
 
-# -- link_message construction (design doc round 93) ---------------------------
+# -- link_message construction (design doc §10) ---------------------------
 
 
 def test_build_link_message_is_signed_by_senders_home_nodes_signing_key(home_node_signing):
@@ -837,7 +837,7 @@ def test_link_message_to_dict_from_dict_roundtrip(home_node_signing):
     assert verify_link_message(restored, home_node_signing.verify_key)
 
 
-# -- link_message_accepted construction (design doc round 93) ------------------
+# -- link_message_accepted construction (design doc §10) ------------------
 
 
 @pytest.fixture
@@ -890,7 +890,7 @@ def test_link_message_accepted_to_dict_from_dict_roundtrip(recipient_node_signin
     assert verify_link_message_accepted(restored, recipient_node_signing.verify_key)
 
 
-# -- link_message_bounced construction (design doc round 93) -------------------
+# -- link_message_bounced construction (design doc §10) -------------------
 
 
 def test_build_link_message_bounced_is_signed_by_recipient_nodes_signing_key(recipient_node_signing):
@@ -954,7 +954,7 @@ def test_link_message_bounced_to_dict_from_dict_roundtrip(recipient_node_signing
     assert verify_link_message_bounced(restored, recipient_node_signing.verify_key)
 
 
-# -- endpoint_descriptor relays field (round 95/issue #58) -------------------
+# -- endpoint_descriptor relays field (design doc §8.5/issue #58) -------------------
 
 
 @pytest.fixture
@@ -1000,7 +1000,7 @@ def test_endpoint_descriptor_relays_to_dict_from_dict_roundtrip(node_signing):
     assert verify_endpoint_descriptor(restored, node_signing.verify_key)
 
 
-# -- relay_consent_request / relay_consent_response (round 95/issue #58) -----
+# -- relay_consent_request / relay_consent_response (design doc §8.5/issue #58) -----
 
 
 @pytest.fixture

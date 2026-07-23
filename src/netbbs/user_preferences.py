@@ -1,14 +1,14 @@
 """
 Per-user preference storage: a simple key-value store backed by the
 database, mirroring `netbbs.config`'s node-wide store exactly (design
-doc §13, sign-off round 38) — that module's own docstring already
+doc §13) — that module's own docstring already
 anticipated this as "a separate, later layer that sits on top of"
 node-wide config, not a replacement for it.
 
 Deliberately generic rather than scoped to any one feature: the
 directory/vCard system (`netbbs.directory`) is the first consumer, but
 any future per-user setting (e.g. a per-user chat timestamp
-preference, design doc round 32) can reuse this same store via its own
+preference, design doc) can reuse this same store via its own
 typed wrapper functions, the same way `netbbs.timeutil` wraps
 `netbbs.config`'s generic store for the node-wide display format/
 timezone settings.

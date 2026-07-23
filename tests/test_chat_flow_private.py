@@ -1,12 +1,12 @@
 """
-Tests for Phase 2 Track 5e (design doc round 32/33, sign-off round 46):
-`/msg`, `/private`, `/close`, driven through the real `_chat_loop`
-dispatcher via the shared `FakeSession` (`test_chat_flow_moderation.py`).
-`/query` was removed in round 54 -- see `test_query_is_no_longer_a_command`.
+Tests for `/msg`, `/private`, `/close`, driven
+through the real `_chat_loop` dispatcher via the shared `FakeSession`
+(`test_chat_flow_moderation.py`). `/query` has been removed as a
+command -- see `test_query_is_no_longer_a_command`.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`.
 """
 
 from __future__ import annotations
@@ -101,10 +101,10 @@ async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_re
 
 
 async def _join_and_wait(lane, hub, presence, mailbox, history, channel, user, session):
-    """Same polled-join reasoning as every other migrated chat test file
-    (design doc round 114): a single `asyncio.sleep(0)` is no longer
-    reliably enough wall-clock time for `_chat_loop`'s own join sequence
-    (now several real `ThreadPoolExecutor` round trips) to complete."""
+    """Same polled-join reasoning as every other chat test file: a
+    single `asyncio.sleep(0)` is not reliably enough wall-clock time for
+    `_chat_loop`'s own join sequence (several real `ThreadPoolExecutor`
+    round trips) to complete."""
     task = asyncio.create_task(
         chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user)
     )
@@ -170,11 +170,10 @@ def test_msg_queues_in_mailbox_when_recipient_is_online_but_not_in_any_channel(
     lane, hub, presence, mailbox, alice, bob, channel
 ):
     # Online (e.g. browsing boards) but not currently in a chat channel --
-    # exactly the gap the mailbox exists for (design doc round 32/46).
-    # A registered (but not chat-live) session is what makes mailbox
-    # delivery possible at all under the session-addressed redesign
-    # (GitHub issue #27) -- without a registry entry there's no Session
-    # object to key the delivery by.
+    # exactly the gap the mailbox exists for. A registered (but not
+    # chat-live) session is what makes mailbox delivery possible at all
+    # under the session-addressed redesign (GitHub issue #27) -- without
+    # a registry entry there's no Session object to key the delivery by.
     presence.enter("bob")
     registry = ActiveSessionRegistry()
     bob_session = FakeSession()
@@ -270,8 +269,8 @@ def test_msg_is_never_written_to_scrollback_or_moderation_log(
     db, lane, hub, presence, mailbox, alice, bob, channel
 ):
     # The `channel` fixture itself now logs a `create_channel` audit
-    # entry (design doc -- channel management round), so the baseline
-    # here is that one entry, not an empty log -- this test's actual
+    # entry, so the baseline here is that one entry, not an empty log
+    # -- this test's actual
     # claim is that /msg adds nothing further, not that the log is
     # globally empty.
     before = list_actions_for_object(db, "channel", channel.id)
@@ -380,8 +379,8 @@ def test_close_without_being_in_private_mode_shows_message(
 
 
 def test_query_is_no_longer_a_command(lane, hub, presence, mailbox, alice, bob, channel):
-    # design doc round 54: removed as a bare, value-free alias for
-    # /private -- the only command that ever had two names.
+    # Removed as a bare, value-free alias for /private -- the only
+    # command that ever had two names.
     presence.enter("bob")
 
     session = asyncio.run(

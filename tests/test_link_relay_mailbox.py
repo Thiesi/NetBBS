@@ -1,4 +1,4 @@
-"""Tests for `netbbs.link.relay_mailbox` (design doc §12 round 95, issue
+"""Tests for `netbbs.link.relay_mailbox` (design doc §12, issue
 #58) -- the bounded relay store-and-forward mailbox. `tests/
 test_link_transport.py` already exercises deposit/pickup through the
 real HTTP layer; this file covers the module's own plain `db`-first

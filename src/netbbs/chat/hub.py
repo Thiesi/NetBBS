@@ -9,7 +9,7 @@ design is meant to generalize cleanly to that later (a remote-origin
 message could be pushed into the same queues a local broadcast uses),
 though nothing about Link participation is implemented here.
 
-Mute/ban/kick (design doc §13, round 37) live in
+Mute/ban/kick (design doc §13) live in
 `netbbs.chat.moderation`/`netbbs.net.chat_flow`, not here — this class
 only provides the two primitives (`participant_ids`, `send_to`) needed
 to reach a specific live session, while staying deliberately ignorant
@@ -130,8 +130,8 @@ class ChatHub:
         `channel_name`, except anyone in `exclude`.
 
         `message` isn't required to be a `str`, matching `send_to`
-        below (design doc -- per-user chat timestamp preference round):
-        a caller can push a small envelope carrying a raw timestamp
+        below (see `netbbs.chat.timestamps`'s per-user chat timestamp
+        preference): a caller can push a small envelope carrying a raw timestamp
         alongside the text, letting each recipient's own `receive_loop`
         decide whether to render it, rather than baking one shared
         rendering decision into the broadcast string itself.
@@ -242,8 +242,9 @@ class ChatHub:
         left (e.g. a kick racing the target's own `/quit`), which the
         caller can treat as "nothing to do" rather than an error.
         Unlike `broadcast`, `message` isn't required to be a `str` —
-        round 37 uses this to deliver a small kick/ban sentinel object
-        `receive_loop` recognizes, distinct from any real chat text.
+        `netbbs.chat.moderation` uses this to deliver a small kick/ban
+        sentinel object `receive_loop` recognizes, distinct from any
+        real chat text.
 
         `priority` (GitHub issue #31, reopened) must be set for any
         mandatory state-transition event — kick, ban, members-only

@@ -4,9 +4,9 @@ Regression test for a real bug hit on Thiesi's own NetBSD deployment
 abstract): `_chat_loop` runs two concurrent child tasks
 (`receive_task`/`send_task`) and awaits `asyncio.wait(...,
 FIRST_COMPLETED)` on them. If the *outer* task running `_chat_loop`
-itself gets cancelled from outside (e.g. deliberate node shutdown,
-design doc round 51's `ActiveSessionRegistry.disconnect_all()`), that
-`CancelledError` is raised at the `asyncio.wait(...)` call site --
+itself gets cancelled from outside (e.g. deliberate node shutdown via
+`ActiveSessionRegistry.disconnect_all()`), that `CancelledError` is
+raised at the `asyncio.wait(...)` call site --
 but `asyncio.wait()` being cancelled does not cancel the tasks it was
 waiting on. Without an explicit fix, both child tasks were left
 orphaned: still scheduled, with nothing left to await their result.

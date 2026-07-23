@@ -194,8 +194,7 @@ def test_disabling_the_account_mid_chat_still_broadcasts_a_leave_notice(tmp_path
             )
             # alice's leave is already recorded/broadcast by the time _run
             # above returns, but bob's receive_loop still needs a
-            # scheduling turn plus its own lane dispatch to render it
-            # (design doc round 114).
+            # scheduling turn plus its own lane dispatch to render it.
             await asyncio.sleep(0.05)
 
             bob_task.cancel()

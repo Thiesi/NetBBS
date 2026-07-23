@@ -1,5 +1,5 @@
 """
-Relay selection and self-healing (design doc §12 round 95, issue #58) --
+Relay selection and self-healing (design doc §12, issue #58) --
 pure, synchronous, `db`-first functions deciding which reachable full
 peers an outgoing-only node should ask to relay for it, and detecting
 when an already-serving relay's observed reliability has dropped enough
@@ -23,7 +23,7 @@ from netbbs.link.protocol import LinkNode
 from netbbs.link.reliability import rank_by_reliability, reliability_score
 from netbbs.storage.database import Database
 
-# Design doc §12 round 95: "a node picks a small redundant set (3) of
+# Design doc §12: "a node picks a small redundant set (3) of
 # candidate relays."
 TARGET_RELAY_COUNT = 3
 
@@ -39,10 +39,10 @@ _RELIABILITY_FLOOR = 0.3
 def _reachable_full_peer_candidates(node: LinkNode) -> list[str]:
     """
     Fingerprints this node could plausibly ask to relay for it: a
-    reachable full peer (round 95's two deployment modes -- has at
+    reachable full peer (either of the two deployment modes -- has at
     least one address, is not itself outgoing-only) among either a
-    completed peer or an unverified candidate descriptor (round 95's
-    own "a weak prior worth trying" framing, extended here from hello-
+    completed peer or an unverified candidate descriptor (the
+    "a weak prior worth trying" framing, extended here from hello-
     bootstrap to relay selection) -- never this node's own fingerprint,
     never a fingerprint already granted or already asked
     (`LinkNode.relays_serving_me`/`pending_own_relay_requests`).

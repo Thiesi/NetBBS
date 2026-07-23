@@ -1,14 +1,13 @@
 """
 Integration tests for the mute/ban/kick command wiring in
-netbbs.net.chat_flow (design doc §13, sign-off round 37) — exercising
-the actual `/mute`, `/ban`, `/kick` commands through `_chat_loop`
-itself, not just the underlying netbbs.chat.moderation library
-(covered separately in tests/test_chat_moderation.py).
+netbbs.net.chat_flow (design doc §13) — exercising the actual
+`/mute`, `/ban`, `/kick` commands through `_chat_loop` itself, not
+just the underlying netbbs.chat.moderation library (covered
+separately in tests/test_chat_moderation.py).
 
-No fake `Session` helper existed anywhere in this test suite before
-this file (confirmed during round 37's design survey) — `FakeSession`
-below is a minimal one, just enough to drive two genuinely concurrent
-`_chat_loop` calls against a shared `ChatHub`/`Database`.
+`FakeSession` below is a minimal fake `Session` helper, just enough
+to drive two genuinely concurrent `_chat_loop` calls against a
+shared `ChatHub`/`Database`.
 """
 
 from __future__ import annotations
@@ -53,10 +52,9 @@ class FakeSession(Session):
         live_buffer=None, lock=None, list_candidates=None,
     ) -> str:
         # `history`/`completer`/`live_buffer`/`lock`/`list_candidates`
-        # accepted only to satisfy the Session ABC signature (design doc
-        # rounds 47/49/79, Tracks 5f/5g) -- this fake works from a
-        # pre-scripted list of whole logical lines, not raw terminal
-        # bytes/characters, so
+        # accepted only to satisfy the Session ABC signature -- this fake
+        # works from a pre-scripted list of whole logical lines, not raw
+        # terminal bytes/characters, so
         # there's no escape-sequence recognition here for Up/Down or Tab
         # to hook into, and no per-keystroke live_buffer updates either
         # (an idle/empty live_buffer is the accurate state for a fake
@@ -72,10 +70,10 @@ class FakeSession(Session):
 
     async def read_key(self, echo: bool = True) -> str:
         # Real callers here: _chat_loop's own post-kick/ban "press any
-        # key to continue" gate (design doc round 79) -- a real keypress
-        # this fake has no scripted input for, so it stands in with an
-        # immediate no-op keystroke rather than raising or blocking
-        # forever, matching a user who's already reaching for a key.
+        # key to continue" gate -- a real keypress this fake has no
+        # scripted input for, so it stands in with an immediate no-op
+        # keystroke rather than raising or blocking forever, matching a
+        # user who's already reaching for a key.
         return " "
 
     async def read_editor_key(self):
@@ -100,9 +98,9 @@ def db(tmp_path):
 
 @pytest.fixture
 def lane(db):
-    # netbbs.net.chat_flow is migrated onto design doc round 91's
-    # two-lane database execution model (issue #57/round 114) -- a
-    # second, independent connection to the same file `db` opens.
+    # netbbs.net.chat_flow uses the two-lane database execution model
+    # (issue #57) -- a second, independent connection to the same file
+    # `db` opens.
     database_lane = DatabaseLane(db.path)
     yield database_lane
     database_lane.close()
@@ -180,13 +178,13 @@ def test_kicked_target_can_read_the_notice_before_the_screen_clears(
     db, lane, hub, presence, mailbox, history, sysop, bob, channel
 ):
     """
-    Before this fix, the pinned-UI screen reset in `_chat_loop`'s
-    `finally` block (design doc round 77) fired unconditionally the
-    instant `receive_task` finished -- for a kicked/banned target, that
-    meant the very next thing after the kick notice was printed was the
-    screen getting wiped, with no chance to actually read it. Now a
-    "press any key to continue" gate sits between the two: the notice,
-    then the prompt, then (only once a key comes back) the reset/clear.
+    The pinned-UI screen reset in `_chat_loop`'s `finally` block must
+    not fire unconditionally the instant `receive_task` finishes -- for
+    a kicked/banned target, that would mean the very next thing after
+    the kick notice was printed was the screen getting wiped, with no
+    chance to actually read it. Instead a "press any key to continue"
+    gate sits between the two: the notice, then the prompt, then (only
+    once a key comes back) the reset/clear.
     """
     async def scenario():
         target_session = FakeSession()  # never types anything
@@ -336,11 +334,10 @@ def test_falling_behind_notice_appears_when_a_participant_queue_overflows(
             chat_flow._chat_loop(target_session, lane, small_hub, presence, mailbox, history, channel, bob)
         )
         # Let target actually join before flooding -- polled, not a fixed
-        # asyncio.sleep(0), since round 114's lane dispatch means joining
-        # now involves real ThreadPoolExecutor round trips (the ban
-        # check, scrollback fetch, join record) with genuine wall-clock
-        # latency a single zero-duration sleep can no longer reliably
-        # outlast.
+        # asyncio.sleep(0), since lane dispatch means joining involves
+        # real ThreadPoolExecutor round trips (the ban check, scrollback
+        # fetch, join record) with genuine wall-clock latency a single
+        # zero-duration sleep can no longer reliably outlast.
         while small_hub.participant_count(channel.name) < 1:
             await asyncio.sleep(0)
 
@@ -384,7 +381,7 @@ def test_non_moderator_cannot_kick(db, lane, hub, presence, mailbox, history, bo
     assert "do not have permission" in _written_text(session)
 
 
-# -- /finger (design doc §13, sign-off round 38) ---------------------------
+# -- /finger (design doc §13) ------------------------------------------------
 
 
 def test_finger_shows_public_bio(db, lane, hub, presence, mailbox, history, sysop, bob, channel):

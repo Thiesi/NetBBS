@@ -68,7 +68,7 @@ def test_get_nonexistent_board_fails(db):
 
 def test_list_boards_default_order_is_by_last_activity_most_recent_first(db, alice):
     # Creation-order sorting was explicitly rejected as the default (design
-    # doc round 18) in favor of "activity". With no posts on either board,
+    # doc) in favor of "activity". With no posts on either board,
     # activity falls back to each board's own created_at, so the more
     # recently *created* board should sort first. Timestamps are set
     # explicitly (rather than relying on two back-to-back create_board()
@@ -439,7 +439,7 @@ def test_list_posts_page_returns_all_in_order(db, alice, monkeypatch):
     # happened when this test was first written against real timing;
     # post_id, the deterministic tie-breaker list_posts_page now uses
     # for same-timestamp posts, doesn't preserve creation order, since
-    # it's a content hash -- see design doc round 30).
+    # it's a content hash -- see the design doc).
     timestamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:00.000001Z"])
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
 
@@ -478,7 +478,7 @@ def test_read_allowed_at_sufficient_level(db, alice):
     assert len(page.posts) == 1
 
 
-# -- update/delete (design doc -- board/area management round) -------------
+# -- update/delete -------------
 
 
 def test_create_board_records_an_audit_entry(db, alice):

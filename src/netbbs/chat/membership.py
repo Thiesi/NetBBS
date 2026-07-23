@@ -1,13 +1,12 @@
 """
 Persistent channel membership and the invite-then-accept flow (design
-doc §8/round 33 points 8/9/11, Phase 2 Track 5h).
+doc §8, points 8/9/11).
 
 Deliberately its own module, distinct from `netbbs.chat.channels`
 (channel CRUD/topic) and `netbbs.chat.moderation` (mute/ban/kick):
 membership is access/visibility eligibility, not a moderation action or
 a permission grant — `channel_members` is its own table rather than
-folded into `moderator_grants` for exactly that reason (see the round
-50 sign-off note).
+folded into `moderator_grants` for exactly that reason.
 
 Two independent capabilities live here:
 
@@ -17,7 +16,7 @@ Two independent capabilities live here:
 - **Invitations** (`channel_invitations`) — a pending offer that a
   successful `/join` consumes (see `netbbs.net.chat_flow._handle_join`)
   rather than granting membership directly; there is no separate
-  `/accept` command (round 33's reasoning: reuse `/join`'s existing
+  `/accept` command (reusing `/join`'s existing
   "look up, check authorization, switch" flow instead of inventing
   parallel command surface for the same action).
 """
@@ -73,7 +72,7 @@ def list_members(db: Database, channel: Channel) -> list[User]:
     `netbbs.chat.hub.ChatHub.participant_ids`'s live roster (who's
     actually connected right now); this is the persistent access list a
     `members_only` channel checks. No permission check here — viewable
-    by anyone already in the channel (design doc round 33 point 8),
+    by anyone already in the channel (design doc, point 8),
     enforced by the caller (`netbbs.net.chat_flow._handle_members`).
 
     Filters `list_users`' full roster down to the member set rather
@@ -96,7 +95,7 @@ def list_members(db: Database, channel: Channel) -> list[User]:
 
 def add_member(db: Database, channel: Channel, target: User, *, granted_by: User) -> None:
     """Grant `target` persistent access to `channel`, bypassing the
-    invite-then-accept flow entirely (round 33 point 8: "granting or
+    invite-then-accept flow entirely (design doc, point 8: "granting or
     removing persistent access" as its own capability, distinct from
     invitations)."""
     _require_manage_members(db, channel, granted_by)
@@ -153,7 +152,7 @@ def create_invitation(db: Database, channel: Channel, target: User, *, invited_b
 
     Allowed if `invited_by` holds `MANAGE_MEMBERS`, **or** the channel
     has `allow_member_invites` set and `invited_by` is already a member
-    (design doc round 33 point 11's opt-in) — checked here, not left to
+    (design doc, point 11's opt-in) — checked here, not left to
     the caller, so this is the one place that authorization decision is
     made.
 
@@ -295,7 +294,7 @@ def accept_invitation(db: Database, channel: Channel, user: User) -> bool:
     """
     Accepts `user`'s pending invitation (if any) — called by a
     successful `/join` (`netbbs.net.chat_flow._handle_join`), not a
-    separate `/accept` command (round 33's "reuse /join" decision).
+    separate `/accept` command ("reuse /join" decision).
     Returns `False`, without error, if there was no pending, non-
     expired invitation left to accept (e.g. the user was already a
     direct member, the channel isn't `members_only` at all, or a

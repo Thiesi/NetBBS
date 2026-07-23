@@ -1,11 +1,10 @@
 """
-Library-level tests for netbbs.chat.mailbox.MessageMailbox (design doc
-round 32, sign-off round 46/Phase 2 Track 5e; session-addressed
-redesign per GitHub issue #27) -- the per-session mailbox +
-next-prompt fallback for a /msg recipient session that isn't currently
-reachable via a live ChatHub queue. Integration coverage (actual /msg
-wiring, flush-at-main-menu) lives in tests/test_chat_flow_private.py
-and tests/test_login_mailbox_flush.py.
+Library-level tests for netbbs.chat.mailbox.MessageMailbox
+(session-addressed redesign per GitHub issue #27) --
+the per-session mailbox + next-prompt fallback for a /msg recipient
+session that isn't currently reachable via a live ChatHub queue.
+Integration coverage (actual /msg wiring, flush-at-main-menu) lives in
+tests/test_chat_flow_private.py and tests/test_login_mailbox_flush.py.
 
 Keyed by an opaque, hashable "session" identity here -- plain objects
 stand in for real netbbs.net.session.Session instances, since this

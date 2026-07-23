@@ -1,14 +1,13 @@
 """
-The node's login/welcome banner (design doc -- welcome banner round,
-Round A of a three-part skinning initiative; see design doc round 26
-for the larger TUI/editor context this round deliberately doesn't
-depend on).
+The node's login/welcome banner (design doc -- welcome banner), part of
+a broader skinning initiative; deliberately independent of the larger
+TUI/editor context (see design doc for that).
 
 A SysOp who wants custom ANSI art at login places a `.ans` file
 directly on the node's filesystem, at the well-known path this module
 resolves (`banner_path`), then enables it via `netbbs.net.admin_flow`'s
-`[W]elcome banner` screen. There is no in-BBS upload mechanism in this
-round -- the file is authored externally (a normal ANSI-art-scene tool,
+`[W]elcome banner` screen. There is no in-BBS upload mechanism --
+the file is authored externally (a normal ANSI-art-scene tool,
 or a download) and placed on the node the same way its SSH host key
 already is: colocated with the database file
 (`netbbs.net.ssh.ensure_host_key`'s established pattern), not stored
@@ -55,7 +54,7 @@ DEFAULT_WELCOME_BANNER = colored(
 # Comfortably covers realistic ANSI art (typically a few KB, rarely
 # above ~150 KB even for elaborate multi-panel pieces) while bounding a
 # SysOp accidentally pointing the path at something pathological. Not
-# admin-configurable in this round.
+# admin-configurable.
 MAX_BANNER_SIZE_BYTES = 262_144  # 256 KiB
 
 _WELCOME_BANNER_ENABLED_CONFIG_KEY = "welcome_banner_enabled"

@@ -2,17 +2,17 @@
 Tests for design doc §16's Community scalar-default inheritance
 actually reaching real enforcement (level/age/name-requirement) at
 board/channel/file-area gate points, not just being assignable via the
-admin UI (rounds 105/106) or resolvable in isolation
-(tests/test_communities.py's `get_effective_*` coverage).
+admin UI or resolvable in isolation (tests/test_communities.py's
+`get_effective_*` coverage).
 
-Also the regression test for a real bug this wiring fixes: rounds 105/
-106 made `min_read_level`/`min_write_level` nullable and let a SysOp
+Also the regression test for a real bug this wiring fixes:
+`min_read_level`/`min_write_level` are nullable, letting a SysOp
 actually set one to `None` (opting a board/area into inheriting), but
 every enforcement call site was still passing that possibly-`None`
 field straight into `netbbs.permissions.meets_level`, which does
 `user.user_level >= minimum_level` -- a `TypeError` the instant
 `minimum_level` is `None`. Browsing or posting to any resource
-opted into inheritance would have crashed before this round's fix.
+opted into inheritance would have crashed before this fix.
 """
 
 from __future__ import annotations

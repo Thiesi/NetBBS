@@ -22,13 +22,13 @@ max-length cap) is verbatim-identical regardless of which transport sits
 underneath — so it lives here once, not duplicated per transport.
 
 Cursor-addressable line editing, command history, and Tab completion
-(design doc §15 Phase 2, sign-off rounds 47/49, Tracks 5f/5g):
+(design doc §15 Phase 2):
 `move_cursor`/`redraw_tail`, `InputHistory`, and `apply_tab_completion`
 below are written with no dependency on bytes or `ByteSource` at all
 (pure `list[str]`/cursor-integer/`WriteFunc` manipulation) specifically
 so `netbbs.net.web.WebSession` — which decodes a browser's `onData`
 events into whole characters itself and deliberately does not share
-this module's byte-oriented reading (round 25) — can still reuse this
+this module's byte-oriented reading — can still reuse this
 *editing* logic instead of duplicating it a second time. Only the
 raw-byte/UTF-8/`ByteSource` half stays genuinely separate between the
 two.
@@ -108,7 +108,7 @@ _CSI_FINAL_TO_KEY: dict[int, str] = {
 
 # Recognized CSI "tilde" forms: ESC [ <param> ~ -- the alternate Home/
 # End encoding some terminals use, plus Delete/Insert and Page Up/Down
-# (design doc -- welcome banner round B1, for netbbs.net.ansi_editor),
+# (design doc -- welcome banner, for netbbs.net.ansi_editor),
 # none of which have a plain-letter CSI form at all.
 _CSI_TILDE_TO_KEY: dict[bytes, str] = {
     b"1": "HOME",
@@ -211,7 +211,7 @@ async def redraw_tail(
 class InputHistory:
     """
     Bounded, in-memory command history for one connected session (design
-    doc round 44/Track 5f) — Up/Down recall in `read_line`.
+    doc) — Up/Down recall in `read_line`.
 
     Deliberately not tied to any one channel: constructed once per
     connection (alongside `hub`/`presence`/`mailbox` — see
@@ -255,7 +255,7 @@ class LiveInputBuffer:
     A live, externally-observable snapshot of an in-progress `read_line`
     edit — the text typed so far and the cursor position within it,
     refreshed once per keystroke, right before the next blocking byte
-    read (design doc round 79). Exists specifically so a concurrently
+    read (design doc). Exists specifically so a concurrently
     running task (`netbbs.net.chat_flow`'s `receive_loop`) can redraw a
     pinned input row from real state after printing new content above
     it, instead of guessing or leaving stale/corrupted text on screen —
@@ -281,7 +281,7 @@ class LiveInputBuffer:
         self.cursor = cursor
 
 
-# -- tab completion (transport/byte agnostic, design doc round 49/Track 5g) -
+# -- tab completion (transport/byte agnostic, design doc) -
 
 # `Completer` is deliberately generic: given the text of the current
 # line up to the cursor, return every full-word replacement candidate
@@ -393,7 +393,7 @@ async def apply_tab_completion(
     candidate list and redrawing the line afterward, instead of this
     function writing a bare `"\\r\\n" + "  ".join(candidates) + "\\r\\n"`
     itself. Needed by callers with pinned/reserved screen rows (chat's
-    status and input rows, design doc round 79's scroll region): an
+    status and input rows, design doc's scroll region): an
     unconditional `"\\r\\n"` from here has no idea that the terminal's
     cursor sits on a row outside the scrolling content region, and lands
     the candidate list on — and overwrites — whatever's pinned there
@@ -482,12 +482,12 @@ async def read_line(
 ) -> str:
     """
     Read one line of input, echoing (or masking, if `echo=False`) as it
-    arrives, with cursor-addressable editing (design doc round 44/
-    Track 5f): Left/Right move within the line, Home/End jump to its
+    arrives, with cursor-addressable editing (design doc):
+    Left/Right move within the line, Home/End jump to its
     start/end, Backspace/Delete remove from either side of the cursor,
     Insert toggles overwrite mode, and Up/Down cycle through `history`
     if one is supplied. Tab triggers completion via `completer` (design
-    doc round 49/Track 5g), if one is supplied — see
+    doc), if one is supplied — see
     `apply_tab_completion`'s docstring for its exact behavior.
 
     `echo=False` (password prompts) deliberately keeps the original,
@@ -497,7 +497,7 @@ async def read_line(
     parallel masked-display buffer just to support cases nothing asks
     for.
 
-    `live_buffer`/`lock` (design doc round 79) are the pinned-chat-
+    `live_buffer`/`lock` (design doc) are the pinned-chat-
     input-row hooks `netbbs.net.chat_flow` needs and nothing else does
     — both default to `None`, a complete no-op for every other call
     site in the codebase. `live_buffer`, if given, is kept up to date
@@ -588,7 +588,7 @@ async def _read_line_editable(
 
         # The whole per-keystroke reaction (every write() call one byte
         # can trigger) is one atomic critical section under `lock`, if
-        # given — design doc round 79. `live_buffer` is refreshed in the
+        # given — design doc. `live_buffer` is refreshed in the
         # `finally` so it happens exactly once per keystroke regardless
         # of which branch below was taken (several `continue`/`break`
         # out of here, all of which still need the buffer updated
@@ -788,7 +788,7 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
 
 
 class EditorKeyKind(Enum):
-    """Design doc -- welcome banner round B1: the structured key-event
+    """Design doc -- welcome banner: the structured key-event
     vocabulary a full-screen editor (`netbbs.net.ansi_editor`) needs,
     which neither `read_line` (line-oriented, returns a finished `str`)
     nor `read_key` (discards every escape sequence outright, since a
@@ -828,7 +828,7 @@ _SYMBOLIC_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
     "DELETE": EditorKeyKind.DELETE,
     "PAGE_UP": EditorKeyKind.PAGE_UP,
     "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
-    # INSERT has no meaning for the ANSI editor in this round's scope
+    # INSERT has no meaning for the ANSI editor
     # (typing always overwrites the cell at the cursor already, no
     # separate overwrite-mode toggle) -- a real INSERT keypress simply
     # isn't surfaced as anything by read_editor_key below.
@@ -967,7 +967,7 @@ async def _read_escape_sequence(source: ByteSource) -> str | None:
     `"END"`/`"DELETE"`/`"INSERT"` — or `None` for a real Escape keypress
     with nothing following, or any shape not in that set (still
     discarded as a complete unit either way — "recognize a few, discard
-    the rest" replaces round 13/14's original "discard everything"
+    the rest" replaces an original "discard everything"
     scope, it doesn't loosen the discarding itself). Handles the two
     common shapes real terminals use for special keys:
 
@@ -980,7 +980,7 @@ async def _read_escape_sequence(source: ByteSource) -> str | None:
     checked once per loop iteration, deliberately *not* an
     `asyncio.wait_for(...)` wrapped around the whole function: that was
     the first approach tried when this function was still
-    `_discard_escape_sequence` (round 13/14), and direct testing against
+    `_discard_escape_sequence`, and direct testing against
     a real socket (not just an in-memory fake source) surfaced a genuine
     race — this function's own per-byte `_read_byte_with_timeout` calls
     are already each individually wrapped in their own `wait_for` by the

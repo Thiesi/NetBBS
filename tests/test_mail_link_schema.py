@@ -1,5 +1,5 @@
 """
-Tests for the Link-messages schema itself (design doc round 93):
+Tests for the Link-messages schema itself:
 `mail_messages` rebuilt with `recipient_user_id` nullable plus new
 Link-only columns, and the new `link_mail_acknowledgements` table.
 Deliberately at the raw-SQL level, matching `tests/test_storage.py`'s

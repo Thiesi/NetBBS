@@ -1,6 +1,6 @@
 """
-Tests for `netbbs.net.local_cli.LocalCLISession` (design doc -- SysOp
-foundation round) -- exercised entirely through injected fake byte-read
+Tests for `netbbs.net.local_cli.LocalCLISession` -- exercised entirely
+through injected fake byte-read
 functions, no real terminal involved. `read_line`/`read_key` just
 delegate to `netbbs.net.char_input`, already covered on its own merits
 elsewhere (tests/test_char_input*.py); this file only checks that

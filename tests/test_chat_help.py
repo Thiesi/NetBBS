@@ -1,6 +1,6 @@
 """
-Tests for the `/help` overhaul and `/?` alias (design doc round 55):
-`_COMMAND_INFO`-driven syntax + one-line description, permission-aware
+Tests for `/help` and its `/?` alias: `_COMMAND_INFO`-driven syntax +
+one-line description, permission-aware
 bare listing (reuses `_COMMAND_VISIBILITY`, the same predicate dict
 Tab completion already applies), and `/help <command>` bypassing that
 gating for an explicit, single-command lookup.
@@ -107,9 +107,9 @@ def test_bare_help_shows_moderation_commands_to_a_moderator(db, lane, hub, prese
 
 def test_help_with_command_shows_detail_regardless_of_visibility(db, lane, hub, presence, alice, channel):
     # alice is not a moderator, so /mute wouldn't appear in the bare
-    # list -- but explicitly asking about it still gets an answer
-    # (design doc round 55: "a suggestion filter, not an authorization
-    # check").
+    # list -- but explicitly asking about it still gets an answer:
+    # visibility gating is a suggestion filter, not an authorization
+    # check.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/help mute", "/quit"]))
     output = _written_text(session)
     assert "/mute <user> [duration] [reason]" in output

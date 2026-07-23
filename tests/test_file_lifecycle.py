@@ -1,10 +1,9 @@
 """
 Tests for the moderated-area approval flow and file maintenance/expiry
-state machine (design doc §13/§15, sign-off round 36) in
-netbbs.files.entries — the file-area mirror of
-tests/test_post_lifecycle.py's round 35 coverage, plus
-get_file_by_name's own pending-visibility check (round 36 only, no
-post equivalent).
+state machine (design doc §13/§15) in netbbs.files.entries — the
+file-area mirror of tests/test_post_lifecycle.py's coverage, plus
+get_file_by_name's own pending-visibility check (files only, no post
+equivalent).
 """
 
 from __future__ import annotations
@@ -331,7 +330,7 @@ def test_expired_file_still_reachable_by_name(db, alice, bob):
     assert found.status == "expired"
 
 
-# -- get_file_by_name pending-visibility check (round 36 only) --------------
+# -- get_file_by_name pending-visibility check (files only) -----------------
 
 
 def test_get_file_by_name_hides_pending_file_from_stranger(db, alice, bob):

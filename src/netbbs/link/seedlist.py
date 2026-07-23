@@ -1,5 +1,5 @@
 """
-Live supplementary seed-list refresh (design doc round 97, closing a gap
+Live supplementary seed-list refresh (design doc, closing a gap
 in issue #58's fixed/hardcoded seed-bootstrap model): fetches a small,
 independently-updated seed list over the same GitHub raw-content channel
 `netbbs.selfupdate` already uses for release checks, as a supplement to
@@ -38,8 +38,8 @@ from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
 
-# Same repo, same raw-content delivery round 82 already accepted as
-# self-update's entire trust boundary -- design doc round 97: "a
+# Same repo, same raw-content delivery already accepted as
+# self-update's entire trust boundary -- design doc: "a
 # strictly lower-stakes payload than that... reuses an already-accepted
 # trust boundary, not a new one."
 _SEED_LIST_URL = "https://raw.githubusercontent.com/Thiesi/NetBBS/main/seeds.json"
@@ -81,7 +81,7 @@ async def fetch_supplementary_seeds(*, fetch: Callable[[str], bytes] = _default_
     an `async def` would.
 
     A malformed *individual* entry is skipped with a warning, not
-    treated as a whole-fetch failure -- design doc round 95's own "a
+    treated as a whole-fetch failure -- design doc's own "a
     stale reachability claim only ever costs a failed connection
     attempt" reasoning applies equally to a malformed one. Raises
     `SeedListError` only for a genuine fetch/parse failure of the
@@ -136,7 +136,7 @@ async def run_scheduled_seed_refresh(
     """
     Runs for the node's lifetime: refreshes the cached supplementary
     seed list once immediately on entry, then every `interval_seconds`
-    (default once a day) -- design doc round 97's "no new trigger-point
+    (default once a day) -- design doc's "no new trigger-point
     machinery... refreshed at the same points self-update already
     checks at," read as *the same schedule/enable-flag* rather than
     literally the same function body (see module docstring for why
@@ -145,12 +145,12 @@ async def run_scheduled_seed_refresh(
 
     Skips a pass entirely when `get_auto_update_check_enabled` is off
     -- reuses that exact flag rather than adding a second toggle for a
-    fairly minor, now explicitly-coupled feature (round 97: "no harm in
+    fairly minor, explicitly-coupled feature ("no harm in
     an established node also refreshing its candidate pool" applies
     equally to opting the whole scheduled-check mechanism out).
 
     A failed fetch logs and leaves the previously-cached list (if any)
-    untouched -- round 95's own "a stale reachability claim only ever
+    untouched -- the same "a stale reachability claim only ever
     costs a failed connection attempt" tolerance, applied to a fetch
     failure the same way it already applies to a stale individual
     entry.

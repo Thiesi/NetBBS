@@ -1,5 +1,5 @@
 """Tests for netbbs.storage.execution — the two-lane database execution
-model (design doc round 91, issue #57)."""
+model (issue #57)."""
 
 from __future__ import annotations
 
@@ -157,8 +157,8 @@ def test_block_if_busy_true_waits_instead_of_raising(tmp_path):
 
 
 def test_cancelling_the_awaiting_coroutine_does_not_abort_the_write(lane):
-    """Round 91: a disconnected session's in-flight DB call still runs
-    to completion on the worker thread -- the caller just doesn't get
+    """A disconnected session's in-flight DB call still runs to
+    completion on the worker thread -- the caller just doesn't get
     to see the result."""
     import time
 

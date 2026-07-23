@@ -1,19 +1,19 @@
 """
-Tests for Phase 2 Track 5d (design doc §8, sign-off round 44):
-`/join`, `/leave`'s new "back to the channel picker" meaning (distinct
-from `/quit`), and `/topic`, driven through the real `_chat_loop`
-dispatcher -- plus `browse_channels`'s outer-loop dispatch on the
-resulting `ChatAction`, tested in isolation via monkeypatched
-`_pick_channel`/`_chat_loop` since `pick_item` itself needs a
-`read_key()`-capable session `FakeSession` (borrowed from
-test_chat_flow_moderation.py) doesn't implement.
+Tests for `/join`, `/leave`'s "back to the channel picker" meaning
+(distinct from `/quit`), and `/topic` (design doc §8), driven through
+the real `_chat_loop` dispatcher -- plus
+`browse_channels`'s outer-loop dispatch on the resulting `ChatAction`,
+tested in isolation via monkeypatched `_pick_channel`/`_chat_loop`
+since `pick_item` itself needs a `read_key()`-capable session
+`FakeSession` (borrowed from test_chat_flow_moderation.py) doesn't
+implement.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop`/`browse_channels` now take a `DatabaseLane` instead of a
-`Database`, so `_run` and every direct call here uses `lane`. Setup/
-assertion calls (`grant_permissions`, `get_channel_by_name`,
-`get_scrollback`) still use the plain `db` fixture directly, unchanged.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop`/`browse_channels` take a `DatabaseLane`
+instead of a `Database`, so `_run` and every direct call here uses
+`lane`. Setup/assertion calls (`grant_permissions`,
+`get_channel_by_name`, `get_scrollback`) still use the plain `db`
+fixture directly, unchanged.
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ def test_quit_returns_quit_action(lane, hub, presence, alice, channel):
 
 
 def test_leave_returns_to_picker_action(lane, hub, presence, alice, channel):
-    # A real behavior change from round 39 (where /leave aliased /quit) --
-    # confirms the two are no longer the same handler under the hood.
+    # /leave and /quit are distinct behaviors -- confirms the two are
+    # not the same handler under the hood.
     _, action = asyncio.run(_run(lane, hub, presence, channel, alice, ["/leave"]))
     assert isinstance(action, chat_flow._ToPicker)
 
@@ -134,11 +134,11 @@ def test_kick_still_resolves_to_quit_action(db, lane, hub, presence, sysop, alic
             chat_flow._chat_loop(target_session, lane, hub, presence, mailbox, history, channel, alice)
         )
         # Let target actually join before the kick is issued -- polled,
-        # not a fixed asyncio.sleep(0), since round 114's lane dispatch
-        # means joining now involves real ThreadPoolExecutor round trips
-        # with genuine wall-clock latency a single zero-duration sleep
-        # can no longer reliably outlast (see design doc round 114's
-        # worklog entry for the concrete failure this was caught by).
+        # not a fixed asyncio.sleep(0), since lane dispatch means
+        # joining involves real ThreadPoolExecutor round trips with
+        # genuine wall-clock latency a single zero-duration sleep can no
+        # longer reliably outlast (see the worklog entry for the
+        # concrete failure this was caught by).
         while hub.participant_count(channel.name) < 1:
             await asyncio.sleep(0)
 
@@ -234,9 +234,9 @@ def test_topic_change_with_permission_sets_and_announces(db, lane, hub, presence
 
 
 def test_bare_topic_with_permission_clears_it(db, lane, hub, presence, sysop, channel):
-    # Same reasoning as /nick's own bare invocation (design doc round
-    # 32): the status line already shows whatever topic is set, so a
-    # bare /topic's only useful job left is to clear it, not view it.
+    # Same reasoning as /nick's own bare invocation: the status line
+    # already shows whatever topic is set, so a bare /topic's only
+    # useful job left is to clear it, not view it.
     grant_permissions(
         db,
         sysop,
@@ -270,9 +270,9 @@ def test_topic_change_is_broadcast_to_other_participants(db, lane, hub, presence
         while not queue.empty():
             item = queue.get_nowait()
             if isinstance(item, ChannelMessage):
-                # join/leave now travel as structured ChannelMessage
-                # events (GitHub issue #64, round 109), not text -- this
-                # test only cares about the plain-string topic notice.
+                # join/leave travel as structured ChannelMessage events
+                # (GitHub issue #64), not text -- this test only cares
+                # about the plain-string topic notice.
                 continue
             received.append(item.text if isinstance(item, chat_flow._TimestampedNotice) else item)
         assert any("Topic changed by sysop: Retro chat" in msg for msg in received)

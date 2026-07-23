@@ -5,14 +5,14 @@ though actual Link signing/relay is Phase 3 — see
 premature complexity.
 
 Moderated-board approval and the maintenance/expiry state machine
-(design doc §13/§15, sign-off round 35) live here too: a post's
+(design doc §13/§15) live here too: a post's
 `status` moves `pending → approved → expired`, with actual row
 deletion as the fourth, unlabeled state (there is no `'deleted'`
 status value — that state is the row's absence). See
-`list_posts_page`'s new `status = 'approved'` filter and
+`list_posts_page`'s `status = 'approved'` filter and
 `_sweep_expired_posts` for how `approved → expired → (deleted)`
 actually happens with no background scheduler anywhere in this
-codebase (confirmed absent during round 35's design work).
+codebase.
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ class Post:
     post_id: str
     board_id: int
     parent_post_id: str | None
-    # Nullable since round 60's account-deletion migration (ON DELETE
-    # SET NULL) -- also, since design doc §9.3/issue #73, the shape a
+    # Nullable due to the account-deletion migration (ON DELETE
+    # SET NULL) -- also, per design doc §9.3/issue #73, the shape a
     # materialized Link-carried post's remote author naturally takes:
     # no local account is implied or required by carrying content.
     # Every reader of this field already treats it as optional in
@@ -188,8 +188,7 @@ def edit_post(
     edited_by: User,
 ) -> Post:
     """
-    Create a new revision of `post` (design doc -- prose editor round
-    B2 planning). Never mutates the existing row in place: `post_id` is
+    Create a new revision of `post`. Never mutates the existing row in place: `post_id` is
     a content hash of the subject/body themselves
     (`netbbs.boards.content_id.compute_content_id`), so an in-place
     `UPDATE` would leave a row's own `post_id` silently mismatched
@@ -304,9 +303,9 @@ def get_post(db: Database, post_id: str) -> Post:
     Unbounded by-ID lookup — deliberately not status-filtered, unlike
     `list_posts_page`. Used for `create_post`'s own return path and
     reply-parent lookup, both of which need to work regardless of
-    status (including replying to an `'expired'` thread, per design
-    doc sign-off round 35: expired content stays individually
-    reachable, only delisted from normal browsing). Reaching a
+    status (including replying to an `'expired'` thread: expired content
+    stays individually reachable, only delisted from normal browsing).
+    Reaching a
     `'pending'` post this way requires already knowing its exact
     `post_id`, which isn't discoverable through any listing a
     non-author, non-moderator would see — an accepted, practically
@@ -320,8 +319,7 @@ def get_post(db: Database, post_id: str) -> Post:
 
 def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     """Given a root post's raw row, build the `Post` actually shown to
-    readers (design doc -- prose editor round B2 planning): identity/
-    position fields (id, post_id, created_at, pinned, exempt_from_expiry,
+    readers: identity/position fields (id, post_id, created_at, pinned, exempt_from_expiry,
     author_*) always come from the root row itself, so a page's cursors
     and a post's feed position never move just because it was edited --
     only `subject`/`body` are substituted from whichever row sharing its
@@ -386,8 +384,8 @@ def list_posts_page(
     limit: int = _DEFAULT_PAGE_SIZE,
 ) -> PostPage:
     """
-    Fetch one bounded page of posts on `board` (design doc round 30,
-    issue #10) — never the whole board, however large its history.
+    Fetch one bounded page of posts on `board` (design doc, issue #10)
+    — never the whole board, however large its history.
     Enforces `board.min_read_level`, same as the unbounded function
     this replaces.
 
@@ -406,10 +404,9 @@ def list_posts_page(
 
     Three mutually exclusive modes, matching how a caller navigates:
     - Neither `before` nor `after`: the **newest** page — the default
-      view when opening a board (design doc round 30, confirmed with
-      Thiesi over keeping the old oldest-first default: an active
-      board's most recent activity, not its oldest history, is what's
-      actually useful to see first).
+      view when opening a board (chosen over an oldest-first default:
+      an active board's most recent activity, not its oldest history,
+      is what's actually useful to see first).
     - `before=(created_at, post_id)`: the page of up to `limit` posts
       immediately *older* than that cursor — paging backward through
       history. Callers pass the oldest post's cursor from the
@@ -428,8 +425,8 @@ def list_posts_page(
     passed in was already at the newest post.
 
     Post identity/position here is always the *root* of a post's edit
-    chain (design doc -- prose editor round B2 planning), regardless of
-    whether it's the currently-displayed content: `post_id`/`created_at`
+    chain, regardless of whether it's the currently-displayed content:
+    `post_id`/`created_at`
     on every returned `Post` are the root's, so pagination cursors
     (built from a page's own boundary posts, see below) stay stable
     across edits -- editing a post never bumps its position or breaks
@@ -570,18 +567,18 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
     Delete a post outright, requiring `deleted_by` to hold
     `BoardPermission.DELETE` on its board. Doubles as "reject" for a
     still-`'pending'` post — there is no separate rejected status
-    (design doc sign-off round 35) — and the moderation log records
-    which of the two actually happened, distinguished by the post's
-    status at the moment of deletion.
+    — and the moderation log records which of the two actually
+    happened, distinguished by the post's status at the moment of
+    deletion.
 
     Refuses with a `PostError` (GitHub issue #37), rather than letting
     SQLite's FK constraint raise `sqlite3.IntegrityError`, if this post
     is still referenced by another row as a reply's `parent_post_id`,
     an edit chain's `root_post_id`, or a later edit's `edit_of_post_id`
-    -- the same three relationships `_sweep_expired_posts` (round 70)
+    -- the same three relationships `_sweep_expired_posts`
     already excludes from its own hard-delete step, for the same
     reason: changing those FKs' `ON DELETE` behavior needs the
-    drop/rebuild migration pattern round 60 found risks cascading
+    drop/rebuild migration pattern, which risks cascading
     SQLite's implicit `DELETE FROM` to *all* of a live parent table's
     relationships at once. A referenced post simply can't be deleted
     until whatever references it is gone first -- an explicit, catchable
@@ -682,7 +679,7 @@ def list_pending_posts(db: Database, board: Board, *, requesting_user: User) -> 
     Deliberately not cursor-paginated like `list_posts_page` —
     moderation queues are expected to be much smaller than full board
     history, and this keeps that already-intricate pagination code
-    untouched (design doc sign-off round 35).
+    untouched.
     """
     if has_permission(
         db, requesting_user, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE
@@ -754,8 +751,7 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
 
     Runs at the top of `list_posts_page` — the natural "someone is
     looking at this board" trigger — rather than via a background job,
-    since none exists anywhere in this codebase (confirmed absent
-    during design doc sign-off round 35's design work). A no-op
+    since none exists anywhere in this codebase. A no-op
     whenever `board.max_post_age_days` is `None` (retain indefinitely,
     the default). Not logged to `netbbs.moderation.log` — that log is
     for explicit human moderation decisions, not mechanical time-based
@@ -763,22 +759,19 @@ def _sweep_expired_posts(db: Database, board: Board) -> None:
 
     The delete step deliberately excludes any post still referenced by
     another live row — as a reply's `parent_post_id`, an edit chain's
-    `root_post_id`, or a later edit's `edit_of_post_id` (design doc --
-    prose editor round B2 planning; a real, pre-existing bug found
-    while testing that round, fixed here rather than there since it
-    predates and is independent of post editing). `posts.parent_post_id
+    `root_post_id`, or a later edit's `edit_of_post_id`; this predates
+    and is independent of post editing. `posts.parent_post_id
     REFERENCES posts(post_id)` with no `ON DELETE` clause means SQLite
     raises `FOREIGN KEY constraint failed` on any attempt to delete a
-    still-referenced row — confirmed to already reproduce this against
-    a plain reply, with none of round B2's own new columns involved.
+    still-referenced row — reproducible against a plain reply alone,
+    with no edit-chain columns involved.
     Changing that FK's `ON DELETE` behavior would need the drop/rebuild
-    migration pattern rounds 37/40/41/56-57/60 use elsewhere, and round
-    60 already found the hard way that rebuilding `posts` specifically
+    migration pattern used elsewhere, and rebuilding `posts` specifically
     — a live parent of several other tables' own foreign keys — risks
     SQLite's `DROP TABLE` applying its own cascade/SET-NULL side
     effects to *all* of those relationships at once, not just the one
     column being fixed. Handling it here instead, application-level,
-    is the same choice round 60 made for board/area/category deletion
+    is the same choice made for board/area/category deletion
     for exactly that reason: a referenced post simply stays in
     `'expired'` status indefinitely rather than being purged — already
     a valid, harmless state (delisted from browsing, still individually

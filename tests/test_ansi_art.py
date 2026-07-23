@@ -58,7 +58,7 @@ def test_decode_never_raises_for_arbitrary_high_bit_sequences():
         assert isinstance(result, str)
 
 
-# -- encode_ansi_bytes (design doc -- welcome banner round B1) --------------
+# -- encode_ansi_bytes -------------------------------------------------------
 
 
 def test_encode_plain_text():

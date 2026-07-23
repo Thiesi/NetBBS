@@ -12,7 +12,7 @@ uses the ANSI rendering framework (color, and reflow to each session's
 actual detected terminal width) plus transport-independent character-
 mode input; a future screen-buffer/diff ("TUI") abstraction for heavy
 cursor-addressable screens is Phase 2 scope, alongside the fullscreen
-editor that's the actual reason it's needed (design doc round 26).
+editor that's the actual reason it's needed (design doc).
 """
 
 from __future__ import annotations
@@ -201,7 +201,7 @@ async def handle_session(
     """
     Top-level per-connection entry point.
 
-    `lane` (design doc round 91/issue #57, Phase 3's database execution
+    `lane` (design doc, issue #57, Phase 3's database execution
     model): the foreground `DatabaseLane`, threaded straight through to
     `_main_menu`'s mail branch (`netbbs.net.mail_flow`, the first —
     proof-of-pattern — module actually migrated onto the lane model).
@@ -214,7 +214,7 @@ async def handle_session(
     transition, not a contradiction.
 
     `shutdown_event`/`graceful_delay_seconds` (design doc -- node
-    management round) are bundled with `session_registry`/`maintenance`
+    management) are bundled with `session_registry`/`maintenance`
     into a `NodeControls`, threaded down through `_run_authenticated_
     session`/`_main_menu` to `netbbs.net.admin_flow.admin_menu` — what
     the in-session `[N]ode` admin command needs to trigger a shutdown
@@ -244,7 +244,7 @@ async def handle_session(
     (an attacker holding open many never-completing connections) no
     longer applies to it.
 
-    `presence` (design doc round 32, sign-off round 42) is entered
+    `presence` (design doc) is entered
     right before the main menu runs and left in a `finally` around it —
     this is the one place in the codebase that knows "this account now
     has one more/one fewer live connection", which `/away`'s "clears
@@ -253,13 +253,13 @@ async def handle_session(
     same reasoning as the login-throttle budget above: an
     unauthenticated connection was never "present" as any account.
 
-    `session_registry`/`maintenance` (design doc round 51) are checked/
+    `session_registry`/`maintenance` (design doc) are checked/
     entered before any of that, right at the top — a deliberate node
     shutdown needs to reach and reject connections regardless of
     whether they ever authenticate at all, unlike `presence`, which
     only ever needs to know about accounts.
 
-    `link_context` (design doc round 124/128), if given, is threaded
+    `link_context` (design doc), if given, is threaded
     straight through to both the ordinary board-browsing path (so
     composing a new post on a Linked board can queue its `board_post`
     event) and to `admin_menu` (the `[L]ink this board` command) — same
@@ -310,7 +310,7 @@ async def _run_authenticated_session(
 ) -> None:
     """The login-through-logoff body of a *Telnet/web* connection,
     wrapped by `handle_session`'s maintenance-mode check and session-
-    registry bookkeeping (design doc round 51) — split out so those two
+    registry bookkeeping (design doc) — split out so those two
     concerns stay a thin, easy-to-read wrapper rather than adding
     another level of nesting to the whole function.
 
@@ -322,7 +322,7 @@ async def _run_authenticated_session(
     #25).
 
     `node_controls`, if given, is threaded straight through to
-    `_main_menu`/`admin_menu` (design doc -- node management round);
+    `_main_menu`/`admin_menu` (design doc);
     `None` is what a direct test call site (bypassing `handle_session`)
     gets by default, which correctly hides the `[N]ode` admin option
     rather than needing every such test updated."""
@@ -456,7 +456,7 @@ async def run_authenticated_session(
     session actually does" implementation.
 
     `node_controls`, if given, is threaded straight through to
-    `_main_menu`/`admin_menu` (design doc -- node management round);
+    `_main_menu`/`admin_menu` (design doc);
     `None` is what a direct test call site (bypassing both entry
     points above) gets by default, which correctly hides the `[N]ode`
     admin option rather than needing every such test updated. The
@@ -495,7 +495,7 @@ async def run_authenticated_session(
     await session.write_line(welcome)
     await _announce_pending_invitations(session, db, user)
 
-    # One InputHistory per connection (design doc round 47/Track 5f),
+    # One InputHistory per connection (design doc),
     # not node-wide like hub/presence/mailbox -- constructed here rather
     # than passed in from netbbs.__main__, so each connected session
     # gets its own recall buffer. Only threaded down into chat's input
@@ -690,7 +690,7 @@ async def _show_pending_invitations(session: Session, db: Database, user: User) 
     brief notice points to -- channel name, inviter, and when, for
     every currently pending invitation. No accept/reject action lives
     here: `/join <channel>` from the channel picker remains the one
-    way to accept (design doc round 33's "reuse /join" decision,
+    way to accept (design doc's "reuse /join" decision,
     unchanged by this issue), so this is purely informational, telling
     the invitee what to type and where."""
     pending = list_pending_invitations_for_user(db, user)
@@ -719,14 +719,14 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     then the menu itself.
 
     This is the one place `/msg`'s mailbox-plus-next-prompt delivery
-    (design doc round 32, sign-off round 46/Track 5e) actually flushes:
+    (design doc) actually flushes:
     every screen (boards, files, directory, profile, chat) returns here
     before its next redraw, so a single flush point here covers all of
     them without needing one sprinkled into each individual screen.
 
     Each flushed `(text, created_at)` pair is formatted through
     `format_with_preference` (design doc -- per-user chat timestamp
-    preference round), honoring `user`'s *current* timestamp preference
+    preference), honoring `user`'s *current* timestamp preference
     at display time -- the recipient here is always `user` themselves,
     so unlike live chat's per-recipient broadcast problem, no envelope
     threading through a shared queue is needed, just the same formatting
@@ -746,7 +746,7 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     separate "mark as seen" bookkeeping needed: this just re-queries
     current truth on every redraw.
 
-    `[E]-mail` (design doc round 93/104, `netbbs.mail`/
+    `[E]-mail` (design doc, `netbbs.mail`/
     `netbbs.net.mail_flow`) is always shown, unlike `[I]nvitations` --
     it's a core always-available feature, not a transient notification --
     but grows an "(N unread)" suffix the same "re-query on every redraw,
@@ -755,13 +755,13 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     closest thing to a ready-made convention BBS users already have
     muscle memory for.
 
-    `[C]ommunities`/`[U]ncategorized`/`[J]ump to...` (design doc §16,
-    round 84) replace the old flat `[M]essage Boards`/`[C]hat`/
+    `[C]ommunities`/`[U]ncategorized`/`[J]ump to...` (design doc §16)
+    replace the old flat `[M]essage Boards`/`[C]hat`/
     `[F]ile areas` split -- `[C]` is reused here specifically because
     Chat moving one level into the shared resource-type sub-menu frees
-    it back up (confirmed directly with Thiesi: round 84's original
-    spec assumed `[E]nter a Community`, written before round 104 claimed
-    `E` for mail). `[C]ommunities`/`[U]ncategorized` are conditionally
+    it back up (confirmed directly with Thiesi: the design's original
+    spec assumed `[E]nter a Community`, but mail later claimed
+    `E`). `[C]ommunities`/`[U]ncategorized` are conditionally
     visible -- hidden when there are zero (visible) Communities, or
     zero visible Uncategorized resources, respectively -- same "only
     offer what currently applies" convention as `[I]nvitations`;
@@ -770,7 +770,7 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     node with no Communities created yet, this reduces the menu to
     `[U]ncategorized  [J]ump to...` (assuming at least one board/
     channel/area already exists), functionally identical to today's
-    flat menu -- migration is a non-event, per round 83.
+    flat menu -- migration is a non-event.
 
     `[N]ew scan` (issue #56) is always shown too, right next to `[J]ump
     to...` -- an activity summary across every accessible board/channel/
@@ -844,7 +844,7 @@ async def _main_menu(
     The menu, and its `Choice: ` prompt, are drawn once on entry and
     again after returning from a submenu (a real context change worth
     re-showing) — not on every loop iteration, and not at all on an
-    unrecognized key (design doc round 52): that just sounds a bell and
+    unrecognized key (design doc): that just sounds a bell and
     leaves the screen exactly as it was, no reprinted prompt, since
     nothing was actually communicated worth a fresh line for.
     """
@@ -932,7 +932,7 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "e":
             await session.write_line("")
-            # design doc round 91/issue #57: mail is the first feature
+            # design doc, issue #57: mail is one of the features
             # migrated onto the two-lane database execution model --
             # `lane` is None only for a direct test call site that
             # doesn't supply one (same degrade-gracefully-in-tests
@@ -956,7 +956,7 @@ async def _main_menu(
             await _draw_main_menu(session, db, mailbox, user)
         elif choice == "s" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
-            # design doc round 91/115: admin is the fourth feature
+            # design doc: admin is one of the features
             # migrated onto the two-lane database execution model -- see
             # the "e" (mail) branch above for the identical lane-is-None
             # degrade-gracefully reasoning. Keystroke is "s" (BBS
@@ -1304,7 +1304,7 @@ async def _login(
             continue
 
         if username.lower() == NEW_ACCOUNT_SENTINEL:
-            # Round 96: `closed` mode hides the registration option from
+            # `closed` mode hides the registration option from
             # the prompt above, but 'new' is a documented, memorable
             # convention -- someone who already knows it and types it
             # anyway gets a clear, honest rejection rather than the
@@ -1374,13 +1374,13 @@ async def _register_new_account(
     registration_mode: RegistrationMode,
 ) -> User | None:
     """
-    Self-service account registration (design doc round 76), entered by
+    Self-service account registration (design doc), entered by
     typing the reserved username `new` (`netbbs.auth.users.
     NEW_ACCOUNT_SENTINEL`) at `_login`'s ordinary username prompt -- the
     same sentinel SSH's keyboard-interactive registration
     (`netbbs.net.ssh._NetBBSSSHServer`) triggers, so every transport
     shares one discoverable "how do I sign up" answer. `_login` never
-    calls this at all when `registration_mode` is `CLOSED` (round 96) --
+    calls this at all when `registration_mode` is `CLOSED` --
     this function only ever runs for `OPEN`/`APPROVAL_REQUIRED`.
 
     Returns the freshly created `User` only when the account can log in
@@ -1461,13 +1461,13 @@ async def _register_new_account(
     return new_user
 
 
-# -- Communities navigation (design doc §16, rounds 71/83/84/86) ------------
+# -- Communities navigation (design doc §16) ------------
 
 
 def _visible_communities_for(db: Database, user: User) -> list[Community]:
     """Every Community `user` is allowed to see. A `hidden` Community is
     delisted from ordinary browsing -- same "listed/hidden" visibility
-    language the design doc's own round 84 text reuses -- except for a
+    language the design doc's own text reuses -- except for a
     SysOp, who still sees everything here, matching every other admin-
     visibility bypass already established in this codebase (e.g.
     `netbbs.moderation.roles.has_permission`'s own SysOp bypass)."""
@@ -1515,7 +1515,7 @@ async def _resource_type_menu(
 ) -> None:
     """
     Shared sub-menu for `[C]ommunities`/`[U]ncategorized`/`[J]ump to...`
-    (design doc §16, round 84) -- all three main-menu entry points lead
+    (design doc §16) -- all three main-menu entry points lead
     here, differing only in what Community filter they apply. Reuses the
     *original* `[M]/[C]/[F]` letters one level in rather than inventing
     new ones -- caught during design: `[B]oards` collides with `[B]ack`
@@ -1571,7 +1571,7 @@ async def _resource_type_menu(
             )
         elif choice == "c" and show_channels:
             await session.write_line("")
-            # design doc round 91/114: chat is the third feature migrated
+            # design doc: chat is one of the features migrated
             # onto the two-lane database execution model -- see the "e"
             # (mail) branch above for the identical lane-is-None
             # degrade-gracefully reasoning.
@@ -1587,7 +1587,7 @@ async def _resource_type_menu(
                 )
         elif choice == "f" and show_areas:
             await session.write_line("")
-            # design doc round 91/112: file areas are the second feature
+            # design doc: file areas are one of the features
             # migrated onto the two-lane database execution model -- see
             # the "e" (mail) branch above for the identical lane-is-None
             # degrade-gracefully reasoning.
@@ -1675,9 +1675,9 @@ async def _jump_to(
 ) -> None:
     """`[J]ump to...` entry point -- the shared resource-type sub-menu
     with no Community filter at all (`community_scoped=False`), reusing
-    round 18's existing search/goto commands against the full,
+    the existing search/goto commands against the full,
     unfiltered list exactly as browsing worked before Communities
-    existed (design doc §16, round 84). `title_prefix=None` keeps every
+    existed (design doc §16). `title_prefix=None` keeps every
     browse function's title exactly as it always was ("Available
     message boards", etc.) rather than prefixing it."""
     await _resource_type_menu(
@@ -1709,7 +1709,7 @@ def _has_visible_boards(db: Database, user: User, *, community_id: int | None, c
     """Whether `user` can see at least one board under the given
     Community filter -- backs the shared resource-type sub-menu's
     "only offer what currently applies" conditional visibility (design
-    doc §16, round 84), same convention as `[I]nvitations`."""
+    doc §16), same convention as `[I]nvitations`."""
     boards = [
         b for b in list_boards(db)
         if meets_level(user, get_effective_min_read_level(db, b)) and meets_age(db, user, get_effective_min_age(db, b))
@@ -1754,7 +1754,7 @@ async def _browse_boards_in_category(
     (`-item.id`) — boards keep their real, positive ID unchanged, so
     existing board `goto` numbers aren't affected by this at all.
 
-    `community_id`/`community_scoped` (design doc §16, round 84) narrow
+    `community_id`/`community_scoped` (design doc §16) narrow
     browsing to one Community's boards (`community_scoped=True`,
     `community_id=X`), Uncategorized boards (`community_scoped=True`,
     `community_id=None` -- `board.community_id == None` filters
@@ -1765,7 +1765,7 @@ async def _browse_boards_in_category(
     unfiltered/Jump case (keeping today's unchanged "Available message
     boards" title) or a human label ("Uncategorized", a Community's own
     name) that becomes "{title_prefix} — message boards" otherwise.
-    Category leak prevention (round 84: "only show/offer categories
+    Category leak prevention ("only show/offer categories
     currently used by ≥1 resource in this Community") only applies when
     `community_scoped` -- the unfiltered Jump path shows every category
     exactly as it always has.
@@ -1900,8 +1900,8 @@ async def _show_board(
     initial_cursor: tuple[str, str] | None = None,
 ) -> None:
     """
-    Show `board`, one bounded page of posts at a time (design doc round
-    30, issue #10) — never the whole board, however large its history.
+    Show `board`, one bounded page of posts at a time (design doc,
+    issue #10) — never the whole board, however large its history.
 
     Opens on the *newest* page, confirmed with Thiesi over keeping the
     old oldest-first default: an active board's most recent activity is
@@ -1918,7 +1918,7 @@ async def _show_board(
     choice used to silently fall through into on its way out (GitHub
     issue #39) -- `[B]ack` now always means back, nothing else.
 
-    `link_context` (design doc round 124/128), if given, is used by
+    `link_context` (design doc), if given, is used by
     `_compose_new_post` to queue a `board_post` event when `board` is
     Linked -- `None` (Link disabled on this node, or a direct test call
     site) simply means a new post here never propagates over Link,
@@ -2054,20 +2054,19 @@ async def _edit_existing_post(
     page-relative `[N]` position `_render_post_page` prints next to
     each one, since a board page is at most 5 posts, too small to
     justify pulling in the real picker (`netbbs.net.picker.pick_item`)
-    just to choose one (design doc -- prose editor round B2).
+    just to choose one (design doc).
 
     Authorization is checked *before* prompting for any new content
     (`_can_edit_post`, the same rule `edit_post` itself enforces) so a
     SysOp who picks a post they can't actually edit finds out
     immediately, not after composing a whole revision.
 
-    `link_context` (design doc round 129/130), if given, queues a
+    `link_context` (design doc), if given, queues a
     `board_post_edit` for a Linked board right after a successful
     `edit_post` -- but only when `user` is the post's own original
     author; a moderator's edit (someone else holding `BoardPermission.
     EDIT`) is silently not propagated, since that needs grant
-    verification this round deliberately doesn't build (design doc
-    round 129).
+    verification this deliberately doesn't build (design doc).
     """
     await session.write(f"Edit which post number [1-{len(page.posts)}]? ")
     choice = (await session.read_key()).strip()
@@ -2151,8 +2150,8 @@ async def _compose_body(
 
 def _author_display_name(db: Database, post: Post, *, name_requirement: str | None) -> str:
     """
-    The author label to render for one post (design doc §18, round
-    101). Only looks up the live account behind `post.author_label`
+    The author label to render for one post (design doc §18). Only
+    looks up the live account behind `post.author_label`
     when this board actually requires `verified_and_displayed` names --
     that's the one case where showing the *current* attested real name
     is intentional (an attestation, like an age gate, is a living fact
@@ -2160,7 +2159,7 @@ def _author_display_name(db: Database, post: Post, *, name_requirement: str | No
     case renders the plain, already-sanitized `author_label` exactly as
     it always has: `author_label` is deliberately denormalized so a
     post's history still reads correctly even if the account is later
-    renamed or removed (design doc round 57) -- substituting a user's
+    renamed or removed (design doc) -- substituting a user's
     *current* `display_name` there for the ordinary case would quietly
     break that property, since `display_name` (unlike `username`) is
     actually mutable.
@@ -2183,7 +2182,7 @@ async def _render_post_page(
         author_display = _author_display_name(db, post, name_requirement=name_requirement)
         # Position numbers are 1-indexed *within this page only* -- not
         # a stable identity across page changes, purely a same-screen
-        # selector for [E]dit (design doc -- prose editor round B2:
+        # selector for [E]dit (design doc -- prose editor:
         # editing an existing post), the same "how do you pick one item
         # currently on screen" role a picker's page-relative numbering
         # already plays elsewhere, just inline here since a board page
@@ -2191,7 +2190,7 @@ async def _render_post_page(
         #
         # Built from three separately-colored segments, not one
         # colored() call wrapping the whole line -- author_display may
-        # already contain its own colored+reset unit (round 99's
+        # already contain its own colored+reset unit (the
         # verified-name formatting), and nesting that inside a single
         # outer colored() would have the inner segment's own reset code
         # clear the outer ACCENT_COLOR early, leaving the trailing
@@ -2216,7 +2215,7 @@ async def _render_post_page(
         await session.write_line(reflow(body, width=session.terminal_width))
 
 
-# -- user directory & vCard/finger (design doc §13, sign-off round 38) ------
+# -- user directory & vCard/finger (design doc §13) ------
 
 
 async def _browse_directory(session: Session, db: Database, user: User) -> None:
@@ -2301,8 +2300,8 @@ async def _render_profile(session: Session, db: Database, user: User) -> bool:
 async def _edit_profile(session: Session, db: Database, user: User) -> None:
     """
     Edit your own vCard: the bio, its visibility toggle, and the
-    fullscreen-editor composition preference (design doc -- prose
-    editor round B2). Shows the current state first, then a small
+    fullscreen-editor composition preference (design doc). Shows the
+    current state first, then a small
     sub-menu — matches this codebase's existing "show state, then
     offer actions" shape (e.g. `netbbs.net.file_flow._show_area`)
     rather than jumping straight into an edit prompt.
@@ -2311,7 +2310,7 @@ async def _edit_profile(session: Session, db: Database, user: User) -> None:
     toggle actually happens, not on every loop iteration — mirrors
     `_show_board`'s `_render_board_page` split. An unrecognized key
     sounds a bell and leaves the screen exactly as it was, no reprinted
-    prompt (design doc round 52), same as the main menu and the picker.
+    prompt (design doc), same as the main menu and the picker.
     """
     visible = await _render_profile(session, db, user)
     while True:
@@ -2395,7 +2394,7 @@ async def _toggle_bio_visibility(
     await session.write_line(f"Bio is now {'public' if new_value else 'private'}.")
 
 
-# -- identity attestation: self-reported profile fields (design doc §18, round 101) --
+# -- identity attestation: self-reported profile fields (design doc §18) --
 
 
 async def _identity_details_screen(session: Session, db: Database, user: User) -> None:
@@ -2550,7 +2549,7 @@ async def _verify_identity_menu(session: Session, db: Database, verifier: User) 
     Conditionally-visible main-menu entry for users with
     `can_verify_identity` (or SysOp level) -- lives at the main menu
     rather than inside the admin menu, since a granted verifier may not
-    have admin access otherwise (design doc §18, round 85 point 6).
+    have admin access otherwise (design doc §18).
     """
     candidates = [u for u in list_users(db) if u.id != verifier.id]
     selected = await pick_item(

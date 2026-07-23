@@ -1,6 +1,6 @@
 """
-Tests for netbbs.boards.posts.list_posts_page (design doc round 30,
-issue #10) -- page boundaries, stable ordering, and empty/single-page
+Tests for netbbs.boards.posts.list_posts_page (issue #10) -- page
+boundaries, stable ordering, and empty/single-page
 boards, per the issue's acceptance criteria. Level-gating enforcement
 itself is already covered in tests/test_boards.py; not duplicated here.
 """

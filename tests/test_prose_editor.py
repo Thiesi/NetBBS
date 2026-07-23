@@ -1,6 +1,6 @@
-"""Integration tests for netbbs.net.prose_editor.edit_prose (design doc
--- prose editor round B2), driven with a scripted FakeSession -- same
-convention tests/test_ansi_editor.py established."""
+"""Integration tests for netbbs.net.prose_editor.edit_prose, driven
+with a scripted FakeSession -- same convention
+tests/test_ansi_editor.py established."""
 
 from __future__ import annotations
 

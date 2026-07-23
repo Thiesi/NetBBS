@@ -1,4 +1,4 @@
-"""Tests for netbbs.net.nodeconfig (design doc round 28, issues #15/#1)."""
+"""Tests for netbbs.net.nodeconfig (issues #15/#1)."""
 
 from __future__ import annotations
 
@@ -247,7 +247,7 @@ def test_loaded_config_is_validated_end_to_end(tmp_path):
         load_config(["--config", str(config_file), "--disable-telnet", "--disable-web"])
 
 
-# -- Link config (design doc §11/§12, round 118) ------------------------------
+# -- Link config (design doc §11/§12) -----------------------------------------
 
 
 def test_default_link_config_is_disabled_and_outgoing_only():
@@ -421,7 +421,7 @@ def test_cli_overrides_toml_link_settings(tmp_path):
     assert config.link.enabled is True  # untouched by CLI, still from file
 
 
-# -- Link seeds / sync interval (design doc §12, round 119) -------------------
+# -- Link seeds / sync interval (design doc §12) ------------------------------
 
 
 def test_default_link_config_has_no_seeds():
@@ -507,7 +507,7 @@ def test_cli_link_seed_replaces_toml_seeds_entirely(tmp_path):
     assert config.link.seeds == ["http://from-cli:7862"]
 
 
-# -- relay-serving opt-out + resource cap (design doc §12 round 95/issue #58) --
+# -- relay-serving opt-out + resource cap (design doc §12, issue #58) --------
 
 
 def test_default_link_config_serves_as_a_relay_with_a_default_cap():

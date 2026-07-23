@@ -1,8 +1,7 @@
 """
 Tests for the moderated-board approval flow and post maintenance/expiry
-state machine (design doc §13/§15, sign-off round 35) in
-netbbs.boards.posts, built on top of netbbs.moderation.roles's grants
-(round 34).
+state machine (design doc §13/§15) in netbbs.boards.posts, built on
+top of netbbs.moderation.roles's grants.
 """
 
 from __future__ import annotations
@@ -195,8 +194,8 @@ def test_delete_post_with_a_reply_is_refused_not_crashed(db, sysop, alice, bob):
     delete_post() path used to attempt a raw DELETE with no reference
     check, raising sqlite3.IntegrityError (potentially crashing the
     session) instead of a catchable domain error -- unlike
-    _sweep_expired_posts, which round 70 already taught to leave a
-    still-referenced post alone."""
+    _sweep_expired_posts, which already leaves a still-referenced
+    post alone."""
     board = create_board(db, "general", creator=alice)
     grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
     parent = create_post(db, board, bob, "Parent", "Body")
@@ -360,8 +359,8 @@ def test_expired_post_past_grace_period_is_actually_deleted(db, alice, bob):
 
 def test_expired_post_still_referenced_by_a_reply_is_not_deleted(db, alice, bob):
     """Regression test for a real, pre-existing bug (found while
-    testing design doc -- prose editor round B2's post-editing work,
-    fixed independently of it): deleting a post that still has a live
+    testing post-editing behavior, fixed independently of it): deleting
+    a post that still has a live
     reply pointing at it via parent_post_id used to raise
     `sqlite3.IntegrityError: FOREIGN KEY constraint failed` -- the
     sweep now leaves a still-referenced post in `'expired'` status
@@ -380,8 +379,8 @@ def test_expired_post_still_referenced_by_a_reply_is_not_deleted(db, alice, bob)
 
 def test_expired_post_still_referenced_by_an_edit_is_not_deleted(db, sysop, alice):
     """Same regression, for the root_post_id/edit_of_post_id chain a
-    still-live edit creates (design doc -- prose editor round B2) --
-    the root must survive as long as any edit of it still exists, even
+    still-live edit creates -- the root must survive as long as any
+    edit of it still exists, even
     once the root row itself has individually aged past deletion."""
     board = create_board(db, "general", max_post_age_days=30, creator=alice)
     set_expiry_grace_period_days(db, 5)

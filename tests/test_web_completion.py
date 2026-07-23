@@ -1,6 +1,6 @@
 """
-Integration tests for Tab completion on the web transport (design doc
-round 49/Track 5g) — `WebSession`'s own parallel implementation of the
+Integration tests for Tab completion on the web transport —
+`WebSession`'s own parallel implementation of the
 same behavior `tests/test_char_input_completion.py` already proves for
 Telnet/SSH, driven here through a real websocket connection. Reuses
 `netbbs.net.char_input.apply_tab_completion` directly (see that

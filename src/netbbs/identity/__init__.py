@@ -12,7 +12,7 @@ addressing was explicitly rejected).
 A note on key types, since it's easy to conflate them: the long-term
 identity keypair itself is always **signing** (Ed25519), used for DAG
 message signatures (§7) and HTTP+JSON payload authentication (§11).
-Where **encryption** (X25519) is needed -- Link messages, round 93 --
+Where **encryption** (X25519) is needed -- Link messages --
 `netbbs.identity.encryption` derives it from that same Ed25519 key
 rather than provisioning a separate one; see that module's own
 docstring. Phase 5's Noise Protocol real-time chat transport is a

@@ -1,12 +1,12 @@
 """
 Rasterizing externally-authored ANSI text into a `ScreenBuffer`
-(design doc -- welcome banner round B1). Pure, no I/O.
+(design doc -- welcome banner). Pure, no I/O.
 
 `netbbs.rendering.ansi_art.decode_ansi_bytes` only ever does byte -> str
 decoding -- it never interprets a file's embedded cursor-positioning/
-SGR-color escape sequences, since Round A only ever needed to *display*
-a banner (hand the decoded text to a real terminal emulator and let it
-interpret the codes). Editing an existing file needs the server side to
+SGR-color escape sequences, since displaying a banner only ever needed
+to hand the decoded text to a real terminal emulator and let it
+interpret the codes. Editing an existing file needs the server side to
 actually know what's in each cell, which this module provides.
 
 Deliberately a minimal, best-effort interpreter, not a full VT100/xterm

@@ -1,5 +1,5 @@
 """
-Integration tests for the SSH transport (design doc round 21/22).
+Integration tests for the SSH transport.
 
 These spin up a real `SSHServer` on an OS-assigned loopback port and
 connect a real `asyncssh` client to it — exercising the actual SSH
@@ -92,8 +92,8 @@ def test_password_auth_succeeds_with_correct_credentials(db):
 
 def test_password_auth_honors_shared_login_throttle(db):
     """
-    Design doc round 28 (issue #3): SSH's validate_password must
-    consult the *same* LoginThrottle instance Telnet/web use, not skip
+    Issue #3: SSH's validate_password must consult the *same*
+    LoginThrottle instance Telnet/web use, not skip
     throttling entirely. A budget already exhausted before the
     connection even starts (per_source_capacity=0) must reject a
     password attempt with otherwise-correct credentials.
@@ -160,8 +160,8 @@ def test_password_auth_reconnect_does_not_reset_shared_throttle(db):
 
 def test_login_timeout_disconnects_an_idle_unauthenticated_connection(db):
     """
-    Design doc round 28 (issue #3): SSH's equivalent of Telnet/web's
-    idle-timeout/login-deadline is asyncssh's own `login_timeout`
+    Issue #3: SSH's equivalent of Telnet/web's idle-timeout/login-
+    deadline is asyncssh's own `login_timeout`
     option (see SSHServer.start/__init__'s docstrings for why SSH
     doesn't reuse netbbs.net.login_flow's own timeout logic). Verified
     against a real TCP connection that sends nothing after the initial

@@ -1,7 +1,6 @@
-"""Tests for netbbs.rendering.screen_buffer (design doc round 26 / --
-welcome banner round B1) -- the TUI screen-buffer/diff abstraction, in
-isolation from its first real consumer (netbbs.net.ansi_editor,
-covered separately)."""
+"""Tests for netbbs.rendering.screen_buffer -- the TUI screen-buffer/
+diff abstraction, in isolation from its first real consumer
+(netbbs.net.ansi_editor, covered separately)."""
 
 from __future__ import annotations
 

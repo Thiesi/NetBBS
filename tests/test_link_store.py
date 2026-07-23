@@ -1,5 +1,5 @@
 """
-Unit tests for `netbbs.link.store` (design doc round 120) — the
+Unit tests for `netbbs.link.store` — the
 `link_peers`/`link_events` persistence functions `netbbs.link.
 transport` dispatches through a `DatabaseLane`. These call the plain
 `db`-first functions directly (no lane, no event loop, no real
@@ -149,7 +149,7 @@ def test_save_event_on_conflict_does_nothing(tmp_path):
     original row -- matches `handle_events`' own dedup guard, which
     means `save_event` is only ever called once per content_id in
     practice; `ON CONFLICT ... DO NOTHING` here is a defensive
-    backstop, not the primary mechanism (round 120)."""
+    backstop, not the primary mechanism."""
     db = Database(tmp_path / "node.db")
     sender_identity = bootstrap_node_identity("bob")
     transition = sender_identity.transitions[0]
@@ -177,8 +177,8 @@ def test_save_event_on_conflict_does_nothing(tmp_path):
 
 
 def test_save_board_genesis_event_then_load_link_node_reconstructs_boards(tmp_path):
-    """Round 126: `LinkServer._handle_events` already persists any
-    accepted event generically, board_genesis included -- proves the
+    """`LinkServer._handle_events` already persists any accepted event
+    generically, board_genesis included -- proves the
     other half actually works: a restarted node reconstructs `node.
     boards` from those rows too, not just `known_event_ids`/`events`,
     so a resent board_post for that board_id isn't wrongly rejected
@@ -242,7 +242,7 @@ def test_save_board_post_event_then_load_link_node_does_not_populate_boards(tmp_
 
 
 def test_load_link_node_reconstructs_self_originated_board_genesis(tmp_path):
-    """Round 128: a board this node itself originated (`netbbs.link.
+    """A board this node itself originated (`netbbs.link.
     boards.link_board`) never goes through `handle_events`/`link_
     events` at all -- its genesis lives only on the local `boards`
     row's own `link_genesis_json` column. Proves `load_link_node`
@@ -264,7 +264,7 @@ def test_load_link_node_reconstructs_self_originated_board_genesis(tmp_path):
 
 
 def test_load_link_node_reconstructs_self_originated_board_post_edit(tmp_path):
-    """Round 130: a self-authored edit (`netbbs.link.boards.queue_
+    """A self-authored edit (`netbbs.link.boards.queue_
     board_post_edit_if_linked`) also never goes through `handle_events`
     -- it lives only on the edited revision's own `posts.link_event_
     json` column. Proves `load_link_node` reconstructs `node.post_
@@ -329,8 +329,8 @@ def test_load_link_node_reconstructs_self_originated_edit_chain_when_created_at_
 
 
 def test_load_link_node_reconstructs_peer_received_board_post_edit_chain_in_order(tmp_path):
-    """Round 130: peer-received board_post_edit rows must reconstruct
-    in the order they were originally accepted, or the chain's own
+    """Peer-received board_post_edit rows must reconstruct in the
+    order they were originally accepted, or the chain's own
     'does previous_event_id match the current head' invariant would be
     violated the moment it's used again."""
     db = Database(tmp_path / "node.db")
@@ -388,7 +388,7 @@ def test_load_link_node_reconstructs_peer_received_board_post_edit_chain_in_orde
     db.close()
 
 
-# -- peer-list candidates (design doc round 95) ------------------------------
+# -- peer-list candidates (design doc §8.3) ------------------------------
 
 
 def test_save_candidate_descriptor_then_load_link_node_reconstructs_it(tmp_path):
@@ -440,7 +440,7 @@ def test_save_candidate_descriptor_upserts_on_conflict(tmp_path):
 
 def test_save_peer_clears_a_matching_on_disk_candidate(tmp_path):
     """Mirrors `LinkNode.handle_hello`'s own in-memory candidate
-    cleanup (round 95) -- a fingerprint that becomes a real verified
+    cleanup -- a fingerprint that becomes a real verified
     peer must not also resurrect as a stale candidate after a
     restart."""
     db = Database(tmp_path / "node.db")

@@ -1,8 +1,8 @@
 """
 Integration tests for the `/away` command wiring in
-netbbs.net.chat_flow (design doc round 32, sign-off round 42) — the
-command itself, plus that sending a message while away reminds rather
-than silently clearing. Library-level PresenceRegistry behavior is
+netbbs.net.chat_flow — the command itself, plus that sending a
+message while away reminds rather than silently clearing.
+Library-level PresenceRegistry behavior is
 covered separately in tests/test_chat_presence.py; the
 session-lifecycle enter()/leave() hook in handle_session is covered in
 tests/test_login_presence.py.
@@ -98,8 +98,8 @@ def test_away_not_written_to_scrollback(db, lane, hub, presence, alice, channel)
 
     asyncio.run(_run(lane, hub, presence, channel, alice, ["/away gone to lunch", "/quit"]))
     # join/leave events are always recorded regardless -- /away itself
-    # must not add anything beyond those (design doc round 32: not
-    # written to channel scrollback or broadcast as a channel event).
+    # must not add anything beyond those: it is not written to channel
+    # scrollback or broadcast as a channel event.
     scrollback = get_scrollback(db, channel)
     assert {m.kind for m in scrollback} == {"join", "leave"}
 
@@ -127,17 +127,17 @@ def test_away_not_broadcast_to_others(db, lane, hub, presence, alice, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    # Anchored to the away *reason* text specifically (design doc round
-    # 77), not a blanket "away" never appears anywhere -- the chat
-    # status line's own "N online (M away)" label (round 77) legitimately
-    # contains that word as static chrome regardless of whether anyone
-    # is actually away, so a bare substring check would now always fail
-    # for a reason unrelated to what this test actually protects: that
-    # alice's /away reason never reaches bob's chat stream.
+    # Anchored to the away *reason* text specifically, not a blanket
+    # "away" never appears anywhere -- the chat status line's own
+    # "N online (M away)" label legitimately contains that word as
+    # static chrome regardless of whether anyone is actually away, so a
+    # bare substring check would always fail for a reason unrelated to
+    # what this test actually protects: that alice's /away reason never
+    # reaches bob's chat stream.
     assert "gone to lunch" not in _written_text(watcher)
 
 
-# -- sending while away (design doc round 32, point 6) ----------------------
+# -- sending while away ------------------------------------------------------
 
 
 def test_sending_a_message_while_away_reminds_but_does_not_clear(db, lane, hub, presence, alice, channel):

@@ -1,12 +1,11 @@
 """
-Tests for the discovery commands in netbbs.net.chat_flow (design doc
-rounds 32/33, sign-off round 43): /names, /who, /list, /whois. Reuses
-the FakeSession/fixture conventions already established in
-tests/test_chat_flow_moderation.py and friends.
+Tests for the discovery commands in netbbs.net.chat_flow: /names,
+/who, /list, /whois. Reuses the FakeSession/fixture conventions
+already established in tests/test_chat_flow_moderation.py and friends.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`.
 """
 
 from __future__ import annotations
@@ -84,13 +83,13 @@ async def _run(lane, hub, presence, channel, user, lines):
 async def _join_and_wait(lane, hub, presence, channel, user, session):
     """Starts `_chat_loop` as a background task and waits until it has
     actually joined `channel`'s hub roster before returning -- polled,
-    not a fixed `asyncio.sleep(0)` (design doc round 114): joining now
-    involves real `ThreadPoolExecutor` round trips (the lane dispatch
-    for the ban check, scrollback fetch, and join record), with genuine
-    wall-clock latency a single zero-duration sleep can no longer
-    reliably outlast -- and every test in this file depends on the
-    watcher's live roster membership being visible by the time the
-    asker's own /names, /who, or /whois command actually runs."""
+    not a fixed `asyncio.sleep(0)`: joining involves real
+    `ThreadPoolExecutor` round trips (the lane dispatch for the ban
+    check, scrollback fetch, and join record), with genuine wall-clock
+    latency a single zero-duration sleep can no longer reliably
+    outlast -- and every test in this file depends on the watcher's
+    live roster membership being visible by the time the asker's own
+    /names, /who, or /whois command actually runs."""
     mailbox = MessageMailbox()
     history = InputHistory()
     task = asyncio.create_task(

@@ -15,8 +15,8 @@ around — so there's never a database row referencing storage that
 doesn't exist.
 
 Moderated-area approval and the maintenance/expiry state machine
-(design doc §13/§15, sign-off round 36) mirror
-`netbbs.boards.posts`'s round 35 treatment structurally — see that
+(design doc §13/§15) mirror
+`netbbs.boards.posts`'s treatment structurally — see that
 module's docstring for the fuller reasoning, not repeated here. One
 real difference: `get_file_by_name` is a second unbounded lookup path
 (besides `get_file`) that posts don't have an equivalent of, so it
@@ -222,7 +222,7 @@ def get_file_by_name(
 ) -> FileEntry | None:
     """
     Look up a file in `area` by its exact stored `filename` — added
-    alongside `list_files_page` (design doc round 31) specifically so
+    alongside `list_files_page` specifically so
     `/download <filename>` (see `netbbs.net.file_flow._handle_download`)
     keeps working for a file that isn't on the *currently displayed*
     page. Pagination bounds what's fetched for browsing; it was never
@@ -240,11 +240,11 @@ def get_file_by_name(
     knows (or guesses) a filename — a real, practical route to a
     `'pending'` file, not the theoretical one `get_file`/`get_post`
     accept. So a `'pending'` match is only returned to its uploader or
-    a holder of `BoardPermission.APPROVE` on `area` (design doc
-    sign-off round 36); passing no `requesting_user` treats it the
-    same as an unauthorized one, the safe default. `'expired'` matches
+    a holder of `BoardPermission.APPROVE` on `area`; passing no
+    `requesting_user` treats it the same as an unauthorized one, the
+    safe default. `'expired'` matches
     are always returned — expiry is a delisting, not an access
-    restriction (see `netbbs.boards.posts`'s round 35 treatment).
+    restriction (see `netbbs.boards.posts`'s equivalent treatment).
     """
     row = db.connection.execute(
         """
@@ -288,7 +288,7 @@ class FileEntryPage:
     """One bounded page of file entries, always in chronological
     (oldest-first) order *within the page* — matches
     `netbbs.boards.posts.PostPage`'s shape and reasoning exactly (design
-    doc round 31, issue #10's file-area follow-up), which this module
+    doc, issue #10's file-area follow-up), which this module
     mirrors deliberately rather than inventing a parallel design."""
 
     entries: list[FileEntry]
@@ -306,8 +306,8 @@ def list_files_page(
     limit: int = _DEFAULT_PAGE_SIZE,
 ) -> FileEntryPage:
     """
-    Fetch one bounded page of files in `area` (design doc round 31,
-    issue #10's file-area follow-up to round 30's board-post
+    Fetch one bounded page of files in `area` (design doc,
+    issue #10's file-area follow-up to the board-post
     pagination) — never the whole area's listing, however large its
     history. Enforces `area.min_read_level`, same as the unbounded
     function this replaces.
@@ -326,8 +326,8 @@ def list_files_page(
     `netbbs.net.file_flow`'s own category-browsing docstrings already
     use for not re-explaining `netbbs.net.login_flow`'s pattern).
 
-    Only `status = 'approved'` entries are ever included here (design
-    doc sign-off round 36, mirroring round 35's post treatment) —
+    Only `status = 'approved'` entries are ever included here (mirroring
+    `netbbs.boards.posts`'s treatment) —
     `'pending'` files belong to the moderation queue
     (`list_pending_files`), and `'expired'` files are delisted from
     normal browsing though still individually reachable (see
@@ -439,8 +439,7 @@ def delete_file(db: Database, entry: FileEntry, *, deleted_by: User) -> None:
     `netbbs.files.storage` are deliberately left alone. Storage-level
     garbage collection of orphaned content-addressed blobs (a
     different file entry could in principle share the same bytes) is
-    out of scope for this round, same as it was never in scope for
-    file areas before moderation existed.
+    a separate concern handled by `netbbs.files.gc`, not by this function.
     """
     _require_area_permission(db, entry, deleted_by, BoardPermission.DELETE)
 

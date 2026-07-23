@@ -1,6 +1,6 @@
 """
 `python -m netbbs.admin [--db PATH] [--as USERNAME]` -- the standalone
-local SysOp admin CLI tool (design doc -- SysOp foundation round).
+local SysOp admin CLI tool (design doc).
 
 Shares `netbbs.net.admin_flow.admin_menu` with the in-BBS [S]ysOp menu
 option (`netbbs.net.login_flow`) rather than duplicating any command
@@ -25,7 +25,7 @@ uses, if any -- an already-supported, designed-for scenario (WAL mode
 concurrently, see `netbbs.storage.database.Database`'s own docstring).
 
 `run_admin_session` opens its own `DatabaseLane` around the `Database`
-handle it's given (design doc round 91/issue #57, round 115) -- the
+handle it's given (design doc/issue #57) -- the
 shared `admin_menu` now takes `lane`, not `db`, and this is the
 process's only other caller of it besides the in-BBS `[S]ysOp` menu
 option. Scoped to this function (opened and closed here, not owned by
@@ -121,7 +121,7 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
         if password is None and verify_key is None:
             await session.write_line("An account needs a password, a public key, or both. Try again.\r\n")
 
-    # round 115: create_user (not create_user_async), same reasoning as
+    # create_user (not create_user_async), same reasoning as
     # netbbs.net.admin_flow._create_user_screen -- lane.run() already
     # dispatches this whole call to a worker thread.
     def _create(db: Database) -> User:

@@ -1,31 +1,31 @@
 """
-Communities (design doc §16, rounds 71/83/84/86): a topic-oriented
+Communities (design doc §16): a topic-oriented
 navigation/container layer above boards, chat channels, and file areas.
-Local Communities only in this module -- Link Communities (round 86)
+Local Communities only in this module -- Link Communities
 become a property layered onto this same `communities` row once Phase
 6's signed-event/DAG governance machinery exists, not a separate object
 type or table.
 
 A Community is a coordination/container object, not a unified content
-type (round 87's wording fix) -- `netbbs.boards`, `netbbs.chat`, and
+type -- `netbbs.boards`, `netbbs.chat`, and
 `netbbs.files` remain exactly what they are today, independent,
 separately-packaged resource types with their own behavior. A board/
 channel/file_area optionally belongs to at most one Community
-(`community_id`, nullable FK) -- zero-or-one, never several (round 83;
-see the design doc for why many-to-many and a mandatory-with-a-default-
+(`community_id`, nullable FK) -- zero-or-one, never several
+(see the design doc for why many-to-many and a mandatory-with-a-default-
 "Uncategorized" shape were both rejected). "No Community" (`community_id
 IS NULL`) is a real, common, distinct state, not a fallback synthetic
 Community.
 
 Two different inheritance mechanics, matching the two different kinds
-of data §13 already has (round 84):
+of data §13 already has:
 - **Scalar defaults** (`get_effective_*` below): a resource's own
   explicit value wins if set (including an explicit `0`), else its
   Community's default if it belongs to one, else the hardcoded system
   default. `min_read_level`/`min_write_level` (boards/file areas) and
   `min_age`/`name_requirement` (all three resource types) all follow
   this shape. `channels.min_level` deliberately does NOT -- see the
-  round-104 migration note in `netbbs.storage.migrations` for why that
+  migration note in `netbbs.storage.migrations` for why that
   field was left out of Community inheritance rather than inventing a
   `default_min_level` field the design doc never specified.
 - **Moderator grant authority** (Community-blanket tier) lives in
@@ -81,7 +81,7 @@ def create_community(
     chain described in this module's docstring just resolves one level
     further down (to 0, or "no gate") when the Community itself doesn't
     set one either. `create`/`update` deliberately stay lean here
-    (design doc round 84: "Create stays lean, Edit carries the rest,
+    (design doc: "Create stays lean, Edit carries the rest,
     same split boards already use") -- callers building an admin "create"
     screen are free to prompt for only `name`/`description` and leave
     every default field to its own default, following up with a
@@ -201,14 +201,14 @@ def delete_community(db: Database, community: Community, *, deleted_by: User) ->
 
     Every referencing board/channel/file_area reverts to `community_id
     = NULL` (Uncategorized) -- the reverse of assignment, not a
-    cascading delete of the resources themselves, matching design doc
-    round 83's "migration is a non-event" framing: losing a Community
+    cascading delete of the resources themselves, matching the design
+    doc's "migration is a non-event" framing: losing a Community
     should never destroy the boards/channels/areas that were in it. Any
     Community-blanket moderator grant scoped to this Community is
     revoked outright (`netbbs.moderation.roles`'s Community-blanket
     tier has no meaning once its Community is gone) rather than left
     dangling. Logged before deleting, matching `delete_board`/
-    `delete_user`'s own "log first" precedent (design doc round 57).
+    `delete_user`'s own "log first" precedent (design doc).
 
     Computing and confirming the blast radius (how many resources/
     grants this affects) before calling this function is the admin UI's
@@ -235,7 +235,7 @@ def delete_community(db: Database, community: Community, *, deleted_by: User) ->
     db.connection.commit()
 
 
-# -- scalar-default resolution (design doc §16, round 84) -------------------
+# -- scalar-default resolution (design doc §16) ------------------------------
 
 
 def get_effective_min_read_level(db: Database, resource) -> int:

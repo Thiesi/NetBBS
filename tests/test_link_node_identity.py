@@ -1,6 +1,6 @@
-"""Tests for netbbs.link.node_identity — design doc round 89's node
-key-lifecycle model (root key + signing/transport operational keys +
-signed transition chains), given a concrete shape by round 110."""
+"""Tests for netbbs.link.node_identity — the node key-lifecycle model
+(root key + signing/transport operational keys + signed transition
+chains)."""
 
 from __future__ import annotations
 

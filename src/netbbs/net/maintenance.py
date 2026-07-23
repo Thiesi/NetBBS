@@ -1,6 +1,5 @@
 """
-Node-wide maintenance-mode gate (design doc round 51, Phase 2
-post-Track-5 fixes): once activated, new connections are refused before
+Node-wide maintenance-mode gate (design doc §13.8): once activated, new connections are refused before
 login even begins (see `netbbs.net.login_flow.handle_session`) — the
 piece a deliberate shutdown sequence needs to stop admitting new users
 while it broadcasts a warning and disconnects everyone already

@@ -1,7 +1,7 @@
 """
 Tests for `netbbs.link.mail` -- the local-origination and receiving-side
-bridge for Link messages (design doc round 93). Tier 1
-(`tier1_home_node_key`) only, per that round's tier-2 finding.
+bridge for Link messages. Tier 1 (`tier1_home_node_key`) only; tier-2
+Link messages are not yet implemented.
 """
 
 from __future__ import annotations

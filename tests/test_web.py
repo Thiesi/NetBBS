@@ -1,5 +1,5 @@
 """
-Integration tests for the web transport (design doc round 22/25).
+Integration tests for the web transport.
 
 These spin up a real `WebServer` on an OS-assigned loopback port and
 connect a real `aiohttp` client websocket to it — exercising the actual

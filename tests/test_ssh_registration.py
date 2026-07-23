@@ -1,6 +1,6 @@
 """
-Integration tests for SSH self-service registration (design doc round
-76) -- `netbbs.net.ssh._NetBBSSSHServer`'s keyboard-interactive
+Integration tests for SSH self-service registration --
+`netbbs.net.ssh._NetBBSSSHServer`'s keyboard-interactive
 (kbdint) auth handlers. Spins up a real `SSHServer` and connects a real
 `asyncssh` client, same as tests/test_ssh.py, with a scripted
 `asyncssh.SSHClient` subclass answering each kbdint round in turn --
@@ -207,7 +207,7 @@ def test_registration_with_approval_required_leaves_account_unable_to_log_in(db)
 
 
 def test_closed_mode_never_offers_the_kbdint_registration_challenge(db):
-    # Round 96: `closed` mode hides registration entirely -- the server
+    # `closed` mode hides registration entirely -- the server
     # never offers the kbdint challenge at all, so a client requesting
     # only kbdint auth fails immediately with no registration prompt
     # ever shown, the SSH-side equivalent of Telnet/web's hidden prompt

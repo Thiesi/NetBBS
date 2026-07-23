@@ -1,7 +1,7 @@
 """
 Real `aiohttp`-based transport for `netbbs.link.protocol` (design doc
-§11, round 117) — the client dial functions and server route handlers
-that translate `LinkNode`'s message-passing interface (round 116) into
+§11) — the client dial functions and server route handlers
+that translate `LinkNode`'s message-passing interface into
 actual HTTP+JSON requests over a real socket.
 
 Mirrors `netbbs.net.web.WebServer`'s own `AppRunner`/`TCPSite` start/
@@ -10,36 +10,30 @@ already uses, not a new one invented for Link.
 
 This module is deliberately the *only* place that imports both
 `aiohttp` and `netbbs.link.protocol` together — `protocol.py` itself
-stays untouched and provably transport-agnostic, matching round 116's
+stays untouched and provably transport-agnostic, matching the
 whole point in building it that way. `LinkNode.handle_hello`/
 `handle_events` do all the actual verification; this module's job is
 only "get bytes to the right place and hand what arrives to the right
 method."
 
 Route shape: `POST {LINK_PATH_PREFIX}/hello` (mutual — a peer's own
-hello comes back in the response body, matching round 116's design-doc
+hello comes back in the response body, matching the design-doc
 note on how store-and-forward's *promise* is preserved even though a
 successful dial's response can still opportunistically carry a prompt
 reply) and `POST {LINK_PATH_PREFIX}/events/{fingerprint}` (gossip push,
 `fingerprint` naming whose own events these are — this design only
 ever gossips a node's *own* key_transitions, never relays on another's
-behalf yet, matching round 116's "no relay from a stranger" scope
+behalf yet, matching the "no relay from a stranger" scope
 note).
 
-**Deliberately not wired into node startup/config this round** — no
-`netbbs.net.nodeconfig`/`netbbs.__main__` changes, no persistent
-`own_hello_provider` beyond what a caller (today: only tests) supplies
-directly. See design doc round 117 sign-off note for the full list of
-what's still open.
-
-**Round 120 adds a required `lane: DatabaseLane` to `LinkServer` and
-`dial_hello`** — the only three call sites in this codebase that
+**`LinkServer`/`dial_hello` require a `lane: DatabaseLane`** — the only
+three call sites in this codebase that
 mutate a `LinkNode`'s peer table or event store (`_handle_hello`,
 `_handle_events`, and `dial_hello`'s own trailing `handle_hello` call)
-now persist what changed via `netbbs.link.store`, off the event loop,
+persist what changed via `netbbs.link.store`, off the event loop,
 after `netbbs.link.protocol`'s own in-memory verification succeeds.
 `push_events` is untouched — it never mutates local `LinkNode` state.
-See design doc round 120 for the full reasoning on why persistence
+See the design doc for the full reasoning on why persistence
 lives here rather than inside `netbbs.link.protocol` itself.
 """
 
@@ -100,7 +94,7 @@ LINK_PATH_PREFIX = "/link/v1"
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
-# Round 95/issue #58: `LinkServer`'s own default resource cap on relay-
+# Issue #58: `LinkServer`'s own default resource cap on relay-
 # serving when a caller doesn't supply `max_relay_clients` explicitly
 # (every test in this codebase predating that parameter, plus any
 # caller that doesn't care to tune it) -- `netbbs.net.nodeconfig.
@@ -161,11 +155,11 @@ class LinkServer:
     `LinkNode.build_hello` itself already applies at the protocol
     layer, one level down).
 
-    `lane` (round 120): the background `DatabaseLane` this server
+    `lane`: the background `DatabaseLane` this server
     persists accepted peers/events through, off the event loop, after
     `node`'s own in-memory verification accepts them.
 
-    `relay_serving_enabled`/`max_relay_clients` (round 95/issue #58):
+    `relay_serving_enabled`/`max_relay_clients` (issue #58):
     this node's own policy for `_handle_relay_consent` -- whether to
     ever grant a relay-consent request at all, and the cap on how many
     simultaneous grants to hold once serving is enabled (design doc
@@ -300,13 +294,13 @@ class LinkServer:
                 object_type=object_type,
                 envelope=envelope,
             )
-            # Link messages (design doc round 93) need real follow-up
+            # Link messages (design doc) need real follow-up
             # beyond persisting the envelope -- decrypt/deliver into a
             # local mailbox or bounce, and apply an incoming
-            # acknowledgement to the outbound row it's about. Round 94/
-            # issue #53's carry-materialization gap means board_genesis
+            # acknowledgement to the outbound row it's about.
+            # Issue #53's carry-materialization gap means board_genesis
             # and board_origin_transfer_accepted both need real follow-up
-            # too now: a received genesis has nothing a local user could
+            # too: a received genesis has nothing a local user could
             # browse without also becoming a real Board row (see
             # materialize_carried_board's own docstring for why this was
             # missing even for a board this node has carried all along),
@@ -346,16 +340,16 @@ class LinkServer:
                 )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
-            # accepted event (round 120).
+            # accepted event.
             await self._lane.run(save_peer, self._node.peers[fingerprint])
 
         return web.json_response({"accepted": accepted})
 
     async def _handle_peers(self, request: web.Request) -> web.Response:
         """
-        Round 95's peer-list exchange: shares this node's own currently-
+        Peer-list exchange: shares this node's own currently-
         verified peers' endpoint descriptors with whoever asks.
-        Deliberately unauthenticated, like `/hello` itself — round 95
+        Deliberately unauthenticated, like `/hello` itself — the design doc
         already treats reachability information as discoverable
         bootstrap data, not something trust-gated ("a seed only ever
         supplies reachability information; it grants no trust"). A
@@ -367,14 +361,14 @@ class LinkServer:
 
     async def _handle_relay_consent(self, request: web.Request) -> web.Response:
         """
-        Round 95/issue #58: answer a `relay_consent_request` synchronously,
+        Issue #58: answer a `relay_consent_request` synchronously,
         in the *same* HTTP response -- the only shape that works for a
         requester who may itself be outgoing-only and can never be dialed
         back (see `RelayConsentRequest`'s own docstring). Mirrors `_handle_
         hello`'s own "reply carried in the response body" shape exactly.
 
         The opt-out/resource-cap policy decision (`self._relay_serving_
-        enabled`/`self._max_relay_clients`, round 95/issue #58) lives
+        enabled`/`self._max_relay_clients`, issue #58) lives
         here, not in `LinkNode` itself -- `handle_relay_consent_request`
         only ever verifies, deliberately never decides (see that
         method's own docstring: this pure/in-memory layer has no config
@@ -415,7 +409,7 @@ class LinkServer:
 
     async def _handle_relay_mailbox_deposit(self, request: web.Request) -> web.Response:
         """
-        Round 95/issue #58: accept one opaque `link_message` for
+        Issue #58: accept one opaque `link_message` for
         `recipient_fingerprint`, held until that recipient itself picks
         it up (`_handle_relay_mailbox_pickup`). Unlike every other route
         on this server, the depositing caller need not be a completed
@@ -435,7 +429,7 @@ class LinkServer:
 
         if message.envelope.get("object_type") != LINK_MESSAGE_OBJECT_TYPE:
             return web.json_response(
-                {"error": "only link_message may be deposited into a relay mailbox this round"}, status=400
+                {"error": "only link_message may be deposited into a relay mailbox"}, status=400
             )
 
         if recipient_fingerprint not in self._node.relaying_for:
@@ -452,7 +446,7 @@ class LinkServer:
 
     async def _handle_relay_mailbox_pickup(self, request: web.Request) -> web.Response:
         """
-        Round 95/issue #58: hand back (and clear) whatever mail this
+        Issue #58: hand back (and clear) whatever mail this
         relay is currently holding for the caller. Authenticated by
         requiring a fresh, verifiable `hello` as the request body rather
         than inventing a new signed message type — a hello already
@@ -495,7 +489,7 @@ async def dial_hello(
     Say hello to a peer at `base_url` (e.g. `"http://198.51.100.7:7862"`,
     no trailing slash): POST `hello`, feed the peer's own hello — carried
     back in the response — into `node.handle_hello`, persist the
-    resulting `PeerRecord` via `lane` (round 120), and return it.
+    resulting `PeerRecord` via `lane`, and return it.
 
     Raises `LinkTransportError` for anything transport-level gone wrong
     (connection failure, timeout, non-200, an unparseable response
@@ -539,11 +533,11 @@ async def push_events(
 ) -> list[str]:
     """
     Push `events` — this node's *own* originated events (`key_
-    transition`s, `board_genesis`/`board_post`/`board_post_edit` since
-    round 128/130, `board_origin_transfer_offer`/`board_origin_transfer_
-    accepted` since round 94/issue #53, and `link_message`/`link_
-    message_accepted`/`link_message_bounced` since round 93's mail-sync
-    wiring) — per round 116's "no relay from a stranger" scope note —
+    transition`s, `board_genesis`/`board_post`/`board_post_edit`,
+    `board_origin_transfer_offer`/`board_origin_transfer_
+    accepted` (issue #53), and `link_message`/`link_
+    message_accepted`/`link_message_bounced`) — per the
+    "no relay from a stranger" scope note —
     to a peer at `base_url`. Returns whichever content_ids the peer
     newly accepted; purely informational, since the sender's own copies
     are already known-good on its own side.
@@ -584,7 +578,7 @@ async def request_peer_list(
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """
-    Request `base_url`'s own peer list (round 95, §12) and feed it into
+    Request `base_url`'s own peer list (design doc §12) and feed it into
     `node.handle_peer_list`, persisting each newly recorded/refreshed
     candidate via `lane` (`netbbs.link.store.save_candidate_descriptor`)
     the same way `dial_hello` persists its own resulting `PeerRecord` —
@@ -635,7 +629,7 @@ async def request_relay_consent(
     Ask the peer at `base_url` (already a completed peer named
     `relay_fingerprint` -- same "caller already completed a real hello"
     precondition `request_peer_list` documents) to relay for this node
-    (design doc §12, round 95/issue #58): build and sign a `relay_
+    (design doc §12, issue #58): build and sign a `relay_
     consent_request`, POST it to `/relay-consent/{this node's own
     fingerprint}`, and verify the answer carried back in the *same* HTTP
     response (`LinkServer._handle_relay_consent`'s own synchronous-reply
@@ -706,7 +700,7 @@ async def deposit_into_relay_mailbox(
     Leave `message` (a `link_message` this node couldn't deliver
     directly) at the relay reachable at `relay_base_url`, for
     `recipient_fingerprint` to pick up on its own next outbound sync
-    pass (design doc §12, round 95/issue #58). Does not require a
+    pass (design doc §12, issue #58). Does not require a
     completed hello with the relay first — see `LinkServer._handle_
     relay_mailbox_deposit`'s own docstring for why depositing is the one
     route on this server that's intentionally open to a stranger.
@@ -738,7 +732,7 @@ async def pickup_from_relay_mailbox(
 ) -> list[LinkMessage]:
     """
     Pick up (and clear) whatever mail the relay at `relay_base_url` is
-    currently holding for this node -- design doc §12, round 95/issue
+    currently holding for this node -- design doc §12, issue
     #58. `hello` is this node's own current hello bundle, the caller's
     to supply (same "deployment config isn't this layer's concern"
     reasoning `dial_hello` already applies to its own `hello` parameter)

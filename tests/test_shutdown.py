@@ -1,13 +1,12 @@
 """
-Tests for the deliberate node-shutdown sequence (design doc round 51):
+Tests for the deliberate node-shutdown sequence:
 `netbbs.net.session_registry.ActiveSessionRegistry`,
 `netbbs.net.maintenance.MaintenanceMode`, and
 `netbbs.net.shutdown.run_shutdown_sequence` (the coordinator SIGTERM/
-SIGINT -- and, as of the node-management round, the in-session `[N]ode`
-admin command too -- actually trigger; relocated out of
-`netbbs.__main__` in that same round since it's no longer signal-
-specific). The coordinator is driven directly here rather than via real
-OS signals — `tests/test_main_lifecycle.py`'s own
+SIGINT -- and the in-session `[N]ode` admin command too -- actually
+trigger; relocated out of `netbbs.__main__` since it's no longer
+signal-specific). The coordinator is driven directly here rather than
+via real OS signals — `tests/test_main_lifecycle.py`'s own
 `test_signal_handler_registration_triggers_shutdown_event` already
 covers that a real signal reaches `_install_signal_handlers`; this file
 covers what happens once it does.
@@ -225,7 +224,7 @@ def test_disconnect_all_on_an_empty_registry_returns_immediately():
     asyncio.run(scenario())
 
 
-# -- disconnect_one / mark_authenticated / list_entries (node management round) --
+# -- disconnect_one / mark_authenticated / list_entries (design doc §13.8) --
 
 
 def test_disconnect_one_cancels_just_that_session():
@@ -677,7 +676,7 @@ def test_shutdown_activates_maintenance_mode():
 
 
 def test_run_shutdown_sequence_custom_message_replaces_the_default(tmp_path):
-    """Per Thiesi's own wording (design doc -- node management round): a
+    """Per Thiesi's own wording (design doc §13.8): a
     supplied message *replaces* the default "going down" text, it
     doesn't append to it."""
 

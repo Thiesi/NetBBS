@@ -1,6 +1,6 @@
 """
 Integration tests for the interactive board post-pagination navigation
-in netbbs.net.login_flow._show_board (design doc round 30, issue #10)
+in netbbs.net.login_flow._show_board (issue #10)
 -- distinct from tests/test_post_pagination.py, which tests
 list_posts_page in isolation. These drive the real _show_board loop
 with a FakeSession to confirm the Older/Newer/Recent keys actually
@@ -129,7 +129,7 @@ def test_recent_key_jumps_straight_back_to_the_newest_page(tmp_path, monkeypatch
     db.close()
 
 
-# -- identity attestation: verified-name display + age/name gating (design doc §18, round 101) --
+# -- identity attestation: verified-name display + age/name gating (design doc §18) --
 
 
 def test_post_shows_verified_and_displayed_real_name(tmp_path):
@@ -163,9 +163,8 @@ def test_post_does_not_leak_current_display_name_for_ungated_board(tmp_path):
     asyncio.run(_show_board(session, db, board, alice))
 
     # Historical author_label ("alice"), not the current display_name --
-    # design doc round 57's denormalization property must survive a
-    # later display_name change, since no gate here actually calls for
-    # the live value.
+    # that denormalization property must survive a later display_name
+    # change, since no gate here actually calls for the live value.
     assert "New Display Name" not in session.output
     assert "alice" in session.output
     db.close()
@@ -241,10 +240,10 @@ def test_empty_board_never_enters_the_navigation_loop(tmp_path):
 
 
 def test_composing_a_post_on_a_linked_board_queues_a_board_post(tmp_path):
-    """Design doc round 124/128: `_compose_new_post` calls `queue_
-    board_post_if_linked` right after a successful `create_post` when
-    `link_context` is given -- proves this reaches the real interactive
-    posting flow, not just the library function in isolation."""
+    """`_compose_new_post` calls `queue_board_post_if_linked` right
+    after a successful `create_post` when `link_context` is given --
+    proves this reaches the real interactive posting flow, not just
+    the library function in isolation."""
     from netbbs.link.boards import LinkContext, link_board
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import LinkNode
@@ -267,11 +266,10 @@ def test_composing_a_post_on_a_linked_board_queues_a_board_post(tmp_path):
 
 
 def test_editing_a_post_on_a_linked_board_queues_a_board_post_edit(tmp_path):
-    """Design doc round 129/130: `_edit_existing_post` calls `queue_
-    board_post_edit_if_linked` right after a successful `edit_post`
-    when `link_context` is given -- proves this reaches the real
-    interactive editing flow, not just the library function in
-    isolation."""
+    """`_edit_existing_post` calls `queue_board_post_edit_if_linked`
+    right after a successful `edit_post` when `link_context` is given
+    -- proves this reaches the real interactive editing flow, not
+    just the library function in isolation."""
     from netbbs.link.boards import LinkContext, link_board, queue_board_post_if_linked
     from netbbs.link.node_identity import bootstrap_node_identity
     from netbbs.link.protocol import LinkNode

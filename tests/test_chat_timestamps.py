@@ -1,8 +1,7 @@
-"""Tests for netbbs.chat.timestamps (design doc round 32 point 3, round
-42 point 6, sign-off round 62) — the per-user chat timestamp preference
-store and formatting helper, in isolation from the /timestamps command
-and chat-loop wiring that drives it (covered separately in
-tests/test_chat_flow_timestamps.py)."""
+"""Tests for netbbs.chat.timestamps — the per-user chat timestamp
+preference store and formatting helper, in isolation from the
+/timestamps command and chat-loop wiring that drives it (covered
+separately in tests/test_chat_flow_timestamps.py)."""
 
 from __future__ import annotations
 
@@ -60,9 +59,9 @@ def test_format_with_preference_prepends_a_timestamp_when_enabled(db, alice):
 
 
 def test_format_with_preference_is_time_only_not_a_full_date(db, alice):
-    """Deliberately a bare HH:MM (design doc round 77), not the node's
-    full configured display format (which includes the date) -- same
-    reasoning as the chat status line's own clock (round 75)."""
+    """Deliberately a bare HH:MM, not the node's full configured display
+    format (which includes the date) -- same reasoning as the chat
+    status line's own clock."""
     set_timestamps_enabled(db, alice, True)
     result = format_with_preference(db, alice, "hello", "2026-01-01T12:34:00.000000Z")
     assert "2026" not in result

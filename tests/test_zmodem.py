@@ -1,14 +1,14 @@
 """
 Tests for netbbs.net.zmodem — real ZMODEM protocol framing, CRC-16, and
-the sender/receiver state machines (design doc round 21/22/24).
+the sender/receiver state machines.
 
 The round-trip tests run this module's own `send_file` against its own
 `receive_file`, connected by an in-memory duplex byte pipe rather than a
 real Telnet/SSH socket — genuinely exercises every framing/escaping/CRC
 code path (this is the real wire protocol, not a mock of it), but can't
 substitute for testing against an actual external Zmodem client
-(SyncTERM, lrzsz). See the module docstring and design doc round 24 for
-why that's flagged as a separate, real-terminal verification step.
+(SyncTERM, lrzsz). See the module docstring for why that's flagged as a
+separate, real-terminal verification step.
 """
 
 from __future__ import annotations
@@ -210,8 +210,8 @@ def test_round_trip_preserves_all_256_byte_values():
 def test_corrupted_data_raises_zmodem_error(tmp_path):
     """A bit-flip in transit should be caught as a CRC mismatch, not
     silently accepted -- proves the "abort on error, no retry" scoping
-    (design doc round 24) actually detects corruption rather than
-    trusting the transport blindly."""
+    actually detects corruption rather than trusting the transport
+    blindly."""
 
     async def scenario():
         sender_session, receiver_session = _session_pair()

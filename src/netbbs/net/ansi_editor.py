@@ -1,12 +1,12 @@
 """
-The WYSIWYG ANSI art editor (design doc -- welcome banner round B1) --
-the first real consumer of the screen-buffer/diff abstraction (design
-doc round 26).
+The WYSIWYG ANSI art editor (design doc -- welcome banner) -- the
+first real consumer of the screen-buffer/diff abstraction (design
+doc).
 
 Deliberately generic/reusable: this module knows nothing about
 "welcome banner" specifically -- see `netbbs.net.admin_flow`'s
-`[X] edit` screen for the one concrete caller today. A later round can
-reuse `edit_ansi_art` against a different save target without any
+`[X] edit` screen for the one concrete caller today. A future caller
+can reuse `edit_ansi_art` against a different save target without any
 changes here; the only file this module writes to directly is the
 autosave draft, never a caller's real save target.
 
@@ -20,7 +20,7 @@ phase, not abandoned.
 
 Ctrl-key bindings deliberately follow nano's scheme wherever nano has
 an equivalent action (Ctrl+O save, Ctrl+X quit), shared with the
-prose editor (round B2) for one consistent muscle-memory set across
+prose editor for one consistent muscle-memory set across
 both fullscreen editors. Ctrl+G (nano's Help) and Ctrl+S (legacy
 terminal XOFF) were both avoided for exactly that reason -- glyph
 picking uses Ctrl+T instead. Foreground/background color picking
@@ -58,7 +58,7 @@ from netbbs.rendering import (
 _logger = logging.getLogger(__name__)
 
 # Overridable so tests don't wait 30 real seconds; production callers
-# get a real, sensible default (design doc -- welcome banner round B1,
+# get a real, sensible default (design doc -- welcome banner:
 # confirmed with Thiesi: periodic autosave, not explicit-save-only).
 DEFAULT_AUTOSAVE_INTERVAL_SECONDS = 30.0
 
@@ -71,7 +71,7 @@ _STATUS_ROW_OFFSET = 2  # one blank line, then the status line
 # The 16 classic ANSI colors -- xterm 256-color palette indices 0-15,
 # exactly the classic set real scene ANSI art overwhelmingly targets.
 # Deliberately not the full 256-color range `colored()` elsewhere
-# supports (design doc -- welcome banner round B1: a stated V1
+# supports (design doc -- welcome banner: a stated V1
 # restriction, also keeps this a single unpaginated picker screen).
 _PALETTE = [
     "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
@@ -277,7 +277,7 @@ def _dispatch(state: _EditorState, key: EditorKey) -> None:
         state.dirty = True
     elif key.kind == EditorKeyKind.CHAR and key.char is not None:
         _paint(state, key.char)
-    # TAB and unrecognized kinds: no-op in this round's scope.
+    # TAB and unrecognized kinds: no-op.
 
 
 def _paint(state: _EditorState, char: str) -> None:

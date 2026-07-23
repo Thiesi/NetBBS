@@ -1,13 +1,13 @@
 """
-The deliberate node-shutdown sequence (design doc round 51), the
+The deliberate node-shutdown sequence (design doc), the
 `[D]rain` sequence (design doc §13.8) that borrows its session-
 management shape without actually ending the node process, and
 `NodeControls`, the bundle an in-session SysOp command needs to trigger
-either (design doc -- node management round).
+either (design doc -- node management).
 
 Split out of `netbbs.__main__` into its own module for the same reason
 `netbbs.net.session_registry`/`netbbs.net.maintenance` were themselves
-split out in round 51: this is shared, not entry-point-specific.
+split out: this is shared, not entry-point-specific.
 Originally only the signal handler in `__main__.py` called this; the
 in-session `[N]ode` admin menu (`netbbs.net.admin_flow`) now does too,
 so it needed a home outside the top-level process-bootstrap module.
@@ -47,7 +47,7 @@ async def run_shutdown_sequence(
 ) -> None:
     """
     What a signal -- or now, the in-session `[N]ode` admin menu --
-    actually triggers (design doc round 51) — locks out new logins,
+    actually triggers (design doc) — locks out new logins,
     warns everyone already connected (regardless of what screen they're
     on, or even whether they've logged in yet — see
     `netbbs.net.session_registry.ActiveSessionRegistry`), then (a
@@ -59,7 +59,7 @@ async def run_shutdown_sequence(
 
     `message`, if given, *replaces* the default "going down in N
     seconds"/"going down now" text entirely rather than appending to it
-    (design doc -- node management round, Thiesi's own wording) —
+    (design doc -- node management, Thiesi's own wording) —
     sanitized, since it's free text a SysOp typed, same discipline as
     anything else reaching the terminal.
 
@@ -68,7 +68,7 @@ async def run_shutdown_sequence(
     stack: the calling session's own task is one of the ones
     `disconnect_all()` cancels, and a task cancelling itself while
     awaiting a `gather()` that includes itself is the same species of
-    hazard design doc round 58 already hit and fixed elsewhere
+    hazard already hit and fixed elsewhere
     (`netbbs.net.chat_flow._chat_loop`). Fire this as an independent
     background task (`asyncio.create_task`) instead, exactly as the
     signal-handler path in `netbbs.__main__` already does — the calling

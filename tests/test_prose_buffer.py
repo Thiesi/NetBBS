@@ -1,7 +1,6 @@
 """
 Tests for netbbs.rendering.prose_buffer -- the pure, I/O-free text
-buffer/word-wrap core behind the fullscreen prose editor (design doc --
-prose editor round B2).
+buffer/word-wrap core behind the fullscreen prose editor.
 """
 
 from __future__ import annotations

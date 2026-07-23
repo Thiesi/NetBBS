@@ -1,7 +1,7 @@
-"""Tests for netbbs.chat.presence.PresenceRegistry (design doc round
-32, sign-off round 42) — node-wide account session-count and away
-tracking, in isolation from the login/chat wiring that drives it
-(covered separately in tests/test_chat_flow_away.py)."""
+"""Tests for netbbs.chat.presence.PresenceRegistry — node-wide account
+session-count and away tracking, in isolation from the login/chat
+wiring that drives it (covered separately in
+tests/test_chat_flow_away.py)."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def test_accounts_are_independent():
     assert registry.is_online("bob") is False
 
 
-# -- online_usernames (design doc round 49/Track 5g) -------------------------
+# -- online_usernames ---------------------------------------------------------
 
 
 def test_online_usernames_empty_by_default():

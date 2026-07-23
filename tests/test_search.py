@@ -109,8 +109,8 @@ def test_search_posts_reflects_latest_approved_edit_only(db, alice, monkeypatch)
     # edit_post back-to-back can otherwise land in the same real-clock
     # microsecond, and _resolve_current_version's (created_at, post_id)
     # tie-break then picks arbitrarily between revisions (post_id is a
-    # content hash, unrelated to recency). See the worklog note this
-    # round adds on that pre-existing tie-break gap.
+    # content hash, unrelated to recency). See the worklog note on that
+    # pre-existing tie-break gap.
     timestamps = iter(f"2026-01-01T00:00:0{i}.000000Z" for i in range(2))
     monkeypatch.setattr(posts_module, "utc_now_iso", lambda: next(timestamps))
     post = create_post(db, board, alice, "hello world", "original body")

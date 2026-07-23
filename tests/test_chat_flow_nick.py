@@ -1,13 +1,13 @@
 """
-Integration tests for the `/nick` command wiring in netbbs.net.chat_flow
-(design doc round 32/41) — the command itself, plus that every live
-chat rendering path (join/leave/message/action) shows the alias
-alongside the canonical username once set. Library-level nick
-validation is covered separately in tests/test_chat_nick.py.
+Integration tests for the `/nick` command wiring in netbbs.net.chat_flow --
+the command itself, plus that every live chat rendering path
+(join/leave/message/action) shows the alias alongside the canonical
+username once set. Library-level nick validation is covered separately
+in tests/test_chat_nick.py.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`.
 """
 
 from __future__ import annotations
@@ -84,8 +84,10 @@ async def _run(lane, hub, presence, channel, user, lines):
 
 
 async def _join_and_wait(lane, hub, presence, channel, user, session):
-    """Same polled-join reasoning as every other migrated chat test file
-    (design doc round 114)."""
+    """Same polled-join reasoning as every other chat test file: joining
+    happens via the lane's queued execution rather than a fixed number of
+    event-loop yields, so tests must poll for it instead of assuming a
+    fixed `asyncio.sleep(0)` will suffice."""
     mailbox = MessageMailbox()
     history = InputHistory()
     task = asyncio.create_task(
@@ -164,12 +166,11 @@ def test_alias_shown_on_join(db, lane, hub, presence, alice, bob, channel):
         return watcher
 
     watcher = asyncio.run(scenario())
-    # Nick-only-plus-marker in the live stream, not both forms (design
-    # doc round 53) -- the canonical username is deliberately absent
-    # here now; still available via /whois. Checked as two separate
-    # substrings, not one spanning "~DeepParse~ has joined", since
-    # chat_stream_label's own trailing ANSI reset sits between the two
-    # once colored (design doc round 53's own documented tradeoff).
+    # Nick-only-plus-marker in the live stream, not both forms -- the
+    # canonical username is deliberately absent here now; still
+    # available via /whois. Checked as two separate substrings, not one
+    # spanning "~DeepParse~ has joined", since chat_stream_label's own
+    # trailing ANSI reset sits between the two once colored.
     text = _written_text(watcher)
     assert "~DeepParse~" in text
     assert "has joined the channel." in text
@@ -190,8 +191,8 @@ def test_alias_shown_on_leave(db, lane, hub, presence, alice, bob, channel):
         # The leave event is already recorded/broadcast by the time
         # _chat_loop returns above, but the watcher's receive_loop still
         # needs a scheduling turn to pull it off its queue *and* render
-        # it via its own lane.run call (design doc round 114) before
-        # it's actually written to watcher's output.
+        # it via its own lane.run call before it's actually written to
+        # watcher's output.
         await asyncio.sleep(0.05)
 
         watcher_task.cancel()
@@ -210,12 +211,12 @@ def test_alias_shown_in_regular_message(db, lane, hub, presence, alice, channel)
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["hello", "/quit"]))
     text = _written_text(session)
     assert "~DeepParse~" in text
-    # Anchored to the raw-username chat-stream author format (design
-    # doc round 77) -- "<alice>" is what an un-aliased message would
-    # look like -- not a blanket "alice" never appears anywhere: the
-    # status line's own "alice(DeepParse)" field (round 77)
-    # legitimately shows the real username, since it's telling the
-    # viewer who *they* are, not attributing a message to anyone.
+    # Anchored to the raw-username chat-stream author format --
+    # "<alice>" is what an un-aliased message would look like -- not a
+    # blanket "alice" never appears anywhere: the status line's own
+    # "alice(DeepParse)" field legitimately shows the real username,
+    # since it's telling the viewer who *they* are, not attributing a
+    # message to anyone.
     assert "<alice>" not in text
 
 
@@ -241,8 +242,8 @@ def test_alias_shown_on_scrollback_replay(db, lane, hub, presence, alice, channe
 
 def test_names_still_shows_both_forms(db, lane, hub, presence, alice, channel):
     # /names/who/whois are directory-style listings, deliberately
-    # unaffected by round 53's chat-stream-only change -- both forms
-    # stay visible there, matching display_label exactly as before.
+    # unaffected by the chat-stream-only nick change -- both forms stay
+    # visible there, matching display_label exactly as before.
     set_nick(db, alice, "DeepParse")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/names", "/quit"]))
     assert "DeepParse|alice" in _written_text(session)
@@ -255,10 +256,11 @@ def test_who_still_shows_both_forms(db, lane, hub, presence, alice, channel):
 
 
 def test_whois_identity_header_is_canonical_only(db, lane, hub, presence, alice, bob, channel):
-    # Not actually touched by round 53 at all -- /whois's identity
-    # header renders straight from vcard.username, never went through
-    # display_label in the first place (unlike /names and /who above).
-    # Confirmed here so that fact is on record, not just assumed.
+    # Not actually touched by the chat-stream-only nick change at all --
+    # /whois's identity header renders straight from vcard.username,
+    # never went through display_label in the first place (unlike
+    # /names and /who above). Confirmed here so that fact is on record,
+    # not just assumed.
     set_nick(db, bob, "Bobby")
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/whois bob", "/quit"]))
     assert "Bobby|bob" not in _written_text(session)
@@ -275,7 +277,6 @@ def test_moderation_notices_stay_canonical_only(db, lane, hub, presence, alice, 
     )
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/kick bob testing", "/quit"]))
     # The moderator's own alias must not appear in the kick notice --
-    # moderation/auditing always shows canonical identity only (design
-    # doc round 32, point 7).
+    # moderation/auditing always shows canonical identity only.
     assert "by DeepParse|alice" not in _written_text(session)
     assert "by alice" in _written_text(session)

@@ -1,7 +1,7 @@
 """
-The TUI screen-buffer/diff abstraction (design doc round 26, built now
-alongside its first real consumer per that round's own reasoning — see
-`netbbs.net.ansi_editor`). Pure, no I/O — matches this package's
+The TUI screen-buffer/diff abstraction (design doc), built now
+alongside its first real consumer — see
+`netbbs.net.ansi_editor`. Pure, no I/O — matches this package's
 existing boundary (nothing else in `netbbs.rendering` touches
 `Session`/`Database`).
 

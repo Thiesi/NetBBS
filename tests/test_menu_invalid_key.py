@@ -1,7 +1,7 @@
 """
 Exact-write-sequence regression tests for "bell only, nothing else" on
-an invalid single-keystroke menu choice (design doc round 52, revising
-round 48) -- `netbbs.net.login_flow._main_menu` and `_show_board`.
+an invalid single-keystroke menu choice --
+`netbbs.net.login_flow._main_menu` and `_show_board`.
 `netbbs.net.picker.pick_item`'s equivalent behavior is already covered
 precisely in `tests/test_picker.py`
 (`test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell`);
@@ -66,11 +66,11 @@ def test_main_menu_invalid_key_writes_only_a_bell(tmp_path):
     )
 
     # Every write() call made across the whole run, in order -- the
-    # invalid "z" turn must be exactly one erase-and-bell (round 67:
-    # echoing already happened inside the real read_key() before
-    # _main_menu ever saw the key, so rejecting it also erases the
-    # already-echoed character, not just bell), nothing else (no
-    # write_line("") newline, no reprinted "Choice: ").
+    # invalid "z" turn must be exactly one erase-and-bell (echoing
+    # already happened inside the real read_key() before _main_menu
+    # ever saw the key, so rejecting it also erases the already-echoed
+    # character, not just bell), nothing else (no write_line("")
+    # newline, no reprinted "Choice: ").
     bell_index = session.written.index("\b \b\a")
     assert session.written[bell_index] == "\b \b\a"
     # Nothing about the menu was written again between entry and the

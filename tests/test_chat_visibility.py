@@ -1,15 +1,15 @@
 """
-Tests for hidden-channel visibility (design doc §8/round 33 point 9,
-Phase 2 Track 5h): `netbbs.net.chat_flow._visible_channels_for`, the
-shared filter behind the picker, `/list`, and `/whois`'s channel-
-membership display, plus `/list` and `/whois` themselves through the
-real dispatcher for end-to-end confirmation.
+Tests for hidden-channel visibility (design doc §8):
+`netbbs.net.chat_flow._visible_channels_for`, the shared filter behind
+the picker, `/list`, and `/whois`'s channel-membership display, plus
+`/list` and `/whois` themselves through the real dispatcher for
+end-to-end confirmation.
 
 `hidden` and `members_only` are independent axes -- "hidden + open is
-obscurity, not access control" (round 33 point 9): a `members_only`-
-but-not-`hidden` channel still appears in listings, only `hidden`
-controls listing visibility itself. Exercised as distinct combinations
-below, not assumed.
+obscurity, not access control": a `members_only`-but-not-`hidden`
+channel still appears in listings, only `hidden` controls listing
+visibility itself. Exercised as distinct combinations below, not
+assumed.
 """
 
 from __future__ import annotations

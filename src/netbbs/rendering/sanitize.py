@@ -1,6 +1,6 @@
 """
 Sanitizing untrusted text at the terminal-rendering boundary (design
-doc round 29, issue #8).
+doc, issue #8).
 
 `sanitize_text()` is the one documented sanitizer every terminal-
 visible user- or federated-controlled string (usernames, board/channel/

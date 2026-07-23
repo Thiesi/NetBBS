@@ -1,7 +1,7 @@
 """
 End-to-end tests for the ON DELETE SET NULL/CASCADE behavior added
-across every table that references users(id) (design doc -- SysOp
-foundation round). Seeds a real row in each affected table directly
+across every table that references users(id) (design doc §4.3). Seeds
+a real row in each affected table directly
 via SQL (matching tests/test_storage.py's own style for schema-level
 assertions, rather than wiring up five unrelated subsystems' business
 APIs just to get one row into each table), then calls

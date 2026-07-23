@@ -1,6 +1,6 @@
 """
-Tests for netbbs.auth.users' SysOp-foundation additions (design doc --
-SysOp foundation round): SYSOP_LEVEL, count_sysops, set_user_level,
+Tests for netbbs.auth.users' SysOp-foundation additions (design doc
+§4.3): SYSOP_LEVEL, count_sysops, set_user_level,
 set_user_disabled, delete_user, and disabled-account rejection at every
 auth entry point. Account creation/password/keypair-login behavior
 itself is already covered in tests/test_auth.py; this file only

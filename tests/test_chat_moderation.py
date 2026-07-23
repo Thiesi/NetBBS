@@ -1,5 +1,5 @@
-"""Tests for netbbs.chat.moderation — mute/ban/kick (design doc §13,
-sign-off round 37), gated by ChannelPermission.MODERATE."""
+"""Tests for netbbs.chat.moderation — mute/ban/kick (design doc §13),
+gated by ChannelPermission.MODERATE."""
 
 from __future__ import annotations
 

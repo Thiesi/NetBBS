@@ -1,5 +1,5 @@
 """
-Local per-node "new day" chat announcement (design doc round 78).
+Local per-node "new day" chat announcement (design doc).
 
 Once per local midnight (the node's configured display timezone --
 `netbbs.timeutil.get_node_timezone`), broadcasts a short system message
@@ -13,8 +13,8 @@ started -- see CLAUDE.md/design doc §15) has no concept of "this
 node's local midnight" that would mean anything coherent federated
 across nodes sitting in different time zones, so this never crosses a
 Link channel's node boundary. That question was raised and answered
-explicitly in the design doc round 77 sign-off note, before any of
-this was built, not an oversight discovered later.
+explicitly in the design doc before any of this was built, not an
+oversight discovered later.
 
 Lives under `netbbs.net`, not `netbbs.chat`, specifically so it can
 reuse `netbbs.net.chat_flow`'s existing `_TimestampedNotice` broadcast

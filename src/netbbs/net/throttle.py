@@ -1,5 +1,5 @@
 """
-Cross-connection login throttling (design doc round 28, issue #3).
+Cross-connection login throttling (design doc, issue #3).
 
 The three-attempt limit `netbbs.net.login_flow._login` enforces is
 scoped to a single connection -- reconnecting resets it, so it does

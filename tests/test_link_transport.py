@@ -1,16 +1,15 @@
 """
-Integration tests for `netbbs.link.transport` (design doc §11, round
-117; round 120 adds persistence) — these spin up real `LinkServer`
-instances on OS-assigned loopback ports and connect real `aiohttp`
-clients to them, exercising actual HTTP+JSON traffic end to end, the
-same "real server, real client, real socket" convention `tests/
-test_web.py` already established for `WebServer`. `tests/
-test_link_protocol.py` already proves the underlying protocol logic
-against a fully synthetic transport (`ScriptedTransport`) — these
-tests prove the same logic survives an actual wire (and, since round
-120, an actual database).
+Integration tests for `netbbs.link.transport` (design doc §11) — these
+spin up real `LinkServer` instances on OS-assigned loopback ports and
+connect real `aiohttp` clients to them, exercising actual HTTP+JSON
+traffic end to end, the same "real server, real client, real socket"
+convention `tests/test_web.py` already established for `WebServer`.
+`tests/test_link_protocol.py` already proves the underlying protocol
+logic against a fully synthetic transport (`ScriptedTransport`) —
+these tests prove the same logic survives an actual wire (and an
+actual database).
 
-Round 120's persistence assertions read back through a second,
+The persistence assertions read back through a second,
 separately-opened `Database` against the same file the test's own
 `DatabaseLane` writes through — the same "one connection for the
 lane's worker thread, one for the test's own assertions" split `tests/
@@ -117,7 +116,7 @@ def test_dial_hello_completes_a_real_http_handshake(tmp_path):
         assert bob_identity.fingerprint in alice_node.peers
         assert alice_identity.fingerprint in bob_node.peers
 
-        # Round 120: both sides persisted the peer they just learned about.
+        # Both sides persisted the peer they just learned about.
         alice_row = alice.db.connection.execute(
             "SELECT fingerprint FROM link_peers WHERE fingerprint = ?", (bob_identity.fingerprint,)
         ).fetchone()
@@ -305,22 +304,20 @@ def test_server_rejects_an_events_body_with_a_duplicate_json_key_in_a_nested_obj
 
 
 def test_push_events_succeeds_on_the_very_first_pass_after_a_hello(tmp_path):
-    """Round 121 regression test: this is the *minimal* case that
-    exposed the bug -- no rotation involved at all. Every node's hello
-    (round 116) already carries its "signing"-purpose transitions, and
-    round 119's push_events sends *every* transition of both purposes
-    moments later, in the same sync pass -- meaning the very first
-    push after the very first hello, for any node, always resends at
-    least one transition the hello already delivered. Before round
-    121's chain-membership check, `known_event_ids` didn't have it yet
-    (handle_hello never touches that set), so it fell through to a
-    duplicate append and got rejected as a forged fork, aborting the
-    *entire* push (verified by hand against round 120's actual shipped
-    code -- push_events had a 100% failure rate on every real sync
-    pass since round 119 shipped, silently swallowed by
-    _sync_one_seed's own catch-and-log). Only the genuinely-new
-    transport-purpose transition (never in the hello) should be
-    reported as newly accepted."""
+    """Regression test: this is the *minimal* case that exposed the
+    bug -- no rotation involved at all. Every node's hello already
+    carries its "signing"-purpose transitions, and push_events sends
+    *every* transition of both purposes moments later, in the same
+    sync pass -- meaning the very first push after the very first
+    hello, for any node, always resends at least one transition the
+    hello already delivered. Without the chain-membership check,
+    `known_event_ids` didn't have it yet (handle_hello never touches
+    that set), so it fell through to a duplicate append and got
+    rejected as a forged fork, aborting the *entire* push (push_events
+    had a 100% failure rate on every real sync pass, silently
+    swallowed by _sync_one_seed's own catch-and-log). Only the
+    genuinely-new transport-purpose transition (never in the hello)
+    should be reported as newly accepted."""
     alice_identity = bootstrap_node_identity("alice")
     bob_identity = bootstrap_node_identity("bob")
     alice_node = LinkNode(identity=alice_identity)
@@ -390,8 +387,8 @@ def test_push_events_gossips_a_real_key_rotation_over_http(tmp_path):
         assert accepted == [revoke_id, authorize_id]
         assert bob_node.peers[alice_identity.fingerprint].transitions[-1].content_id == authorize_id
 
-        # Round 120: both accepted events, and bob's updated peer record
-        # (its extended transitions chain), landed in bob's database.
+        # Both accepted events, and bob's updated peer record (its
+        # extended transitions chain), landed in bob's database.
         rows = bob.db.connection.execute("SELECT content_id FROM link_events").fetchall()
         assert {row["content_id"] for row in rows} == {revoke_id, authorize_id}
         peer_row = bob.db.connection.execute(
@@ -408,9 +405,8 @@ def test_push_events_gossips_a_real_key_rotation_over_http(tmp_path):
 
 def test_push_events_raises_link_transport_error_for_a_stranger(tmp_path):
     """bob's server refuses events from a peer with no completed hello
-    on file (round 116's own scope) -- surfaces as a 400, wrapped as
-    LinkTransportError here, same shape as any other server-side
-    rejection."""
+    on file -- surfaces as a 400, wrapped as LinkTransportError here,
+    same shape as any other server-side rejection."""
     alice_identity = bootstrap_node_identity("alice")
     bob_node = LinkNode(identity=bootstrap_node_identity("bob"))
     alice_node = LinkNode(identity=alice_identity)
@@ -439,11 +435,11 @@ def test_push_events_raises_link_transport_error_for_a_stranger(tmp_path):
 
 
 def test_a_restarted_node_recovers_its_peer_and_events_from_disk(tmp_path):
-    """The actual round-120 proof, distinct from the inline DB-row
-    checks above: a *second*, freshly-constructed `LinkNode` -- not the
-    original in-memory object bob's server used -- hydrated from the
-    same database file via `load_link_node`, has bob's peer and event
-    state intact. This is what a real node restart looks like."""
+    """Proof, distinct from the inline DB-row checks above: a *second*,
+    freshly-constructed `LinkNode` -- not the original in-memory object
+    bob's server used -- hydrated from the same database file via
+    `load_link_node`, has bob's peer and event state intact. This is
+    what a real node restart looks like."""
     alice_identity = bootstrap_node_identity("alice")
     bob_identity = bootstrap_node_identity("bob")
     alice_node = LinkNode(identity=alice_identity)
@@ -500,9 +496,9 @@ def test_link_server_port_raises_before_start(tmp_path):
 
 
 def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
-    """Round 95's peer-list exchange over a real socket: bob already
-    knows carol (a completed hello); alice requests bob's peer list and
-    records carol as an unverified candidate."""
+    """Peer-list exchange over a real socket: bob already knows carol
+    (a completed hello); alice requests bob's peer list and records
+    carol as an unverified candidate."""
     alice_identity = bootstrap_node_identity("alice")
     bob_identity = bootstrap_node_identity("bob")
     carol_identity = bootstrap_node_identity("carol")
@@ -546,8 +542,8 @@ def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
 
 
 def test_request_relay_consent_completes_a_real_http_round_trip(tmp_path):
-    """Round 95/issue #58's relay-consent exchange over a real socket:
-    alice (outgoing-only) asks bob to relay for her, and gets a signed
+    """Issue #58's relay-consent exchange over a real socket: alice
+    (outgoing-only) asks bob to relay for her, and gets a signed
     accept back in the *same* HTTP response -- the shape that has to
     work for an outgoing-only requester who can never be dialed back."""
     alice_identity = bootstrap_node_identity("alice")
@@ -581,7 +577,7 @@ def test_request_relay_consent_completes_a_real_http_round_trip(tmp_path):
         # cleared once the synchronous reply came back.
         assert alice_node.pending_own_relay_requests == {}
 
-        # Round 95/issue #58: both sides persisted the grant.
+        # Both sides persisted the grant (issue #58).
         alice_row = alice.db.connection.execute(
             "SELECT fingerprint, role, accepted_at FROM link_relay_consents"
         ).fetchone()
@@ -634,7 +630,7 @@ def test_request_relay_consent_declines_once_the_relay_is_at_capacity(tmp_path):
 
 
 def test_request_relay_consent_declines_when_relay_serving_is_opted_out(tmp_path):
-    """Round 95/issue #58: an operator's `relay_serving_enabled=False`
+    """Issue #58: an operator's `relay_serving_enabled=False`
     (`netbbs.net.nodeconfig.LinkConfig`'s own opt-out) always declines,
     even with plenty of capacity to spare -- separate knob from the
     resource cap tested just above."""
@@ -751,8 +747,8 @@ def _link_message_for(
 
 
 def test_deposit_and_pickup_relay_mailbox_round_trips_over_http(tmp_path):
-    """Round 95/issue #58: alice deposits a link_message for carol at
-    bob (acting as carol's relay); carol picks it up over a real
+    """Issue #58: alice deposits a link_message for carol at bob
+    (acting as carol's relay); carol picks it up over a real
     socket. Alice needs no prior relationship with bob at all -- see
     `LinkServer._handle_relay_mailbox_deposit`'s own docstring."""
     alice_identity = bootstrap_node_identity("alice")
@@ -789,7 +785,7 @@ def test_deposit_and_pickup_relay_mailbox_round_trips_over_http(tmp_path):
         assert len(picked_up) == 1
         assert picked_up[0].content_id == message.content_id
 
-        # Round 95/issue #58: the deposit was persisted, then removed on pickup.
+        # The deposit was persisted, then removed on pickup (issue #58).
         row = bob.db.connection.execute("SELECT * FROM link_relay_mailbox").fetchone()
         assert row is None
     finally:

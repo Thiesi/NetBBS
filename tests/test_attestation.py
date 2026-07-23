@@ -1,5 +1,5 @@
 """
-Tests for netbbs.attestation (design doc §18, rounds 85/86/98/99): the
+Tests for netbbs.attestation (design doc §18): the
 core age/name attestation mechanism -- profile fields, age computation,
 attestation records, gating checks, and anti-forgery display formatting.
 
@@ -77,8 +77,8 @@ def test_display_name_rejects_reserved_marker(db, alice):
 
 
 def test_display_name_allows_parentheses(db, alice):
-    # Round 99 lifted round 98's parens ban -- color is the actual
-    # anti-forgery guarantee now, not restricting parentheses.
+    # Parentheses are allowed -- color is the actual anti-forgery
+    # guarantee, not restricting parentheses.
     set_display_name(db, alice, "Alex (they/them)")
     assert get_display_name(db, alice) == "Alex (they/them)"
 
@@ -140,8 +140,8 @@ def test_compute_age_after_birthday_this_year():
 
 
 def test_compute_age_naive_year_subtraction_would_have_been_wrong():
-    # The bug round 85 caught: current_year - birth_year overestimates
-    # age by one for anyone whose birthday hasn't happened yet.
+    # current_year - birth_year overestimates age by one for anyone
+    # whose birthday hasn't happened yet.
     naive = 2026 - 1990  # 36 -- wrong on 2026-06-14, one year too many
     assert compute_age(date(1990, 6, 15), today=date(2026, 6, 14)) == naive - 1
 
@@ -246,7 +246,7 @@ def test_has_any_verification(db, alice, sysop):
     assert has_any_verification(db, alice) is True
 
 
-# -- anti-forgery display formatting (round 99) ------------------------------
+# -- anti-forgery display formatting -----------------------------------------
 
 
 def test_format_name_for_resource_with_no_requirement_is_plain(db, alice):

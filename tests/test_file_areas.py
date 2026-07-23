@@ -360,7 +360,7 @@ def test_list_files_page_returns_all_in_order(db, alice, monkeypatch):
     # file's own module docstring warns about); list_files_page's
     # deterministic tie-breaker for same-timestamp entries is file_id
     # (a content hash), which doesn't preserve upload order, so a tie
-    # would make this assertion flaky without them (design doc round 31).
+    # would make this assertion flaky without them.
     timestamps = iter(["2026-01-01T00:00:00.000000Z", "2026-01-01T00:00:00.000001Z"])
     monkeypatch.setattr(entries_module, "utc_now_iso", lambda: next(timestamps))
 
@@ -464,7 +464,7 @@ def test_list_files_allowed_at_sufficient_level(db, alice):
     assert len(page.entries) == 1
 
 
-# -- update/delete (design doc -- board/area management round) -------------
+# -- update/delete -------------
 
 
 def test_create_file_area_records_an_audit_entry(db, alice):

@@ -1,11 +1,11 @@
 """
 Local-origination and receiving-side bridge for Link messages (design
-doc round 93) -- turns a locally-composed message addressed to a remote
+doc) -- turns a locally-composed message addressed to a remote
 `user@node-fingerprint` into a signed `link_message` event, and turns an
 accepted incoming `link_message` into a real local mailbox delivery plus
 the signed `link_message_accepted`/`link_message_bounced` acknowledgement
-queued to send back. **Tier 1 (`tier1_home_node_key`) only this round**
--- design doc round 93's tier-2 finding: nothing here ever selects or
+queued to send back. **Tier 1 (`tier1_home_node_key`) only**
+-- nothing here ever selects or
 builds a tier-2 message.
 
 Deliberately lives here, not in `netbbs.mail` -- the same one-way-
@@ -23,7 +23,7 @@ Every function here is plain and synchronous, `db`-first, matching
 `netbbs.link.boards`/`netbbs.link.store`'s own calling convention --
 dispatched via `DatabaseLane.run` from async call sites. Composing an
 outbound message resolves the recipient's current signing key directly
-from the persisted `link_peers` table (round 120), never from a live
+from the persisted `link_peers` table, never from a live
 `LinkNode` -- unlike linking a board, composing a message never mutates
 `LinkNode` state, so there is no event-loop-only step here at all.
 
@@ -90,7 +90,7 @@ def compose_link_message(
     addressed to `recipient_address`.
 
     Always encrypts to the *recipient's home node's* derived key
-    (`netbbs.identity.encryption`, tier 1 only this round), resolved
+    (`netbbs.identity.encryption`, tier 1 only), resolved
     from this node's own persisted `link_peers` row for that
     fingerprint. Raises `LinkMailError` if that fingerprint has never
     exchanged a hello with this node (nothing on file to encrypt to).
@@ -153,7 +153,7 @@ def compose_link_message(
 
 def _resolve_peer_signing_key(db: Database, node_fingerprint: str) -> nacl.signing.VerifyKey:
     """The current signing verify key on file for `node_fingerprint`,
-    read directly from the persisted `link_peers` table (round 120) --
+    read directly from the persisted `link_peers` table --
     never the live `LinkNode`, since this is the one Link-mail operation
     that doesn't need it (see module docstring)."""
     peer_row = db.connection.execute(
@@ -345,8 +345,8 @@ def _set_delivery_status(db: Database, message_content_id: str, status: str) -> 
 #
 # `link_mail_acknowledgements.sent_at` is no longer read or written by
 # anything (`netbbs.link.work_items`' own status now tracks this) -- left
-# in the schema rather than dropped in a follow-up migration purely for
-# this round's own churn budget; it's dead, not harmful.
+# in the schema rather than dropped in a follow-up migration purely to
+# avoid unrelated churn; it's dead, not harmful.
 
 
 def get_link_message_for_delivery(db: Database, content_id: str) -> tuple[LinkMessage, str] | None:
@@ -384,7 +384,7 @@ def expire_link_message_delivery(db: Database, content_id: str) -> None:
     """Called when a `link_mail_delivery` work item dead-letters or is
     cancelled -- the payload could never even be successfully pushed
     (or a SysOp gave up on it), so this finally gives `mail_messages.
-    link_delivery_status`'s long-reserved `'expired'` value (round 93)
+    link_delivery_status`'s long-reserved `'expired'` value
     a real producer. Guarded on the row still being `'pending'`: a
     genuine accepted/bounced event racing in first (this node's own
     push actually did succeed, just not yet reflected in the work item)

@@ -1,5 +1,5 @@
 """
-Bounded relay store-and-forward mailbox (design doc §12 round 95, issue
+Bounded relay store-and-forward mailbox (design doc §12, issue
 #58) -- a relay only ever custodies opaque, already-encrypted `link_
 message` envelopes addressed to a fingerprint it has granted `i_relay_
 for` consent to (`netbbs.link.protocol.LinkNode.relaying_for`), bounded
@@ -9,7 +9,7 @@ influenced resources" principle, applied here the same way `netbbs.
 link.protocol`'s own `_MAX_PEER_LIST_ENTRIES_PER_REQUEST`/`_MAX_
 CANDIDATE_DESCRIPTORS` bound peer-list state).
 
-Deliberately narrower than every `link_message`-family event this round
+Deliberately narrower than every `link_message`-family event
 -- only `link_message` itself is deposit-able via a relay; routing
 `link_message_accepted`/`link_message_bounced` back through a relay too
 is a known, not yet built, follow-up (this codebase's recurring "known
@@ -40,7 +40,7 @@ from netbbs.link.events import LINK_MESSAGE_OBJECT_TYPE, LinkMessage
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
-# Design doc §12 round 95: "bounded storage/bandwidth ... at once" --
+# Design doc §12: "bounded storage/bandwidth ... at once" --
 # per-recipient, so one recipient's abandoned/never-collected mail can't
 # starve every other recipient this node also relays for.
 MAX_MAILBOX_ENVELOPES_PER_RECIPIENT = 50

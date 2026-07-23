@@ -1,7 +1,7 @@
 """
-Integration test for the one flush point Phase 2 Track 5e's mailbox +
-next-prompt private-message delivery relies on (design doc round 32,
-sign-off round 46): the top of `netbbs.net.login_flow._draw_main_menu`,
+Integration test for the one flush point the mailbox + next-prompt
+private-message delivery relies on: the top of
+`netbbs.net.login_flow._draw_main_menu`,
 called on entry to `_main_menu` and again after returning from every
 submenu -- the one choke point every screen (boards, files, directory,
 profile, chat) passes through before its next redraw. Library-level
@@ -116,7 +116,7 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
         # the exact object passed in here is the same one _main_menu is
         # about to flush() by. **kwargs absorbs the community_id/
         # community_scoped/title_prefix keywords _resource_type_menu now
-        # passes through (design doc §16, round 84) -- irrelevant here.
+        # passes through (design doc §16) -- irrelevant here.
         mailbox.deliver(session, "*** Private message from bob: while you were away", _T)
 
     monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)

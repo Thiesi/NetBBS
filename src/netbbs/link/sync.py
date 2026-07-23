@@ -1,18 +1,18 @@
 """
-NetBBS Link background sync (design doc §12, round 119) — the piece
+NetBBS Link background sync (design doc §12) — the piece
 that makes a running node *originate* outbound Link activity, not just
-answer it (round 118 wired up the inbound side only). Periodically
+answer it. Periodically
 dials every configured seed via `netbbs.link.transport.dial_hello`,
-then pushes this node's own `key_transition`s (and, since round 128,
-its own `board_genesis`/`board_post` events) via `netbbs.link.
+then pushes this node's own `key_transition`s and its own
+`board_genesis`/`board_post` events via `netbbs.link.
 transport.push_events`.
 
 Pushes *all* of `node.identity.transitions`, not just the `"signing"`-
-purpose subset `build_hello`'s own bundle carries — round 116 excluded
-`"transport"`-purpose transitions from the hello bundle specifically
+purpose subset `build_hello`'s own bundle carries — `"transport"`-purpose
+transitions are excluded from the hello bundle specifically
 because live transport-key *authentication* is Noise's own concern
 (§11), but the transition record itself is still an ordinary event
-(design doc round 90) that needs to reach other nodes via Link like
+(design doc) that needs to reach other nodes via Link like
 any other, so a node's transport-key rotations get gossiped too. No
 per-peer "what have I already pushed" tracking — `handle_events` on
 the receiving end already dedups via its own `known_event_ids` (§7:
@@ -21,59 +21,58 @@ re-pushing everything every interval is simply a harmless no-op for
 whatever a peer has already seen, and keeps this module's own state
 to nothing worth persisting.
 
-**Round 128** extends the same "re-push everything every pass"
-treatment to `netbbs.link.boards.load_own_board_events` — this node's
+The same "re-push everything every pass"
+treatment extends to `netbbs.link.boards.load_own_board_events` — this node's
 own Linked boards' genesis events and its own posts' board_post events,
 read fresh off the `boards`/`posts` tables each pass rather than
 tracked in any in-memory list of "what's pending push," the same
 "nothing here worth persisting separately" reasoning as `identity.
 transitions` above.
 
-Deliberately minimal, matching what this round set out to fill: a
+Deliberately minimal: a
 single interval, no per-seed backoff/retry state, no peer-list
 exchange (a peer that has only ever *dialed this node*, never been
-dialed by it, is not re-contacted here — round 118's own design-doc
-sign-off note already flagged this as the next real gap), and no pull
+dialed by it, is not re-contacted here — a known, named gap), and no pull
 ("what am I missing") request — `push_events` is the only gossip
 direction this module drives. A single unreachable or misbehaving seed
 logs a warning and is skipped; it never aborts the rest of that pass
 or the loop itself.
 
-**Round 120**: `dial_hello` now persists the resulting `PeerRecord`
+`dial_hello` persists the resulting `PeerRecord`
 via a `DatabaseLane`, so `run_link_sync` takes one and threads it
 through unchanged -- this module has no storage concerns of its own.
-Round 128 reuses the same `lane` to read `load_own_board_events`
+The same `lane` is reused to read `load_own_board_events`
 (a plain, synchronous, `db`-first function, dispatched the same way
 every other lane-run function already is).
 
-**Link messages (design doc round 93) get their own pass, not folded
+**Link messages (design doc) get their own pass, not folded
 into the per-seed loop above.** A `board_post`/`key_transition` is
-correctly pushed to *every* configured seed (round 116's flood-to-
+correctly pushed to *every* configured seed (the flood-to-
 peers model); a `link_message` has exactly one intended recipient node
-and must reach *that node specifically* (round 93's confirmed routing
+and must reach *that node specifically* (the confirmed routing
 decision) -- pushing it to an unrelated seed would just have that seed
 correctly refuse it (`LinkNode.handle_events`'s own "not addressed to
 me" rule). `_push_pending_link_mail` dials a pending item's target
 directly using whatever address this node already knows for it from a
 prior hello (`node.peers`), never a configured seed URL. A target this
 node has never said hello to is skipped this pass -- nothing here
-discovers new peers, matching round 116's own "no relay from a
+discovers new peers, matching the "no relay from a
 stranger" boundary applied to composing/delivering too. Same "push
 everything every pass, dedup handles idempotency" model as the rest of
 this module for a pending *message* (`link_delivery_status` only
 changes when a real `link_message_accepted`/`_bounced` arrives, never
-just because a transport push succeeded -- round 93's own "a transport
-ACK only means the bytes arrived" distinction); a pending
+just because a transport push succeeded -- "a transport
+ACK only means the bytes arrived" is a distinct fact); a pending
 *acknowledgement* is simpler and genuinely one-shot, marked sent as
 soon as the push itself succeeds, since nothing acknowledges an
 acknowledgement.
 
-**Round 95: `_sync_one_seed` also requests each seed's own peer list**,
+**`_sync_one_seed` also requests each seed's own peer list**,
 right after its hello completes -- `netbbs.link.protocol.LinkNode.
 handle_peer_list` records what comes back as unverified candidates
 (`node.candidate_descriptors`), persisted the same way `dial_hello`
 already persists its own `PeerRecord`. **Deliberately not consumed by
-anything yet** -- this round only closes the *exchange* half of §12's
+anything else** -- this only closes the *exchange* half of §12's
 "a node isn't perpetually dependent on the seed list" resilience path;
 actually falling back to dialing a candidate when every configured seed
 is unavailable is real behavior this module doesn't have, named here
@@ -81,7 +80,7 @@ rather than silently assumed done. A failed peer-list request logs and
 is skipped, same tolerance every other per-seed step in this loop
 already has.
 
-**Round 97: the per-pass seed list is operator-configured `seeds` plus
+**The per-pass seed list is operator-configured `seeds` plus
 whatever `netbbs.link.seedlist.run_scheduled_seed_refresh` has most
 recently cached**, re-merged every pass (not just once at startup) so a
 live-fetched seed takes effect without a restart.
@@ -90,13 +89,13 @@ live-fetched seed takes effect without a restart.
 were configured/cached at all), `_try_candidate_fallback` tries a small
 random sample of `node.candidate_descriptors` (peer-list-discovered,
 unverified addresses) before giving up for that pass -- closing the gap
-earlier rounds' own docstrings named as still open ("not yet consumed
+named above as still open ("not yet consumed
 by anything"). Never a first resort: the normal seed list is always
 tried first, every pass, regardless of whether the previous pass had to
 fall back.
 
 **Automatic relay selection, pickup, and send-via-relay (design doc
-§12 round 95, issue #58)**, both gated on this node's own hello
+§12, issue #58)**, both gated on this node's own hello
 currently claiming `outgoing_only` (a full peer never needs relays --
 checked via `own_hello_provider()` itself rather than a new parameter,
 since that callable already encodes the addresses/outgoing_only
@@ -126,7 +125,7 @@ for why this is safe: a wrong/stale candidate address costs a failed
 deposit, never a confidentiality issue, since the payload is already
 sealed to the real recipient's own key). Only `link_message` gets this
 fallback, never an acknowledgement -- `netbbs.link.relay_mailbox`'s own
-documented boundary this round.
+documented boundary.
 """
 
 from __future__ import annotations
@@ -171,7 +170,7 @@ from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
 
-# Round 95: how many discovered-but-unverified candidates to try, at
+# How many discovered-but-unverified candidates to try, at
 # most, when every configured/cached seed has failed for a pass -- a
 # small, bounded number matching relay selection's own "pick a small
 # number" precedent (no reliability ranking exists yet to pick more
@@ -201,12 +200,12 @@ async def run_link_sync(
     interval first.
 
     `own_hello_provider` is the same callable shape `netbbs.link.
-    transport.LinkServer` takes (design doc round 117/118) — reused
+    transport.LinkServer` takes (design doc) — reused
     here rather than duplicating the addresses/outgoing_only-from-
     config logic a second time.
 
     `seeds` is the *operator-configured* list only (explicit intent
-    always wins, round 97) — each pass also merges in whatever `netbbs.
+    always wins) — each pass also merges in whatever `netbbs.
     link.seedlist.run_scheduled_seed_refresh` has most recently cached
     (empty until/unless that task is running and Link is enabled), so a
     node started with zero configured seeds still eventually reaches
@@ -245,7 +244,7 @@ async def run_link_sync(
             succeeded = await _sync_one_seed(node, session, seed_url, own_hello_provider, lane)
             reached_network = reached_network or succeeded
         if not reached_network:
-            # Round 95's own-stated resilience path: every configured/
+            # Resilience path: every configured/
             # cached seed failed this pass (or none were configured at
             # all) -- fall back to a discovered candidate rather than
             # sitting isolated until the next pass tries the same seeds
@@ -253,7 +252,7 @@ async def run_link_sync(
             # configuration and a genuinely live supplementary list
             # always take priority when either actually works.
             await _try_candidate_fallback(node, session, own_hello_provider, lane)
-        # Round 95/issue #58: relay selection/pickup only makes sense
+        # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
         # (design doc §12: "an outgoing-only node selects its own
@@ -293,7 +292,7 @@ async def _sync_one_seed(
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
-    pass" (round 95's candidate-fallback trigger). A failed push/peer-
+    pass" (the candidate-fallback trigger). A failed push/peer-
     list-request afterward doesn't downgrade a successful hello back to
     failure; those are secondary, independently-tolerated steps, not
     the "are we isolated" signal."""
@@ -311,7 +310,7 @@ async def _sync_one_seed(
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
 
-    # Round 95: also ask this seed who else it knows -- feeds the
+    # Also ask this seed who else it knows -- feeds the
     # candidate pool `_try_candidate_fallback` (below) draws from.
     try:
         await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
@@ -327,7 +326,7 @@ def _dialable_addresses(descriptor: EndpointDescriptor) -> list[str]:
     "peers try them in order", issue #58 -- previously only `addresses[0]`
     was ever attempted anywhere in this transport layer; callers now try
     each of these in turn, stopping at the first that works). Empty for
-    an outgoing-only descriptor (round 12: by design, genuinely
+    an outgoing-only descriptor (by design, genuinely
     undialable directly -- see `netbbs.link.relay_mailbox`/this
     module's own `_relay_base_urls_for_peer` for how such a peer is
     still reachable, via `payload["relays"]`, once it has any)."""
@@ -349,7 +348,7 @@ def _dialable_addresses_for_peer(node: LinkNode, target_fingerprint: str) -> lis
 
 def _candidate_dialable_addresses(node: LinkNode, fingerprint: str) -> list[str]:
     """Every advertised address on file for `fingerprint`, whether it's
-    a completed peer or merely an unverified candidate (round 95/issue
+    a completed peer or merely an unverified candidate (issue
     #58's relay selection draws from both -- see `netbbs.link.relay_
     selection.select_relay_candidates`'s own docstring for why). Checks
     `node.peers` first since a completed peer's own descriptor is more
@@ -367,9 +366,9 @@ def _candidate_dialable_addresses(node: LinkNode, fingerprint: str) -> list[str]
 def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[str]:
     """
     Base URLs of every relay `target_fingerprint` has itself published
-    as serving it (`EndpointDescriptor.payload["relays"]`, round 95/
+    as serving it (`EndpointDescriptor.payload["relays"]`,
     issue #58) that *this* node can also directly dial -- a relay this
-    node has never itself met is skipped (round 116's own "no relay
+    node has never itself met is skipped (the "no relay
     from a stranger" boundary, extended here: reaching a relay to
     deposit at it needs the same direct-address knowledge reaching
     anyone else does). Empty if `target_fingerprint` is unknown, or
@@ -382,7 +381,7 @@ def _relay_base_urls_for_peer(node: LinkNode, target_fingerprint: str) -> list[s
     to dial it *at*), so a completed-peer record for one will simply
     never exist here; the *only* way this node ever learns such a
     recipient's `relays` field is secondhand, via peer-list exchange
-    with someone who has directly met them (round 95's own "worth
+    with someone who has directly met them (the "worth
     trying, not trusting outright" framing, applied here to routing
     rather than trust: a wrong or stale candidate address just costs a
     failed deposit attempt, never a confidentiality issue, since the
@@ -417,16 +416,16 @@ async def _try_candidate_fallback(
     lane: DatabaseLane,
 ) -> None:
     """
-    Round 95's own-stated resilience path, closing the gap named in
-    earlier rounds' own docstrings: "a node isn't perpetually dependent
+    Resilience path, closing the gap named elsewhere in this module's
+    docstrings: "a node isn't perpetually dependent
     on the seed list." Only ever called once every configured/cached
     seed has already failed this pass (see `run_link_sync`'s own
     caller). Tries a small, randomly-sampled subset of `node.candidate_
-    descriptors` -- round 95's own "pick a small number" precedent for
+    descriptors` -- the same "pick a small number" precedent as
     relay selection, reused here for the same reason: no reliability
     ranking exists yet to pick more cleverly (that's automatic relay
     selection's own still-open reliability-metric question, not
-    answered by this round), and trying every known candidate every
+    answered here), and trying every known candidate every
     pass would be excessive at this project's declared scale (§14).
     Random rather than insertion order, so a consistently-unreachable
     early candidate doesn't get retried every single pass at the
@@ -521,7 +520,7 @@ async def _maintain_relay_selection(
     lane: DatabaseLane,
 ) -> None:
     """
-    Round 95/issue #58's automatic relay selection. `run_link_sync`
+    Issue #58's automatic relay selection. `run_link_sync`
     only calls this for an outgoing-only node (design doc §12: a full
     peer never needs relays, see that caller's own comment for why) --
     this function itself has no such guard, so a future caller wiring
@@ -589,7 +588,7 @@ async def _pickup_relay_mail(
     lane: DatabaseLane,
 ) -> None:
     """
-    Round 95/issue #58: for every relay currently serving this node
+    Issue #58: for every relay currently serving this node
     (`node.relays_serving_me`), pick up whatever mail it's holding and
     feed each envelope through the exact same `LinkNode.handle_events`
     acceptance path a directly-arrived `link_message` already goes
@@ -726,7 +725,7 @@ async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: 
         if base_urls:
             delivered = await _try_addresses_via(base_urls, lambda url: _push_one(node, session, url, [message]))
         if not delivered:
-            # Round 95/issue #58: send-via-relay -- the recipient is
+            # Issue #58: send-via-relay -- the recipient is
             # either unknown-as-directly-dialable or genuinely outgoing-
             # only. Only `link_message` gets this fallback (never an
             # acknowledgement, below) -- `netbbs.link.relay_mailbox`'s

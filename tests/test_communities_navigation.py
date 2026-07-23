@@ -1,6 +1,6 @@
 """
 Tests for the Communities main-menu navigation restructuring (design
-doc §16, round 84/107): [C]ommunities/[U]ncategorized/[J]ump to...
+doc §16): [C]ommunities/[U]ncategorized/[J]ump to...
 replacing the flat [M]essage Boards/[C]hat/[F]ile areas split, the
 shared resource-type sub-menu, and category leak prevention. The
 underlying data model/core logic (netbbs.communities) is covered
@@ -57,8 +57,8 @@ def _written_text(session: FakeSession) -> str:
 
 
 def _run_main_menu(session, db, user):
-    # design doc round 91/112: file areas (like mail) are reachable
-    # through _main_menu only with a real lane -- constructed here, once,
+    # File areas (like mail) are reachable through _main_menu only with
+    # a real lane -- constructed here, once,
     # so every existing call site in this file exercises the real
     # lane-is-present path rather than the lane=None degrade.
     lane = DatabaseLane(db.path)
@@ -229,7 +229,7 @@ def test_jump_shows_the_full_unfiltered_list(tmp_path):
     text = _written_text(session)
     assert "amiga" in text
     assert "general" in text
-    assert "Available message boards" in text  # unchanged title, per round 84
+    assert "Available message boards" in text  # unchanged title
     db.close()
 
 
@@ -260,7 +260,7 @@ def test_uncategorized_browsing_shows_uncategorized_in_title(tmp_path):
     db.close()
 
 
-# -- category leak prevention (design doc §16, round 84) --------------------
+# -- category leak prevention (design doc §16) -------------------------------
 
 
 def test_category_used_only_by_another_communitys_board_does_not_leak(tmp_path):

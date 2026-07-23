@@ -1,19 +1,19 @@
 """
-Tests for GitHub issue #64 (design doc round 109): wiring round 99's
-real-name-attestation anti-forgery display into the live chat message
-stream — `netbbs.net.chat_flow._chat_author_label`/`_render_channel_message`
+Tests for GitHub issue #64: wiring the real-name-attestation
+anti-forgery display into the live chat message stream —
+`netbbs.net.chat_flow._chat_author_label`/`_render_channel_message`
 and the live-session fail-closed re-check.
 
 Distinct from `tests/test_attestation.py` (the underlying
 `format_verified_name_unit`/`format_name_for_resource` primitives in
 isolation) and `tests/test_chat_nick.py` (`/nick`'s own alias mechanics,
-untouched by this round) — these drive the real `_chat_loop` dispatcher
-end to end, the same way `tests/test_chat_action.py`/
+untouched here) — these drive the real `_chat_loop` dispatcher end to
+end, the same way `tests/test_chat_action.py`/
 `tests/test_terminal_sanitization.py` do.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`.
 `_chat_author_label`/`_message_author_label`/`_render_channel_message`/
 `_meets_live_participation_requirements` are leaf functions dispatched
 *through* the lane elsewhere, unchanged here -- still called directly
@@ -107,8 +107,10 @@ async def _run(lane, hub, presence, channel, user, lines):
 
 
 async def _join_and_wait(lane, hub, presence, channel, user, session):
-    """Same polled-join reasoning as every other migrated chat test file
-    (design doc round 114)."""
+    """Same polled-join reasoning as every other chat test file: joining
+    happens via the lane's queued execution rather than a fixed number of
+    event-loop yields, so tests must poll for it instead of assuming a
+    fixed `asyncio.sleep(0)` will suffice."""
     mailbox = MessageMailbox()
     history = InputHistory()
     task = asyncio.create_task(
@@ -232,7 +234,7 @@ def test_join_notice_shows_verified_unit_to_other_participant(db, lane, hub, pre
     assert "(=Alice Smith=)" in text
 
 
-# -- SGR sequencing: design doc round 102's nesting bug, fixed here -----------
+# -- SGR sequencing: nested colored segments must not swallow the outer color
 
 
 def test_verified_unit_does_not_swallow_trailing_color(db, gated_channel, alice, sysop):

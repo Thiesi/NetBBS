@@ -1,6 +1,6 @@
 """
-Tests for netbbs.selfupdate (design doc §17, round 82; round 95/96
-DB-snapshot addition).
+Tests for netbbs.selfupdate (design doc §17, including the DB-snapshot
+addition).
 
 Real GitHub network access and real process replacement (os.execv) are
 never exercised here -- see the module's own docstring for why. Every

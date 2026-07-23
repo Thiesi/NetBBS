@@ -314,7 +314,7 @@ def test_valid_csi_and_ss3_sequences_still_work_within_new_bounds():
     asyncio.run(scenario())
 
 
-# -- read_editor_key (design doc -- welcome banner round B1) ----------------
+# -- read_editor_key ---------------------------------------------------------
 
 
 def test_read_editor_key_page_up_and_page_down():

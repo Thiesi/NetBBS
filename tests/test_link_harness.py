@@ -1,12 +1,11 @@
 """
-Smoke tests for the deterministic Link-protocol test harness (design doc
-round 92, issue #59's minimal-harness gate).
+Smoke tests for the deterministic Link-protocol test harness (issue
+#59's minimal-harness gate).
 
 These tests only prove the harness scaffolding itself (node spawning,
 fake clock, scripted transport) behaves correctly and deterministically
-in isolation -- see `tests/test_link_protocol.py` (round 116) for real
-protocol code (`netbbs.link.protocol`) actually plugged into this same
-harness.
+in isolation -- see `tests/test_link_protocol.py` for real protocol
+code (`netbbs.link.protocol`) actually plugged into this same harness.
 """
 
 from __future__ import annotations

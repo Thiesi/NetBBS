@@ -1,24 +1,23 @@
 """
-Canonical NetBBS Link event envelope (design doc §7, rounds
-27/90/110/116/124).
+Canonical NetBBS Link event envelope (design doc §7).
 
-Round 27 fixed the outer envelope shape (`netbbs_protocol`/
-`object_type`/`payload`); round 90 fixed the semantic model (event
-chains with head pointers, replacing per-feature special-casing); round
-110 fixed the byte-level canonicalization rule (reusing
+The outer envelope shape is `netbbs_protocol`/
+`object_type`/`payload`. The semantic model is event
+chains with head pointers, rather than per-feature special-casing. The
+byte-level canonicalization rule reuses
 `netbbs.boards.content_id.canonical_json_bytes` rather than a second
-implementation) and the one concrete event type needed to unblock round
-89's node key-lifecycle work: `key_transition`. Round 116 adds
-`endpoint_descriptor` (design doc §12), the second concrete event type,
-needed to unblock the first real handshake/gossip protocol code
-(`netbbs.link.protocol`). Round 124/125 adds `board_genesis` and
-`board_post` (design doc §13/§7, the first Phase 3 board-related event
-types) — see each type's own docstring below for the design doc round
-124 decisions they encode. Round 129/130 adds `board_post_edit` —
-self-authored edits only this round; moderator edits and tombstones
-stay deferred to Phase 6 (design doc round 129).
+implementation. The concrete event types are: `key_transition`, the
+event type needed to unblock the node key-lifecycle work
+(`netbbs.link.node_identity`); `endpoint_descriptor` (design doc §12),
+needed to unblock the handshake/gossip protocol code
+(`netbbs.link.protocol`); `board_genesis` and
+`board_post` (design doc §13/§7, the Phase 3 board-related event
+types) — see each type's own docstring below for the design doc
+decisions they encode; and `board_post_edit` —
+self-authored edits only; moderator edits and tombstones
+stay deferred to Phase 6 (design doc).
 
-Design doc round 93 adds `link_message`, `link_message_accepted`, and
+Design doc adds `link_message`, `link_message_accepted`, and
 `link_message_bounced` (Link's extension of local mail, §7). This
 implementation slice covers building/signing/verifying the three
 envelope shapes only — protocol-level acceptance rules
@@ -28,18 +27,18 @@ mechanism that actually reaches a specific recipient node, and
 design not yet settled) are deliberately not part of this slice; see
 each class's own docstring for the boundary.
 
-Design doc round 94/issue #53 adds `board_origin_transfer_offer` and
+Design doc/issue #53 adds `board_origin_transfer_offer` and
 `board_origin_transfer_accepted` (§13's origin-succession policy) — the
 mutual-consent pair a board's current origin and a prospective new one
 exchange to hand off authority, plus an optional `forked_from` pointer
 on `board_genesis` itself. Orphan detection needs no event type of its
 own — it's a computed property of the origin's existing key-transition
 chain (`netbbs.link.node_identity.resolve_current_operational_key`),
-not a signal on the wire (round 94: "no cryptographic proof an origin
+not a signal on the wire (the design doc: "no cryptographic proof an origin
 is gone versus merely offline," so no node's observation gets an
 automatic network-wide effect).
 
-Design doc §12 round 95/issue #58 adds `relay_consent_request` and
+Design doc §12/issue #58 adds `relay_consent_request` and
 `relay_consent_response` — the signed pair an outgoing-only node and a
 candidate relay exchange to establish relay consent. Structurally the
 odd one out among everything above: every other pair here is either
@@ -52,8 +51,7 @@ transport`'s dedicated `/relay-consent` route rather than the general
 
 No other event type (moderator grants, tombstones, etc.) is specified
 here yet — each gets its own payload-shape decision when it's actually
-being built, following this same envelope pattern (round 110's own
-scope note).
+being built, following this same envelope pattern.
 """
 
 from __future__ import annotations
@@ -69,41 +67,40 @@ import nacl.signing
 from netbbs.boards.content_id import canonical_json_bytes, compute_content_id
 from netbbs.identity.keys import Identity, verify_signature
 
-# Round 27: versioning mandatory from the first byte, not inferred.
+# Versioning mandatory from the first byte, not inferred.
 NETBBS_PROTOCOL_VERSION = 1
 
-# Round 110: the one event type specified so far.
 KEY_TRANSITION_OBJECT_TYPE = "key_transition"
 
-# Round 116: a node's signed, periodically-refreshed reachability claim
+# A node's signed, periodically-refreshed reachability claim
 # (design doc §12).
 ENDPOINT_DESCRIPTOR_OBJECT_TYPE = "endpoint_descriptor"
 
-# Round 124: the signed announcement putting an existing local board
+# The signed announcement putting an existing local board
 # into Link scope, and an individual Link-native post on one.
 BOARD_GENESIS_OBJECT_TYPE = "board_genesis"
 BOARD_POST_OBJECT_TYPE = "board_post"
 
-# Round 129: a self-authored edit to an existing board_post -- never a
-# moderator edit or a tombstone this round (design doc round 129).
+# A self-authored edit to an existing board_post -- never a
+# moderator edit or a tombstone (design doc).
 BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
 
-# Design doc round 94/issue #53: the mutual-consent origin-succession
+# Design doc/issue #53: the mutual-consent origin-succession
 # pair -- the current origin's handoff offer, and the new origin's
 # acceptance. Neither alone changes anything (see each class's own
 # docstring).
 BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE = "board_origin_transfer_offer"
 BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
 
-# Design doc round 93: Link's extension of local mail. A signed message
+# Design doc: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
 # recipient's node sends back toward the sender's. `link_message_expired`
-# is named in round 93 but not built yet -- see module docstring.
+# is named in the design doc but not built yet -- see module docstring.
 LINK_MESSAGE_OBJECT_TYPE = "link_message"
 LINK_MESSAGE_ACCEPTED_OBJECT_TYPE = "link_message_accepted"
 LINK_MESSAGE_BOUNCED_OBJECT_TYPE = "link_message_bounced"
 
-# Design doc §12 round 95/issue #58: the signed request/response pair an
+# Design doc §12/issue #58: the signed request/response pair an
 # outgoing-only node and a candidate relay exchange to establish relay
 # consent. Unlike every other pair above, these are never gossiped or
 # appended to a chain -- a synchronous round trip over a dedicated route
@@ -118,20 +115,20 @@ _VALID_PURPOSES = ("signing", "transport")
 _VALID_ACTIONS = ("authorize", "revoke")
 _VALID_NAME_REQUIREMENTS = ("verified", "verified_and_displayed")
 
-# Round 124: the only `board_post` author tag with a real build/verify
-# path this round — see `build_board_post`'s docstring for why
-# `user_key`/`node` are named in the design but not built yet. Round 93's
+# The only `board_post` author tag with a real build/verify
+# path — see `build_board_post`'s docstring for why
+# `user_key`/`node` are named in the design but not built yet. The
 # `link_message` sender reuses the same tag for the same reason.
 _NODE_VOUCHED_USER_AUTHOR_KIND = "node_vouched_user"
 
-# Design doc round 93's two confidentiality tiers -- which key a
+# Design doc's two confidentiality tiers -- which key a
 # `link_message`'s ciphertext is sealed to. See `netbbs.identity.
 # encryption` for the actual derive-and-seal mechanism.
 _TIER1_HOME_NODE_KEY = "tier1_home_node_key"
 _TIER2_PERSONAL_KEY = "tier2_personal_key"
 _VALID_CONFIDENTIALITY_TIERS = (_TIER1_HOME_NODE_KEY, _TIER2_PERSONAL_KEY)
 
-# Design doc round 93's named bounce reasons.
+# Design doc's named bounce reasons.
 _VALID_BOUNCE_REASONS = ("mailbox_full", "blocked_sender", "unknown_recipient")
 
 
@@ -143,7 +140,7 @@ class EventError(Exception):
 
 def build_envelope(object_type: str, payload: dict) -> dict:
     """
-    The round-27 envelope shape. Plain construction only — this doesn't
+    The canonical envelope shape. Plain construction only — this doesn't
     canonicalize or sign anything itself; see `canonical_bytes`/
     `event_content_id` for that, and `build_key_transition` for a
     complete signed example.
@@ -158,7 +155,7 @@ def build_envelope(object_type: str, payload: dict) -> dict:
 def canonical_bytes(envelope: dict) -> bytes:
     """
     The exact bytes a signature over `envelope` is made over — reuses
-    `netbbs.boards.content_id.canonical_json_bytes` directly (round 110)
+    `netbbs.boards.content_id.canonical_json_bytes` directly
     so Link events and Phase 1/2 local content-IDs share exactly one
     canonicalization implementation, not two independently-maintained
     ones that could quietly drift apart.
@@ -168,7 +165,7 @@ def canonical_bytes(envelope: dict) -> bytes:
 
 def event_content_id(envelope: dict) -> str:
     """The content-ID of a canonical event envelope — same
-    canonicalization as `canonical_bytes`, hashed (round 110)."""
+    canonicalization as `canonical_bytes`, hashed."""
     return compute_content_id(envelope)
 
 
@@ -211,11 +208,11 @@ def strict_json_loads(data: str | bytes) -> Any:
 @dataclass(frozen=True)
 class KeyTransition:
     """
-    One signed `key_transition` event (design doc round 89/110): an
+    One signed `key_transition` event (design doc): an
     authorize-or-revoke record for one of a node's two operational keys
     (signing, transport), always signed by that node's root key —
     "any node can verify a signature by walking the transition chain
-    back to the root" (round 89) — never by another operational key, so
+    back to the root" — never by another operational key, so
     verification is a flat, direct signature check rather than a
     multi-hop delegation chain.
     """
@@ -231,7 +228,7 @@ class KeyTransition:
     def content_id(self) -> str:
         """This transition's own content-ID — what the *next* transition
         in the same `(subject_fingerprint, purpose)` chain references as
-        its `previous_transition_id` (round 90's head-pointer model)."""
+        its `previous_transition_id` (the head-pointer model)."""
         return event_content_id(self.envelope)
 
     def to_dict(self) -> dict:
@@ -257,18 +254,18 @@ def build_key_transition(
     created_at: str,
 ) -> KeyTransition:
     """
-    Build and sign one `key_transition` event, per design doc round 110.
+    Build and sign one `key_transition` event, per design doc.
 
-    `purpose` is `"signing"` or `"transport"` — round 89's two
+    `purpose` is `"signing"` or `"transport"` — the two
     independently-rotatable operational-key chains. `action` is
     `"authorize"` (introduces a new operational key — covers both a
     node's initial bootstrap and a planned rotation) or `"revoke"`
-    (marks a specific operational key invalid, round 89's "compromise
+    (marks a specific operational key invalid, the "compromise
     response" case, without necessarily authorizing a replacement in the
     same record). `previous_transition_id` is `None` only for the first
-    transition of a given `(subject, purpose)` pair — round 90's event-
+    transition of a given `(subject, purpose)` pair — the event-
     chain/head-pointer model applied to this object type, omitted
-    entirely rather than stored as `null` (round 110 point 6).
+    entirely rather than stored as `null`.
 
     Always signed by `root` — never by an operational key (see
     `KeyTransition`'s own docstring).
@@ -304,12 +301,12 @@ def verify_key_transition(transition: KeyTransition, root_verify_key: nacl.signi
 @dataclass(frozen=True)
 class EndpointDescriptor:
     """
-    One signed `endpoint_descriptor` event (design doc §12, round 116):
+    One signed `endpoint_descriptor` event (design doc §12):
     a node's own claim about how to reach it — a list of (protocol,
     address, port) tuples for a full peer, or an outgoing-only marker —
-    self-authenticated by the node's own *current signing key* (round
-    116), not its root key. Unlike `key_transition`, this is
-    deliberately **not** a head-pointer chain: round 90's chain model
+    self-authenticated by the node's own *current signing key*,
+    not its root key. Unlike `key_transition`, this is
+    deliberately **not** a head-pointer chain: the chain model
     exists for state whose *history* matters (audit, "what did this
     used to be"); a stale reachability claim only ever costs a failed
     connection attempt (design doc §12: "connecting to the wrong
@@ -317,7 +314,7 @@ class EndpointDescriptor:
     "whichever signed descriptor has the newest `created_at` wins" is
     sufficient — no chain-walking machinery needed to interpret one.
 
-    Round 95/issue #58 adds an optional `payload["relays"]` — the
+    Issue #58 adds an optional `payload["relays"]` — the
     fingerprints of candidates that have granted this node's own
     `relay_consent_request` (`netbbs.link.protocol.LinkNode.relays_
     serving_me`), meaningful for an outgoing-only node specifically
@@ -361,8 +358,8 @@ def build_endpoint_descriptor(
     relays: list[str] | None = None,
 ) -> EndpointDescriptor:
     """
-    Build and sign one `endpoint_descriptor` event, per design doc §12/
-    round 116 (round 95/issue #58 adds `relays`). `addresses` is a list
+    Build and sign one `endpoint_descriptor` event, per design doc §12
+    (issue #58 adds `relays`). `addresses` is a list
     of `{"protocol", "address", "port"}` dicts, tried in order by a peer
     (§12: "multiple simultaneous addresses... supported; peers try them
     in order") — required unless `outgoing_only` is true, matching
@@ -373,8 +370,8 @@ def build_endpoint_descriptor(
     `relays` is a list of relay fingerprints (`netbbs.link.protocol.
     LinkNode.relays_serving_me`'s own keys) that have granted this
     node's `relay_consent_request` — omitted entirely, like `addresses`,
-    rather than stored as an empty list, when there are none (round
-    110 point 6's own "omitted rather than null/empty" convention).
+    rather than stored as an empty list, when there are none (this
+    format's own "omitted rather than null/empty" convention).
     Never validated against `outgoing_only` here — a full peer
     publishing `relays` alongside `addresses` isn't a contradiction this
     layer needs to police (a redundant reachability path costs nothing,
@@ -382,8 +379,8 @@ def build_endpoint_descriptor(
     class's own docstring already applies to a stale address).
 
     Always signed by `signing_identity` — the subject's *current*
-    signing key (round 89), never the root key directly (root only ever
-    signs `key_transition`, per that round's own scope). `subject_
+    signing key, never the root key directly (root only ever
+    signs `key_transition`). `subject_
     fingerprint` is the subject's root fingerprint, included explicitly
     in the payload (not merely implied by "whoever signed this") so a
     verifier can cross-check it against whichever peer's transition
@@ -421,22 +418,21 @@ def verify_endpoint_descriptor(
 @dataclass(frozen=True)
 class BoardGenesis:
     """
-    One signed `board_genesis` event (design doc §13, round 124): the
+    One signed `board_genesis` event (design doc §13): the
     announcement that puts an *existing* local board into Link scope —
-    not a separate creation act. Round 124's central decision:
+    not a separate creation act. The central decision:
     `payload["board_id"]` is the board's existing local content-
     addressed ID (`netbbs.boards.content_id.compute_content_id`), never
     a newly-minted one, so a board created Linked-from-the-start and a
     board Linked years into its local life go through the exact same
-    event; only timing differs. This is the head of what design doc
-    round 94 already describes as an eventual lifecycle chain (later
-    closure/transfer entries append, each its own object type per
-    round 124's own scope note) — no `previous_event_id` here, since
-    nothing precedes genesis.
+    event; only timing differs. This is the head of what the design doc
+    describes as an eventual lifecycle chain (later
+    closure/transfer entries append, each its own object type) — no
+    `previous_event_id` here, since nothing precedes genesis.
 
     Always signed by the origin node's current *signing* operational
-    key (round 89), never its root key directly — round 90 already
-    names board creation as the canonical `node`-tier authored event,
+    key, never its root key directly — board creation is
+    the canonical `node`-tier authored event,
     so there is no author tagged-union here at all, unlike `BoardPost`.
     """
 
@@ -479,10 +475,10 @@ def build_board_genesis(
     forked_from: str | None = None,
 ) -> BoardGenesis:
     """
-    Build and sign one `board_genesis` event, per design doc round 124.
+    Build and sign one `board_genesis` event, per design doc.
 
     `board_id` is the board's *existing* local content-addressed ID
-    (see `BoardGenesis`'s own docstring for why this round deliberately
+    (see `BoardGenesis`'s own docstring for why this deliberately
     doesn't mint a new one). `origin_fingerprint` is the origin node's
     root fingerprint, included explicitly (not merely implied by
     "whoever signed this") so a verifier can cross-check it against
@@ -491,26 +487,25 @@ def build_board_genesis(
     its own `subject_fingerprint` field.
 
     The six `default_*` fields are optional, non-binding cascading-
-    scalar-default recommendations (design doc round 86, applied to
-    boards for the first time in round 124) — a superset of Community's
+    scalar-default recommendations (design doc) — a superset of Community's
     own four `default_*` fields, since a board owns `moderated`/
     `max_post_age_days` directly where a Community doesn't. Each is
-    omitted entirely when `None` (round 110 point 6), never stored as
+    omitted entirely when `None`, never stored as
     `null`; a carrying node's own local value always wins regardless of
     what's recommended here.
 
-    `forked_from` (design doc §13, round 94/issue #53) is an optional,
+    `forked_from` (design doc §13, issue #53) is an optional,
     **non-authoritative** pointer to a different board's own `board_id`
     — purely a discoverability hint for readers/other nodes ("this board
     started as a copy of that one"), never verified or enforced, and
     never implies any relationship the protocol actually acts on. A
     fork is simply a new board with its own fresh genesis; each carrying
     node independently decides whether to carry the original, the fork,
-    both, or neither, exactly like any other board (round 94's own
+    both, or neither, exactly like any other board (the design doc's own
     "purely local" framing for orphan/fork handling generally).
 
     Always signed by `signing_identity` — the origin's *current signing
-    key* (round 89), matching `build_endpoint_descriptor`'s own
+    key*, matching `build_endpoint_descriptor`'s own
     signing choice, never the root key directly.
     """
     if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
@@ -556,8 +551,8 @@ def verify_board_genesis(genesis: BoardGenesis, signing_verify_key: nacl.signing
 @dataclass(frozen=True)
 class BoardPost:
     """
-    One signed `board_post` event (design doc §7/§13, round 124): an
-    immutable content-creation event (round 90's other event class,
+    One signed `board_post` event (design doc §7/§13): an
+    immutable content-creation event (the other event class,
     alongside the mutable per-object chains `KeyTransition`/
     `BoardGenesis` belong to) — content-addressed by this event's own
     envelope hash, causally ordered by `parent_post_id`, nothing to
@@ -566,9 +561,9 @@ class BoardPost:
     the same precedent `KeyTransition`/`EndpointDescriptor` already set
     of never storing their own ID inline.
 
-    `payload["author"]` is round 90's tagged union — but round 124
-    confirmed only the `node_vouched_user` tag gets a real build/verify
-    path this round (see `build_board_post`'s own docstring); `user_key`
+    `payload["author"]` is a tagged union — but
+    only the `node_vouched_user` tag gets a real build/verify
+    path (see `build_board_post`'s own docstring); `user_key`
     and `node` are named in the design but have no code path here.
     """
 
@@ -607,10 +602,10 @@ def build_board_post(
     nonce: str | None = None,
 ) -> BoardPost:
     """
-    Build and sign one `board_post` event, per design doc round 124.
+    Build and sign one `board_post` event, per design doc.
 
-    Only the `node_vouched_user` author tier is built this round
-    (design doc round 124, confirmed with Thiesi): the server holds no
+    Only the `node_vouched_user` author tier is built
+    (design doc, confirmed with Thiesi): the server holds no
     user's private personal key today, and passwordless/keypair login
     itself isn't implemented yet, so there's no session-level signing
     capacity to hang a genuine `user_key`-tier signature off of —
@@ -623,7 +618,7 @@ def build_board_post(
     no personal keypair fingerprint.
 
     Always signed by `signing_identity` — the posting user's *home
-    node's* current signing key (round 89), matching round 90's own
+    node's* current signing key, matching the design doc's own
     framing exactly ("their content carries their home node's
     signature, not a signature of their own") — never the user's own
     key, since a password-only user has none. `board_id` is the
@@ -632,7 +627,7 @@ def build_board_post(
     here.
 
     `nonce` distinguishes two genuinely identical posting actions
-    submitted in the same instant (round 90), which would otherwise
+    submitted in the same instant, which would otherwise
     hash identically and look like a dedup hit; auto-generated if not
     given, since callers have no reason to manage this themselves.
     """
@@ -669,17 +664,17 @@ def verify_board_post(post: BoardPost, signing_verify_key: nacl.signing.VerifyKe
 @dataclass(frozen=True)
 class BoardPostEdit:
     """
-    One signed `board_post_edit` event (design doc §7/§13, round 129):
+    One signed `board_post_edit` event (design doc §7/§13):
     a self-authored revision of an existing `board_post` — never a
     moderator edit, never a tombstone, both explicitly deferred to
-    Phase 6 (design doc round 129: the local model has no "delete your
+    Phase 6 (design doc: the local model has no "delete your
     own post" capability to propagate even for the simple tombstone
     case, and a moderator edit needs grant verification that doesn't
     exist yet).
 
     Unlike `BoardGenesis`/`KeyTransition`, this is **never** the head of
     its own chain — `payload["previous_event_id"]` is always present,
-    never omitted (round 90 point 6 only applies to a chain's first
+    never omitted (that omission rule only applies to a chain's first
     entry, and the immutable `BoardPost` this extends already fills
     that role). `payload["root_post_id"]` is the original `BoardPost`'s
     content_id, stable across the whole edit chain — the same concept
@@ -721,8 +716,7 @@ def build_board_post_edit(
     nonce: str | None = None,
 ) -> BoardPostEdit:
     """
-    Build and sign one `board_post_edit` event, per design doc round
-    129.
+    Build and sign one `board_post_edit` event, per design doc.
 
     `author` is copied **verbatim** from the root `board_post`'s own
     `payload["author"]` dict by the caller (`netbbs.link.boards`) —
@@ -730,8 +724,8 @@ def build_board_post_edit(
     guarantees an exact match with the root post's author by
     construction rather than by separately re-deriving the same fields
     and hoping they stay in sync. Whether this edit is actually
-    self-authored (as opposed to a moderator edit, unsupported this
-    round) is decided by the caller before ever reaching this function
+    self-authored (as opposed to a moderator edit, not yet
+    supported) is decided by the caller before ever reaching this function
     — see `netbbs.link.boards.queue_board_post_edit_if_linked`.
 
     `root_post_id`/`previous_event_id` are both always required (never
@@ -772,11 +766,11 @@ def verify_board_post_edit(edit: BoardPostEdit, signing_verify_key: nacl.signing
 class BoardOriginTransferOffer:
     """
     One signed `board_origin_transfer_offer` event (design doc §13,
-    round 94/issue #53): the *first* half of a mutual-consent origin
+    issue #53): the *first* half of a mutual-consent origin
     handoff — a board's current origin proposing that a different node
     become the new one. Alone, this changes nothing: every other node
     keeps trusting the *old* origin until the matching
-    `BoardOriginTransferAccepted` is also seen (round 94's own framing,
+    `BoardOriginTransferAccepted` is also seen (the design doc's own framing,
     directly reusing `netbbs.chat.membership`'s "an invitation alone
     never creates membership" pattern).
 
@@ -828,7 +822,7 @@ def build_board_origin_transfer_offer(
 ) -> BoardOriginTransferOffer:
     """
     Build and sign one `board_origin_transfer_offer` event, per design
-    doc round 94.
+    doc.
 
     Always signed by `signing_identity` — the *current* origin's own
     current signing key, matching `build_board_genesis`'s own signing
@@ -868,12 +862,12 @@ def verify_board_origin_transfer_offer(
 class BoardOriginTransferAccepted:
     """
     One signed `board_origin_transfer_accepted` event (design doc §13,
-    round 94/issue #53): the *second*, consent-completing half of an
+    issue #53): the *second*, consent-completing half of an
     origin handoff — signed by the *new* origin, referencing the
     specific offer it accepts. Only once this is seen (never from the
     offer alone) does `netbbs.link.protocol.LinkNode.board_origin`
     actually flip which fingerprint is authoritative for the board —
-    the mechanical expression of "mutual consent" round 94 requires.
+    the mechanical expression of "mutual consent" the design doc requires.
 
     `payload["previous_event_id"]` is always the accepted offer's own
     `content_id` — an acceptance is never the head of its own chain, and
@@ -915,7 +909,7 @@ def build_board_origin_transfer_accepted(
 ) -> BoardOriginTransferAccepted:
     """
     Build and sign one `board_origin_transfer_accepted` event, per
-    design doc round 94.
+    design doc.
 
     Always signed by `signing_identity` — the *new* origin's own current
     signing key. `previous_event_id` is always the offer's own
@@ -952,11 +946,11 @@ def verify_board_origin_transfer_accepted(
 @dataclass(frozen=True)
 class LinkMessage:
     """
-    One signed `link_message` event (design doc §7, round 93): Link's
+    One signed `link_message` event (design doc §7): Link's
     extension of local mail, addressed to exactly one recipient node —
     not gossiped to "everyone carrying this board" the way `board_post`
-    is. Always signed by the sender's *home node's* current signing key
-    (round 89), matching `build_board_post`'s own precedent exactly:
+    is. Always signed by the sender's *home node's* current signing key,
+    matching `build_board_post`'s own precedent exactly:
     `payload["sender"]` is the same `node_vouched_user` tagged union,
     since a password-only user has no personal signing key of their own
     to sign with either.
@@ -1006,7 +1000,7 @@ def build_link_message(
     created_at: str,
 ) -> LinkMessage:
     """
-    Build and sign one `link_message` event, per design doc round 93.
+    Build and sign one `link_message` event, per design doc.
 
     `ciphertext` must already be sealed by the caller (`netbbs.identity.
     encryption.encrypt_for`, called against whichever key
@@ -1020,7 +1014,7 @@ def build_link_message(
     its own identities to decrypt with, without guessing.
 
     Always signed by `signing_identity` — the sending user's home node's
-    current signing key (round 89), never the user's own key, matching
+    current signing key, never the user's own key, matching
     `build_board_post`'s identical reasoning.
     """
     if confidentiality_tier not in _VALID_CONFIDENTIALITY_TIERS:
@@ -1058,11 +1052,11 @@ def verify_link_message(message: LinkMessage, signing_verify_key: nacl.signing.V
 @dataclass(frozen=True)
 class LinkMessageAccepted:
     """
-    One signed `link_message_accepted` event (design doc §7, round 93):
+    One signed `link_message_accepted` event (design doc §7):
     the recipient's node vouching that it placed a specific
     `link_message` (`payload["message_content_id"]`) into that user's
     local mailbox. A transport-level HTTP ACK only means the bytes
-    arrived (round 93's own distinction) — this is the separate,
+    arrived (the design doc's own distinction) — this is the separate,
     explicit, user-level delivery confirmation the sender's node can
     show the sending user.
 
@@ -1101,8 +1095,8 @@ def build_link_message_accepted(
     created_at: str,
 ) -> LinkMessageAccepted:
     """
-    Build and sign one `link_message_accepted` event, per design doc
-    round 93. `recipient_node_fingerprint` is included explicitly (not
+    Build and sign one `link_message_accepted` event, per design doc.
+    `recipient_node_fingerprint` is included explicitly (not
     merely implied by "whoever signed this") so a verifier can cross-
     check it against whichever peer's transition chain it resolved the
     signing key from — same reasoning `build_board_genesis`'s own
@@ -1130,11 +1124,11 @@ def verify_link_message_accepted(
 @dataclass(frozen=True)
 class LinkMessageBounced:
     """
-    One signed `link_message_bounced` event (design doc §7, round 93):
+    One signed `link_message_bounced` event (design doc §7):
     the recipient's node explicitly refusing a specific `link_message`
     (`payload["message_content_id"]`) with a named `payload["reason"]`
     (`"mailbox_full"`, `"blocked_sender"`, or `"unknown_recipient"`) —
-    round 93's own requirement that a rejection is a distinct, explicit
+    the design doc's own requirement that a rejection is a distinct, explicit
     signed event rather than silence, so the sender gets a specific
     reason instead of an ambiguous timeout.
 
@@ -1172,8 +1166,8 @@ def build_link_message_bounced(
     reason: str,
     created_at: str,
 ) -> LinkMessageBounced:
-    """Build and sign one `link_message_bounced` event, per design doc
-    round 93. `reason` must be one of the three named in this class's
+    """Build and sign one `link_message_bounced` event, per design doc.
+    `reason` must be one of the three named in this class's
     own docstring."""
     if reason not in _VALID_BOUNCE_REASONS:
         raise EventError(f"invalid bounce reason: {reason!r}")
@@ -1201,8 +1195,8 @@ def verify_link_message_bounced(
 @dataclass(frozen=True)
 class RelayConsentRequest:
     """
-    One signed `relay_consent_request` event (design doc §12, round
-    95/issue #58): an outgoing-only node's signed ask that a specific
+    One signed `relay_consent_request` event (design doc §12,
+    issue #58): an outgoing-only node's signed ask that a specific
     candidate — `payload["relay_fingerprint"]` — relay for it. Always
     signed by the requester's own current signing key; `payload[
     "requester_fingerprint"]` is included explicitly (not merely implied
@@ -1248,8 +1242,8 @@ def build_relay_consent_request(
     nonce: str | None = None,
 ) -> RelayConsentRequest:
     """
-    Build and sign one `relay_consent_request` event, per design doc §12
-    round 95. Always signed by `signing_identity` — the requester's own
+    Build and sign one `relay_consent_request` event, per design doc §12.
+    Always signed by `signing_identity` — the requester's own
     current signing key.
     """
     payload = {
@@ -1278,8 +1272,8 @@ def verify_relay_consent_request(
 @dataclass(frozen=True)
 class RelayConsentResponse:
     """
-    One signed `relay_consent_response` event (design doc §12, round
-    95/issue #58): a candidate's answer to a specific `RelayConsentRequest`
+    One signed `relay_consent_response` event (design doc §12,
+    issue #58): a candidate's answer to a specific `RelayConsentRequest`
     — accept or decline, per its own local relay-acceptance policy (a
     resource-cap/opt-out decision made by the caller, e.g.
     `netbbs.link.transport`'s route handler; this class only carries the
@@ -1330,7 +1324,7 @@ def build_relay_consent_response(
 ) -> RelayConsentResponse:
     """
     Build and sign one `relay_consent_response` event, per design doc
-    §12 round 95. Always signed by `signing_identity` — the candidate
+    §12. Always signed by `signing_identity` — the candidate
     relay's own current signing key. `relay_fingerprint`/`requester_
     fingerprint` are both included explicitly, matching `RelayConsent
     Request`'s own reasoning, so a verifier can cross-check both ends of

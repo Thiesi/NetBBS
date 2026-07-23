@@ -5,8 +5,8 @@ clearing.
 Design doc §4/§15: the ANSI rendering framework, built now since it
 benefits every existing feature (menu, boards, chat) immediately. A
 future screen-buffer/diff abstraction for heavy screens like a file
-browser or the fullscreen editor ("TUI") is Phase 2 scope — see design
-doc round 26.
+browser or the fullscreen editor ("TUI") is Phase 2 scope — see the
+design doc.
 
 Targets 256-color / extended ANSI (SGR), per Thiesi's explicit choice —
 richer than classic 16-color BBS ANSI art, at the cost of some very old
@@ -58,7 +58,7 @@ def colored(
     raw ANSI codes. Returns `text` unchanged if no formatting is
     requested, rather than emitting empty escape sequences.
 
-    `reverse` (SGR 7, design doc round 77) swaps foreground/background
+    `reverse` (SGR 7, design doc) swaps foreground/background
     at the terminal level rather than picking specific colors for
     both — the chat status line originally used this so it read as a
     solid, inverted bar regardless of whatever the client's own default
@@ -112,8 +112,8 @@ def set_scroll_region(top: int, bottom: int) -> str:
     DECSTBM (`CSI {top};{bottom} r`) — confines *ordinary* scrolling
     (a newline written past the bottom of the screen) to rows `top`
     through `bottom` (1-indexed, inclusive), leaving anything outside
-    that range untouched by it. The chat status line (design doc round
-    75) is the first consumer: excluding the terminal's last row from
+    that range untouched by it. The chat status line (design doc)
+    is the first consumer: excluding the terminal's last row from
     the region keeps a status line pinned there while ordinary chat
     text scrolls normally within the rest of the screen — the same
     mechanism real BBS/IRC status bars and tools like `tmux` use, not
@@ -165,7 +165,7 @@ def reject_keystroke(count: int = 1) -> str:
 
     Necessary because that echo happens inside `read_key` itself, as
     each byte is read, before the caller can know whether the
-    keystroke will turn out to be recognized (design doc round 52:
+    keystroke will turn out to be recognized (design doc:
     "character echo is a real transport's job") -- by the time an
     unrecognized keystroke reaches a dispatch loop's `else` branch,
     its character is already on screen, with no way to have withheld

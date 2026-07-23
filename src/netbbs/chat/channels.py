@@ -50,16 +50,16 @@ class Channel:
     hidden: bool
     members_only: bool
     allow_member_invites: bool
-    # Age/name-gating (design doc §18, rounds 85/86/101/102) -- nullable,
-    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Age/name-gating (design doc §18) -- nullable,
+    # NULL means no gate *and* (§16) "inherit this
     # Community's default" if this channel belongs to one, same shape
     # and enforcement point as netbbs.boards.boards.Board's own fields;
     # see netbbs.net.chat_flow's join/message checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
-    # Zero-or-one, nullable FK (design doc §16, round 83), same shape as
+    # Zero-or-one, nullable FK (design doc §16), same shape as
     # Board.community_id. Deliberately does NOT gain Community-level
-    # inheritance for `min_level` itself -- see the round-104 migration
+    # inheritance for `min_level` itself -- see the migration
     # note in netbbs.storage.migrations for why that field was left out
     # of scope rather than invented.
     community_id: int | None
@@ -88,20 +88,20 @@ def create_channel(
     `category_id` optionally places the channel under a
     `netbbs.chat.categories.Category`. `pinned` channels always sort
     first — see `list_channels`. `hidden`/`members_only`/
-    `allow_member_invites` (design doc §8/round 33 points 8/9/11, Phase
-    2 Track 5h) default to `False` — an invite-only or hidden channel is
+    `allow_member_invites` (design doc §8, points 8/9/11)
+    default to `False` — an invite-only or hidden channel is
     always an explicit opt-in, never accidental. No `/createchannel`
-    command exists yet (matches every earlier track's precedent — no
-    SysOp channel/board-creation UI), so these are seeded here directly,
-    e.g. by test fixtures, the same way round 21's file-area equivalents
+    command exists yet (no SysOp channel/board-creation UI has been
+    built), so these are seeded here directly,
+    e.g. by test fixtures, the same way file-area equivalents
     already are.
 
-    `min_age`/`name_requirement` (design doc §18, rounds 85/86/101/102)
+    `min_age`/`name_requirement` (design doc §18)
     are the same nullable-means-no-gate shape as
     `netbbs.boards.boards.create_board`'s own fields — see that
     function's docstring.
 
-    `community_id` (design doc §16, round 83) optionally places the
+    `community_id` (design doc §16) optionally places the
     channel under a `netbbs.communities.Community` -- same zero-or-one
     shape as `Board.community_id`. Unlike boards/file areas,
     `min_level` itself is NOT nullable/inheritable here -- see
@@ -194,8 +194,8 @@ def update_channel(
     changed_by: User,
 ) -> Channel:
     """
-    Replace `channel`'s editable settings with the given full state
-    (design doc -- channel management round), mirroring
+    Replace `channel`'s editable settings with the given full state,
+    mirroring
     `netbbs.boards.boards.update_board`: every field is required, not
     partial/PATCH-style; the admin UI pre-fills current values as
     editable defaults. `channel_id`/`created_at` are immutable, not
@@ -204,9 +204,9 @@ def update_channel(
     `ChannelPermission.EDIT` check and audit trail, not folded into
     this SysOp-only full-state replace.
 
-    `min_age`/`name_requirement` follow design doc §18 (rounds 101/102)
+    `min_age`/`name_requirement` follow design doc §18
     -- see `create_channel`'s docstring. `community_id` follows design
-    doc §16 (round 83) -- see that same docstring.
+    doc §16 -- see that same docstring.
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise ChannelError(f"invalid name_requirement: {name_requirement!r}")
@@ -241,12 +241,12 @@ def delete_channel(db: Database, channel: Channel, *, deleted_by: User) -> None:
     """
     Permanently remove `channel`, along with its scrollback, mute/ban
     restrictions, membership/invitations, any moderator grants scoped
-    to it (design doc -- channel management round), and any per-user
+    to it, and any per-user
     read-cursor/follow rows for it (issue #56) --
     application-level cleanup, same reasoning as
     `netbbs.boards.boards.delete_board`: no `ON DELETE` behavior in the
     schema (a rebuild to add it risks the same silent-cascade hazard
-    found and documented in round 60). Logged before deleting, matching
+    documented there). Logged before deleting, matching
     `delete_board`/`delete_user`'s own "log first" precedent.
     """
     record_action(
@@ -276,9 +276,9 @@ def set_topic(db: Database, channel: Channel, topic: str | None, *, set_by: User
 
     Requires `set_by` to hold `ChannelPermission.EDIT` on `channel` --
     already reserved for exactly this in `netbbs.moderation.roles`
-    (`"EDIT = auto()  # gates /topic changes (round 33, point 5)"`).
-    Logged via the shared `moderation_log` audit trail (design doc round
-    33 point 5: "recorded in moderation or metadata history with setter
+    (`"EDIT = auto()  # gates /topic changes"`).
+    Logged via the shared `moderation_log` audit trail (design doc,
+    point 5: "recorded in moderation or metadata history with setter
     identity and timestamp") -- that table's `actor`/`created_at` columns
     already satisfy this, no separate history table needed.
     """

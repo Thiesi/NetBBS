@@ -1,7 +1,7 @@
 """
 Node-wide account presence: how many live sessions each account
 currently has open, and whether they're currently marked away (design
-doc round 32, sign-off round 42).
+doc).
 
 Deliberately separate from `netbbs.chat.hub.ChatHub`: `ChatHub` tracks
 per-*channel* participants (one small dict per channel); this tracks
@@ -32,8 +32,8 @@ class PresenceRegistry:
     def leave(self, username: str) -> None:
         """
         One fewer live session for `username`. Clears away status the
-        moment the account's *final* session disconnects (design doc
-        round 32: "clears only when the account's final session
+        moment the account's *final* session disconnects (design doc:
+        "clears only when the account's final session
         disconnects") — away status conceptually belongs to "being
         present at all", not to any one connection, so it shouldn't
         outlive every connection that could have set it.
@@ -50,14 +50,14 @@ class PresenceRegistry:
 
     def online_usernames(self) -> set[str]:
         """Every currently-online account — used by `/msg`/`/private`'s
-        Tab completion (design doc round 49/Track 5g) to suggest only
+        Tab completion to suggest only
         reachable targets, distinct from `is_online`'s single-account
         check."""
         return set(self._session_counts)
 
     def set_away(self, username: str, message: str) -> None:
         """Mark `username` away, sharing the same status across every
-        one of their active sessions (design doc round 32: "shared
+        one of their active sessions (design doc: "shared
         across all active sessions")."""
         self._away_messages[username] = message
 

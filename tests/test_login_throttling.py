@@ -1,6 +1,6 @@
 """
-Integration tests for netbbs.net.login_flow's throttling wiring (design
-doc round 28, issue #3) -- distinct from tests/test_login_outcomes.py
+Integration tests for netbbs.net.login_flow's throttling wiring (issue
+#3) -- distinct from tests/test_login_outcomes.py
 (pre-existing attempt-count/blocklist behavior) and
 tests/test_throttle.py (LoginThrottle in isolation). These exercise
 handle_session/_login actually consulting a LoginThrottle: the THROTTLED
@@ -87,7 +87,7 @@ class HangingSession(FakeSession):
     exercise idle-timeout/login-deadline wrapping without a real
     socket, matching this project's convention of testing async
     timeout logic via a controlled fake rather than trusting reasoning
-    about it (see design doc round 5's CSI-timeout lesson)."""
+    about it (see the design doc's CSI-timeout lesson)."""
 
     def __init__(self, *, unblock_after: list[str] | None = None, **kwargs):
         super().__init__(**kwargs)

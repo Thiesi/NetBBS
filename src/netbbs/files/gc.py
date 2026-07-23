@@ -20,8 +20,7 @@ might drop the last reference to a blob (delete, expiry, area
 deletion) to individually know how to reference-count it.
 
 Explicit, SysOp-triggered maintenance (design doc's existing posture:
-no background scheduler exists anywhere in this codebase, confirmed
-absent during round 35's design work for the same reason) -- not a
+no background scheduler exists anywhere in this codebase) -- not a
 periodic background job. `dry_run=True` by default on the actual
 reclaim step specifically because this is a destructive, one-way
 operation on the filesystem, unlike everything else in this codebase

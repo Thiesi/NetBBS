@@ -1,8 +1,7 @@
 """
-Tests for channel topics (design doc §8/round 33 point 5, sign-off
-round 44, Phase 2 Track 5d): `netbbs.chat.channels.set_topic`, gated by
-`ChannelPermission.EDIT` -- already reserved for exactly this in
-`netbbs.moderation.roles` since round 34.
+Tests for channel topics (design doc §8):
+`netbbs.chat.channels.set_topic`, gated by `ChannelPermission.EDIT` --
+already reserved for exactly this in `netbbs.moderation.roles`.
 """
 
 from __future__ import annotations
@@ -71,7 +70,7 @@ def test_set_topic_succeeds_with_local_blanket_edit_grant(db, channel, alice, sy
         db,
         alice,
         object_type="channel",
-        object_id=None,  # local-blanket, per design doc §13/round 34
+        object_id=None,  # local-blanket, per design doc §13
         permissions=ChannelPermission.EDIT,
         granted_by=sysop,
     )
@@ -82,9 +81,9 @@ def test_set_topic_succeeds_with_local_blanket_edit_grant(db, channel, alice, sy
 
 
 def test_moderate_permission_alone_does_not_allow_setting_topic(db, channel, alice, sysop):
-    # EDIT and MODERATE are deliberately different bits (design doc
-    # round 34) -- a chat moderator who can kick/mute/ban shouldn't
-    # automatically also be able to change the topic.
+    # EDIT and MODERATE are deliberately different bits -- a chat
+    # moderator who can kick/mute/ban shouldn't automatically also be
+    # able to change the topic.
     grant_permissions(
         db,
         alice,

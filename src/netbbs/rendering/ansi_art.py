@@ -46,7 +46,7 @@ def decode_ansi_bytes(data: bytes) -> str:
 def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
     """
     The save-side counterpart to `decode_ansi_bytes` (design doc --
-    welcome banner round B1): walks `buffer` row by row, emitting a
+    welcome banner): walks `buffer` row by row, emitting a
     real SGR color-change sequence only where the style actually
     changes between adjacent cells (not per-cell, for a reasonably
     compact file), each character CP437-encoded with

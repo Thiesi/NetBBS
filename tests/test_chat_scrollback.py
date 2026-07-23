@@ -123,9 +123,8 @@ def test_scrollback_is_trimmed_to_configured_limit(db, lobby):
 
 
 def test_scrollback_trimming_counts_join_leave_events_too(db, lobby):
-    # Round 19/20: join/leave events share the same retained window as
-    # chat messages, not a separate budget -- trimming should treat them
-    # identically.
+    # Join/leave events share the same retained window as chat messages,
+    # not a separate budget -- trimming should treat them identically.
     set_scrollback_limit(db, 2)
     record_message(db, lobby, kind="join", author_label="alice")
     record_message(db, lobby, kind="message", author_label="alice", body="hi")

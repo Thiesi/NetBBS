@@ -1,18 +1,16 @@
 """
 Integration tests for the `/timestamps` command and per-user chat
-timestamp preference wiring (design doc round 32 point 3, round 42
-point 6, sign-off round 62). Library-level `netbbs.chat.timestamps`
+timestamp preference wiring. Library-level `netbbs.chat.timestamps`
 behavior (`timestamps_enabled`/`set_timestamps_enabled`/
 `format_with_preference`) is exercised indirectly here, through the
 real command and chat loop -- mirroring tests/test_chat_flow_away.py's
 structure for the sibling `/away` preference command.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`, so
-`_run` and every direct call here uses `lane`. `db` stays for setup/
-assertion calls (`timestamps_enabled`, `set_timestamps_enabled`),
-unchanged.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`, so `_run` and every direct call here uses `lane`. `db`
+stays for setup/assertion calls (`timestamps_enabled`,
+`set_timestamps_enabled`), unchanged.
 """
 
 from __future__ import annotations
@@ -35,8 +33,8 @@ from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
 
-#: Time-only (design doc round 77) -- format_with_preference dropped
-#: the date, matching the chat status line clock's own round-75 format.
+#: Time-only -- format_with_preference dropped the date, matching the
+#: chat status line clock's own format.
 _TIMESTAMP_PATTERN = re.compile(r"\[\d{2}:\d{2}\]")
 
 
@@ -96,11 +94,11 @@ async def _run(lane, hub, presence, channel, user, lines):
 async def _join_and_wait(lane, hub, presence, channel, user, session):
     """Starts `_chat_loop` as a background task and waits until it has
     actually joined `channel`'s hub roster before returning -- polled,
-    not a fixed `asyncio.sleep(0)` (design doc round 114): joining now
-    involves real `ThreadPoolExecutor` round trips (the lane dispatch
-    for the ban check, scrollback fetch, and join record), with genuine
-    wall-clock latency a single zero-duration sleep can no longer
-    reliably outlast."""
+    not a fixed `asyncio.sleep(0)`: joining involves real
+    `ThreadPoolExecutor` round trips (the lane dispatch for the ban
+    check, scrollback fetch, and join record), with genuine wall-clock
+    latency a single zero-duration sleep can no longer reliably
+    outlast."""
     mailbox = MessageMailbox()
     history = InputHistory()
     task = asyncio.create_task(
@@ -214,9 +212,9 @@ def test_timestamp_preference_applies_to_join_and_leave_notices_for_an_opted_in_
         # _chat_loop returns above (its own finally block awaits that),
         # but the watcher's receive_loop still needs a scheduling turn
         # to pull it off its queue *and* render it via a lane.run call
-        # of its own (design doc round 114) before it's actually written
-        # to watcher's output -- a single asyncio.sleep(0) tick is no
-        # longer reliably enough wall-clock time for that round trip.
+        # of its own before it's actually written to watcher's output --
+        # a single asyncio.sleep(0) tick is no longer reliably enough
+        # wall-clock time for that round trip.
         await asyncio.sleep(0.05)
 
         watcher_task.cancel()

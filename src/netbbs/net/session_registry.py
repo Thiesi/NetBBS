@@ -1,6 +1,6 @@
 """
 Node-wide registry of every currently connected session (design doc
-round 51, Phase 2 post-Track-5 fixes) — the piece a deliberate,
+§13.8) — the piece a deliberate,
 coordinated node shutdown needs that nothing else in the codebase
 provides: a way to reach *every* connection regardless of what screen
 it's on, and a way to forcibly end all of them.
@@ -44,7 +44,7 @@ class _Entry:
 @dataclass(frozen=True)
 class SessionSummary:
     """A read-only snapshot of one registered session, for admin
-    display (design doc -- node management round) — deliberately
+    display — deliberately
     doesn't expose the raw `Task`, only what a "who's connected" view
     needs."""
 
@@ -92,8 +92,7 @@ class ActiveSessionRegistry:
 
     def list_entries(self) -> list[SessionSummary]:
         """A snapshot of every currently connected session, for the
-        `[N]ode` admin menu's `[W]ho` screen (design doc -- node
-        management round)."""
+        `[N]ode` admin menu's `[W]ho` screen."""
         return [
             SessionSummary(
                 session=session,
@@ -163,11 +162,11 @@ class ActiveSessionRegistry:
         cancellation and moving on without confirming it took effect.
 
         Must never be `await`ed directly from within one of the very
-        sessions being disconnected (design doc -- node management
-        round): that session's own task would then be cancelling
-        itself while being one of the tasks this method's own
-        `gather()` is waiting on — the same species of hazard round 58
-        hit and fixed in `netbbs.net.chat_flow._chat_loop`. Callers
+        sessions being disconnected (design doc -- node management):
+        that session's own task would then be cancelling itself while
+        being one of the tasks this method's own `gather()` is waiting
+        on — the same species of hazard also guarded against in
+        `netbbs.net.chat_flow._chat_loop`. Callers
         triggering this from inside a live session (the `[N]ode` admin
         menu's shutdown/drain commands) fire it as an independent
         background task instead — see `netbbs.net.shutdown.
@@ -230,8 +229,8 @@ class ActiveSessionRegistry:
     async def disconnect_one(self, session: Session) -> bool:
         """
         Forcibly end just `session`'s connection, the same way
-        `disconnect_all` ends every one of them (design doc -- node
-        management round's `[N]ode` `[W]ho` screen). Returns `False`
+        `disconnect_all` ends every one of them, from the `[N]ode`
+        `[W]ho` screen. Returns `False`
         without doing anything if `session` isn't (or is no longer)
         registered, `True` otherwise.
 

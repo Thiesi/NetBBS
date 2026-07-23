@@ -1,5 +1,5 @@
 """
-Tests for `netbbs.link.relay_selection` (design doc §12 round 95, issue
+Tests for `netbbs.link.relay_selection` (design doc §12, issue
 #58) -- the pure "what to do next" relay-candidate-ranking and self-
 healing-detection logic, deliberately built on plain `LinkNode.peers`/
 `candidate_descriptors` state rather than a real handshake: this module

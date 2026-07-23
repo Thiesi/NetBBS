@@ -1,6 +1,6 @@
 """
-Tests for netbbs.chat.membership (design doc §8/round 33 points 8/9/11,
-Phase 2 Track 5h): persistent channel membership (`channel_members`)
+Tests for netbbs.chat.membership (design doc §8):
+persistent channel membership (`channel_members`)
 and the invite-then-accept flow (`channel_invitations`), both gated by
 `ChannelPermission.MANAGE_MEMBERS` -- library-level, distinct from the
 real command wiring covered in tests/test_chat_flow_membership.py.
@@ -155,8 +155,8 @@ def test_create_invitation_with_manage_members_succeeds(db, alice, bob, channel)
 def test_create_invitation_via_member_opt_in(db, alice, bob, channel):
     # alice holds MANAGE_MEMBERS and grants bob plain membership (no
     # grant of his own) -- the channel opts into member-issued
-    # invitations (design doc round 33 point 11), so bob, a member with
-    # no permission grant at all, can still invite someone else.
+    # invitations, so bob, a member with no permission grant at all,
+    # can still invite someone else.
     _grant_manage_members(db, alice, channel)
     open_channel = create_channel(
         db, "welcoming", creator=alice, members_only=True, allow_member_invites=True

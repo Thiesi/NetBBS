@@ -1,5 +1,5 @@
 """
-Local asynchronous personal mail UI (design doc round 93/104), wiring
+Local asynchronous personal mail UI (design doc), wiring
 `netbbs.mail`'s core module into the interactive session.
 
 Kept in its own module rather than growing login_flow.py indefinitely --
@@ -13,8 +13,8 @@ rendering distinction for onlookers. Mail is a private 1:1 exchange with
 no shared audience to forge an identity in front of, so `sender_label`
 (a plain denormalized username, see `netbbs.mail`) is shown as-is.
 
-**First module migrated onto design doc round 91's two-lane database
-execution model (issue #57)** -- every function here takes `lane:
+**First module migrated onto the two-lane database
+execution model (design doc, issue #57)** -- every function here takes `lane:
 DatabaseLane` instead of `db: Database`, and every business-logic call
 goes through `await lane.run(func, *args, **kwargs)` rather than a
 direct synchronous call. Two consequences worth being explicit about,
@@ -80,7 +80,7 @@ async def browse_mail(
 ) -> None:
     """Entry point from the main menu's `[E]-mail` option.
 
-    `link_context` (design doc round 93), if given, lets `_compose_mail`
+    `link_context` (design doc), if given, lets `_compose_mail`
     recognize a `user@node-fingerprint` address and send a Link message
     instead of ordinary local mail -- `None` whenever this node has Link
     disabled, the same convention `netbbs.link.boards.LinkContext`
@@ -276,7 +276,7 @@ async def _compose_mail(
 ) -> None:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@
-    node-fingerprint` address (design doc round 93) in addition to a
+    node-fingerprint` address (design doc) in addition to a
     plain local username -- routed to `netbbs.link.mail.compose_link_
     message` instead of `netbbs.mail.send_mail`. Only checked on the
     fresh-compose path: a reply always targets an already-resolved

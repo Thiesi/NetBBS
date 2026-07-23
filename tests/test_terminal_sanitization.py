@@ -1,6 +1,6 @@
 """
 End-to-end verification that untrusted content is actually sanitized
-where it's rendered (design doc round 29, issue #8) -- distinct from
+where it's rendered (issue #8) -- distinct from
 tests/test_sanitize.py, which tests `sanitize_text` in isolation. These
 drive the real board/chat/file-area/picker code paths with genuinely
 hostile stored/typed content and inspect what actually reaches
@@ -116,9 +116,9 @@ def _assert_hostile_payload_neutralized(text: str) -> None:
 
     The clear-screen check specifically looks for HOSTILE's *own*
     contiguous fragment (`"...PWNED\x07\x1b[2Jmore text"`), not a bare
-    "`\x1b[2J` never appears anywhere in the transcript" -- since
-    design doc round 75, the chat status line's scroll-region setup
-    legitimately emits a real `clear_screen()` on ordinary chat entry,
+    "`\x1b[2J` never appears anywhere in the transcript" -- the chat
+    status line's scroll-region setup legitimately emits a real
+    `clear_screen()` on ordinary chat entry,
     which happens to contain the identical two bytes for an entirely
     unrelated reason. Anchoring to HOSTILE's own neighboring text is
     what actually distinguishes "the attacker's sequence survived
@@ -269,7 +269,7 @@ def test_live_chat_message_is_sanitized_for_both_sender_and_recipient(tmp_path):
     _assert_hostile_payload_neutralized(sender_session.output)
 
     # join/message/leave now arrive as structured ChannelMessage events
-    # (GitHub issue #64, round 109) -- render each through the same
+    # (GitHub issue #64) -- render each through the same
     # shared renderer receive_loop itself uses before checking
     # sanitization, so this still exercises the real rendering path.
     received_text = [

@@ -1,7 +1,7 @@
 """
 `python -m netbbs [--config PATH] [options...]` — node entry point.
 
-Configuration-driven (design doc round 28, issue #15): what listens
+Configuration-driven (design doc, issue #15): what listens
 where, and the login-throttling policy protecting it, come from
 `netbbs.net.nodeconfig.NodeConfig` — an optional TOML file plus CLI
 overrides — rather than the hardcoded constants this module used to
@@ -81,7 +81,7 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
 def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig):
     """
     Returns a plain callable producing this node's current `HelloMessage`
-    on demand (design doc round 117: `LinkServer`'s `own_hello_provider`
+    on demand (design doc: `LinkServer`'s `own_hello_provider`
     — a transport-level concern deliberately kept out of `LinkNode`
     itself). `addresses` is only populated for a full peer
     (`not outgoing_only`) -- `config.validate()` already guarantees
@@ -138,11 +138,11 @@ async def _start_servers(
     username/password a second time.
 
     `link_node`, non-`None` exactly when `config.link.enabled` (`run()`
-    constructs it, not this function -- design doc round 119: the
+    constructs it, not this function -- the
     background sync task needs to share this *same* `LinkNode`
     instance, not a second one with its own independent, diverging
     peer table), is what `LinkServer` answers inbound traffic through.
-    `link_lane` (round 120) is the background `DatabaseLane` `LinkServer`
+    `link_lane` is the background `DatabaseLane` `LinkServer`
     persists accepted peers/events through.
     """
     started: list = []
@@ -285,7 +285,7 @@ async def run(
     testable without sending real OS signals (see
     `tests/test_main_lifecycle.py`/`tests/test_shutdown.py`); the real
     top-level `main()` below constructs its own and wires actual
-    SIGTERM/SIGINT handling to them (design doc round 51) — by the time
+    SIGTERM/SIGINT handling to them (design doc) — by the time
     `shutdown_event` is set, whatever triggered it (a real signal, or a
     test setting it directly) has already had its chance to warn/
     disconnect connected sessions first; this function itself doesn't
@@ -331,19 +331,19 @@ async def run(
             "drill.md) rather than starting against a corrupted database."
         ) from exc
 
-    # Design doc round 91/issue #57: the foreground DatabaseLane -- a
+    # Design doc/issue #57: the foreground DatabaseLane -- a
     # second, independent connection to the same database file (WAL
     # mode makes this safe), off the event loop, that migrated features
     # dispatch through instead of calling business logic directly via
     # `db`. Only `netbbs.net.mail_flow` (the first module migrated,
     # proof-of-pattern) actually uses it yet -- every other feature
-    # still runs on `db` directly, unmigrated, per design doc round 111.
+    # still runs on `db` directly, unmigrated, per the design doc.
     # Opened lazily on first use, not here, so node startup doesn't pay
     # for a connection nothing may touch this run.
     foreground_lane = DatabaseLane(config.db_path)
 
-    # Design doc round 120: the background DatabaseLane round 91 named
-    # but never actually constructed -- "peer inventory exchange, event
+    # Design doc: the background DatabaseLane named for
+    # "peer inventory exchange, event
     # verification/ingestion, retry/outbox processing." First real use:
     # netbbs.link.transport persists accepted Link peers/events through
     # it, off the event loop, independent of foreground_lane's own
@@ -376,14 +376,14 @@ async def run(
     # than lazily right before `await shutdown_event.wait()` (as this
     # used to) -- a real connection could in principle reach
     # session_handler (and need a real shutdown_event to hand down to
-    # handle_session, design doc -- node management round) before
+    # handle_session, per the design doc's node management section) before
     # reaching that later line, the same ordering hazard
     # session_registry/maintenance's own None-check already avoids by
     # being resolved up here.
     if shutdown_event is None:
         shutdown_event = asyncio.Event()
 
-    # Node-lifetime background task (design doc round 78), not tied to
+    # Node-lifetime background task (design doc), not tied to
     # any one session -- see netbbs.net.daybreak's own module docstring
     # for what it does and why it's strictly local-only. Started here,
     # alongside hub/presence/mailbox/throttle, and cancelled in this
@@ -395,7 +395,7 @@ async def run(
     # not go unnoticed, and must not be able to block the `finally`
     # block's listener/database cleanup below. The done-callback logs
     # the failure the moment it happens -- this is a purely cosmetic,
-    # local-only chat announcement (design doc round 77/78), not
+    # local-only chat announcement (design doc), not
     # something worth taking the whole node's listeners down for, so
     # the chosen policy is graceful degrade (log and keep serving,
     # feature silently retired for the rest of this node's uptime)
@@ -419,7 +419,7 @@ async def run(
 
     daybreak_task.add_done_callback(_log_daybreak_failure)
 
-    # Design doc round 97/§17: the "startup" and "daily-background"
+    # Design doc §17: the "startup" and "daily-background"
     # halves of the check-for-updates off switch admin_flow's own
     # screen already names and gates (`get_auto_update_check_enabled`)
     # -- previously nothing actually performed a scheduled check despite
@@ -449,8 +449,8 @@ async def run(
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
             lane=foreground_lane,
-            # Design doc round 124/128: None whenever this node has Link
-            # disabled (round 87: Phase 3 is opt-in/experimental) --
+            # Design doc: None whenever this node has Link
+            # disabled (Phase 3 is opt-in/experimental) --
             # `link_node` is only ever non-None in that same condition
             # (see its own construction below), so this mirrors it
             # directly rather than re-checking config.link.enabled here.
@@ -502,7 +502,7 @@ async def run(
         # itself.
         write_pid_file(config.db_path)
 
-        # Design doc round 89/111: a node's Link identity (root key +
+        # Design doc: a node's Link identity (root key +
         # signing/transport operational keys) auto-generates silently on
         # first-ever startup and just loads on every one after that -- no
         # separate "init" step. Always loaded regardless of whether
@@ -517,13 +517,13 @@ async def run(
             raise StartupError(f"could not load or bootstrap this node's Link identity: {exc}") from exc
         _logger.info("node Link identity %r: fingerprint %s", config.node_name, node_identity.fingerprint)
 
-        # Design doc round 119: constructed here, once, rather than
+        # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs
         # to share this *same* LinkNode instance (its peer table, its
         # tracked transitions-per-peer), not a second one that would
         # silently diverge from what LinkServer sees.
         #
-        # Round 120: hydrated from persisted storage via load_link_node,
+        # Hydrated from persisted storage via load_link_node,
         # not a bare LinkNode(...) construction -- so a restarted node
         # doesn't forget its peers or reprocess/re-forward events it has
         # already seen. Reads `db` directly (not background_lane): this
@@ -579,21 +579,21 @@ async def run(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane
         )
 
-        # Design doc round 119: the piece that makes this node
-        # *originate* outbound Link activity, not just answer it (round
-        # 118). A separate try/except ImportError from LinkServer's own,
+        # Design doc: the piece that makes this node
+        # *originate* outbound Link activity, not just answer it. A
+        # separate try/except ImportError from LinkServer's own,
         # since this runs here in run(), not inside _start_servers,
         # after _start_servers may have already decided (independently)
         # whether aiohttp was available for the inbound listener.
         #
-        # Round 97: no longer gated on `config.link.seeds` being
+        # Not gated on `config.link.seeds` being
         # non-empty -- a node started with zero operator-configured
-        # seeds still starts this task, since `run_link_sync` itself now
+        # seeds still starts this task, since `run_link_sync` itself
         # also merges in whatever `run_scheduled_seed_refresh` (below)
         # most recently cached, and a genuinely empty combined list is
         # already a harmless no-op pass (nothing to dial, nothing
         # crashes). This is precisely the "brand-new node with no
-        # learned peers yet" case round 97 named as the one live
+        # learned peers yet" case the live
         # seed-list refresh matters most for -- gating the task itself
         # on operator-configured seeds would have made a live-fetched
         # seed unreachable no matter how successfully it was fetched.
@@ -637,7 +637,7 @@ async def run(
                     len(config.link.seeds), config.link.sync_interval_seconds,
                 )
 
-                # Design doc round 97: refreshes the supplementary seed
+                # Design doc: refreshes the supplementary seed
                 # list `run_link_sync` above merges in every pass. Its
                 # own off switch is `get_auto_update_check_enabled` --
                 # deliberately the same flag as the release-check task,
@@ -674,7 +674,7 @@ async def run(
             pass
         except Exception:
             pass
-        # Design doc round 97: same cancel-await-swallow shape as
+        # Same cancel-await-swallow shape as
         # daybreak_task, for the same reason (issue #48) -- already
         # logged by _log_update_check_failure if it failed on its own.
         update_check_task.cancel()
@@ -714,7 +714,7 @@ async def run(
                 pass
         if link_sync_session is not None:
             await link_sync_session.close()
-        # Design doc round 97: same cancel-await-swallow shape, for the
+        # Same cancel-await-swallow shape, for the
         # same reason -- already logged by _log_seed_refresh_failure if
         # it failed on its own.
         if seed_refresh_task is not None:

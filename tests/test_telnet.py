@@ -244,8 +244,8 @@ def test_backspace_removes_last_character_and_erases_visually():
 
             writer.write(bytes([0x08]))  # Backspace
             await writer.drain()
-            # Cursor-addressable editing (design doc round 47/Track 5f)
-            # erases via move-left + ESC[K rather than the old "\b \b"
+            # Cursor-addressable editing erases via move-left + ESC[K
+            # rather than the old "\b \b"
             # trick, since the same redraw primitive also has to work
             # for a Backspace in the *middle* of a line, not just at
             # the end.

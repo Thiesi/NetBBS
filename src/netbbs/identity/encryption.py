@@ -1,7 +1,7 @@
 """
 Link-message content encryption.
 
-Design doc round 93 (Link messages) confirmed the mechanism: derive the
+The design doc (Link messages) confirms the mechanism: derive the
 X25519 keypair a subject needs from its existing Ed25519 identity key
 rather than minting/storing/rotating a separate encryption keypair.
 Uses PyNaCl's own supported conversion -- `nacl.signing.SigningKey.

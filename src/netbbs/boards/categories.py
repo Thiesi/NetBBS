@@ -60,8 +60,8 @@ def create_category(
     No permission check here — same precedent as board/channel creation
     elsewhere in Phase 1: an admin-level action with no SysOp/moderator
     concept defined yet, left to whatever calls this. `created_by` is
-    only for the audit-log entry (design doc -- board/area management
-    round) — this function itself still has no authorization check of
+    only for the audit-log entry (design doc -- board/area management)
+    — this function itself still has no authorization check of
     its own.
     """
     if parent_category_id is not None:
@@ -128,8 +128,8 @@ def list_subcategories(db: Database, parent_category_id: int) -> list[Category]:
 
 def delete_category(db: Database, category: Category, *, deleted_by: User) -> None:
     """
-    Permanently remove `category` (design doc -- board/area management
-    round). Any board currently assigned to it, and any sub-category
+    Permanently remove `category` (design doc -- board/area management).
+    Any board currently assigned to it, and any sub-category
     whose parent it is, falls back to "uncategorized"/top-level
     (`category_id`/`parent_category_id` set to `NULL`) rather than being
     deleted or blocking this — handled here at the application level,

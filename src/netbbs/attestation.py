@@ -1,6 +1,5 @@
 """
-Identity attestation: real-world age/name verification (design doc §18,
-rounds 85, 86, 98, 99).
+Identity attestation: real-world age/name verification (design doc §18).
 
 Delegates a policy question NetBBS can't answer globally (who counts as
 a minor, what identity disclosure a community actually needs) to
@@ -9,12 +8,11 @@ delegate. Reuses existing infrastructure throughout rather than
 inventing new mechanisms — `netbbs.user_preferences` for the new
 self-reported profile fields (same pattern as `netbbs.directory`'s
 `bio`), `netbbs.moderation.log` for verifier accountability, and
-`netbbs.rendering`'s `VERIFIED_COLOR` (round 99) for anti-forgery
-display.
+`netbbs.rendering`'s `VERIFIED_COLOR` for anti-forgery display.
 
 **Attestations are deliberately unsigned for now, regardless of whether
-the verifier holds a personal keypair.** Round 85 originally described
-signing as reusing "round 7's node-vouching fallback" — but producing a
+the verifier holds a personal keypair.** Reusing the node-vouching
+fallback as a signing mechanism was considered — but producing a
 real signature over new content during a live terminal session needs a
 client that signs a server-issued challenge itself, the same
 challenge/response shape `netbbs.auth.users.authenticate_keypair`'s own
@@ -57,11 +55,11 @@ _VERIFIED_BADGE_VISIBLE_KEY = "verified_badge_visible"
 MAX_DISPLAY_NAME_BYTES = 64
 MAX_LOCATION_BYTES = 100
 
-# Round 99: reserved so the attested-real-name marker in the display
+# Reserved so the attested-real-name marker in the display
 # format ("(={name}=)") can never appear inside a self-chosen display
 # name -- see format_name_for_resource's docstring for the anti-forgery
 # reasoning this protects. Deliberately distinct from /nick's own "~"
-# marker (round 53).
+# marker.
 RESERVED_DISPLAY_NAME_MARKER = "="
 
 
@@ -75,16 +73,16 @@ class AttestationError(Exception):
     attested value fails validation."""
 
 
-# -- self-reported profile fields (design doc §18, round 85 point 11) ------
+# -- self-reported profile fields (design doc §18) --------------------------
 
 
 def set_display_name(db: Database, user: User, name: str) -> None:
     """
     A directory/vCard-level field, distinct from the existing chat-only
-    `/nick` alias (round 41 deliberately kept `/nick` out of the
-    directory; this doesn't revisit that).
+    `/nick` alias (deliberately kept out of the directory; this doesn't
+    revisit that).
 
-    Rejects (round 99), rather than silently stripping, the reserved
+    Rejects, rather than silently stripping, the reserved
     `=` marker — a display name containing it could otherwise make a
     later real-name attestation's `(={name}=)` rendering ambiguous
     about which part is user-chosen versus system-appended. See
@@ -94,7 +92,7 @@ def set_display_name(db: Database, user: User, name: str) -> None:
     if RESERVED_DISPLAY_NAME_MARKER in name:
         raise ProfileFieldError(
             f"display name cannot contain {RESERVED_DISPLAY_NAME_MARKER!r} "
-            "(reserved for verified real-name display, design doc round 99)"
+            "(reserved for verified real-name display, design doc)"
         )
     byte_count = len(name.encode("utf-8"))
     if byte_count > MAX_DISPLAY_NAME_BYTES:
@@ -163,7 +161,7 @@ def is_verified_badge_visible(db: Database, user: User) -> bool:
     return get_user_preference(db, user, _VERIFIED_BADGE_VISIBLE_KEY, default="0") == "1"
 
 
-# -- age computation (design doc §18, round 85 point 3) ---------------------
+# -- age computation (design doc §18) ----------------------------------------
 
 
 def _today() -> date:
@@ -321,16 +319,16 @@ def _row_to_attestation(row: sqlite3.Row) -> UserAttestation:
     )
 
 
-# -- anti-forgery display (design doc round 99) ------------------------------
+# -- anti-forgery display (design doc §18) -----------------------------------
 
 
 def format_verified_name_unit(db: Database, user: User, *, name_requirement: str | None) -> str | None:
     """
     The trusted, colored `(={attested real name}=)` unit alone, or
     `None` if `name_requirement` isn't `verified_and_displayed` or
-    `user` has no name attestation — the primitive `format_name_for_resource`
-    itself is built from (round 99's rendering-layer guarantee, extracted
-    in round 109/GitHub issue #64).
+    `user` has no name attestation — the rendering-layer guarantee the
+    primitive `format_name_for_resource` itself is built from (see
+    GitHub issue #64).
 
     Split out of `format_name_for_resource` specifically because chat's
     per-message author label (`netbbs.net.chat_flow._chat_author_label`)
@@ -341,7 +339,7 @@ def format_verified_name_unit(db: Database, user: User, *, name_requirement: str
     caller composes around it rather than reimplementing the coloring
     itself.
 
-    Sanitizes before coloring, not after (round 53's established
+    Sanitizes before coloring, not after (the established
     ordering) — running `sanitize_text` on an already-colored string
     would risk stripping this function's own legitimate SGR codes right
     alongside any genuinely hostile content.
@@ -364,9 +362,9 @@ def format_name_for_resource(db: Database, user: User, *, name_requirement: str 
 
     Format: `"{display_name or username} (={attested real name}=)"`,
     with the whole `(=...=)` unit rendered in `VERIFIED_COLOR` via
-    `format_verified_name_unit` (round 99; extracted as its own
-    primitive round 109). This is a **rendering-layer guarantee, not a
-    text-pattern one**: the color is applied directly to the trusted
+    `format_verified_name_unit`, its own extracted primitive. This is a
+    **rendering-layer guarantee, not a text-pattern one**: the color is
+    applied directly to the trusted
     `attested_value` from `user_attestations`, never derived from or
     combined with `display_name` — and `display_name` already rejects
     the `=` marker at write time (`set_display_name`), so nothing a user

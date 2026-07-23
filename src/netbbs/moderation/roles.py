@@ -7,14 +7,14 @@ grants answer a narrower, additive question: "does this specific
 account also hold this specific permission on this specific object —
 or on every local object of this type, if locally-blanket."
 
-See design doc sign-off round 34 for the reasoning behind the choices
+See the design doc's sign-off for the reasoning behind the choices
 this module encodes: a bitmask representation (matching §13's own
 "settable individually or combined" phrasing), no partial-exception
 blanket grants, and recording every grant/revoke in the shared
 `netbbs.moderation.log` audit trail.
 
 Four moderator scope tiers now exist: per-object, **Community-blanket**
-(design doc §16, round 83 -- `object_id` is `None` *and* `community_id`
+(design doc §16 -- `object_id` is `None` *and* `community_id`
 is set), local-blanket (`object_id` and `community_id` both `None`), and
 Link-blanket ("global"). The last is unreachable until Phase 6's
 Link-wide moderation exists and is deliberately not modeled by a third
@@ -62,7 +62,7 @@ class ChannelPermission(IntFlag):
     board permissions are.
     """
 
-    EDIT = auto()  # gates /topic changes (round 33, point 5)
+    EDIT = auto()  # gates /topic changes
     MODERATE = auto()  # kick/mute/ban
     MANAGE_MEMBERS = auto()  # invite-only channel membership admin
 
@@ -75,7 +75,7 @@ _PERMISSION_ENUMS: dict[str, type[IntFlag]] = {
 
 # Which table to resolve an object's own community_id from, for
 # has_permission's/list_grants_for_object's Community-blanket fallback
-# (design doc §16, round 83) -- the one place this module knows
+# (design doc §16) -- the one place this module knows
 # anything about boards/channels/file_areas specifically, rather than
 # staying purely polymorphic over moderator_grants alone.
 _COMMUNITY_LOOKUP_TABLES: dict[str, str] = {
@@ -101,8 +101,8 @@ class ModeratorGrant:
     granted_by_user_id: int
     created_at: str
     # None == local-blanket (or a per-object grant); set == Community-
-    # blanket, scoped to one Community's membership (design doc §16,
-    # round 83). Only meaningful when object_id is also None -- a
+    # blanket, scoped to one Community's membership (design doc §16).
+    # Only meaningful when object_id is also None -- a
     # per-object grant with a non-NULL community_id is never produced
     # by grant_permissions, since a specific object's own community_id
     # already answers that question without needing it duplicated here.
@@ -127,8 +127,8 @@ def grant_permissions(
     object of `object_type` (`object_id` is `None`, `community_id` is
     also `None` -- a local-blanket grant), or on every object of
     `object_type` currently or later belonging to one Community
-    (`object_id` is `None`, `community_id` is set -- design doc §16,
-    round 83's Community-blanket tier).
+    (`object_id` is `None`, `community_id` is set -- design doc §16's
+    Community-blanket tier).
 
     Additive: repeating this call for the same (user, object_type,
     object_id, community_id) combines with whatever bits are already
@@ -226,13 +226,13 @@ def has_permission(
     """
     Does `user` hold `permission` on this object — either via a grant
     on it specifically, a Community-blanket grant covering the
-    Community this object currently belongs to (design doc §16, round
-    83), or a local-blanket grant covering every local object of
+    Community this object currently belongs to (design doc §16), or a
+    local-blanket grant covering every local object of
     `object_type`? (Deliberately no partial-exception blanket grants —
-    see design doc sign-off round 34.)
+    see the design doc's sign-off.)
 
     SysOp-level always satisfies this, with zero grant rows required
-    (design doc -- board/area management round, a deliberate, cross-
+    (design doc -- board/area management is a deliberate, cross-
     cutting decision -- confirmed to also apply to every existing
     consumer of this function, not just new board/area moderation:
     chat's `/mute`/`/ban`/`/kick`, Tab-completion visibility, etc.).
@@ -300,7 +300,7 @@ def list_grants_for_community(db: Database, community_id: int) -> list[Moderator
     """Every Community-blanket grant scoped to this Community, across
     every user and object_type -- used by
     `netbbs.communities.delete_community`'s callers to show the blast
-    radius (design doc §16, round 84's confirmation prompt: "...and M
+    radius (design doc §16's confirmation prompt: "...and M
     moderator grant(s)...") before deleting."""
     rows = db.connection.execute(
         "SELECT * FROM moderator_grants WHERE community_id = ?", (community_id,)

@@ -45,7 +45,7 @@ def create_category(
 ) -> Category:
     """No permission check here — same precedent as board/channel
     creation elsewhere in Phase 1. `created_by` is only for the
-    audit-log entry (design doc -- channel management round), mirroring
+    audit-log entry (design doc -- channel management), mirroring
     `netbbs.boards.categories.create_category`."""
     if parent_category_id is not None:
         parent = get_category_by_id(db, parent_category_id)
@@ -111,8 +111,8 @@ def list_subcategories(db: Database, parent_category_id: int) -> list[Category]:
 
 def delete_category(db: Database, category: Category, *, deleted_by: User) -> None:
     """
-    Permanently remove `category` (design doc -- channel management
-    round). Any channel currently assigned to it, and any sub-category
+    Permanently remove `category` (design doc -- channel management).
+    Any channel currently assigned to it, and any sub-category
     whose parent it is, falls back to "uncategorized"/top-level rather
     than being deleted or blocking this — mirrors
     `netbbs.boards.categories.delete_category` exactly, application-

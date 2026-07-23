@@ -1,6 +1,6 @@
 """
 LocalCLISession: a `Session` implementation over the local controlling
-terminal's stdin/stdout (design doc -- SysOp foundation round), used by
+terminal's stdin/stdout (design doc -- SysOp foundation), used by
 the standalone `python -m netbbs.admin` CLI tool
 (`netbbs.admin.__main__`) so it can share the exact same
 `netbbs.net.admin_flow.admin_menu` code the in-BBS Admin option uses.
@@ -72,11 +72,11 @@ class LocalCLISession(Session):
         lock: asyncio.Lock | None = None,
         list_candidates: char_input.CandidateListPrinter | None = None,
     ) -> str:
-        # live_buffer/lock/list_candidates (design doc round 79) are
-        # never actually passed by this session's one caller (the
-        # standalone `python -m netbbs.admin` CLI has no chat feature) --
-        # accepted anyway purely for signature consistency with the rest
-        # of the Session implementations.
+        # live_buffer/lock/list_candidates are never actually passed by
+        # this session's one caller (the standalone `python -m
+        # netbbs.admin` CLI has no chat feature) -- accepted anyway
+        # purely for signature consistency with the rest of the Session
+        # implementations.
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,

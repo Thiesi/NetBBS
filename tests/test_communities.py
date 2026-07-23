@@ -1,8 +1,8 @@
 """
-Tests for netbbs.communities (design doc §16, rounds 71/83/84/86): the
-Communities core module -- CRUD, deletion cascade, and scalar-default
-resolution. Admin/main-menu UI wiring is not built yet (see the design
-doc's round-104 status note); these drive the library layer directly.
+Tests for netbbs.communities (design doc §16): the Communities core
+module -- CRUD, deletion cascade, and scalar-default resolution.
+Admin/main-menu UI wiring is not built yet (see the design doc's
+status note); these drive the library layer directly.
 """
 
 from __future__ import annotations
@@ -190,7 +190,7 @@ def test_delete_community_removes_the_row(db, sysop):
     assert get_community(db, community.id) is None
 
 
-# -- scalar-default resolution (design doc round 84) -------------------------
+# -- scalar-default resolution -------------------------------------------------
 
 
 def test_effective_min_read_level_uses_explicit_board_value_over_community_default(db, sysop):

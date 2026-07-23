@@ -1,6 +1,6 @@
 """
 Per-user "compose with the fullscreen prose editor" preference (design
-doc -- prose editor round B2): whether composing/editing a board post
+doc -- prose editor): whether composing/editing a board post
 or bio opens `netbbs.net.prose_editor.edit_prose` instead of the plain
 line-based flow. A thin typed wrapper over `netbbs.user_preferences`'
 generic per-user key-value store, the exact same shape

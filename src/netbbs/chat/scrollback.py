@@ -1,12 +1,12 @@
 """
 Bounded, disk-backed chat scrollback per channel.
 
-Design doc round 19/20: revisits round 10's "chat isn't persisted"
+Revisits the earlier "chat isn't persisted"
 decision, scoped specifically to the *local* problem of a channel looking
 empty after a node restart — not the separate, harder question of a
 newly-joined Link node needing catch-up scrollback from peers, which stays
 explicitly deferred to whenever Phase 5 starts. Bounded by message count
-rather than a time window (round 19, point 4): predictable storage size
+rather than a time window: predictable storage size
 and scrollback length regardless of how chatty a given channel is.
 
 Join/leave presence events are recorded here too, not just chat text —
@@ -39,10 +39,10 @@ from netbbs.timeutil import utc_now_iso
 MessageKind = Literal[
     "message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action", "nick", "daybreak"
 ]
-# "nick" was already a valid DB-level kind (round 41's CHECK-widening
+# "nick" was already a valid DB-level kind (added by a CHECK-widening
 # migration; see netbbs.net.chat_flow._announce_nick_change) but had
 # drifted out of sync with this Python-side type hint until now --
-# fixed in passing while adding "daybreak" (design doc round 78) below,
+# fixed in passing while adding "daybreak" below,
 # not a separate change.
 
 # Config key for the node-wide scrollback retention limit, stored via
@@ -53,8 +53,8 @@ SCROLLBACK_LIMIT_CONFIG_KEY = "chat_scrollback_limit"
 # Confirmed with Thiesi: enough to catch up on a conversation without
 # excessive per-channel storage. Node-wide default, overridable via
 # node_config; per-channel/per-user tuning is out of scope for the same
-# reason list_boards' sort order is node-wide only for now (design doc
-# round 18) — no per-user preference system exists yet.
+# reason list_boards' sort order is node-wide only for now
+# — no per-user preference system exists yet.
 _DEFAULT_SCROLLBACK_LIMIT = 100
 
 
@@ -111,7 +111,7 @@ def record_message(
     configured limit.
 
     `body` is required for `kind="message"` and `kind="daybreak"`
-    (design doc round 78 -- the announcement text itself, since a
+    -- the announcement text itself, since a
     daybreak event has no author to derive display text from the way
     "join"/"leave" do); for `"join"`/`"leave"` the kind alone carries
     the whole meaning of the event (see module docstring), so `body` is
@@ -167,7 +167,7 @@ def get_scrollback(db: Database, channel: Channel) -> list[ChannelMessage]:
     user reading back through history would expect. Unlike board posts
     (`netbbs.boards.posts.list_posts_page`), this doesn't need its own
     pagination: `record_message` already trims retained scrollback down
-    to `get_scrollback_limit(db)` on every insert (round 19/20), so
+    to `get_scrollback_limit(db)` on every insert, so
     what's fetched here is already small and bounded by construction,
     not by a query-time LIMIT."""
     rows = db.connection.execute(

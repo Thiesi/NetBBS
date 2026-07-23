@@ -1,5 +1,5 @@
 """Tests for netbbs.user_preferences — the generic per-user key-value
-store (design doc §13, sign-off round 38)."""
+store (design doc §13)."""
 
 from __future__ import annotations
 

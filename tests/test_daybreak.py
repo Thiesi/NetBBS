@@ -1,6 +1,6 @@
 """
-Tests for the local per-node "new day" chat announcement (design doc
-round 78) -- `netbbs.net.daybreak`. Pure-function pieces (message
+Tests for the local per-node "new day" chat announcement --
+`netbbs.net.daybreak`. Pure-function pieces (message
 formatting, midnight scheduling math, the "which channels are
 occupied" filter) are tested directly; `announce_new_day` and
 `run_daybreak_announcer` are driven through a real `ChatHub`/`Database`

@@ -1,6 +1,6 @@
 """
-Per-user chat timestamp preference (design doc round 32 point 3, round
-42 point 6, sign-off round 62): whether chat lines are prefixed with a
+Per-user chat timestamp preference (design doc, point 3):
+whether chat lines are prefixed with a
 display timestamp, defaulting to off. A thin typed wrapper over
 `netbbs.user_preferences`' generic per-user key-value store — the same
 pattern `netbbs.timeutil` already uses for the node-wide display
@@ -9,8 +9,8 @@ format/timezone settings.
 `format_with_preference` is the single place that combines the
 preference check, `netbbs.timeutil.format_for_display` (so this reuses
 the existing per-user/node display-timezone and display-format system
-rather than inventing chat-specific formatting rules, per round 32
-point 3), and the muted-color styling — reused identically by both
+rather than inventing chat-specific formatting rules), and the
+muted-color styling — reused identically by both
 `netbbs.net.chat_flow` (live chat, scrollback replay) and
 `netbbs.net.login_flow` (mailbox-flushed private messages), so the
 combination logic lives in exactly one place rather than being
@@ -44,9 +44,9 @@ def format_with_preference(db: Database, user: User, text: str, created_at: str)
     """Prefix `text` with a muted-color display timestamp if `user` has
     chat timestamps enabled, otherwise return `text` unchanged.
 
-    Deliberately time-only (`override_format="%H:%M"`, design doc round
-    77), not the node's full configured display format (which includes
-    the date) -- the same reasoning round 75 already applied to the
+    Deliberately time-only (`override_format="%H:%M"`),
+    not the node's full configured display format (which includes
+    the date) -- the same reasoning applied elsewhere to the
     status line's own clock: chat is an inherently *now* context, so a
     per-message date is static clutter, not information, for the
     overwhelming majority of a session's messages. Unlike the status

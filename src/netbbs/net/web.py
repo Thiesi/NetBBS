@@ -1,9 +1,9 @@
 """
-Web transport (design doc round 22/25): `aiohttp`-based, serving both
+Web transport (design doc): `aiohttp`-based, serving both
 the xterm.js terminal page and a websocket endpoint from one process.
 
-Structured JSON wire protocol confirmed in round 22, not raw byte
-passthrough — see that round's sign-off note for the full reasoning.
+Structured JSON wire protocol, not raw byte
+passthrough — see the design doc for the full reasoning.
 A browser has already resolved the raw-terminal-byte ambiguity
 `netbbs.net.char_input` exists to handle (a `keydown`/paste event
 already delivers decoded Unicode characters, not a byte stream needing
@@ -12,12 +12,12 @@ directly against decoded characters — reusing `char_input`'s
 byte-oriented `ByteSource` protocol here would mean forcing something
 that was never bytes back into a byte-shaped hole.
 
-Cursor-addressable editing and history recall (design doc round 47/
-Track 5f) reuse `char_input.move_cursor`/`redraw_tail`/`InputHistory`
+Cursor-addressable editing and history recall (design doc) reuse
+`char_input.move_cursor`/`redraw_tail`/`InputHistory`
 directly, though — those are pure `list[str]`/cursor-integer/`WriteFunc`
 manipulation with no dependency on bytes, so only the byte-vs-already-
 decoded-character *reading* half stays genuinely separate between the
-two transports, same split round 25 already established.
+two transports.
 
 **File transfer is not available over this transport.** Real Zmodem
 interop (`netbbs.net.zmodem`) depends on the *terminal client*
@@ -59,7 +59,7 @@ from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 _logger = logging.getLogger(__name__)
 
 # netbbs/web/static/, a sibling top-level package rather than living
-# under netbbs/net/ (design doc round 22, point 8) — asset files aren't
+# under netbbs/net/ (design doc) — asset files aren't
 # a transport-layer concern the way this module's actual code is.
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 
@@ -88,7 +88,7 @@ _MAX_QUEUED_CHARS = 8192
 # _CSI_FINAL_TO_KEY/_CSI_TILDE_TO_KEY/_SS3_TO_KEY exactly (same key set,
 # same reasoning) but keyed by already-decoded characters rather than
 # raw byte values, since that's what a browser's onData event delivers.
-# Page Up/Down (design doc -- welcome banner round B1, for
+# Page Up/Down (design doc -- welcome banner, for
 # netbbs.net.ansi_editor) added here in lockstep with char_input's own
 # table -- this decoder is independently maintained, not shared code,
 # so both need updating together (see read_editor_key's docstring).
@@ -108,7 +108,7 @@ _SPECIAL_TO_EDITOR_KIND: dict[str, EditorKeyKind] = {
     "DELETE": EditorKeyKind.DELETE,
     "PAGE_UP": EditorKeyKind.PAGE_UP,
     "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
-    # INSERT has no meaning for the ANSI editor in this round's scope --
+    # INSERT has no meaning for the ANSI editor --
     # see char_input.py's own _SYMBOLIC_TO_EDITOR_KIND for the same note.
 }
 
@@ -126,8 +126,8 @@ class _SpecialKey:
 def _parse_input_events(data: str) -> list[str | _SpecialKey]:
     """
     Splits a raw `onData` string into plain characters and recognized
-    `_SpecialKey`s (arrow keys, Home/End, Delete, Insert — design doc
-    round 47/Track 5f), discarding anything else escape-sequence-shaped
+    `_SpecialKey`s (arrow keys, Home/End, Delete, Insert — design doc),
+    discarding anything else escape-sequence-shaped
     as a complete unit — the same "recognize a few, discard the rest"
     scope `netbbs.net.char_input._read_escape_sequence` documents for
     Telnet/SSH, applied here at the point a whole keystroke event
@@ -311,8 +311,8 @@ class WebSession(Session):
     ) -> str:
         """
         Read one line, with the same cursor-addressable editing,
-        `history` recall (design doc round 47/Track 5f), and `completer`-
-        driven Tab completion (design doc round 49/Track 5g)
+        `history` recall (design doc), and `completer`-
+        driven Tab completion (design doc)
         `netbbs.net.char_input.read_line` provides for Telnet/SSH --
         reusing that module's `move_cursor`/`redraw_tail`/
         `apply_tab_completion` helpers directly rather than re-deriving
@@ -322,11 +322,11 @@ class WebSession(Session):
         as the Telnet/SSH path and for the same reason -- see that
         module's `read_line` docstring.
 
-        `live_buffer`/`lock`/`list_candidates` (design doc round 79)
+        `live_buffer`/`lock`/`list_candidates` (design doc)
         mirror `netbbs.net.char_input.read_line`'s own identically-named
         parameters exactly -- see that function's docstring. This
         transport's `_read_line_editable` is a separate reimplementation
-        (round 25: a browser already delivers decoded characters, not
+        (a browser already delivers decoded characters, not
         raw bytes, so it can't share `char_input`'s `ByteSource`-based
         reading), so the same pinned-input hooks need mirroring here too
         for chat's pinned input row to behave identically over web.
@@ -377,7 +377,7 @@ class WebSession(Session):
             item = await self._read_item()
 
             # Mirrors netbbs.net.char_input._read_line_editable's own
-            # identical wrapping exactly (design doc round 79) -- see
+            # identical wrapping exactly (design doc) -- see
             # that function's comment for the full reasoning: one
             # atomic critical section per keystroke under `lock`, with
             # `live_buffer` refreshed in `finally` so it happens exactly
@@ -530,7 +530,7 @@ class WebSession(Session):
         This module's escape-sequence decoder (`_parse_input_events`/
         `_CSI_*_TO_KEY` above) is independently maintained from
         `netbbs.net.char_input`'s -- not shared code, a known, accepted
-        duplication (design doc -- welcome banner round B1) rather than
+        duplication (design doc -- welcome banner) rather than
         an unscoped refactor to unify two transports' worth of
         already-working decoding. `_SPECIAL_TO_EDITOR_KIND` is the
         translation from this module's own `_SpecialKey` vocabulary to

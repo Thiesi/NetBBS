@@ -143,9 +143,9 @@ def db(tmp_path):
 
 @pytest.fixture
 def lane(tmp_path):
-    # netbbs.net.file_flow is migrated onto design doc round 91's
-    # two-lane database execution model (issue #57/round 112) -- a
-    # second, independent connection to the same file the `db` fixture
+    # netbbs.net.file_flow is migrated onto the two-lane database
+    # execution model (issue #57) -- a second, independent connection
+    # to the same file the `db` fixture
     # above opens, matching real node startup.
     database_lane = DatabaseLane(tmp_path / "node.db")
     yield database_lane

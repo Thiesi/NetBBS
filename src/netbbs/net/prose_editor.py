@@ -1,8 +1,8 @@
 """
-The fullscreen prose editor (design doc -- prose editor round B2): a
+The fullscreen prose editor (design doc -- prose editor): a
 nano-keybound, word-wrapping, scrolling text composer, built on the
 same screen-buffer/diff foundation and control-loop shape as
-`netbbs.net.ansi_editor` (round B1) -- but with a genuinely different
+`netbbs.net.ansi_editor` -- but with a genuinely different
 editing core underneath. The ANSI editor is a fixed-grid paint tool
 (arrows move a cursor over a canvas, typing overwrites a cell, no
 insertion, no wrap); this is real insert-mode text editing over
@@ -22,7 +22,7 @@ Viewport size is the session's *actual negotiated terminal size*
 row), not a fixed canvas -- unlike the ANSI editor, where 80x24 is the
 *content's* own dimensions, prose has no fixed size of its own, so this
 follows the same session-adaptive sizing `netbbs.net.picker` already
-uses (design doc round 16) rather than inventing a fixed default.
+uses (design doc) rather than inventing a fixed default.
 """
 
 from __future__ import annotations
@@ -221,7 +221,7 @@ def _dispatch(state: _EditorState, key: EditorKey, width: int, height: int) -> b
             return True
         buffer.insert_char(key.char)
         state.dirty = True
-    # TAB and unrecognized kinds: no-op in this round's scope, matching
+    # TAB and unrecognized kinds: no-op, matching
     # netbbs.net.ansi_editor._dispatch's own precedent -- no tab-width
     # convention has been settled on, so inserting a raw tab character
     # (unpredictable rendering width across terminals) is deliberately

@@ -1,6 +1,6 @@
 """
 Tests for netbbs.__main__'s configuration-driven startup and graceful
-shutdown (design doc round 28, issue #15).
+shutdown (issue #15).
 
 `run()` is deliberately structured to be testable without real OS
 signals or a real subprocess: it takes an injectable `shutdown_event`
@@ -37,7 +37,7 @@ from netbbs.storage.execution import DatabaseLane
 def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
     """
     `seed_sysop=True` by default: `run()` refuses to start at all with
-    zero SysOp-level accounts (design doc -- SysOp foundation round),
+    zero SysOp-level accounts (design doc §4.3),
     and every test in this file except the one that specifically
     exercises that refusal wants a normally-startable node -- seeding
     here once, centrally, avoids repeating a create_user call at every
@@ -95,7 +95,7 @@ async def _open_connection_when_ready(host: str, port: int, *, timeout: float = 
             await asyncio.sleep(0.02)
 
 
-# -- node Link identity bootstrap (design doc round 89/111) ------------------
+# -- node Link identity bootstrap --------------------------------------------
 
 
 def test_run_bootstraps_node_identity_on_first_startup(tmp_path):
@@ -227,11 +227,10 @@ def test_configured_telnet_listener_on_known_port_accepts_connections(tmp_path):
 
 
 def test_configured_link_listener_completes_a_real_hello(tmp_path):
-    """design doc round 118: a real running node's Link listener
-    actually answers a genuine dial_hello -- not just "something is
-    listening" (test_configured_telnet_listener above), but a
-    verified, signed handshake against the node's own real, loaded
-    NodeIdentity."""
+    """A real running node's Link listener actually answers a genuine
+    dial_hello -- not just "something is listening" (test_configured_
+    telnet_listener above), but a verified, signed handshake against
+    the node's own real, loaded NodeIdentity."""
     import aiohttp
 
     async def scenario():
@@ -272,8 +271,8 @@ def test_configured_link_listener_completes_a_real_hello(tmp_path):
 
 
 def test_configured_link_seed_is_dialed_by_a_real_running_node(tmp_path):
-    """design doc round 119: a real running node with [link] seeds
-    configured actually *originates* a hello to that seed on its own,
+    """A real running node with [link] seeds configured actually
+    *originates* a hello to that seed on its own,
     unprompted -- not just answering one (the test above). Drives a
     bare LinkServer as the "seed" (not a second full netbbs node --
     tests/test_link_sync.py already covers the sync loop's own
@@ -488,8 +487,8 @@ def test_link_alone_does_not_count_as_an_interactive_listener(tmp_path):
     """A node configured with only Link enabled (no telnet/ssh/web) has
     nothing a *user* can connect to -- must still raise StartupError,
     even though the Link listener itself would start fine. Confirms
-    round 118's any_interactive_started tracking is genuinely separate
-    from the servers list Link also participates in."""
+    any_interactive_started tracking is genuinely separate from the
+    servers list Link also participates in."""
 
     async def scenario():
         config = _config(
@@ -509,7 +508,7 @@ def test_shutdown_event_and_graceful_delay_reach_handle_session(tmp_path, monkey
     """
     Confirms `run()`'s `session_handler` closure actually threads its
     real `shutdown_event`/`config.shutdown.graceful_delay_seconds` all
-    the way into `handle_session` (design doc -- node management round)
+    the way into `handle_session` (design doc §13.8)
     -- not just that `handle_session`'s own signature accepts them.
 
     Monkeypatches `_run_authenticated_session` to a spy that captures
@@ -658,7 +657,7 @@ def test_run_writes_and_removes_its_own_pid_file(tmp_path):
     asyncio.run(scenario())
 
 
-# -- zero-SysOp startup refusal (design doc -- SysOp foundation round) ------
+# -- zero-SysOp startup refusal (design doc §4.3) ------
 
 
 def test_zero_sysops_raises_startup_error(tmp_path):

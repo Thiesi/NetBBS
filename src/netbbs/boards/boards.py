@@ -21,9 +21,9 @@ from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
 # Supported list_boards() sort orders. "activity" is the current default
-# (see design doc round 17 sign-off notes) -- creation-order was judged a
-# pure implementation convenience that doesn't match how anyone would
-# actually want to browse boards (Thiesi's example: a single politics
+# -- creation-order was judged a pure implementation convenience that
+# doesn't match how anyone would actually want to browse boards
+# (example: a single politics
 # board created between two batches of unrelated vintage-computing boards
 # ends up sitting in the middle of them under creation-order, satisfying
 # nobody). "volume" (total post count) is a genuinely different signal
@@ -45,7 +45,7 @@ class Board:
     board_id: str
     name: str
     description: str | None
-    # Nullable (design doc §16, round 84's correction): NULL means
+    # Nullable (design doc §16): NULL means
     # "inherit this Community's default, or the system default of 0 if
     # this board has no Community" -- see
     # netbbs.communities.get_effective_min_read_level/
@@ -58,14 +58,14 @@ class Board:
     created_at: str
     moderated: bool
     max_post_age_days: int | None
-    # Age/name-gating (design doc §18, rounds 85/86/101) -- nullable,
-    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Age/name-gating (design doc §18) -- nullable,
+    # NULL means no gate *and* (§16) "inherit this
     # Community's default" if this board belongs to one. Enforced
     # alongside min_read_level/min_write_level wherever those already
     # are; see netbbs.net.login_flow's board-browsing/posting checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
-    # Zero-or-one, nullable FK (design doc §16, round 83) -- a board
+    # Zero-or-one, nullable FK (design doc §16) -- a board
     # never belongs to more than one Community; NULL is a real,
     # distinct, common state ("Uncategorized"), not a fallback.
     community_id: int | None
@@ -108,18 +108,18 @@ def create_board(
     board's own maintenance/expiry threshold (design doc §13); `None`
     means retain indefinitely, the default.
 
-    `min_age`/`name_requirement` (design doc §18, round 101) are the
+    `min_age`/`name_requirement` (design doc §18) are the
     same nullable-means-no-gate shape as everything else here — see
     `netbbs.attestation.meets_age`/`meets_name_requirement` for the
     actual check, enforced by callers alongside `min_read_level`/
     `min_write_level` rather than inside this function.
 
     `min_read_level`/`min_write_level` are also nullable (design doc
-    §16, round 84's correction) -- `None` means inherit `community_id`'s
+    §16) -- `None` means inherit `community_id`'s
     Community default (or the system default of 0 if `community_id` is
     also `None`), while the default of `0` here preserves this
     function's original always-explicit behavior for every existing
-    caller. `community_id` (round 83) optionally places the board under
+    caller. `community_id` optionally places the board under
     a `netbbs.communities.Community` -- zero-or-one, same shape as
     `category_id` but the outer layer, not a replacement for it.
 
@@ -195,8 +195,8 @@ def list_boards(db: Database, *, order_by: str = "activity") -> list[Board]:
         as active from content ordinary readers can't even see would
         leak that hidden activity exists. An edit does count as fresh
         activity even though it deliberately doesn't move its post's
-        own position within the board's own feed (design doc -- prose
-        editor round B2) -- those are different concerns at different
+        own position within the board's own feed -- those are different
+        concerns at different
         granularities: intra-board feed position vs. board-list
         activity ranking (GitHub issue #36).
       - "alphabetical": by name, case-insensitive.
@@ -306,16 +306,15 @@ def update_board(
     changed_by: User,
 ) -> Board:
     """
-    Replace `board`'s editable settings with the given full state
-    (design doc -- board/area management round) -- every field is
-    required, not a partial/PATCH-style update; the admin UI is
-    responsible for pre-filling a caller's edits with the board's
+    Replace `board`'s editable settings with the given full state --
+    every field is required, not a partial/PATCH-style update; the admin
+    UI is responsible for pre-filling a caller's edits with the board's
     current values as defaults, keeping this function itself simple.
     `board_id`/`created_at` are immutable, not accepted here.
 
-    `min_age`/`name_requirement` follow design doc §18 (round 101) --
+    `min_age`/`name_requirement` follow design doc §18 --
     see `create_board`'s docstring. `min_read_level`/`min_write_level`
-    (nullable, §16 round 84) and `community_id` (§16 round 83) follow
+    (nullable, §16) and `community_id` (§16) follow
     that same docstring's Community-inheritance reasoning.
     """
     if name_requirement not in (None, "verified", "verified_and_displayed"):
@@ -350,7 +349,7 @@ def update_board(
 def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
     """
     Permanently remove `board`, along with its posts, any moderator
-    grants scoped to it (design doc -- board/area management round),
+    grants scoped to it,
     and any per-user read-cursor/follow rows for it (issue #56).
 
     No `ON DELETE` behavior exists in the schema for this -- rebuilding
@@ -364,7 +363,7 @@ def delete_board(db: Database, board: Board, *, deleted_by: User) -> None:
     cleanup already has to be (it has no FK at all, being polymorphic)
     -- explicit deletes, in the correct order, inside one transaction.
     Logged before deleting, not after, matching `delete_user`'s own
-    "log first" reasoning (design doc round 57).
+    "log first" reasoning.
     """
     record_action(
         db, actor=deleted_by, action="delete_board", object_type="board", object_id=board.id,

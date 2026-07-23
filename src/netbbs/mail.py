@@ -1,17 +1,17 @@
 """
-Local asynchronous personal mail (design doc round 93, resolving the
+Local asynchronous personal mail (design doc, resolving the
 local half of issue #52).
 
 Deliberately a new, persistent domain -- not the same mechanism as
 `/msg` (`netbbs.chat.mailbox`), which stays exactly what it is:
 ephemeral, online-only, session-addressed, with no fallback to
-persistence (round 32's own explicit prohibition). This module is the
+persistence (an explicit prohibition). This module is the
 opposite shape on purpose: one message per row, independently
 toggleable read/deleted state per side, and a quota that never
 silently destroys something the recipient hasn't seen yet.
 
 Link messages (the Phase 3 extension of this same mailbox) are not part
-of this module -- see design doc round 93's "Link messages" half for
+of this module -- see design doc's "Link messages" half for
 that design; nothing here assumes or depends on it.
 """
 
@@ -35,8 +35,8 @@ MAX_MAIL_BODY_BYTES = 20_000
 # module constant, not a SysOp-configurable node_config setting, same
 # shape as netbbs.chat.mailbox.MessageMailbox's own per-session cap and
 # netbbs.chat.hub.ChatHub's queue bounds. Generous enough that no
-# realistically-paced correspondence ever comes close; round 93 didn't
-# call for per-node tuning, so this isn't built as a knob speculatively.
+# realistically-paced correspondence ever comes close; the design doc
+# doesn't call for per-node tuning, so this isn't built as a knob speculatively.
 MAX_MAIL_PER_RECIPIENT = 500
 
 
@@ -50,7 +50,7 @@ class MailError(Exception):
 class MailboxFullError(Exception):
     """
     Raised when `send_mail` would otherwise have to silently destroy an
-    *unread* message to make room (design doc round 93: "never silently
+    *unread* message to make room (design doc: "never silently
     drop something a user hasn't seen yet"). The caller is expected to
     report this back to the sender as a bounce -- the message is never
     stored.
@@ -85,7 +85,7 @@ def send_mail(db: Database, sender: User, recipient: User, subject: str, body: s
     `netbbs.chat.hub.ChatHub`'s queues and `netbbs.chat.mailbox.
     MessageMailbox`'s own per-session cap). If the inbox is entirely
     unread and full, raises `MailboxFullError` instead of destroying an
-    unread message -- deterministic, matching design doc round 93's own
+    unread message -- deterministic, matching the design doc's own
     acceptance criterion.
     """
     subject = subject.strip()

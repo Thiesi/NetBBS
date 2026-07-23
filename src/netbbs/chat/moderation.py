@@ -1,7 +1,7 @@
 """
 Chat channel moderation: mute/ban/kick (design doc §13), gated by
 `netbbs.moderation.roles.ChannelPermission.MODERATE` — the single bit
-Track 1 bundles all three under, since §13 describes them as one
+all three are bundled under, since §13 describes them as one
 bundled capability of being a chat moderator, not independently
 combinable permissions.
 
@@ -14,9 +14,9 @@ cross-feature grant/log primitives).
 Mute and ban share one table (`channel_restrictions`, discriminated by
 `kind`) since they're structurally identical: same duration/expiry
 shape, same "is there a live, non-expired row for (channel, user)"
-check. No cleanup sweep for expired rows — unlike design doc round
-35/36's board/file expiry (where deleting the row was the point of the
-feature), a stale expired mute/ban row causes no problem just sitting
+check. No cleanup sweep for expired rows — unlike board/file expiry
+(where deleting the row was the point of the feature), a stale
+expired mute/ban row causes no problem just sitting
 there; `is_muted`/`is_banned` simply filter it out at check time.
 
 `kick_user` only handles the permission check and audit trail — it

@@ -215,7 +215,7 @@ def test_list_grants_for_object_includes_blanket_grants(db, sysop, alice, bob):
     assert user_ids == {alice.id, bob.id}
 
 
-# -- Community-blanket tier (design doc §16, round 83) ----------------------
+# -- Community-blanket tier (design doc §16) ---------------------------------
 
 
 def test_grant_permissions_community_blanket_uses_none_object_id_and_community_id(db, sysop, alice):
@@ -313,7 +313,7 @@ def test_revoke_permissions_records_moderation_log_entry(db, sysop, alice):
     assert [e.action for e in entries] == ["grant", "revoke"]
 
 
-# -- SysOp bypass (design doc -- board/area management round) --------------
+# -- SysOp bypass --------------
 #
 # The `sysop` fixture above is level 100 -- a pre-existing test-suite
 # convention, not the real SYSOP_LEVEL (255) constant -- so it does NOT

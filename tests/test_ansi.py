@@ -79,9 +79,9 @@ def test_colored_with_underline_wraps_and_resets():
 
 
 def test_colored_combines_underline_with_a_distinct_fg_per_call():
-    # The chat status line's own reason for this combination (design
-    # doc round 77's redesign): each field gets its own color, but the
-    # underline must still run continuously once several such calls are
+    # The chat status line's own reason for this combination: each
+    # field gets its own color, but the underline must still run
+    # continuously once several such calls are
     # concatenated -- unlike `reverse`, which fights over one shared
     # background per row.
     first = colored("alice", fg_color=201, underline=True)
@@ -112,7 +112,7 @@ def test_move_cursor_rejects_non_positive_coordinates():
         move_cursor(-1, 5)
 
 
-# -- design doc round 75: scroll region + save/restore cursor --------------
+# -- scroll region + save/restore cursor -------------------------------------
 # -- (the chat status line's underlying primitives) -------------------------
 
 

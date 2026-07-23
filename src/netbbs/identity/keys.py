@@ -326,8 +326,8 @@ def load_identity(path: Path, passphrase: bytes | None = None) -> Identity:
 
 def parse_verify_key(text: str) -> nacl.signing.VerifyKey:
     """
-    Parse a public key pasted by a human (design doc -- SysOp foundation
-    round, the admin account-creation flow) into a `VerifyKey`.
+    Parse a public key pasted by a human (design doc -- SysOp foundation,
+    the admin account-creation flow) into a `VerifyKey`.
 
     Accepts either this project's own base64 raw-key form (what
     `users.public_key` stores) or a standard OpenSSH public-key line

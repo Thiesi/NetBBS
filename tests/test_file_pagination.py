@@ -1,6 +1,6 @@
 """
 Tests for netbbs.files.entries.list_files_page and get_file_by_name
-(design doc round 31, issue #10's file-area follow-up) -- mirrors
+(issue #10's file-area follow-up) -- mirrors
 tests/test_post_pagination.py's structure and coverage exactly, since
 list_files_page deliberately mirrors list_posts_page's design.
 """
@@ -144,9 +144,9 @@ def test_composite_file_pagination_index_exists(db):
 
 
 def test_get_file_by_name_finds_a_file_not_on_the_newest_page(db, alice, monkeypatch):
-    """The whole reason get_file_by_name exists (design doc round 31):
-    /download must still work for a file that isn't on the currently
-    displayed (newest) page."""
+    """The whole reason get_file_by_name exists: /download must still
+    work for a file that isn't on the currently displayed (newest)
+    page."""
     area = create_file_area(db, "docs", creator=alice)
     _upload_with_distinct_timestamps(db, area, alice, monkeypatch, count=10)
 

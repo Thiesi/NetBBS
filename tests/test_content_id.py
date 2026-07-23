@@ -1,8 +1,8 @@
 """Tests for netbbs.boards.content_id — deterministic content addressing.
 
-The NFC-normalization/float-rejection tests below cover design doc round
-110's canonicalization rule, formalizing what this module already did
-informally since round 7."""
+The NFC-normalization/float-rejection tests below cover the design
+doc's canonicalization rule, formalizing what this module already did
+informally."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_none_values_affect_id_distinctly_from_missing_or_string():
     assert len({a, b, c}) == 3
 
 
-# -- round 110: Unicode NFC normalization ------------------------------------
+# -- Unicode NFC normalization ------------------------------------------------
 
 
 def test_nfc_and_nfd_forms_of_the_same_text_produce_the_same_id():
@@ -103,7 +103,7 @@ def test_non_colliding_unicode_keys_do_not_raise():
     compute_content_id({"café": "value", "plain": "x"})  # must not raise
 
 
-# -- round 110: floats forbidden ----------------------------------------------
+# -- floats forbidden ----------------------------------------------------------
 
 
 def test_float_field_raises():
@@ -150,7 +150,7 @@ def test_nested_out_of_range_integer_raises():
         compute_content_id({"payload": {"items": [1, 2**53]}})
 
 
-# -- round 110: canonical_json_bytes is the same bytes compute_content_id hashes --
+# -- canonical_json_bytes is the same bytes compute_content_id hashes --------
 
 
 def test_canonical_json_bytes_matches_what_compute_content_id_hashes():

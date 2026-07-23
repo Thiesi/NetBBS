@@ -1,5 +1,5 @@
 """
-SSH transport (design doc round 21/22).
+SSH transport (design doc).
 
 Mirrors `netbbs.net.telnet`'s shape — a `Session` implementation plus a
 server class with `start`/`serve_forever`/`stop`/`port` — so
@@ -18,8 +18,8 @@ Sessions run in binary mode (`encoding=None`) for the same reason
 reconstruction decode multi-byte characters — decoding a raw byte at a
 time as text would corrupt every non-ASCII character.
 
-Both password and Ed25519 public-key auth are supported from day one
-(design doc round 22, point 3) — the latter finally exercises the
+Both password and Ed25519 public-key auth are supported
+(design doc) — the latter finally exercises the
 already-implemented keypair login path via any standard SSH client, no
 NetBBS-aware client needed. SSH's own protocol already proves possession
 of the private key before `validate_public_key` is ever called, so this
@@ -145,9 +145,9 @@ class SSHSession(Session):
         lock: asyncio.Lock | None = None,
         list_candidates: char_input.CandidateListPrinter | None = None,
     ) -> str:
-        # live_buffer/lock/list_candidates (design doc round 79) pass
-        # straight through to char_input.read_line unchanged -- see that
-        # function's docstring.
+        # live_buffer/lock/list_candidates pass straight through to
+        # char_input.read_line unchanged -- see that function's
+        # docstring.
         return await char_input.read_line(
             self, self.write, echo, history, completer,
             live_buffer=live_buffer, lock=lock, list_candidates=list_candidates,
@@ -211,7 +211,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
     not stored as a class attribute.
 
     `throttle` is `netbbs.net.login_flow`'s cross-connection
-    `LoginThrottle` (design doc round 28, issue #3), shared with
+    `LoginThrottle` (design doc, issue #3), shared with
     Telnet/web. Only the per-source/per-username/global token-bucket
     check (`allow_attempt`) applies here — the concurrent-
     unauthenticated-session cap and idle-timeout pieces of the same
@@ -226,7 +226,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         self._throttle = throttle
         self._peer_address: str | None = None
         # Multi-round keyboard-interactive registration state (design
-        # doc round 76) -- see get_kbdint_challenge/validate_kbdint_
+        # doc) -- see get_kbdint_challenge/validate_kbdint_
         # response below. None whenever no registration attempt (a kbdint
         # auth try against the reserved NEW_ACCOUNT_SENTINEL username) is
         # currently in progress on this connection.
@@ -290,7 +290,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         return True
 
     # -- self-service registration via keyboard-interactive auth
-    # (design doc round 76) --------------------------------------------
+    # (design doc) --------------------------------------------
     #
     # SSH has no notion of "create an account, then continue as it" --
     # the authenticated identity for a connection is fixed to whatever
@@ -302,7 +302,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
     # attempt on purpose, after showing a final message -- the client
     # must reconnect using the new username to actually log in. This is
     # an inherent SSH protocol property, not a workaround limitation
-    # (see the design doc round 76 sign-off note for the full reasoning,
+    # (see the design doc for the full reasoning,
     # and netbbs.net.login_flow._register_new_account for Telnet/web's
     # equivalent, which *can* hand the connection straight into a live
     # session since it has no such constraint).
@@ -357,7 +357,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         if username.strip().lower() != NEW_ACCOUNT_SENTINEL:
             return False
         if get_registration_mode(self._db) == RegistrationMode.CLOSED:
-            # Round 96: `closed` mode hides registration entirely --
+            # `closed` mode hides registration entirely --
             # simply never offering the keyboard-interactive challenge
             # means an asyncssh client sees 'new' fail like any other
             # nonexistent username, the SSH-side equivalent of Telnet/

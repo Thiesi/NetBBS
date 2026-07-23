@@ -40,8 +40,8 @@ def set_config(db: Database, key: str, value: str) -> None:
 
 
 # Config key for the node-wide grace period between a post/file
-# expiring and actually being deleted (design doc §13/§15, sign-off
-# round 35). Deliberately a single node-wide default rather than a
+# expiring and actually being deleted (design doc §13/§15). Deliberately
+# a single node-wide default rather than a
 # per-board/per-area column — nothing in the design doc asks for
 # per-object control over it, unlike max post age, which genuinely is
 # per-board (see netbbs.boards.boards.Board.max_post_age_days).
@@ -112,22 +112,21 @@ def set_invitation_expiry_days(db: Database, days: int | None) -> None:
 
 class RegistrationMode(str, Enum):
     """
-    A node's registration posture (design doc round 96) -- three real
+    A node's registration posture (design doc) -- three real
     BBS operating postures, not a binary:
 
     - `OPEN` -- self-registration active immediately (the default,
       preserving this setting's original boolean behavior).
     - `APPROVAL_REQUIRED` -- self-registration creates a
       `pending_approval` account a SysOp must approve before it can log
-      in (design doc round 76's original behavior, unchanged).
+      in (original behavior, unchanged).
     - `CLOSED` -- no public registration surface at all; every account
-      is SysOp-created. New in round 96 -- round 87 had already
-      correctly noted no such switch previously existed.
+      is SysOp-created.
 
     A single tri-state field rather than two independent booleans,
     since one combination of the old shape (registration disabled +
     still requiring approval) would have been a representable-but-
-    meaningless state -- same reasoning as round 84's nullable-vs-
+    meaningless state -- same reasoning as the nullable-vs-
     explicit-zero fix for Community inheritance.
     """
 
@@ -138,8 +137,8 @@ class RegistrationMode(str, Enum):
 
 REGISTRATION_MODE_CONFIG_KEY = "registration_mode"
 
-# Superseded by REGISTRATION_MODE_CONFIG_KEY (round 96) -- kept only so
-# get_registration_mode can read a pre-round-96 database's stored value
+# Superseded by REGISTRATION_MODE_CONFIG_KEY -- kept only so
+# get_registration_mode can read an older database's stored value
 # without a batch migration. Never written by current code.
 _LEGACY_REQUIRE_REGISTRATION_APPROVAL_CONFIG_KEY = "require_registration_approval"
 
@@ -149,10 +148,10 @@ def get_registration_mode(db: Database) -> RegistrationMode:
     The node's current registration posture.
 
     Checks the current key first; if it's never been set, falls back to
-    translating a pre-round-96 database's legacy boolean (`"1"` ->
+    translating an older database's legacy boolean (`"1"` ->
     `APPROVAL_REQUIRED`, anything else -> `OPEN`) rather than requiring
     an explicit migration step -- the same computed-at-read-time
-    philosophy round 8/9 already established for other node_config
+    philosophy already established for other node_config
     values. Once a SysOp sets a mode via `set_registration_mode`, the
     new key takes over and the legacy one is never consulted again for
     this node.

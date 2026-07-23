@@ -1,5 +1,5 @@
-"""Tests for /me (design doc round 32/40) — a typed action event,
-distinct from tests/test_chat_dispatch.py's dispatcher-level coverage."""
+"""Tests for /me — a typed action event, distinct from
+tests/test_chat_dispatch.py's dispatcher-level coverage."""
 
 from __future__ import annotations
 

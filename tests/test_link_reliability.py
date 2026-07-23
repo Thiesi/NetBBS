@@ -1,4 +1,4 @@
-"""Tests for `netbbs.link.reliability` (design doc §12 round 95, issue
+"""Tests for `netbbs.link.reliability` (design doc §12, issue
 #58) -- the from-scratch, direct-observation-only dial reliability
 tracker, built because §6's own reputation system (which the design
 doc assumed relay scoring would reuse) doesn't exist anywhere in this

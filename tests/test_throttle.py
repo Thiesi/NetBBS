@@ -1,4 +1,4 @@
-"""Tests for netbbs.net.throttle (design doc round 28, issue #3)."""
+"""Tests for netbbs.net.throttle (issue #3)."""
 
 from __future__ import annotations
 

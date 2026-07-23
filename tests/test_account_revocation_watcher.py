@@ -124,8 +124,8 @@ async def _drive(db, hub, presence, mailbox, registry, user, session):
     as the watcher's own cancel_one() call requires (it looks the
     session up by identity in that registry).
 
-    Constructs a real `DatabaseLane` (design doc round 91/112) so a
-    session that reaches the file-area branch actually enters it,
+    Constructs a real `DatabaseLane` so a session that reaches the
+    file-area branch actually enters it,
     rather than hitting the lane-is-None degrade and blocking one level
     up at the main menu instead -- `test_watcher_disconnects_a_session_
     stuck_inside_a_file_area` specifically needs the former to test what

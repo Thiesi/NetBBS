@@ -1,14 +1,13 @@
 """
-UI-level tests for `netbbs.net.mail_flow` (design doc round 93/104):
-local asynchronous personal mail wired into the main menu. The
-underlying persistence/quota/deletion semantics are covered at the
-library level in tests/test_mail.py -- these drive the real
-`netbbs.net.login_flow._main_menu` / `netbbs.net.mail_flow.browse_mail`
-entry points instead.
+UI-level tests for `netbbs.net.mail_flow`: local asynchronous personal
+mail wired into the main menu. The underlying persistence/quota/deletion
+semantics are covered at the library level in tests/test_mail.py --
+these drive the real `netbbs.net.login_flow._main_menu` /
+`netbbs.net.mail_flow.browse_mail` entry points instead.
 
-`netbbs.net.mail_flow` is the first module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 111) --
-`browse_mail` (and everything it calls) now takes a `DatabaseLane`
+`netbbs.net.mail_flow` is the first module migrated onto the two-lane
+database execution model (issue #57) -- `browse_mail` (and everything
+it calls) now takes a `DatabaseLane`
 instead of a `Database`, so every test here constructs one instead.
 Direct `Database` calls (`create_user`, `send_mail`, `list_inbox`, etc.)
 used purely for test setup/assertions -- not exercising mail_flow.py's
@@ -351,7 +350,7 @@ def test_compose_reports_bounce_when_mailbox_is_full(tmp_path, monkeypatch):
     db.close()
 
 
-# -- compose: Link addresses (design doc round 93) ----------------------------
+# -- compose: Link addresses --------------------------------------------------
 
 
 def _link_context_with_known_peer(db, node_identity, peer_identity):

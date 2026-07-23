@@ -2,13 +2,13 @@
 Generic moderation audit log (design doc §13: "All actions logged").
 
 One shared table for every moderation action, rather than a
-bespoke log for each feature: moderator-grant/revoke (this round),
-and mute/ban/kick and moderated-board approval once those tracks
+bespoke log for each feature: moderator-grant/revoke,
+and mute/ban/kick and moderated-board approval once those
 exist. Built now, ahead of most of its consumers, for the same
 anti-retrofit reason `netbbs.permissions.levels` was built ahead of a
-menu/command dispatch layer to plug into (design doc round 34) —
+menu/command dispatch layer to plug into (design doc) —
 better to design this against two real, if not-yet-all-built,
-consumers than have Track 2/3 each invent their own logging.
+consumers than have each later consumer invent its own logging.
 
 No action-specific columns: `action` is a short free-text label
 ("grant", "revoke", ...), `detail` is a human-readable free-text
@@ -30,9 +30,9 @@ from netbbs.timeutil import utc_now_iso
 @dataclass(frozen=True)
 class ModerationLogEntry:
     id: int
-    # Nullable since design doc's SysOp-foundation round: the account
-    # that performed an action can later be hard-deleted (ON DELETE SET
-    # NULL) without destroying the audit trail that names it.
+    # Nullable: the account that performed an action can later be
+    # hard-deleted (ON DELETE SET NULL) without destroying the audit
+    # trail that names it.
     actor_user_id: int | None
     action: str
     object_type: str | None

@@ -1,15 +1,15 @@
 """
-Tests for the pinned chat input row (design doc round 79): a fixed row
-just above the status line, kept out of ordinary scrolling the same way
-the status line itself is (`netbbs.rendering.set_scroll_region`), safe
-against an incoming message arriving mid-keystroke.
+Tests for the pinned chat input row: a fixed row just above the status
+line, kept out of ordinary scrolling the same way the status line
+itself is (`netbbs.rendering.set_scroll_region`), safe against an
+incoming message arriving mid-keystroke.
 
 Most of this file drives the real `_chat_loop` through the same
 whole-line-scripted `FakeSession` other chat tests use (`tests.
 test_chat_flow_moderation.FakeSession`) -- adequate for confirming the
-row is painted, redrawn after a command, etc. The one test that
-actually matters most for this round (`test_...`) needs something more
-capable: `_LiveTypingSession`, a real byte-fed session driving
+row is painted, redrawn after a command, etc. The test that most
+directly exercises live typing needs something more capable:
+`_LiveTypingSession`, a real byte-fed session driving
 `netbbs.net.char_input.read_line`'s genuine per-keystroke loop, so
 `live_buffer`/`lock` are genuinely exercised rather than bypassed --
 `FakeSession`'s whole-line scripting never touches either.
@@ -114,9 +114,8 @@ def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox
 
 def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence, mailbox, channel, alice):
     """A pure-function check on `_repaint_input_row`'s own truncation
-    behavior (design doc round 79) -- doesn't need a real `_chat_loop`
-    at all, just a `LiveInputBuffer` with more text than an narrow
-    terminal can show."""
+    behavior -- doesn't need a real `_chat_loop` at all, just a
+    `LiveInputBuffer` with more text than an narrow terminal can show."""
 
     class _NarrowSession:
         def __init__(self):
@@ -139,9 +138,8 @@ def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence
 
 
 def test_pinned_ui_min_height_requires_three_rows(lane, hub, presence, mailbox, channel, alice):
-    """Design doc round 79: one more than the status-line-only minimum
-    (2, round 75) -- at least one row of actual scrolling content, plus
-    both reserved rows."""
+    """One more than the status-line-only minimum (2) -- at least one
+    row of actual scrolling content, plus both reserved rows."""
     session = FakeSession(["/quit"])
     session.terminal_height = 2  # one below _PINNED_UI_MIN_HEIGHT (3)
     history = InputHistory()
@@ -164,8 +162,8 @@ class _LiveTypingSession(Session):
     unlike `FakeSession`'s whole-line scripting (which returns an
     entire logical line instantly, bypassing `netbbs.net.char_input`
     entirely), this drives the real character-by-character `read_line`
-    loop, so `live_buffer`/`lock` (design doc round 79) are genuinely
-    exercised rather than trivially unreachable. `feed()` pushes bytes
+    loop, so `live_buffer`/`lock` are genuinely exercised rather than
+    trivially unreachable. `feed()` pushes bytes
     from the test at whatever pace the test wants; `read_byte()` blocks
     until more arrive, the same way a real transport waits on a slow
     typist -- this is what lets a test pause mid-line and interject a
@@ -237,11 +235,10 @@ class _LiveTypingSession(Session):
 
 def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, mailbox, channel, alice, bob):
     """
-    The actual bug this whole round exists to fix: an incoming chat
-    message arriving while alice is mid-keystroke must not corrupt or
-    lose what she's already typed -- it should scroll in above the
-    pinned input row, which is then redrawn showing her still-intact
-    in-progress text (design doc round 79).
+    An incoming chat message arriving while alice is mid-keystroke must
+    not corrupt or lose what she's already typed -- it should scroll in
+    above the pinned input row, which is then redrawn showing her
+    still-intact in-progress text.
     """
 
     async def scenario():
@@ -596,11 +593,11 @@ def test_shrink_below_minimum_mid_session_then_receive_broadcast_does_not_crash(
 
 
 def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(lane, hub, presence, mailbox, channel, alice):
-    """The reverse transition, also broken before this fix (design doc
-    round 79's pinned UI never rechecked height after entry at all): a
-    session that enters chat too short to support the pinned UI, then
-    grows past the threshold, must have the scroll region and both
-    pinned rows (re-)initialized -- not remain permanently unpinned."""
+    """The reverse transition: a session that enters chat too short to
+    support the pinned UI, then grows past the threshold, must have the
+    scroll region and both pinned rows (re-)initialized -- not remain
+    permanently unpinned (the pinned UI must recheck height after entry,
+    not just at entry)."""
 
     async def scenario():
         session = _LiveTypingSession()

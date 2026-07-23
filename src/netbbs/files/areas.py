@@ -6,8 +6,8 @@ reason board/channel IDs are: no ID-scheme migration needed when file
 areas can become Linked in a later phase.
 
 Categories, pinning, and sort order are built in from the start here,
-unlike boards/channels — those got this shape retrofitted in design doc
-round 18, after shipping without it first. Doing it up front for file
+unlike boards/channels — those got this shape retrofitted, after
+shipping without it first. Doing it up front for file
 areas avoids repeating that same later migration, consistent with the
 project's broader anti-retrofit principle (§2/§13).
 
@@ -15,7 +15,7 @@ Moderator/permission grants (`netbbs.moderation.roles`) and per-area
 moderation settings (`moderated`, `max_file_age_days`) layer on top of
 the coarse `min_read_level`/`min_write_level` gate here, mirroring
 `netbbs.boards.boards` — see `netbbs.files.entries` for where those
-settings actually change file behavior (design doc sign-off round 36).
+settings actually change file behavior.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class FileArea:
     area_id: str
     name: str
     description: str | None
-    # Nullable (design doc §16, round 84's correction) -- see
+    # Nullable (design doc §16) -- see
     # netbbs.boards.boards.Board's own fields for the full
     # Community-inheritance reasoning; identical here.
     min_read_level: int | None
@@ -55,14 +55,14 @@ class FileArea:
     created_at: str
     moderated: bool
     max_file_age_days: int | None
-    # Age/name-gating (design doc §18, rounds 85/86/101/102) -- nullable,
-    # NULL means no gate *and* (since round 86/§16) "inherit this
+    # Age/name-gating (design doc §18) -- nullable,
+    # NULL means no gate *and* (§16) "inherit this
     # Community's default" if this area belongs to one, same shape and
     # enforcement point as netbbs.boards.boards.Board's own fields; see
     # netbbs.net.file_flow's browse/upload checks.
     min_age: int | None
     name_requirement: str | None  # None | "verified" | "verified_and_displayed"
-    # Zero-or-one, nullable FK (design doc §16, round 83), same shape as
+    # Zero-or-one, nullable FK (design doc §16), same shape as
     # Board.community_id.
     community_id: int | None
 
@@ -98,11 +98,11 @@ def create_file_area(
     `max_file_age_days` is this area's own maintenance/expiry threshold;
     `None` means retain indefinitely, the default.
 
-    `min_age`/`name_requirement` (design doc §18, rounds 85/86/101/102)
+    `min_age`/`name_requirement` (design doc §18)
     are the same nullable-means-no-gate shape as
     `netbbs.boards.boards.create_board`'s own fields — see that
     function's docstring. `min_read_level`/`min_write_level` (nullable,
-    §16 round 84) and `community_id` (§16 round 83) follow that same
+    §16) and `community_id` (§16) follow that same
     docstring's Community-inheritance reasoning.
 
     No permission check on *creating* an area here — same reasoning as
@@ -268,9 +268,9 @@ def update_file_area(
     """Replace `area`'s editable settings with the given full state --
     mirrors `netbbs.boards.boards.update_board` exactly, see that
     function's docstring for the full reasoning. `min_age`/
-    `name_requirement` follow design doc §18 (rounds 101/102).
+    `name_requirement` follow design doc §18.
     `min_read_level`/`min_write_level`/`community_id` follow design doc
-    §16 (rounds 83/84)."""
+    §16."""
     if name_requirement not in (None, "verified", "verified_and_displayed"):
         raise FileAreaError(f"invalid name_requirement: {name_requirement!r}")
     try:

@@ -5,7 +5,7 @@ Kept in its own module rather than growing login_flow.py indefinitely —
 matches the project's modular-package approach (design doc §3), same
 reasoning as chat_flow.py.
 
-Upload/download (design doc round 21/22/24) go over real ZMODEM
+Upload/download (design doc) go over real ZMODEM
 (`netbbs.net.zmodem`), not a NetBBS-specific scheme — the whole point
 being that a real Zmodem-capable terminal (SyncTERM, lrzsz) can drive
 this without any custom client software. `/upload`/`/download` take
@@ -15,8 +15,8 @@ finishes (or aborts — see `netbbs.net.zmodem`'s module docstring on
 error handling: a failed transfer doesn't crash the session, it reports
 the error and returns to browsing).
 
-**Second module migrated onto design doc round 91's two-lane database
-execution model (issue #57/round 112)**, following `netbbs.net.
+**Second module migrated onto the two-lane database execution model
+(design doc, issue #57)**, following `netbbs.net.
 mail_flow`'s proof-of-pattern exactly: every function reachable from
 `browse_file_areas` takes `lane: DatabaseLane` instead of `db:
 Database`. Two exceptions, deliberately unmigrated:
@@ -118,8 +118,8 @@ def has_visible_areas(
     """Whether `user` can see at least one file area under the given
     Community filter -- backs `netbbs.net.login_flow`'s shared
     resource-type sub-menu, same convention as `_has_visible_boards`/
-    `netbbs.net.chat_flow.has_visible_channels` (design doc §16, round
-    84). Deliberately still `db`-based, not `lane`-based -- see this
+    `netbbs.net.chat_flow.has_visible_channels` (design doc §16).
+    Deliberately still `db`-based, not `lane`-based -- see this
     module's own docstring for why."""
     areas = [
         a for a in list_file_areas(db)
@@ -146,7 +146,7 @@ async def _browse_areas_in_category(
     reasoning, same two-level cap, same category/item ID-namespace
     disambiguation trick (negated category IDs), and the same
     `community_id`/`community_scoped`/`title_prefix` Community-filter
-    threading (design doc §16, round 84). See that function's docstring
+    threading (design doc §16). See that function's docstring
     for the full rationale.
     """
 
@@ -292,9 +292,9 @@ async def _show_area(
     initial_cursor: tuple[str, str] | None = None,
 ) -> None:
     """
-    Show `area`, one bounded page of files at a time (design doc round
-    31, issue #10's file-area follow-up to round 30's board-post
-    pagination) — mirrors `netbbs.net.login_flow._show_board`'s
+    Show `area`, one bounded page of files at a time (design doc,
+    issue #10's file-area follow-up to the board-post pagination) —
+    mirrors `netbbs.net.login_flow._show_board`'s
     pagination *semantics* exactly: same newest-first default, same
     `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` options, same reasoning for
     both (see that function's docstring, not repeated here) — including
@@ -404,14 +404,14 @@ async def _show_area(
 
 
 def _uploader_display_name(db: Database, entry, *, name_requirement: str | None) -> str:
-    """The uploader label to render for one file entry (design doc §18,
-    round 102) -- mirrors `netbbs.net.login_flow._author_display_name`
+    """The uploader label to render for one file entry (design doc §18)
+    -- mirrors `netbbs.net.login_flow._author_display_name`
     exactly: only looks up the live account when the area actually
     requires `verified_and_displayed` names, otherwise renders the
     plain historical `uploader_label` unchanged, for the identical
     reason (a mutable `display_name` must not retroactively rewrite an
     already-uploaded entry's attribution). Still `db`-first, unchanged
-    by round 112 -- see this module's own docstring for why."""
+    -- see this module's own docstring for why."""
     if name_requirement == "verified_and_displayed":
         uploader = get_user_by_id(db, entry.uploader_user_id)
         if uploader is not None:
@@ -481,7 +481,7 @@ async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea,
     # match/miss against real stored filenames; sanitize_text is only
     # applied below, at the point this gets echoed back to the terminal.
     # requesting_user is passed so a still-pending upload (moderated
-    # area, design doc sign-off round 36) isn't downloadable by name
+    # area, design doc sign-off) isn't downloadable by name
     # before it's been approved, unless this user is its own uploader
     # or holds approve permission on the area.
     entry = await lane.run(get_file_by_name, area, filename, requesting_user=user)
@@ -497,7 +497,8 @@ async def _handle_download(session: Session, lane: DatabaseLane, area: FileArea,
         # download_file reads content-addressed storage directly from
         # disk by hash/path -- it never took a `db` parameter, so
         # nothing here changes: real file I/O, not database I/O, is
-        # outside round 91's scope regardless of which lane calls it.
+        # outside the two-lane database execution model's scope
+        # regardless of which lane calls it.
         data = download_file(entry)
         await zmodem.send_file(session, entry.filename, data)
     except (zmodem.ZmodemError, NotImplementedError) as exc:

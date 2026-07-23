@@ -1,6 +1,6 @@
-"""Integration tests for netbbs.net.ansi_editor.edit_ansi_art (design
-doc -- welcome banner round B1), driven with a scripted FakeSession --
-the WYSIWYG ANSI art editor, the first real consumer of the
+"""Integration tests for netbbs.net.ansi_editor.edit_ansi_art, driven
+with a scripted FakeSession -- the WYSIWYG ANSI art editor, the first
+real consumer of the
 screen-buffer/diff abstraction. `pick_item` (used for the glyph/color
 pickers) reads two-digit selections via `read_key`, so this
 FakeSession's single ordered `_inputs` queue serves `read_key`/
@@ -328,7 +328,7 @@ def test_quit_without_editing_returns_none_with_no_prompt(tmp_path):
 
 
 def test_bare_escape_no_longer_quits(tmp_path):
-    """Nano keybindings (round B2 lump-in): Esc is a Meta-combo prefix in
+    """Nano keybindings: Esc is a Meta-combo prefix in
     nano, not "exit" -- Ctrl+X owns quit now, so a standalone Esc press
     must be inert. Types both before and after it, and saves rather than
     quitting, to prove the editor kept running and accepting input right

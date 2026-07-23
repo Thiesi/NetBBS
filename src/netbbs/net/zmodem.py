@@ -1,11 +1,11 @@
 """
-Real ZMODEM file-transfer protocol (design doc round 21/22/24).
+Real ZMODEM file-transfer protocol (design doc).
 
 Interoperates with actual Zmodem-capable terminal clients (SyncTERM,
 lrzsz's rz/sz, etc.) — the whole reason this exists rather than a
 NetBBS-specific transfer scheme: a generic Telnet/SSH client can't drive
-a custom raw-byte protocol on its own (see design doc round 21's
-discussion), but Zmodem is a real, decades-old wire protocol that many
+a custom raw-byte protocol on its own (see design doc discussion), but
+Zmodem is a real, decades-old wire protocol that many
 terminal emulators already auto-detect and drive without any NetBBS-
 specific support needed.
 
@@ -42,8 +42,8 @@ all) is verified here via this module's own sender talking to its own
 receiver — genuinely exercises every framing/CRC/escaping code path, but
 can't substitute for testing against a real external client. That needs
 a real terminal (SyncTERM, or any lrzsz-equipped shell) connecting to a
-running node — flagged explicitly in the round 24 sign-off note as
-something to verify directly once such a client is available, the same
+running node — flagged explicitly as something to verify directly once
+such a client is available, the same
 "verify directly, don't just claim it" standard the rest of this
 project's networking work has held to.
 """

@@ -1,6 +1,6 @@
 """
 Tests for the chat slash-command dispatch mechanism in
-netbbs.net.chat_flow (design doc §13, sign-off round 39) — the
+netbbs.net.chat_flow (design doc §13) — the
 `_dispatch_command`/`_COMMANDS` registry itself, distinct from the
 individual command behaviors already covered in
 tests/test_chat_flow_moderation.py.
@@ -92,8 +92,7 @@ def test_unknown_command_is_not_recorded_as_a_chat_message(db, lane, hub, presen
 
 def test_unknown_command_preserves_leading_slash_text_verbatim(db, lane, hub, presence, alice, channel):
     # A typo'd command must never silently become public chat text --
-    # this was a real gap in the old ad hoc `if` chain (design doc
-    # sign-off round 39).
+    # a real gap the ad hoc `if` chain this replaced was prone to.
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/mtue bob", "/quit"]))
     assert "Unknown command: /mtue" in _written_text(session)
     scrollback = get_scrollback(db, channel)
@@ -127,9 +126,8 @@ def test_leave_also_exits_the_loop(db, lane, hub, presence, alice, channel):
 
 def test_help_lists_known_commands(db, lane, hub, presence, alice, channel):
     # /mute etc. deliberately excluded here -- alice is a plain user,
-    # and /help is permission-aware since design doc round 55 (see
-    # tests/test_chat_help.py for the full behavior, including what a
-    # moderator sees).
+    # and /help is permission-aware (see tests/test_chat_help.py for
+    # the full behavior, including what a moderator sees).
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/help", "/quit"]))
     output = _written_text(session)
     assert "/finger" in output

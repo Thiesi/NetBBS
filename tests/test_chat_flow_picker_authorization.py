@@ -208,7 +208,7 @@ def test_selecting_an_open_channel_still_works_unaffected(db, lane, hub, presenc
     assert "Joined" in _written_text(session)
 
 
-# -- identity attestation: age/name gating on channel entry (design doc §18, round 103) --
+# -- identity attestation: age/name gating on channel entry (design doc §18) --
 
 
 def test_min_age_gate_hides_the_channel_from_the_picker(db, lane, hub, presence, alice, bob):

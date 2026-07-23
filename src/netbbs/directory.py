@@ -1,6 +1,6 @@
 """
-User directory & vCard/finger system (design doc §13, sign-off round
-38): a short free-text bio per account, independently toggleable
+User directory & vCard/finger system (design doc §13): a short
+free-text bio per account, independently toggleable
 visibility, and a finger-style lookup.
 
 A distinct concern from both `netbbs.auth` (identity/authentication)

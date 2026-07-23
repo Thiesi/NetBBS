@@ -1,7 +1,7 @@
 """
-Tests for `netbbs.link.boards` — the local-origination bridge (design
-doc round 124, round 128 wiring) turning an existing local board/post
-into a signed `board_genesis`/`board_post` event.
+Tests for `netbbs.link.boards` — the local-origination bridge turning
+an existing local board/post into a signed `board_genesis`/`board_post`
+event.
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ def test_link_board_carries_forked_from(db, alice, node_identity):
     assert genesis.payload["forked_from"] == original.board_id
 
 
-# -- materialize_carried_board (design doc round 94/issue #53) -----------------
+# -- materialize_carried_board (design doc §9/issue #53) -----------------
 
 
 @pytest.fixture
@@ -498,7 +498,7 @@ def test_rebuild_carried_post_materialization_is_a_noop_when_nothing_is_missing(
     assert rebuild_carried_post_materialization(db) == 0
 
 
-# -- board_origin_fingerprint (design doc round 94/issue #53) ------------------
+# -- board_origin_fingerprint (design doc §9/issue #53) ------------------
 
 
 def test_board_origin_fingerprint_falls_back_to_genesis_when_no_transfer_happened(db, alice, node_identity):
@@ -524,7 +524,7 @@ def test_board_origin_fingerprint_raises_for_an_unlinked_board(db, alice):
         board_origin_fingerprint(db, board)
 
 
-# -- offer_board_origin_transfer (design doc round 94/issue #53) ---------------
+# -- offer_board_origin_transfer (design doc §9/issue #53) ---------------
 
 
 def test_offer_board_origin_transfer_builds_a_valid_offer(db, alice, node_identity, remote_node_identity):
@@ -568,7 +568,7 @@ def test_offer_board_origin_transfer_refuses_a_second_outstanding_offer(db, alic
         )
 
 
-# -- accept_board_origin_transfer (design doc round 94/issue #53) --------------
+# -- accept_board_origin_transfer (design doc §9/issue #53) --------------
 
 
 def test_accept_board_origin_transfer_builds_a_valid_acceptance_and_updates_origin(
@@ -602,7 +602,7 @@ def test_accept_board_origin_transfer_refuses_an_offer_not_naming_this_node(
         accept_board_origin_transfer(db, board, node_identity=remote_node_identity, offer=offer)
 
 
-# -- record_board_origin_change (design doc round 94/issue #53) ----------------
+# -- record_board_origin_change (design doc §9/issue #53) ----------------
 
 
 def test_record_board_origin_change_is_a_no_op_for_an_unknown_board_id(db):
@@ -611,7 +611,7 @@ def test_record_board_origin_change_is_a_no_op_for_an_unknown_board_id(db):
     record_board_origin_change(db, "no-such-board-id", "some-fingerprint")
 
 
-# -- is_board_origin_orphaned (design doc round 94/issue #53) ------------------
+# -- is_board_origin_orphaned (design doc §9/issue #53) ------------------
 
 
 def _peer_record(identity, *, revoked: bool = False) -> PeerRecord:
@@ -734,7 +734,7 @@ def test_queue_board_post_links_parent_when_parent_is_itself_linked(db, alice, n
 def test_queue_board_post_omits_parent_when_parent_predates_linking(db, alice, node_identity):
     board = create_board(db, "general", creator=alice)
     # root created *before* the board goes Linked -- no board_post of
-    # its own, per round 124's "no backfill" decision.
+    # its own, per the "no backfill" decision.
     root = create_post(db, board, alice, "hello", "world")
     link_board(db, board, node_identity=node_identity)
     reply = create_post(db, board, alice, "re: hello", "reply body", parent_post_id=root.post_id)
@@ -744,7 +744,7 @@ def test_queue_board_post_omits_parent_when_parent_predates_linking(db, alice, n
     assert "parent_post_id" not in reply_board_post.payload
 
 
-# -- queue_board_post_edit_if_linked (design doc round 129/130) ----------------
+# -- queue_board_post_edit_if_linked (design doc §9) ----------------
 
 
 def test_queue_board_post_edit_builds_and_persists(db, alice, node_identity):
@@ -758,8 +758,8 @@ def test_queue_board_post_edit_builds_and_persists(db, alice, node_identity):
 
     assert edit is not None
     # root_post_id is the *Link event's* own content_id, not the local
-    # post_id -- the two hash schemes are deliberately different (round
-    # 124: full-envelope hash vs. the old flat-dict local scheme).
+    # post_id -- the two hash schemes are deliberately different
+    # (full-envelope hash vs. the local flat-dict scheme).
     assert edit.payload["root_post_id"] == board_post.content_id
     assert edit.payload["previous_event_id"] == board_post.content_id
     assert edit.payload["subject"] == "hello (edited)"

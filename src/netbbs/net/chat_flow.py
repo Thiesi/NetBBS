@@ -4,19 +4,19 @@ Chat channel browsing and the real-time chat loop.
 Kept in its own module rather than growing login_flow.py indefinitely —
 matches the project's modular-package approach (design doc §3).
 
-**Third module migrated onto design doc round 91's two-lane database
-execution model (issue #57/round 114)**, following `netbbs.net.
+Migrated onto the two-lane database execution model (design doc,
+issue #57), following `netbbs.net.
 mail_flow`/`netbbs.net.file_flow`'s established recipe: every function
 reachable from `browse_channels` takes `lane: DatabaseLane` instead of
 `db: Database`. Unlike those two, chat has no functions left
-deliberately unmigrated — confirmed with Thiesi (round 114): the pinned
+deliberately unmigrated — confirmed with Thiesi: the pinned
 status line (`_render_chat_status_line`, repainted after nearly every
 message) and the tab-completer (`_build_completer`, rebuilt fresh on
 every `read_line()` call) are both hot, read-only, cosmetic paths that
 still move fully onto the lane, same as everything else, rather than
 staying on a lingering `db` the way `file_flow.has_visible_areas` did —
-real added per-message overhead, accepted as consistent with round 91's
-own "defer benchmarking to #59's harness" stance rather than guessed at
+real added per-message overhead, accepted as consistent with the
+"defer benchmarking to #59's harness" stance rather than guessed at
 now.
 
 Every module-level helper function that takes `db: Database` as its own
@@ -44,8 +44,7 @@ something that can't run inside a lane job (async session I/O, or a
 synchronous callback contract this module doesn't control):
 
 - `_build_completer` (a `pick_item`-callback-shaped problem, one level
-  removed — `netbbs.net.picker`'s callbacks were the first instance,
-  round 112): its `completer(text)` closure is itself a plain
+  removed from `netbbs.net.picker`'s own callbacks): its `completer(text)` closure is itself a plain
   synchronous callable (`netbbs.net.char_input.Completer`'s own
   contract), invoked possibly several times per `read_line()` call as
   the user presses Tab — same fix as the picker case, eager pre-fetch
@@ -204,8 +203,8 @@ async def browse_channels(
     entirely (mainly tests not exercising this specific feature); every
     real connection always has one.
 
-    A small outer loop, not a single call (design doc §8/round 33,
-    sign-off round 44 — Track 5d): `/leave` returns here to pick again,
+    A small outer loop, not a single call (design doc §8): `/leave`
+    returns here to pick again,
     `/join` jumps straight back into `_chat_loop` with an already-
     validated channel without going through the picker at all, and
     `/quit` (or a kick/dropped connection) exits out to the caller (the
@@ -214,7 +213,7 @@ async def browse_channels(
     "back always lands somewhere consistent" reasoning `/quit` already
     followed, not a new decision.
 
-    `history` (design doc round 47/Track 5f) is the one connection's
+    `history` (design doc) is the one connection's
     `InputHistory`, constructed once in `netbbs.net.login_flow.
     handle_session` — passed straight through to every `_chat_loop`
     call here so command recall persists across a `/join` channel
@@ -231,8 +230,8 @@ async def browse_channels(
     ever returning that action, so this just re-confirms "yes, still a
     member" for free.
 
-    `community_id`/`community_scoped`/`title_prefix` (design doc §16,
-    round 84) narrow every picker re-entry in this loop -- not just the
+    `community_id`/`community_scoped`/`title_prefix` (design doc §16)
+    narrow every picker re-entry in this loop -- not just the
     initial pick -- to the same Community/Uncategorized/unfiltered
     scope the caller entered with; see
     `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
@@ -271,9 +270,9 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     """
     Every channel `user` is allowed to *see* — the shared filter behind
     the picker, `/list`, and `/whois`'s channel-membership display
-    (design doc round 33 point 9, Phase 2 Track 5h). Consolidates what
+    (design doc). Consolidates what
     were three separate, slightly-duplicated `meets_level`-only list
-    comprehensions (round 43) into one place, adding the hidden-channel
+    comprehensions into one place, adding the hidden-channel
     condition: level still gates access exactly as before, and a
     `hidden` channel is additionally excluded unless the user is
     already a member, holds a pending invitation, or holds *any*
@@ -282,8 +281,8 @@ def _visible_channels_for(db: Database, user: User) -> list[Channel]:
     these," not one specific bit).
 
     A `members_only`-but-not-`hidden` channel still appears here —
-    "hidden + open is obscurity, not access control" (round 33 point
-    9): only `hidden` controls listing visibility itself; `members_only`
+    "hidden + open is obscurity, not access control": only `hidden`
+    controls listing visibility itself; `members_only`
     alone just means you can see it exists but can't actually enter it
     without access, enforced separately by `_authorize_channel_entry`
     (GitHub issue #28, reopened a third time -- both `/join` and
@@ -314,10 +313,9 @@ def has_visible_channels(
     specifically so `netbbs.net.login_flow`'s shared resource-type
     sub-menu can use it for the same "only offer what currently
     applies" conditional visibility `_has_visible_boards` provides for
-    boards (design doc §16, round 84). Deliberately still `db`-based --
+    boards (design doc §16). Deliberately still `db`-based --
     a menu-gating check called from still-unmigrated `login_flow.py`
-    code, same category as `netbbs.net.file_flow.has_visible_areas`
-    (round 113)."""
+    code, same category as `netbbs.net.file_flow.has_visible_areas`."""
     channels = _visible_channels_for(db, user)
     if community_scoped:
         channels = [c for c in channels if c.community_id == community_id]
@@ -352,17 +350,17 @@ async def _pick_channel(
     reasoning, same two-level cap, same category/item ID-namespace
     disambiguation trick (negated category IDs), and the same
     `community_id`/`community_scoped`/`title_prefix` Community-filter
-    threading (design doc §16, round 84). See that function's docstring
+    threading (design doc §16). See that function's docstring
     for the full rationale; not repeated here to avoid the two copies
     drifting out of sync in what they claim rather than just in what
     they say.
 
-    The channel/category list-building (round 114) is one bundled
+    The channel/category list-building is one bundled
     `lane.run` call, not several -- `_channel_description` (the picker's
     own `description_of` callback) needs no DB access at all (`hub.
     participant_count` plus the channel's own already-fetched
     `description` field), so, like `netbbs.net.file_flow`'s own category
-    picker (round 113), nothing about the picker callback itself needed
+    picker, nothing about the picker callback itself needed
     eager-pre-fetch restructuring -- only the list construction moved.
     """
 
@@ -372,7 +370,7 @@ async def _pick_channel(
             all_channels = [c for c in all_channels if c.community_id == community_id]
         # Activity-sort applied before splitting by category, so ordering
         # within each category's channel list is still most-recent-first —
-        # same node-wide default as boards (design doc round 17).
+        # same node-wide default as boards (design doc).
         all_channels.sort(key=lambda c: hub.last_activity(c.name) or c.created_at, reverse=True)
         all_channels.sort(key=lambda c: not c.pinned)
         channels_here = [c for c in all_channels if c.category_id == category_id]
@@ -473,9 +471,9 @@ def _authorize_channel_entry(db: Database, channel: Channel, user: User) -> tupl
     `is_member`, `has_pending_invitation`, `accept_invitation`) already
     is, and there's no `await` point for a race to open up between them
     within a single call. Dispatched as one `lane.run` call by every
-    caller (round 114) -- the whole point of staying synchronous here.
+    caller -- the whole point of staying synchronous here.
 
-    `meets_age`/`meets_name_requirement` (design doc §18, round 102) are
+    `meets_age`/`meets_name_requirement` (design doc §18) are
     both checked here, not split across a separate read/write boundary
     the way `netbbs.boards.boards.Board`'s gates are -- chat has no
     meaningful read/write split (this module's own docstring, and
@@ -513,7 +511,7 @@ def _meets_live_participation_requirements(db: Database, channel: Channel, user:
     """
     Re-checks the age/name-verification gates a long-lived chat
     session's `channel` snapshot can drift out of sync with (GitHub
-    issue #64 point 5, round 109) — `_authorize_channel_entry` only
+    issue #64 point 5) — `_authorize_channel_entry` only
     ever runs once, at join time, but a channel's (or its Community's)
     `min_age`/`name_requirement` can change, or a name/age attestation
     can be revoked/replaced (design doc §18), while a session sits in
@@ -551,32 +549,31 @@ def _channel_description(hub: ChatHub, channel: Channel) -> str:
 def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
     """
     `chat_stream_label(db, user)` — the alias-or-username presentation
-    form, design doc round 53, deliberately untouched by this function —
+    form, design doc, deliberately untouched by this function —
     with `channel`'s colored verified-real-name unit appended when its
     *effective* `name_requirement` (`netbbs.communities.
     get_effective_name_requirement`, Community-inheritance-aware) is
-    `verified_and_displayed`: the chat-specific composition of round
-    99's anti-forgery display for the live message stream (GitHub issue
-    #64, round 109).
+    `verified_and_displayed`: the chat-specific composition of the
+    anti-forgery display for the live message stream (GitHub issue #64).
 
     Deliberately its own function here in the net layer, not folded
     into `chat_stream_label` itself or into `netbbs.attestation.
     format_name_for_resource`: `chat_stream_label`'s one job is the
-    presentation alias, plain and channel-policy-ignorant (round 53) —
+    presentation alias, plain and channel-policy-ignorant —
     making it resource-aware would give the nick module a dependency on
     chat/Communities policy it has no other reason to carry.
     `format_name_for_resource` doesn't transfer directly either, since
     chat's primary name may be a nick, not `display_name` — this reuses
-    that function's own extracted primitive, `format_verified_name_unit`
-    (round 109), rather than either duplicating the coloring or trying
+    that function's own extracted primitive, `format_verified_name_unit`,
+    rather than either duplicating the coloring or trying
     to parse a fully-composed string back apart.
 
     Composition confirmed with Thiesi (issue #64): `~nick~ (=Real
     Name=)` when a nick is set, `display-name-or-username (=Real
     Name=)` otherwise — deliberately not a three-name `~nick~
     display-name (=Real Name=)` form, which would put three
-    simultaneous names on every line of live chat and reverse round
-    53's deliberate clutter reduction; `/whois` still supplies
+    simultaneous names on every line of live chat and reverse the
+    plain alias's deliberate clutter reduction; `/whois` still supplies
     canonical/display identity on demand.
     """
     ordinary = chat_stream_label(db, user)
@@ -593,7 +590,7 @@ def _chat_author_label(db: Database, channel: Channel, user: User) -> str:
 
 def _resolve_message_author(db: Database, author_label: str) -> User | None:
     """Best-effort live-account lookup behind a stored `ChannelMessage.
-    author_label` (a denormalized username, design doc round 19/20) —
+    author_label` (a denormalized username, design doc) —
     `None` if the account can no longer be found (defensive; no
     account-deletion feature exists yet to actually trigger this)."""
     try:
@@ -610,7 +607,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     `_chat_author_label` (current nick/alias, current verified-name
     unit if `channel` currently calls for one) when possible, exactly
     the same whether this is a live event or scrollback replay (GitHub
-    issue #64, round 109) — there's no per-message alias/attestation
+    issue #64) — there's no per-message alias/attestation
     snapshot, matching the existing "replay shows current presentation"
     behavior `chat_stream_label`'s own docstring already establishes.
 
@@ -628,7 +625,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
 def _colored_around(prefix: str, middle: str, suffix: str, *, fg_color: int, bold: bool = False) -> str:
     """
     Compose `prefix + middle + suffix`, all in `fg_color` — the fix for
-    design doc round 102's nesting bug (GitHub issue #64 point 4):
+    a nesting bug (GitHub issue #64 point 4):
     `middle` (almost always `_message_author_label`'s output) may
     already carry its own embedded `NICK_COLOR`/`VERIFIED_COLOR` segment
     with its own trailing reset. Interpolating it into one larger string
@@ -667,15 +664,15 @@ def _render_channel_message(
     (`send_loop`/`receive_loop`, `_handle_me`, channel join/leave) and
     scrollback replay (`_render_scrollback_message`), so the two paths
     can never disagree about whether a currently-verified real name is
-    shown (GitHub issue #64, round 109). Previously each path rendered
+    shown (GitHub issue #64). Previously each path rendered
     independently — a live-only fix would have left replay behind, and
     a rule fixed in one path but not the other could have either shown
     a visible inconsistency or reintroduced the historical-instability
-    bug round 102 was written to avoid.
+    bug this was written to avoid.
 
     `self_message` selects `SELF_COLOR` over `ACCENT_COLOR` for a
     `"message"` kind's delimiter — the sender's own live-typing
-    affordance (design doc -- per-user chat timestamp preference round);
+    affordance (design doc -- per-user chat timestamp preference);
     meaningless for `"action"`/`"join"`/`"leave"` (never self-colored,
     matching existing behavior) and always `False` for scrollback replay
     — a past message read back isn't "what I just sent," possibly from a
@@ -709,21 +706,21 @@ def _render_scrollback_message(db: Database, channel: Channel, user: User, messa
     delayed.
 
     `"message"`/`"action"`/`"join"`/`"leave"` kinds delegate entirely to
-    `_render_channel_message` (GitHub issue #64, round 109) — the exact
+    `_render_channel_message` (GitHub issue #64) — the exact
     same renderer the live broadcast path uses, so the two can never
     drift apart on the gated-display rule. Moderation kinds
     (`_VERB_BY_KIND`) and `nick` itself deliberately don't go through
     it: moderation/auditing always shows canonical identity only (design
-    doc round 32, point 7), and a `nick` event's own body text already
+    doc), and a `nick` event's own body text already
     fully describes the change — neither is a candidate for verified-
     name display in the first place.
 
     `user` is the *replaying* session's own account — every kind gets
     prefixed with `message.created_at` per `user`'s own timestamp
-    preference (design doc -- per-user chat timestamp preference round),
+    preference (design doc -- per-user chat timestamp preference),
     uniformly across every kind rather than selectively by original
     live-broadcast coverage: "replayed scrollback" is its own category
-    in that round's scope, not a kind-by-kind carryover of which live
+    in that scope, not a kind-by-kind carryover of which live
     events happen to be timestamped.
     """
     if message.kind in ("message", "action", "join", "leave"):
@@ -734,7 +731,7 @@ def _render_scrollback_message(db: Database, channel: Channel, user: User, messa
             fg_color=MUTED_COLOR,
         )
     elif message.kind == "daybreak":
-        # No author at all (design doc round 78) -- a standalone system
+        # No author at all (design doc) -- a standalone system
         # announcement, unlike every other kind here, none of which
         # reference message.author_label.
         line = colored(sanitize_text(message.body), fg_color=MUTED_COLOR)
@@ -749,22 +746,21 @@ def _render_scrollback_message(db: Database, channel: Channel, user: User, messa
 
 def _render_all_scrollback(db: Database, channel: Channel, user: User, messages: list[ChannelMessage]) -> list[str]:
     """Bundles rendering the whole scrollback replay into one `lane.run`
-    call (round 114) rather than one per message -- the same "one round
-    trip, not N" reasoning as every other bundled loop in this round."""
+    call rather than one per message -- the same "one round
+    trip, not N" reasoning as every other bundled loop in this module."""
     return [_render_scrollback_message(db, channel, user, message) for message in messages]
 
 
-# -- command dispatch (design doc §13, sign-off round 39; ChatAction result
-# type widened from a bare bool in round 44/Track 5d) ------------------------
+# -- command dispatch (design doc §13) ------------------------
 
 
 @dataclass(frozen=True)
 class ChatCommandContext:
     """Everything a slash-command handler might need, bundled into one
     consistent shape — replaces what used to be a different ad hoc
-    positional-argument list per handler (Track 3/4's `/mute` etc. each
+    positional-argument list per handler (`/mute` etc. each
     took their own subset of `session, db, hub, channel, user`;
-    `/finger` omitted `hub` entirely). `lane`, not `db` (round 114) --
+    `/finger` omitted `hub` entirely). `lane`, not `db` --
     see this module's own docstring."""
 
     session: Session
@@ -787,7 +783,7 @@ class _Quit:
 @dataclass(frozen=True)
 class _ToPicker:
     """Exit the current channel, back to channel selection — `/leave`'s
-    meaning (Track 5d; previously an alias for `/quit`)."""
+    meaning (previously an alias for `/quit`)."""
 
 
 @dataclass(frozen=True)
@@ -803,7 +799,7 @@ class _SwitchTo:
 @dataclass(frozen=True)
 class _EnterPrivate:
     """Enter private-conversation mode targeting `target` — `/private
-    <user>`'s meaning (Track 5e). Unlike `_ToPicker`/`_SwitchTo`, this
+    <user>`'s meaning. Unlike `_ToPicker`/`_SwitchTo`, this
     never propagates past `send_loop` — it's consumed entirely there,
     updating its own local `private_target` variable, since entering
     private mode doesn't change anything about *which channel* the loop
@@ -824,12 +820,12 @@ class _ExitPrivate:
 # loop itself needs to change" — propagated all the way up through
 # `_dispatch_command`/`send_loop`/`_chat_loop` to `browse_channels`
 # (`_Quit`/`_ToPicker`/`_SwitchTo`), or consumed directly inside
-# `send_loop` without going any further (`_EnterPrivate`/`_ExitPrivate`,
-# Track 5e — see their own docstrings). Originally just `bool` (round
-# 39; only `/quit` ever returned `True`) — widened, not replaced, each
+# `send_loop` without going any further (`_EnterPrivate`/`_ExitPrivate`
+# — see their own docstrings). Originally just `bool`
+# (only `/quit` ever returned `True`) — widened, not replaced, each
 # time a new command needed to distinguish another outcome from plain
 # "keep going": the same "explicit return contract, not exceptions"
-# reasoning round 39 already established, just with more to say than a
+# reasoning already established, just with more to say than a
 # single bit could carry.
 ChatAction = _Quit | _ToPicker | _SwitchTo | _EnterPrivate | _ExitPrivate
 CommandHandler = Callable[[ChatCommandContext, str], Awaitable[ChatAction | None]]
@@ -848,8 +844,8 @@ async def _handle_join(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     `/join <channel>` -- see `_handle_leave`/`ChatAction` for the outer
     loop's side of channel switching.
 
-    Also doubles as invitation *acceptance* (design doc round 33, Phase
-    2 Track 5h): there is no separate `/accept` command — successfully
+    Also doubles as invitation *acceptance* (design doc): there is no
+    separate `/accept` command — successfully
     joining a `members_only` channel via a pending invitation marks it
     accepted, reusing this existing "look up, check authorization,
     switch" flow instead of inventing parallel command surface for the
@@ -899,7 +895,7 @@ async def _handle_topic(ctx: ChatCommandContext, args: str) -> None:
     already shows whatever topic is currently set, so a query-only bare
     invocation would just be redundant, and the only useful thing left
     for it to do is act. Deliberately not persisted into scrollback
-    (design doc round 33 point 5 only asks for moderation-log history,
+    (design doc only asks for moderation-log history,
     unlike `/nick`'s explicit scrollback requirement) — a live
     in-channel notice plus the audit log entry `set_topic` already
     writes is enough.
@@ -931,8 +927,8 @@ def _find_live_participants(db: Database, hub: ChatHub, username: str) -> list[t
     chat sessions used to have only the first one located actually
     receive a `/msg`). `ChatHub` has no reverse "which channel is this
     user in" index, the same O(channels) shape `_kick_live_sessions`
-    already has for the same reason. Reordered `db`-first (round 114,
-    was `hub`-first) so `DatabaseLane.run`'s db-injection convention
+    already has for the same reason. Reordered `db`-first
+    (was `hub`-first) so `DatabaseLane.run`'s db-injection convention
     applies without a wrapper closure -- private, single call site.
     """
     found = []
@@ -952,8 +948,7 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     already use, just a differently-formatted string — no new
     `receive_loop` branch needed), and queued in the mailbox — keyed by
     that specific `Session` object, not the account — for the rest,
-    each to be shown at its own next natural prompt (design doc round
-    32, sign-off round 46/Track 5e).
+    each to be shown at its own next natural prompt (design doc).
 
     `ctx.session_registry` (`netbbs.net.session_registry.
     ActiveSessionRegistry`) is what makes "every session," not just
@@ -964,8 +959,8 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
     session's mailbox slot without actually knowing which `Session`
     objects exist for the account.
 
-    Never written to scrollback or the moderation log — round 32 point
-    1's "online-only" private messages are intentionally as ephemeral as
+    Never written to scrollback or the moderation log — these
+    "online-only" private messages are intentionally as ephemeral as
     live chat itself.
     """
     sender_label = sanitize_text(await ctx.lane.run(display_label, ctx.user))
@@ -994,10 +989,9 @@ async def _deliver_private_message(ctx: ChatCommandContext, target: User, body: 
 
 async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/msg <user> <text>` (design doc round 32 point 1): a one-off,
+    `/msg <user> <text>` (design doc): a one-off,
     online-only private message. Scoped as a chat-context command only,
-    matching every command Tracks 3-5d already built — no parallel
-    main-menu entry point.
+    matching every other chat command — no parallel main-menu entry point.
     """
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
@@ -1020,10 +1014,10 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
 
 async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     """
-    `/private <user>` (design doc round 33 point 1): enters a temporary
+    `/private <user>` (design doc): enters a temporary
     private-conversation mode layered on `/msg` — ordinary (non-slash)
     input is sent privately to `target` until `/close`. The old `/query`
-    IRC-compatibility alias for this handler was removed in round 54 —
+    IRC-compatibility alias for this handler was removed —
     it was the only command with two names and added no value beyond
     what `/private` already provides.
     """
@@ -1059,18 +1053,18 @@ async def _handle_close(ctx: ChatCommandContext, args: str) -> ChatAction:
 
 async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/help` (no args, design doc round 55): lists every command visible
+    `/help` (no args, design doc): lists every command visible
     to the caller — reuses the exact same `_COMMAND_VISIBILITY`
-    predicate Tab completion (round 49/Track 5g) already applies, so
+    predicate Tab completion already applies, so
     the list matches what `/` + Tab would offer, with syntax and a
     one-line description attached to each command — the actual
-    value-add over Tab completion this round was built to provide (the
+    value-add over Tab completion this was built to provide (the
     old version just printed the same bare name list Tab completion
     already surfaces).
 
     `/help <command>` shows one command's full detail regardless of the
-    caller's own visibility for it — consistent with Track 5g's
-    established framing that visibility gating is a suggestion filter,
+    caller's own visibility for it — consistent with the established
+    framing that visibility gating is a suggestion filter,
     not an authorization check: asking about a command by name is a
     deliberate, explicit request, not a passive listing a non-moderator
     shouldn't be nudged toward.
@@ -1108,7 +1102,7 @@ async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | 
     `line` is known to start with `/` (checked by the caller). Any
     such line is now always treated as a command attempt — looked up
     in `_COMMANDS`, and if not found, "Unknown command" is shown and
-    nothing is broadcast. Previously (Track 3/4), an unrecognized `/x`
+    nothing is broadcast. Previously, an unrecognized `/x`
     line fell all the way through to being sent as an ordinary chat
     message, since the old ad hoc `if` chain only checked for the
     specific commands it knew about — a typo'd command silently became
@@ -1125,7 +1119,7 @@ async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | 
     return await handler(ctx, rest)
 
 
-# -- mute/ban/kick (design doc §13, sign-off round 37) -----------------------
+# -- mute/ban/kick (design doc §13) -----------------------
 
 _VERB_BY_KIND = {
     "mute": "muted",
@@ -1153,13 +1147,13 @@ class _TimestampedNotice:
     """
     Delivered through `ChatHub.broadcast`/`send_to` for any event whose
     display should honor each *recipient's* own timestamp preference
-    (design doc -- per-user chat timestamp preference round): `text` is
-    the already-rendered line, `created_at` the raw moment it happened.
-    `receive_loop` is the one place that turns this into a final string,
-    via `format_with_preference`, using the receiving session's own
-    user -- the same reason a plain rendered string can't be broadcast
-    directly here the way it is for events outside this round's scope
-    (e.g. `/topic`/`/nick` notices): a shared string can't reflect a
+    (design doc): `text` is the already-rendered line, `created_at`
+    the raw moment it happened. `receive_loop` is the one place that
+    turns this into a final string, via `format_with_preference`,
+    using the receiving session's own user -- the same reason a plain
+    rendered string can't be broadcast directly here the way it is for
+    events outside this scope (e.g. `/topic`/`/nick` notices): a shared
+    string can't reflect a
     per-recipient decision.
     """
 
@@ -1182,10 +1176,10 @@ def _split_duration_and_reason(rest: str) -> tuple[datetime.timedelta | None, st
     reason. If it fails to parse, the duration defaults to indefinite
     and the *entire* `rest` is the reason instead.
 
-    A deliberate, flagged-as-reconsiderable heuristic (design doc
-    sign-off round 37) — matches the common `!mute @user 10m
+    A deliberate, flagged-as-reconsiderable heuristic (design doc)
+    — matches the common `!mute @user 10m
     spamming`-style convention several existing chat moderation tools
-    use, not something settled beyond this round.
+    use, not something settled permanently.
     """
     if not rest:
         return None, None
@@ -1227,7 +1221,7 @@ async def _announce_moderation(
 
 async def _show_usage(session: Session, command: str) -> None:
     """Writes the standard `"Usage: /command <args>"` message for
-    `command`, generated from `_COMMAND_INFO` (design doc round 55) —
+    `command`, generated from `_COMMAND_INFO` (design doc) —
     the single source of truth for command syntax, also used by
     `_handle_help`, instead of each handler carrying its own
     independently-maintained copy of the same text."""
@@ -1240,7 +1234,7 @@ async def _resolve_target(session: Session, lane: DatabaseLane, username: str) -
     friendly message and returning `None` if there's no such account —
     `AuthError`'s own message is deliberately generic for login-failure
     enumeration-avoidance (see its docstring), not meant for this
-    different, non-login context. `lane`, not `db` (round 114) -- split
+    different, non-login context. `lane`, not `db` -- split
     from a single function body mixing a synchronous lookup with async
     session I/O into a `lane.run` call (the lookup) wrapped by ordinary
     `await`s (the write) in this same coroutine, since a lane job can't
@@ -1394,10 +1388,10 @@ async def _handle_kick(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _write_vcard_detail(session: Session, lane: DatabaseLane, vcard: VCard) -> None:
-    """Shared by `/finger` and `/whois` (design doc round 32/43) — the
+    """Shared by `/finger` and `/whois` (design doc) — the
     identity/bio block both commands show identically; `/whois`
     appends online/away/channel-membership lines of its own after
-    calling this. `lane`, not `db` (round 114) -- the one DB read
+    calling this. `lane`, not `db` -- the one DB read
     (`resolve_display_preferences`) happens via `lane.run` before any
     `await session.write_line(...)` call, same split as
     `_resolve_target`."""
@@ -1432,7 +1426,7 @@ async def _handle_finger(ctx: ChatCommandContext, args: str) -> None:
 
 async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     """
-    `/me <action>` (design doc round 32, point 4): a typed action
+    `/me <action>` (design doc): a typed action
     event ("* alice waves"), stored and transported as a distinct
     event kind rather than encoded as specially formatted ordinary
     text. Rendered identically for the actor and everyone else —
@@ -1478,8 +1472,8 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
 
 async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/nick <name>` sets a transparent display alias (design doc round
-    32, points 7-10). A bare `/nick` clears it -- same reasoning as
+    `/nick <name>` sets a transparent display alias (design doc,
+    points 7-10). A bare `/nick` clears it -- same reasoning as
     `/timestamps`'s own bare invocation: the status line already shows
     whatever alias is currently active, so a query-only bare invocation
     would just be redundant, and the only useful thing left for it to
@@ -1522,13 +1516,13 @@ async def _announce_nick_change(ctx: ChatCommandContext, *, new_nick: str | None
 
 async def _handle_away(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/away [message]` (design doc round 32, point 5): sets a node-wide
+    `/away [message]` (design doc): sets a node-wide
     away status shared across every one of the account's active
     sessions; `/away` with no argument clears it. Not written to
     channel scrollback or broadcast — away status is "visible through
     local presence views and private-message feedback" per the design
-    doc, neither of which exist yet (Track 5c/5e), so for now this is
-    a private confirmation to the user themselves only.
+    doc, neither of which exist yet, so for now this is a private
+    confirmation to the user themselves only.
     """
     if not args:
         if ctx.presence.is_away(ctx.user.username):
@@ -1570,7 +1564,7 @@ async def _handle_timestamps(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(colored(f"Chat timestamps are now {state}.", fg_color=MUTED_COLOR))
 
 
-# -- discovery (design doc rounds 32/33, sign-off round 43) ------------------
+# -- discovery (design doc) ------------------
 
 
 def _lookup_user_quietly(db: Database, username: str) -> User | None:
@@ -1594,7 +1588,7 @@ def _roster_usernames(hub: ChatHub, channel: Channel) -> list[str]:
 
 
 async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
-    """`/names` (design doc round 32/33): a compact, one-line roster
+    """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     if not usernames:
@@ -1614,7 +1608,7 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
-    """`/who` (design doc round 32/33): the more detailed presence
+    """`/who` (design doc): the more detailed presence
     view of `ctx.channel` — one line per person, with an away
     indicator where applicable."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
@@ -1644,7 +1638,7 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
-    """`/list` (design doc round 32/33): every channel `ctx.user`'s
+    """`/list` (design doc): every channel `ctx.user`'s
     level allows, "exposes only channels visible to the requesting
     user." Flat and sorted pinned-first-then-alphabetical, matching
     `list_boards`/`_pick_channel`'s existing sort
@@ -1672,15 +1666,15 @@ def _channel_names_for_user(
     restricted to channels `requesting_user` can themselves see
     (`_visible_channels_for` — the same filter `/list` and the picker
     use). This *is* the "hidden-channel visibility" `/whois` must
-    respect (design doc round 32/33), now actually enforced against real
-    hidden channels (Track 5h), not just consistently applied ahead of
-    their existence the way round 43 originally left it.
+    respect (design doc), now actually enforced against real
+    hidden channels, not just consistently applied ahead of
+    their existence the way it was originally left.
 
     `ChatHub` has no reverse "which channels is this user in" index —
     only per-channel participant lists — so this checks every visible
     channel's roster in turn. O(channels × participants); fine at this
-    project's declared scale (§14). Reordered `db`-first (round 114,
-    was `hub`-first) -- see `_find_live_participants`'s own docstring
+    project's declared scale (§14). Reordered `db`-first
+    (was `hub`-first) -- see `_find_live_participants`'s own docstring
     for why.
     """
     visible = _visible_channels_for(db, requesting_user)
@@ -1693,8 +1687,8 @@ def _channel_names_for_user(
 
 async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/whois <user>` (design doc round 32/33): reuses `get_vcard`
-    (Track 4) for the identity/bio block (`_write_vcard_detail`,
+    `/whois <user>` (design doc): reuses `get_vcard`
+    for the identity/bio block (`_write_vcard_detail`,
     shared with `/finger`), then adds presence info `/finger` doesn't
     have — online/offline, away status, and which currently-visible
     channels the target is in. Works for offline/never-online
@@ -1725,13 +1719,12 @@ async def _handle_whois(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(f"Channels: {joined}")
 
 
-# -- invite-only channels & membership admin (design doc §8/round 33 -------
-# points 8/9/11, Phase 2 Track 5h) -------------------------------------
+# -- invite-only channels & membership admin (design doc §8) -------------------------------------
 
 
 async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     """
-    `/invite <user>` (design doc round 33 point 11): allowed if the
+    `/invite <user>` (design doc): allowed if the
     actor holds `ChannelPermission.MANAGE_MEMBERS`, **or** the channel
     has `allow_member_invites` set and the actor is already a member —
     `create_invitation` itself is the one place that authorization
@@ -1742,7 +1735,7 @@ async def _handle_invite(ctx: ChatCommandContext, args: str) -> None:
     discoverable by the invitee at their own next login/main-menu visit
     (`netbbs.net.login_flow._announce_pending_invitations`/
     `_show_pending_invitations`) regardless of whether they're online
-    right now. Live delivery through Track 5e's mailbox/push mechanism
+    right now. Live delivery through the mailbox/push mechanism
     (`_deliver_private_message`) remains a *convenience* on top of that
     for a currently-online invitee, gated on `ctx.presence.is_online`
     first -- the same check `_handle_msg` already makes before ever
@@ -1803,7 +1796,7 @@ async def _handle_uninvite(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
-    """`/grantaccess <user>` (design doc round 33 point 8): directly
+    """`/grantaccess <user>` (design doc): directly
     adds `target` to `channel_members`, bypassing the invite-then-accept
     flow entirely — a distinct capability from `/invite`, not an
     alternate way to trigger the same thing."""
@@ -1830,7 +1823,7 @@ async def _handle_grantaccess(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
-    """`/revokeaccess <user>` (design doc round 33 point 8): removes a
+    """`/revokeaccess <user>` (design doc): removes a
     `channel_members` grant and, for a `members_only` channel, forces
     out any of the target's currently-live sessions in it (GitHub issue
     #28) -- for an access-*restricted* channel specifically, letting an
@@ -1867,7 +1860,7 @@ async def _handle_revokeaccess(ctx: ChatCommandContext, args: str) -> None:
 
 
 async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
-    """`/members` (design doc round 33 point 8): lists current direct
+    """`/members` (design doc): lists current direct
     members. Viewable by anyone already in the channel (you can only
     run this from inside it) — not further gated, reviewing your own
     channel's roster is different from administering it."""
@@ -1879,7 +1872,7 @@ async def _handle_members(ctx: ChatCommandContext, args: str) -> None:
     await ctx.session.write_line(f"Members: {names}")
 
 
-# Design doc round 55: the single source of truth for every command's
+# Design doc: the single source of truth for every command's
 # syntax and a one-line description -- `_show_usage` generates each
 # handler's own "Usage: ..." error message from this same table
 # (replacing what used to be ~16 independently-maintained copies of the
@@ -1926,10 +1919,10 @@ _COMMANDS: dict[str, CommandHandler] = {
     "private": _handle_private,
     "close": _handle_close,
     "help": _handle_help,
-    "?": _handle_help,  # terse alias (design doc round 55) -- a genuinely
+    "?": _handle_help,  # terse alias (design doc) -- a genuinely
                          # distinct trigger for /help, not a second name
-                         # for a command that already has one (see round
-                         # 54's removal of /query for the contrast)
+                         # for a command that already has one (see the
+                         # removal of /query for the contrast)
     "me": _handle_me,
     "nick": _handle_nick,
     "away": _handle_away,
@@ -1952,7 +1945,7 @@ _COMMANDS: dict[str, CommandHandler] = {
 }
 
 
-# -- Tab completion (design doc round 49/Track 5g) --------------------------
+# -- Tab completion (design doc) --------------------------
 
 # Per-command visibility predicate for completion *suggestions* only --
 # deliberately a separate dict rather than widening _COMMANDS' own value
@@ -1961,7 +1954,7 @@ _COMMANDS: dict[str, CommandHandler] = {
 # This is purely a suggestion filter, not an authorization check: the
 # handlers themselves (mute_user/kick_user/etc., via ChatModerationError/
 # MembershipError) remain the sole source of truth for what's actually
-# allowed to run -- unchanged by this track.
+# allowed to run.
 def _requires_moderate(db: Database, channel: Channel, user: User) -> bool:
     return has_permission(
         db, user, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
@@ -1977,7 +1970,7 @@ def _requires_manage_members(db: Database, channel: Channel, user: User) -> bool
 def _can_invite(db: Database, channel: Channel, user: User) -> bool:
     """`/invite`'s own visibility predicate is more permissive than the
     other three membership-admin commands, matching `create_invitation`'s
-    real authorization exactly (design doc round 33 point 11's opt-in) --
+    real authorization exactly (design doc's opt-in) --
     unlike them, it's not gated on MANAGE_MEMBERS alone."""
     if _requires_manage_members(db, channel, user):
         return True
@@ -2029,15 +2022,15 @@ async def _build_completer(
     (moderator grants can change mid-session, unlike a static completer
     built once and reused).
 
-    All matching is case-insensitive (design doc round 33 point 6).
+    All matching is case-insensitive (design doc).
 
-    `async` and `lane`-based, not `db`-based (round 114): the returned
+    `async` and `lane`-based, not `db`-based: the returned
     `completer(text)` closure is itself a plain *synchronous* callable
     (`netbbs.net.char_input.Completer`'s own contract) that `session.
     read_line` may call several times per invocation, once per Tab
     press -- it structurally cannot make a `lane.run` call itself, the
     same "callback can't await" problem `netbbs.net.picker.pick_item`'s
-    `name_of`/`description_of` callbacks had (round 112). Fixed the
+    `name_of`/`description_of` callbacks had. Fixed the
     same way: everything the completer might need -- which commands are
     currently visible, the full username list, and current membership --
     is fetched once, eagerly, in one bundled `lane.run` call *before*
@@ -2094,13 +2087,13 @@ async def _build_completer(
     return completer
 
 
-# -- chat status line (design doc round 75) + pinned input row (round 79) ---
+# -- chat status line + pinned input row (design doc) ---
 
 # The scroll region reserves the terminal's last two rows -- the pinned
 # status row, then the input row below it -- for the duration of the
 # session (rows 1..height-2 scroll normally; neither reserved row ever
-# does). Status above input -- originally the other way around (design
-# doc round 79), swapped so the status row's own underline sits on the
+# does). Status above input -- originally the other way around, swapped
+# so the status row's own underline sits on the
 # boundary between scrollback and the pinned UI, where it actually
 # reads as a divider. On the terminal's true last row (the old order)
 # there was nothing below the rule to separate, so it was rendered but
@@ -2111,13 +2104,13 @@ async def _build_completer(
 # exactly as it did before either feature existed: plain, unconfined
 # scrolling, no pinned input either. One combined gate, not two
 # independent minimums -- there's no sensible state where one pinned
-# row exists without the other (design doc round 79). A client can
+# row exists without the other (design doc). A client can
 # report an arbitrarily small height (`netbbs.net.session.
 # clamp_terminal_size`'s own floor is 1, not a sane minimum), so this
 # has to be a real runtime check, not an assumption.
 _PINNED_UI_MIN_HEIGHT = 3
 
-# Design doc round 79: shown before the pinned input row's in-progress
+# Design doc: shown before the pinned input row's in-progress
 # text, now that a full redraw happens on every update anyway -- makes
 # it immediately clear "this row is for typing," distinct from the
 # scrolling chat content above it. There was no equivalent before the
@@ -2155,7 +2148,7 @@ def _check_mute(db: Database, channel: Channel, user: User) -> str | None:
     human-readable "indefinitely"/"until ..." text -- bundles the
     restriction check and its expiry formatting into one function so
     every call site (`_chat_loop`'s send-path checks, `_handle_me`) is
-    a single `lane.run` round trip, not two (round 114)."""
+    a single `lane.run` round trip, not two."""
     restriction = is_muted(db, channel, user)
     if restriction is None:
         return None
@@ -2260,10 +2253,9 @@ def _render_chat_status_line(
     affect (see that parameter's own resolution order).
 
     Dispatched as one bundled `lane.run` call by `_repaint_status_line`
-    (round 114) -- this whole function runs on the lane's worker
+    -- this whole function runs on the lane's worker
     thread, so every read here (`get_nick`, `_own_channel_privileges`,
-    `is_muted`, `format_for_display`) stays a plain synchronous call,
-    unchanged from before this round.
+    `is_muted`, `format_for_display`) stays a plain synchronous call.
 
     Re-fetches `channel` fresh via `get_channel_by_name` rather than
     trusting the frozen snapshot passed in -- the same reasoning
@@ -2409,7 +2401,7 @@ async def _repaint_status_line(
 ) -> None:
     """
     Redraws the pinned status row in place, leaving the user's own
-    in-progress input line untouched (design doc round 75).
+    in-progress input line untouched (design doc).
 
     Re-reads `session.terminal_height` and re-issues `set_scroll_region`
     on every call, not just once at entry -- the cheapest way to stay
@@ -2429,7 +2421,7 @@ async def _repaint_status_line(
     server-side code has no visibility into) — asking the terminal
     itself to remember and restore it is the only way to guarantee this
     doesn't disturb in-progress typing, regardless of what transport or
-    client is on the other end. Every call site (design doc round 79)
+    client is on the other end. Every call site (design doc)
     already holds `_chat_loop`'s shared write lock before calling this
     -- this function doesn't acquire it itself, the same way it never
     needed to before that lock existed, since `save_cursor`/
@@ -2438,7 +2430,7 @@ async def _repaint_status_line(
     interleaving with some *other* concurrent write, not to protect
     this function against itself.
 
-    `lane`, not `db` (round 114, per Thiesi's explicit choice to
+    `lane`, not `db` (per Thiesi's explicit choice to
     migrate this hot, cosmetic, repainted-after-nearly-every-message
     path fully rather than leave it on direct `db` access): one
     `lane.run` call renders the whole line's fields on the worker
@@ -2475,7 +2467,7 @@ async def _repaint_status_line(
 async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, height: int) -> None:
     """
     Redraws the pinned input row in place from `live_buffer`'s current
-    text/cursor (design doc round 79). Unlike `_repaint_status_line`
+    text/cursor (design doc). Unlike `_repaint_status_line`
     (which jumps away and back via save/restore-cursor), this leaves
     the cursor sitting exactly here afterward -- the input row *is*
     its destination, not somewhere to return from, so there's nothing
@@ -2490,7 +2482,7 @@ async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, hei
 
     A very long in-progress line is truncated (not horizontally
     scrolled) to fit the terminal width -- an accepted simplification
-    for what's expected to be a rare case (design doc round 79); the
+    for what's expected to be a rare case (design doc); the
     cursor is left at the end of the truncated view rather than at its
     true, possibly-invisible position when that happens.
 
@@ -2520,8 +2512,8 @@ async def _print_and_redraw_input(
 ) -> None:
     """
     Print `text` as a new line into the scrolling content region, then
-    redraw the pinned input row immediately below it (design doc round
-    79). Used by every write that happens while a pinned input row
+    redraw the pinned input row immediately below it (design doc).
+    Used by every write that happens while a pinned input row
     exists: an incoming broadcast (`receive_loop`'s `deliver` closure),
     and this session's own command/message output (`send_loop`, via
     `_enter_content_region` beforehand, right after each `read_line()`
@@ -2535,7 +2527,7 @@ async def _print_and_redraw_input(
     auto-scroll-at-the-bottom-margin behavior handles it). This
     produces newest-content-adjacent-to-the-input-box behavior, which
     is what's actually expected once the input row is a fixed anchor
-    (design doc round 79's own note on why this isn't a regression from
+    (design doc's own note on why this isn't a regression from
     the old grows-from-the-top behavior, just a different, arguably
     more correct one now that there's a fixed anchor to grow from).
 
@@ -2554,8 +2546,8 @@ async def _print_candidates_and_redraw_input(
     candidates: Sequence[str], line_text: str, cursor: int,
 ) -> None:
     """
-    `apply_tab_completion`'s `list_candidates` hook (design doc round
-    79) for chat's pinned input row: prints the Tab-completion candidate
+    `apply_tab_completion`'s `list_candidates` hook (design doc)
+    for chat's pinned input row: prints the Tab-completion candidate
     list through the exact same "new line in the scrolling content
     region, then redraw the pinned input row" shape as everything else
     that prints while the pinned rows are active (`_print_and_redraw_
@@ -2582,8 +2574,8 @@ async def _enter_content_region(session: Session, height: int) -> None:
     """
     Repositions the cursor into the scrolling content region's bottom
     row, ready for ordinary `write_line` calls (every existing chat
-    command handler's own output, unchanged by this round) to print and
-    auto-scroll correctly (design doc round 79). Needed because the
+    command handler's own output) to print and
+    auto-scroll correctly (design doc). Needed because the
     cursor is otherwise sitting on the pinned input row -- outside the
     scroll region -- immediately after `read_line()` returns; without
     this, the first line a command handler writes would land in the
@@ -2769,7 +2761,7 @@ async def _chat_loop(
     an earlier version of this docstring described that as still
     deferred; it isn't anymore. Cursor-addressable editing (Left/Right/
     Home/End/Delete/Insert) and Up/Down command-history recall (`history`
-    — design doc round 47/Track 5f) landed later still, once retyping a
+    — design doc) landed later still, once retyping a
     long `/mute`/`/ban` reason from scratch each time turned out to be
     genuinely painful in practice. An incoming message can still land
     mid-typing and interleave visually with a user's own in-progress
@@ -2777,18 +2769,18 @@ async def _chat_loop(
     always had — that's a receive-vs-send-task race (see below), a
     different problem from line editing, and still out of scope.
 
-    Scrollback (design doc round 19/20) is replayed here, before the
+    Scrollback (design doc) is replayed here, before the
     "Joined" line, using whatever was persisted *before* this join —
     this join's own event is recorded immediately after, so it's part of
     the next person's replay, not this one's.
 
-    Checked once, here, before doing anything else (design doc §13,
-    sign-off round 37): an unexpired ban means the user never enters
+    Checked once, here, before doing anything else (design doc §13):
+    an unexpired ban means the user never enters
     the loop at all. Mute has no equivalent join-time check — a muted
     user can still read, just not send (enforced in `send_loop`).
 
     A pinned status row, and a pinned input row just below it (design
-    doc round 75, expanded round 79; see `_repaint_status_line`/
+    doc; see `_repaint_status_line`/
     `_repaint_input_row`), occupy the terminal's last two lines for the
     duration of the session, via a VT100 scroll region — everything
     above them, including the scrollback replay and "Joined" line
@@ -2802,7 +2794,7 @@ async def _chat_loop(
     exactly the old, unconfined scrolling behavior with no pinned input
     row either.
 
-    `live_buffer`/`lock` (design doc round 79) are constructed
+    `live_buffer`/`lock` (design doc) are constructed
     unconditionally, even when the pinned UI itself is disabled for
     this session -- passed to every `read_line()` call regardless, so
     `receive_loop`'s own conditional logic doesn't need a second,
@@ -2810,7 +2802,7 @@ async def _chat_loop(
     off, `lock` is simply never contended (`receive_loop` never
     acquires it either in that case), so this costs nothing.
 
-    `lane`, not `db` (round 114): both `send_loop`/`receive_loop`
+    `lane`, not `db`: both `send_loop`/`receive_loop`
     dispatch concurrently through this same lane -- safe by
     construction, the identical property that already lets two
     different *sessions* share one lane (`DatabaseLane`'s own single
@@ -2826,14 +2818,14 @@ async def _chat_loop(
 
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(channel.name, participant_id)
-    # Round 114: this try now starts immediately after hub.join(), not
+    # This try starts immediately after hub.join(), not
     # just around the receive/send-task wait below -- scrollback replay
     # and the initial join broadcast/status-line paint between here and
-    # task creation now cross real lane.run() round trips, so a
+    # task creation cross real lane.run() round trips, so a
     # cancellation landing in that window needs the same finally-block
-    # hub.leave() cleanup as one landing in the wait() below. Before
-    # this migration that window was effectively zero-width (pure
-    # synchronous db calls, no await points to be cancelled at).
+    # hub.leave() cleanup as one landing in the wait() below (that
+    # window is not zero-width: real await points exist there, not just
+    # synchronous db calls).
     try:
         pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
         live_buffer = LiveInputBuffer()
@@ -2858,7 +2850,7 @@ async def _chat_loop(
             await session.write_line(colored("--- scrollback ---", fg_color=MUTED_COLOR))
             for line in rendered_scrollback:
                 await session.write_line(line)
-            # Round 19, point 5: even bounded persistence is a different
+            # Even bounded persistence is a different
             # promise than pure ephemeral chat — worth surfacing explicitly
             # rather than leaving as an internal implementation detail.
             await session.write_line(
@@ -2878,7 +2870,7 @@ async def _chat_loop(
         # alias-aware label) -- sanitize on output, not on storage, per
         # sanitize_text's docstring; only the rendered copy each recipient's
         # receive_loop produces is actually shown to a terminal (GitHub
-        # issue #64, round 109) -- the recorded ChannelMessage itself is
+        # issue #64) -- the recorded ChannelMessage itself is
         # broadcast, not a pre-rendered string, so live and scrollback
         # replay always agree on how to render it (see
         # _render_channel_message).
@@ -2910,8 +2902,8 @@ async def _chat_loop(
             held to perform a threshold-crossing transition atomically
             with respect to `send_loop`.
 
-            Used two ways: `receive_loop`'s own writes below (design doc
-            round 79), and installed as `session.pinned_notice_hook` so
+            Used two ways: `receive_loop`'s own writes below (design doc),
+            and installed as `session.pinned_notice_hook` so
             an out-of-band system notice (a node-shutdown broadcast,
             `netbbs.net.session_registry.ActiveSessionRegistry.
             broadcast_to_all`) reaches this session through the same
@@ -2938,28 +2930,27 @@ async def _chat_loop(
                     )
                     return
                 if isinstance(message, ChannelMessage):
-                    # GitHub issue #64, round 109: join/leave/message/action
-                    # broadcasts now carry the structured, persisted event
+                    # GitHub issue #64: join/leave/message/action
+                    # broadcasts carry the structured, persisted event
                     # itself rather than a pre-rendered string, so this is
                     # the same renderer scrollback replay uses
                     # (_render_channel_message) -- the two paths can no
                     # longer independently drift on whether a currently-
                     # verified real name is shown. repaint_status=True
                     # unconditionally, same as the _TimestampedNotice branch
-                    # below did for these same event kinds before this
-                    # split (design doc round 75) -- join/leave affect the
+                    # below does for these same event kinds
+                    # (design doc) -- join/leave affect the
                     # participant count every repaint shows regardless.
                     rendered = await lane.run(_render_channel_message, channel, user, message, self_message=False)
                     await deliver(rendered, repaint_status=True)
                     continue
                 if isinstance(message, _TimestampedNotice):
-                    # The one remaining use of this wrapper after round 109
-                    # moved join/leave/message/action onto ChannelMessage
+                    # The one remaining use of this wrapper now that
+                    # join/leave/message/action are carried on ChannelMessage
                     # above: private (`/msg`/`/private`) message delivery via
                     # `send_to` (`_deliver_private_message`), which has no
                     # ChannelMessage to carry -- private conversations are
-                    # deliberately not persisted (design doc round 32 point
-                    # 1). repaint_status=True here too since a private
+                    # deliberately not persisted (design doc). repaint_status=True here too since a private
                     # message can arrive while the status line is showing
                     # something now-stale (e.g. an away reminder).
                     rendered = await lane.run(format_with_preference, user, message.text, message.created_at)
@@ -2981,14 +2972,13 @@ async def _chat_loop(
                 await deliver(message)
 
         async def send_loop() -> ChatAction | None:
-            # Per-session private-conversation state (design doc round 33
-            # point 1, sign-off round 46/Track 5e): set by `/private`
-            # (`_EnterPrivate`), cleared by `/close` (`_ExitPrivate`). A
-            # plain local, not anything shared/global -- only this session's
-            # own next lines of ordinary input are affected. While set,
-            # slash-commands still dispatch exactly as normal (confirmed
-            # with Thiesi, matching round 39's existing "leading / is always
-            # a command attempt" rule) -- only *non-slash* lines change
+            # Per-session private-conversation state (design doc): set by
+            # `/private` (`_EnterPrivate`), cleared by `/close`
+            # (`_ExitPrivate`). A plain local, not anything shared/global --
+            # only this session's own next lines of ordinary input are
+            # affected. While set, slash-commands still dispatch exactly as
+            # normal (confirmed with Thiesi, matching the existing "leading /
+            # is always a command attempt" rule) -- only *non-slash* lines change
             # meaning, routed to the private conversation instead of posted
             # to the channel.
             private_target: User | None = None
@@ -3008,7 +2998,7 @@ async def _chat_loop(
                 ).strip()
 
                 # Everything from here to the next read_line() call is one
-                # atomic critical section under `lock` (design doc round 79)
+                # atomic critical section under `lock` (design doc)
                 # -- entering the scroll region's content row up front, so
                 # every existing write_line() call below (unchanged) prints
                 # and auto-scrolls in the right place instead of landing on
@@ -3089,7 +3079,7 @@ async def _chat_loop(
                             # relevant state of this user's own (/away, /nick) --
                             # repainting after every command, not just those two,
                             # is simpler than enumerating which ones matter and no
-                            # more expensive (design doc round 75).
+                            # more expensive (design doc).
                             if pinned_ui_enabled:
                                 await _repaint_status_line(session, lane, hub, presence, channel, user)
                             continue
@@ -3131,7 +3121,7 @@ async def _chat_loop(
                                 await _repaint_status_line(session, lane, hub, presence, channel, user)
                             continue
 
-                        # GitHub issue #64, round 109: re-checked here against
+                        # GitHub issue #64: re-checked here against
                         # the *current* channel/Community policy and the
                         # user's *current* attestation, not just at channel
                         # entry -- see _meets_live_participation_requirements.
@@ -3171,7 +3161,7 @@ async def _chat_loop(
                         )
                         await session.write_line(rendered_self)
                         await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
-                        # Design doc round 32, point 6: sending a message does not
+                        # Design doc: sending a message does not
                         # clear away state -- a user may intentionally remain away
                         # while briefly responding. Reminded, not silently changed.
                         if presence.is_away(user.username):
@@ -3202,7 +3192,7 @@ async def _chat_loop(
             )
         except asyncio.CancelledError:
             # This whole session task was itself cancelled from outside
-            # (e.g. deliberate node shutdown, design doc round 51's
+            # (e.g. deliberate node shutdown, design doc's
             # ActiveSessionRegistry.disconnect_all()) -- asyncio.wait()
             # being cancelled does NOT cancel the tasks it was waiting
             # on, so without this, receive_task/send_task would be left
@@ -3283,15 +3273,15 @@ async def _chat_loop(
             # reason this whole function is unwinding in the first
             # place) makes this write raise SessionClosedError, which
             # must not replace/mask whatever exception is already
-            # propagating out of the try block above (design doc round
-            # 75) -- there's nothing left to reset for a session that's
+            # propagating out of the try block above (design doc) --
+            # there's nothing left to reset for a session that's
             # already disconnected anyway. Must happen before this
             # session moves on to any other screen (the main menu, the
             # channel picker) -- left active, every subsequent screen
             # would keep scrolling inside this same shrunk region.
             #
-            # clear_screen() is bundled in here too (design doc round
-            # 77 bugfix): neither the channel picker (`pick_item`,
+            # clear_screen() is bundled in here too (design doc
+            # bugfix): neither the channel picker (`pick_item`,
             # reached via /leave) nor the main menu (`_draw_main_menu`,
             # reached via /quit) ever clear the screen themselves, so
             # without this the last screenful of chat stayed visible

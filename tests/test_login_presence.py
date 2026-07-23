@@ -1,7 +1,7 @@
 """
 Integration test for netbbs.net.login_flow.handle_session's
-PresenceRegistry enter()/leave() hook (design doc round 32, sign-off
-round 42) -- confirms the one place in the codebase that knows "this
+PresenceRegistry enter()/leave() hook -- confirms the one place in
+the codebase that knows "this
 account now has one more/one fewer live connection" actually calls
 it, paired correctly around the authenticated portion of a session.
 Library-level PresenceRegistry behavior is covered separately in

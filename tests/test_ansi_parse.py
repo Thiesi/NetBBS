@@ -1,6 +1,6 @@
-"""Tests for netbbs.rendering.ansi_parse.parse_ansi_into_buffer (design
-doc -- welcome banner round B1) -- rasterizing externally-authored ANSI
-text into a ScreenBuffer, the loading half of what makes editing an
+"""Tests for netbbs.rendering.ansi_parse.parse_ansi_into_buffer --
+rasterizing externally-authored ANSI text into a ScreenBuffer, the
+loading half of what makes editing an
 existing file possible (netbbs.rendering.ansi_art.decode_ansi_bytes
 only ever does byte decoding, never escape-sequence interpretation)."""
 

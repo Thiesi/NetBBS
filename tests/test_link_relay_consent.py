@@ -1,6 +1,6 @@
 """
 Tests for `netbbs.link.protocol`'s relay-consent verification methods
-(design doc §12, round 95/issue #58): `handle_relay_consent_request`/
+(design doc §12, issue #58): `handle_relay_consent_request`/
 `handle_relay_consent_response`. Both are verify-only -- neither method
 mutates `relaying_for`/`relays_serving_me`, matching the module's own
 "verify here, policy/mutation elsewhere" split (see each method's own

@@ -90,7 +90,7 @@ async def pick_item(
     position in `items`.
 
     `name_of`/`description_of` results are sanitized (`netbbs.rendering.
-    sanitize_text`, design doc round 29) immediately before display —
+    sanitize_text`, design doc) immediately before display —
     every caller of this shared picker (boards, chat channels, file
     areas) gets that protection automatically rather than needing to
     remember it individually. Search matching (`query.lower() in
@@ -104,7 +104,7 @@ async def pick_item(
     specific answer) — not on every keystroke. An action that changes
     nothing (paging past the last/first page, an unrecognized key, an
     out-of-range 2-digit selection) sounds a bell and does *nothing*
-    else (design doc round 52) — no redraw, no reprinted prompt, no
+    else (design doc) — no redraw, no reprinted prompt, no
     error message; the screen is left exactly as it was, and the next
     keystroke's own echo lands wherever the cursor already sits. A
     deliberately typed sub-prompt that fails on its own terms (`search`
@@ -265,8 +265,8 @@ async def pick_item(
 
 def _search_completer(candidates: Sequence[str]) -> Completer:
     """
-    Tab completion for `pick_item`'s `"Search: "` prompt (design doc
-    round 49/Track 5g) — purely additive: the substring-match-on-Enter
+    Tab completion for `pick_item`'s `"Search: "` prompt — purely
+    additive: the substring-match-on-Enter
     search behavior above is completely unchanged, this only helps when
     what's typed so far happens to already be a real *prefix* of some
     candidate's name.
@@ -280,7 +280,8 @@ def _search_completer(candidates: Sequence[str]) -> Completer:
     space. Safe scope: complete the *first* word of a name, not every
     word within it — redefining the picker's own search matching to
     prefix-only (which could support the general case properly) is a
-    separate, larger, round-16-reversing question, out of scope here.
+    separate, larger question that would reverse the existing
+    substring-match search behavior, out of scope here.
     """
 
     def completer(text: str) -> list[str]:

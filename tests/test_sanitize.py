@@ -1,5 +1,5 @@
 """
-Tests for netbbs.rendering.sanitize (design doc round 29, issue #8).
+Tests for netbbs.rendering.sanitize (issue #8).
 
 Covers exactly the acceptance-criteria categories the issue names: ESC,
 C0/C1 controls, OSC sequences, bidi controls, and ordinary UTF-8 text.

@@ -1,5 +1,5 @@
 """
-Shared SysOp admin menu (design doc -- SysOp foundation round).
+Shared SysOp admin menu (design doc -- SysOp foundation).
 
 The single implementation of every user-management action, reachable
 two ways: a gated menu option inside an authenticated BBS session
@@ -12,23 +12,23 @@ entry point that came from.
 
 Follows the submenu shape already established by
 `netbbs.net.login_flow._edit_profile`: a redraw-on-real-change-only
-draw function, a bell-only-on-invalid-key dispatch loop (design doc
-round 52), and `netbbs.net.picker.pick_item` for target selection.
+draw function, a bell-only-on-invalid-key dispatch loop (design doc),
+and `netbbs.net.picker.pick_item` for target selection.
 
-Fourth and final file migrated onto design doc round 91's two-lane
-database execution model (issue #57/round 115) -- every screen/menu
-function here now takes `lane: DatabaseLane` instead of `db: Database`,
+Migrated onto the two-lane database execution model (design doc,
+issue #57) -- every screen/menu
+function here takes `lane: DatabaseLane` instead of `db: Database`,
 and every direct domain-function call goes through `await lane.run(...)`.
-Almost entirely mechanical, unlike chat_flow.py's round 114 (no
-synchronous-callback contracts here the way the Tab completer was) --
+Almost entirely mechanical (no
+synchronous-callback contracts here the way the Tab completer in
+chat_flow.py has) --
 `pick_item`'s own `name_of`/`description_of` callbacks in this file only
 ever read attributes already present on the objects handed to
-`pick_item`, never a fresh DB call, so no eager-pre-fetch restructuring
-was needed for any of them except one: `_who_screen`'s
-`description_of` used to call `format_for_display(entry.connected_at,
-db)` directly inside its lambda, which cannot dispatch through a lane
-from inside a synchronous callback -- fixed the same way round 112
-fixed this same shape (`resolve_display_preferences`, fetched once via
+`pick_item`, never a fresh DB call, except one: `_who_screen`'s
+`description_of` cannot call `format_for_display(entry.connected_at,
+db)` directly inside its lambda, since a synchronous callback cannot
+dispatch through a lane -- it instead uses the same fix as elsewhere
+(`resolve_display_preferences`, fetched once via
 `lane.run` before the picker, then passed as `override_format`/
 `override_timezone` into a plain synchronous `format_for_display`
 call). `_community_label` stays `db`-first, dispatched *through* the
@@ -42,8 +42,8 @@ as the mail/files/chat branches before it) and the standalone
 `python -m netbbs.admin` CLI (`netbbs.admin.__main__`), which
 constructs its own `DatabaseLane` around its own `Database` handle --
 there is no live-session/CLI distinction for admin functionality
-itself once inside `admin_menu` (that's `node_controls`' job, already
-established before this round).
+itself once inside `admin_menu` (that's `node_controls`' job,
+established independently).
 """
 
 from __future__ import annotations
@@ -197,7 +197,7 @@ async def admin_menu(
     check of its own, matching `pick_item`'s "presentation and
     selection only" precedent.
 
-    `node_controls` (design doc -- node management round), if given,
+    `node_controls` (design doc), if given,
     unlocks the `[N]ode` command nested inside the `[S]ystem` submenu
     (list/disconnect sessions, trigger shutdown) -- present when called
     from within a live session (`netbbs.net.login_flow`), absent
@@ -206,7 +206,7 @@ async def admin_menu(
     at all (confirmed design decision, not an oversight -- see that
     module's docstring).
 
-    `link_context` (design doc round 124/128), if given, unlocks the
+    `link_context` (design doc), if given, unlocks the
     `[L]ink this board` command inside the board-management screens --
     same presence/absence reasoning as `node_controls`: absent for the
     standalone CLI and for any node with Link disabled.
@@ -265,8 +265,8 @@ async def _draw_admin_menu(session: Session) -> None:
 async def _users_menu(
     session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
 ) -> None:
-    """Every user-account action, grouped together (design doc -- admin
-    menu reorganization round): create, list/detail, registration
+    """Every user-account action, grouped together (design doc): create,
+    list/detail, registration
     policy, promote/demote, enable/disable, delete. `node_controls` is
     threaded straight through to the screens that need it
     (`_disable_enable_screen`/`_delete_user_screen`, for the live-
@@ -335,9 +335,9 @@ async def _system_menu(
     node_controls: NodeControls | None,
     link_context: LinkContext | None = None,
 ) -> None:
-    """Node-wide settings, grouped together (design doc -- admin menu
-    reorganization round): welcome banner, self-update, and -- Thiesi's
-    own call -- `[N]ode` (sessions/shutdown) nested here rather than
+    """Node-wide settings, grouped together (design doc): welcome banner,
+    self-update, and -- Thiesi's own call -- `[N]ode` (sessions/shutdown)
+    nested here rather than
     sitting at the top level, since it's a node-wide concern too.
 
     `link_context` (issue #60), if given, unlocks `[L]ink status` --
@@ -439,7 +439,7 @@ async def _create_user_screen(session: Session, lane: DatabaseLane, actor: User)
         return
 
     try:
-        # round 115: create_user, not create_user_async -- the latter's
+        # create_user, not create_user_async -- the latter's
         # off-loop hashing split existed specifically to keep Argon2
         # hashing off the *raw* event loop; lane.run() already dispatches
         # this whole call to a worker thread, so the plain synchronous
@@ -520,8 +520,8 @@ async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, t
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Level: {target.user_level}")
     await session.write_line(f"Status: {_status_label(target)}")
-    # round 115: display prefs fetched once, reused for the loop below
-    # too (round 112's format_for_display-under-a-lane fix).
+    # Display prefs fetched once, reused for the loop below too
+    # (the format_for_display-under-a-lane fix).
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     member_since = format_for_display(
         target.created_at, override_format=display_format, override_timezone=display_timezone
@@ -545,7 +545,7 @@ async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, t
             updated = await lane.run(approve_pending_user, target, approved_by=actor)
             await session.write_line(f"{updated.username!r} approved.")
 
-    # Design doc §18, round 85 point 6 / round 101: a narrow, SysOp-
+    # Design doc §18: a narrow, SysOp-
     # grantable permission independent of the four moderator scope
     # tiers -- toggled here rather than a dedicated screen, same shape
     # as the pending-approval prompt just above.
@@ -561,7 +561,7 @@ async def _show_user_detail(session: Session, lane: DatabaseLane, actor: User, t
         )
 
 
-# -- self-service registration settings (design doc round 76) -----------
+# -- self-service registration settings (design doc) -----------
 
 
 _REGISTRATION_MODE_LABELS = {
@@ -573,7 +573,7 @@ _REGISTRATION_MODE_LABELS = {
 
 async def _registration_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     """
-    Sets the node's `registration_mode` (design doc round 96) --
+    Sets the node's `registration_mode` (design doc) --
     open/approval_required/closed, replacing the earlier plain
     require-approval toggle -- and surfaces how many self-registered
     accounts are currently waiting on approval. Approving/rejecting any
@@ -629,7 +629,7 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
     await session.write_line(f"Registration mode is now: {_REGISTRATION_MODE_LABELS[new_mode]}")
 
 
-# -- self-update (design doc §17, round 82; round 95/96 implementation) --
+# -- self-update (design doc §17) --
 
 
 async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -1192,7 +1192,7 @@ async def _revoke_live_sessions(
         )
 
 
-# -- node management (design doc -- node management round) -----------------
+# -- node management (design doc) -------------------------------------------
 
 
 async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
@@ -1248,10 +1248,10 @@ def _session_description(entry: SessionSummary, display_format: str, display_tim
 
 async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     entries = node_controls.session_registry.list_entries()
-    # round 115: description_of runs synchronously inside pick_item, so
+    # description_of runs synchronously inside pick_item, so
     # the display-preference lookup _session_description needs is
-    # resolved once via the lane *before* the picker, same shape round
-    # 112 established for format_for_display generally.
+    # resolved once via the lane *before* the picker, same shape
+    # established for format_for_display generally.
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     selected = await pick_item(
         session, entries,
@@ -1420,8 +1420,8 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
     await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s.")
 
 
-# -- welcome banner (design doc -- welcome banner round, Round A of a
-# three-part skinning initiative) -------------------------------------
+# -- welcome banner (design doc -- part one of a three-part skinning
+# initiative) ----------------------------------------------------------
 
 
 async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -1538,8 +1538,8 @@ async def _disable_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 
 
 async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """Opens the WYSIWYG ANSI art editor (design doc -- welcome banner
-    round B1) against the current banner file, if any. `edit_ansi_art`
+    """Opens the WYSIWYG ANSI art editor (design doc) against the
+    current banner file, if any. `edit_ansi_art`
     itself knows nothing about "welcome banner" -- this screen is
     responsible for loading the existing file, computing the draft
     path, and writing a real save back to `banner_path(db)`."""
@@ -1557,7 +1557,7 @@ async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, acto
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
-# -- boards & areas (design doc -- board/area management round) -----------
+# -- boards & areas (design doc) ---------------------------------------
 #
 # Boards and file areas share an identical schema shape and permission
 # model (BoardPermission is reused for both object_type='board' and
@@ -1649,8 +1649,8 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
     "no gate" wording -- already asserted on by
     tests/test_admin_flow.py and tests/test_board_pagination_ui.py --
     stays exactly as it is. Used for every nullable-int field
-    introduced by design doc §16's Community inheritance model (round
-    84): boards'/file areas' own `min_read_level`/`min_write_level`
+    introduced by design doc §16's Community inheritance model:
+    boards'/file areas' own `min_read_level`/`min_write_level`
     (this is the *only* way to ever set one back to `None` -- i.e. opt
     a resource into inheriting its Community's default -- `_read_int`
     has no clearing mechanism at all), plus Community's own
@@ -1673,7 +1673,7 @@ async def _prompt_optional_int(session: Session, label: str, *, current: int | N
 
 async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int | None, bool]:
     """Shared min_age prompt for board/channel/area create+edit screens
-    (design doc §18, round 101). Returns `(value, ok)` -- `ok=False`
+    (design doc §18). Returns `(value, ok)` -- `ok=False`
     means the caller should cancel; blank keeps `current` (which may
     itself already be `None`, meaning no gate), `'none'` clears any
     existing gate, otherwise a plain integer sets it."""
@@ -1692,10 +1692,10 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
 
 
 async def _prompt_name_requirement(session: Session, *, current: str | None) -> tuple[str | None, bool]:
-    """Shared name_requirement prompt (design doc §18, round 101) --
+    """Shared name_requirement prompt (design doc §18) --
     `none` (no gate), `verified` (SysOp can identify but nothing is
     displayed), or `verified_and_displayed` (shown within this
-    resource's own rendering, design doc round 99)."""
+    resource's own rendering, design doc)."""
     label = current or "none"
     await session.write(
         f"Name requirement [{label}] (none/verified/verified_and_displayed, blank = keep): "
@@ -1730,7 +1730,7 @@ async def _pick_optional_category(
     `netbbs.files.categories`). Returns the chosen category's id, or
     `None` if declined or none exist.
 
-    `community_id`/`resources` (design doc §16, round 84's category
+    `community_id`/`resources` (design doc §16's category
     leak-prevention, admin-side half -- see
     `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
     the browse-side half, which this mirrors) narrow the offered
@@ -1792,7 +1792,7 @@ async def _pick_optional_category(
 
 async def _pick_optional_community(session: Session, lane: DatabaseLane) -> int | None:
     """Optional Community picker shared by board/channel/area create+
-    edit screens (design doc §16, round 84) -- mirrors
+    edit screens (design doc §16) -- mirrors
     `_pick_optional_category` exactly, but flat (a Community has no
     two-level sub-structure the way categories do). Prompted *before*
     the existing category prompt at every call site -- Community is the
@@ -1818,7 +1818,7 @@ def _community_label(db: Database, community_id: int | None) -> str:
     return sanitize_text(community.name) if community is not None else "(none)"
 
 
-# -- Communities (design doc §16, rounds 71/83/84/86) ------------------
+# -- Communities (design doc §16) ------------------
 
 
 async def _community_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -1849,8 +1849,8 @@ async def _draw_community_menu(session: Session) -> None:
 
 
 async def _create_community_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """Create stays lean, Edit carries the rest (design doc §16, round
-    84) -- same split boards already use. Only name/description are
+    """Create stays lean, Edit carries the rest (design doc §16) -- same
+    split boards already use. Only name/description are
     prompted here; `hidden` and every `default_*` field start at their
     own defaults (visible, no gate) and are set via `_edit_community_screen`
     afterward if the SysOp wants them."""
@@ -1892,7 +1892,7 @@ def _community_description(community: Community) -> str:
 
 async def _community_detail_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> None:
     """No "pending" equivalent here, unlike boards/areas -- a Community
-    holds no content of its own (design doc §16, round 84)."""
+    holds no content of its own (design doc §16)."""
     await _draw_community_detail(session, community)
     while True:
         choice = (await session.read_key()).lower()
@@ -1980,8 +1980,8 @@ async def _edit_community_screen(
 
 
 async def _delete_community_screen(session: Session, lane: DatabaseLane, actor: User, community: Community) -> bool:
-    """Shows the blast radius before committing (design doc §16, round
-    84's exact confirmation wording): how many boards/channels/areas
+    """Shows the blast radius before committing (design doc §16's exact
+    confirmation wording): how many boards/channels/areas
     will revert to Uncategorized, and how many Community-blanket
     moderator grants will be revoked outright."""
 
@@ -2180,12 +2180,12 @@ async def _board_detail_screen(
 
 async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext) -> None:
     """
-    `[L]ink this board` (design doc round 124/128): puts `board` into
+    `[L]ink this board` (design doc): puts `board` into
     Link scope via a signed `board_genesis` event referencing its
-    existing `board_id` -- never a fresh one (round 124's "promote an
+    existing `board_id` -- never a fresh one (the "promote an
     existing local board" case, the normal one, not a special one).
 
-    The six `default_*` cascading-scalar-default fields (round 124)
+    The six `default_*` cascading-scalar-default fields
     are pre-filled from `board`'s own *current* local settings (the
     obvious starting recommendation, matching `_edit_board_screen`'s
     own prefill-then-edit convention). For the four fields sharing
@@ -2275,7 +2275,7 @@ async def _link_board_screen(session: Session, lane: DatabaseLane, board: Board,
 
 def _linked_boards_excluding(db: Database, exclude_board_id: int) -> list[Board]:
     """Every currently-Linked board except `exclude_board_id` (design
-    doc §13, round 94/issue #53) -- the fork-source candidate list for
+    doc §13, issue #53) -- the fork-source candidate list for
     `_link_board_screen`'s own optional `forked_from` prompt. A board
     doesn't fork from itself, and an as-yet-unLinked board has no
     genesis to point at in the first place, so both are excluded by
@@ -2291,7 +2291,7 @@ async def _transfer_board_origin_screen(
     session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
 ) -> None:
     """
-    `[T]ransfer origin` (design doc §13, round 94/issue #53): the
+    `[T]ransfer origin` (design doc §13, issue #53): the
     current origin's half of the mutual-consent handoff -- offers a
     different, already-known peer as `board`'s next origin. Alone, this
     changes nothing (see `BoardOriginTransferOffer`'s own docstring) --
@@ -2347,7 +2347,7 @@ async def _accept_board_origin_transfer_screen(
     session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
 ) -> None:
     """
-    `[A]ccept transfer` (design doc §13, round 94/issue #53): the
+    `[A]ccept transfer` (design doc §13, issue #53): the
     consent-completing half -- accepts the single pending incoming
     origin-transfer offer for `board` that names this node as the
     proposed new origin. Only reachable when `_draw_board_detail`
@@ -2398,8 +2398,8 @@ async def _draw_board_detail(
     link_context: LinkContext | None = None,
 ) -> tuple[bool, bool]:
     """
-    Returns `(is_origin, has_incoming_offer)` (design doc §13, round
-    94/issue #53) -- whether this node is currently `board`'s own
+    Returns `(is_origin, has_incoming_offer)` (design doc §13, issue
+    #53) -- whether this node is currently `board`'s own
     origin (gates `[T]ransfer origin`) and whether a pending incoming
     origin-transfer offer names this node as the proposed new origin
     (gates `[A]ccept transfer`). `_board_detail_screen`'s own dispatch
@@ -2992,7 +2992,7 @@ async def _file_action_screen(session: Session, lane: DatabaseLane, actor: User,
             await session.write(reject_keystroke())
 
 
-# -- channels (design doc -- channel management round) --------------------
+# -- channels (design doc) --------------------------------------------------
 #
 # Mirrors the board/area sections above, structurally, but with no
 # pending-queue equivalent: channels have no moderated-content/approval
@@ -3382,10 +3382,9 @@ async def _list_categories_screen(
 async def _pick_moderator_scope(session: Session, lane: DatabaseLane) -> tuple[str, int | None, str, int | None] | None:
     """Returns `(object_type, object_id, human label, community_id)`,
     or `None` if cancelled. `object_id=None` means a blanket grant
-    (design doc -- board/area management round; channel scope added in
-    the channel management round) -- `community_id` further narrows a
-    blanket grant to one Community's membership (design doc §16, round
-    84's Community-blanket tier) instead of the whole node;
+    (design doc) -- `community_id` further narrows a blanket grant to
+    one Community's membership (design doc §16's Community-blanket
+    tier) instead of the whole node;
     `community_id` is always `None` for a per-object grant (`[B]oard`/
     `[A]rea`/`Cha[N]nel`), since a specific object's own `community_id`
     already answers that question without needing it duplicated on the
@@ -3441,10 +3440,10 @@ async def _pick_moderator_scope(session: Session, lane: DatabaseLane) -> tuple[s
 
 
 async def _pick_optional_community_blanket_scope(session: Session, lane: DatabaseLane) -> int | None:
-    """The blanket-grant-scoping follow-up (design doc §16, round 84):
+    """The blanket-grant-scoping follow-up (design doc §16):
     'Scope this blanket grant to one Community instead of the whole
     node?' -- extends the existing X/Y/Z blanket keys rather than
-    adding new ones, per that round's own decision. Returns the chosen
+    adding new ones. Returns the chosen
     Community's id, or `None` for an ordinary node-wide (local-)blanket
     grant."""
     if not await prompt_yes_no(

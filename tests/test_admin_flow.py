@@ -1,6 +1,6 @@
 """
-Tests for the shared SysOp admin menu (design doc -- SysOp foundation
-round), `netbbs.net.admin_flow.admin_menu` -- the single implementation
+Tests for the shared SysOp admin menu, `netbbs.net.admin_flow.admin_menu`
+-- the single implementation
 both the in-BBS [S]ysOp main-menu option and the standalone `python -m
 netbbs.admin` CLI tool call. Driven with a scripted `FakeSession`
 (single ordered input queue serving both `read_key`/`read_line`, same
@@ -28,7 +28,7 @@ from netbbs.storage.execution import DatabaseLane
 from tests.test_shutdown import _hold_registered
 
 # Sentinel strings in FakeSession's single scripted-input queue that
-# read_editor_key (design doc -- welcome banner round B1) maps to
+# read_editor_key maps to
 # non-CHAR EditorKeyKinds, rather than treating them as literal typed
 # text -- keeps the whole file's "one ordered queue for every kind of
 # read" convention intact instead of adding a second, incompatible
@@ -377,7 +377,7 @@ def test_disabling_your_own_account_excludes_your_own_session(db, lane, sysop):
     asyncio.run(scenario())
 
 
-# -- invalid key: bell only (design doc round 52 convention) ---------------
+# -- invalid key: bell only convention ---------------------------------------
 
 
 def test_invalid_key_writes_only_a_bell(db, lane, sysop):
@@ -388,7 +388,7 @@ def test_invalid_key_writes_only_a_bell(db, lane, sysop):
     assert session.written[:bell_index].count("Choice: ") == 1
 
 
-# -- node management (design doc -- node management round) -----------------
+# -- node management -------------------------------------------------------
 
 
 def _node_controls() -> NodeControls:
@@ -701,7 +701,7 @@ def test_drain_screen_declined_confirmation_does_nothing(db, lane, sysop):
     asyncio.run(scenario())
 
 
-# -- boards & areas (design doc -- board/area management round) -----------
+# -- boards & areas -------------------------------------------------------
 
 
 def test_create_board_flow(db, lane, sysop):
@@ -772,7 +772,7 @@ def test_sysop_approves_a_pending_post_with_zero_grants(db, lane, sysop):
     assert get_post(db, post.post_id).status == "approved"
 
 
-# -- linked boards (design doc round 124/128) --------------------------------
+# -- linked boards ------------------------------------------------------------
 
 
 def _link_context():
@@ -833,8 +833,8 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
 def _add_fake_peer(link_context, *, descriptor=None):
     """A minimal but real, correctly-shaped `PeerRecord` for a second
     node -- enough for `_transfer_board_origin_screen` to recognize a
-    transfer target as a known peer (design doc §13, round 94/issue
-    #53). `descriptor` defaults to `None` (every existing caller doesn't
+    transfer target as a known peer (design doc §13, issue #53).
+    `descriptor` defaults to `None` (every existing caller doesn't
     need one) -- pass a real `EndpointDescriptor` (issue #60's Link
     status screen reads `.payload` off it) when a test needs one."""
     from netbbs.link.node_identity import bootstrap_node_identity
@@ -1112,7 +1112,7 @@ def test_grant_blanket_across_all_boards(db, lane, sysop):
     assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)
 
 
-# -- channels (design doc -- channel management round) --------------------
+# -- channels -------------------------------------------------------------
 
 
 def test_create_channel_flow(db, lane, sysop):
@@ -1224,7 +1224,7 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
     )
 
 
-# -- Communities (design doc §16, rounds 71/83/84/86) ----------------------
+# -- Communities (design doc §16) -------------------------------------------
 
 
 def test_create_community_flow(db, lane, sysop):
@@ -1302,7 +1302,7 @@ def test_admin_category_picker_leak_prevention(db, lane, sysop):
     # content menu -> boards -> create: name, description, read/write
     # levels, assign a Community (yes, pick Vintage Computing, #02),
     # assign a category (yes) -- "Hardware" is only used by a Politics
-    # board, so it must not be offered here (design doc §16, round 84's
+    # board, so it must not be offered here (design doc §16's
     # admin-side leak prevention): the picker reports no categories
     # exist for this Community rather than showing Hardware.
     inputs = [
@@ -1344,14 +1344,14 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
     )
 
 
-# -- welcome banner (design doc -- welcome banner round) -------------------
+# -- welcome banner --------------------------------------------------------
 
 
 def test_welcome_banner_option_appears_in_the_system_submenu(db, lane, sysop):
     # menu_key("W", "elcome banner") highlights the "W" separately, so
     # the contiguous literal text is "elcome banner", not "Welcome banner".
     # Welcome banner now lives in the [S]ystem submenu, not the top-level
-    # admin menu (design doc -- admin menu reorganization round).
+    # admin menu.
     session = FakeSession(["s", "b", "b"])
     _run(session, lane, sysop)
     assert "elcome banner" in _written_text(session)
@@ -1455,7 +1455,7 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
     assert banner_path(db).read_bytes() == b"ORIGINAL"
 
 
-# -- self-service registration (design doc round 76) -----------------------
+# -- self-service registration -----------------------------------------------
 
 
 def test_list_users_shows_pending_approval_status(db, lane, sysop):
@@ -1573,7 +1573,7 @@ def test_registration_settings_screen_shows_pending_count(db, lane, sysop):
     assert "1 account(s) awaiting approval" in _written_text(session)
 
 
-# -- self-update (design doc §17, round 82; round 95/96) --------------------
+# -- self-update (design doc §17) --------------------------------------------
 
 
 def _fake_release(tag: str):

@@ -1,6 +1,6 @@
 """
 Platform-specific local-terminal I/O for the SysOp admin CLI tool
-(design doc -- SysOp foundation round).
+(design doc -- SysOp foundation).
 
 Deliberately the smallest possible platform-specific sliver:
 `raw_terminal()` puts the controlling terminal into character-mode

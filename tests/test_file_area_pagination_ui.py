@@ -1,15 +1,14 @@
 """
 Integration tests for the interactive file-area post-pagination
-navigation in netbbs.net.file_flow._show_area (design doc round 31,
-issue #10's file-area follow-up) -- mirrors tests/test_board_
-pagination_ui.py's structure and coverage, plus a test specific to
-file areas: /download working for a file that isn't on the currently
-displayed page (get_file_by_name, the fix that pagination itself made
-necessary).
+navigation in netbbs.net.file_flow._show_area (issue #10's file-area
+follow-up) -- mirrors tests/test_board_pagination_ui.py's structure
+and coverage, plus a test specific to file areas: /download working
+for a file that isn't on the currently displayed page (get_file_by_name,
+the fix that pagination itself made necessary).
 
-`netbbs.net.file_flow` is the second module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 112) --
-`_show_area` now takes a `DatabaseLane` instead of a `Database`. Setup
+`netbbs.net.file_flow` is the second module migrated onto the two-lane
+database execution model (issue #57) -- `_show_area` now takes a
+`DatabaseLane` instead of a `Database`. Setup
 calls (`create_user`, `create_file_area`, `upload_file`, `attest_name`,
 etc.) still use a plain `Database` directly, same as every other test
 file's style -- only the call *into* file_flow.py needs a lane.
@@ -187,7 +186,7 @@ def test_download_reports_a_clear_error_for_a_truly_nonexistent_file(tmp_path, m
     db.close()
 
 
-# -- identity attestation: verified-name display + age/name gating (design doc §18, round 103) --
+# -- identity attestation: verified-name display + age/name gating (design doc §18) --
 
 
 def test_file_listing_shows_verified_and_displayed_real_name(tmp_path):

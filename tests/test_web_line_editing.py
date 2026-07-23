@@ -1,6 +1,6 @@
 """
 Integration tests for cursor-addressable editing and history recall on
-the web transport (design doc round 47/Track 5f) — `WebSession`'s own
+the web transport — `WebSession`'s own
 parallel implementation of the same behavior
 `tests/test_char_input_line_editing.py`/`test_char_input_history.py`
 already prove for Telnet/SSH, driven here through a real websocket

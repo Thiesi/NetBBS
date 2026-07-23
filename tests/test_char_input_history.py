@@ -1,6 +1,6 @@
 """
 Tests for command history recall (Up/Down) in netbbs.net.char_input
-(design doc §15 Phase 2, sign-off round 47/Track 5f) -- both the
+(design doc §15 Phase 2) -- both the
 library-level `InputHistory` class and its wiring into `read_line`.
 Cursor-addressable editing itself is covered separately in
 tests/test_char_input_line_editing.py.

@@ -1,9 +1,8 @@
 """
-Self-update mechanism (design doc §17, round 82; DB-snapshot-before-
-migration safety net added round 95/96 as part of the addendum-backlog
-implementation pass).
+Self-update mechanism (design doc §17), including a DB-snapshot-before-
+migration safety net.
 
-Scoped as protocol-agnostic plumbing only, per round 82: this module
+Scoped as protocol-agnostic plumbing only: this module
 knows how to check GitHub Releases, fetch and extract a newer release,
 snapshot the database before handing off to it, and record enough state
 to confirm a successful start or roll back a failed one. It knows
@@ -48,7 +47,7 @@ _logger = logging.getLogger(__name__)
 # is needed just to find it.
 _GITHUB_RELEASES_API_URL = "https://api.github.com/repos/Thiesi/NetBBS/releases"
 
-# Config keys (netbbs.config's generic node_config store, round 8).
+# Config keys (netbbs.config's generic node_config store).
 # Only this first one is a SysOp-facing setting (§17's "off switch");
 # the rest are this module's own bookkeeping, reusing the same
 # generic key-value primitives rather than a dedicated table.
@@ -131,7 +130,7 @@ def _default_fetch(url: str) -> bytes:
     `asyncio.to_thread` -- deliberately `urllib.request`, not a new
     dependency, so the self-updater works on every node regardless of
     which optional extras (ssh/web) are installed, and stays consistent
-    with round 91's "blocking I/O moves off-loop via a thread" pattern
+    with the "blocking I/O moves off-loop via a thread" pattern
     rather than adding aiohttp as a hard core dependency."""
     request = urllib.request.Request(url, headers={"User-Agent": "netbbs-selfupdate"})
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -309,7 +308,7 @@ def _safe_extract(archive: tarfile.TarFile, destination: Path) -> None:
         archive.extractall(destination)
 
 
-# -- Database snapshot / restore (round 95's DB-before-blobs ordering, ----
+# -- Database snapshot / restore (DB-before-blobs ordering, ---------------
 # -- narrowed here to just the DB half: no blob storage is affected by ----
 # -- an application-code update, only a schema migration is a risk) -------
 
@@ -318,8 +317,7 @@ def snapshot_database(db_path: Path, snapshot_path: Path) -> None:
     """
     Consistent online snapshot of the SQLite database at `db_path`, via
     SQLite's own backup API rather than a raw file copy -- safe to run
-    while WAL is in use, unlike copying the file directly (design doc
-    round 95).
+    while WAL is in use, unlike copying the file directly (design doc).
     """
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     source = sqlite3.connect(str(db_path))
@@ -444,9 +442,9 @@ def confirm_update(db: Database, pending: PendingUpdate) -> None:
 def roll_back_update(db: Database, pending: PendingUpdate, *, db_path: Path) -> None:
     """
     Called when the newly re-exec'd process fails to start cleanly:
-    restores the database from the pre-migration snapshot (round 95 --
-    the previous version's code may not be able to read a schema the
-    failed update migrated forward) and clears the pending marker. Does
+    restores the database from the pre-migration snapshot -- the
+    previous version's code may not be able to read a schema the
+    failed update migrated forward -- and clears the pending marker. Does
     **not** itself re-exec back into the previous version -- like
     `prepare_update`, that's left to the caller, which already has to
     own the actual restart mechanism.

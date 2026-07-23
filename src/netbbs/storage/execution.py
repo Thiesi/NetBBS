@@ -1,12 +1,12 @@
 """
-Two-lane database execution model (design doc round 91, resolves issue
+Two-lane database execution model (design doc, resolves issue
 #57 — Phase 3 background-work prerequisite).
 
-Round 30 diagnosed the problem: `netbbs.storage.database.Database` is
+The problem: `netbbs.storage.database.Database` is
 exactly one synchronous `sqlite3.Connection`, called directly from
 coroutines with no `await` around it — every query blocks the entire
 asyncio event loop, not just the calling coroutine, until it returns.
-Round 91 chose the fix: two dedicated single-worker-thread lanes (a
+The fix: two dedicated single-worker-thread lanes (a
 **foreground** lane for interactive Telnet/SSH/web session work, and a
 **background** lane reserved for Phase 3's continuous Link activity —
 peer inventory exchange, event verification/ingestion, retry/outbox
@@ -37,10 +37,10 @@ from netbbs.storage.database import Database
 
 T = TypeVar("T")
 
-# Round 91: "Backpressure: a bounded semaphore per lane, not the
+# Design doc: "Backpressure: a bounded semaphore per lane, not the
 # executor's default unbounded queue... Exact numeric limits... are
 # #60's job [the operational model]." A conservative placeholder
-# pending that round's actual implementation — large enough that
+# pending that work — large enough that
 # ordinary interactive load at this project's declared scale (§14:
 # dozens-to-low-hundreds of users, small fast queries) never comes
 # close, small enough to bound worst-case queued-work memory
@@ -52,7 +52,7 @@ DEFAULT_MAX_QUEUED = 200
 class LaneBusyError(Exception):
     """Raised when a lane's queue is already at `max_queued` and a new
     submission would exceed it — the "reject rather than grow without
-    limit" half of round 91's backpressure requirement. `asyncio.
+    limit" half of the design doc's backpressure requirement. `asyncio.
     Semaphore` alone only ever blocks, never rejects; this class exists
     so a caller that would rather fail fast than queue indefinitely
     behind an already-saturated lane has that option (see `run`'s
@@ -112,7 +112,7 @@ class DatabaseLane:
         follows, so a migrated call site just drops the explicit `db`
         it used to pass directly.
 
-        `block_if_busy` (round 91's bounded-semaphore backpressure):
+        `block_if_busy` (the bounded-semaphore backpressure):
         `True` (default) waits for a free slot, same as an ordinary
         bounded queue; `False` raises `LaneBusyError` immediately
         instead of waiting, for a caller that would rather fail fast
@@ -128,7 +128,7 @@ class DatabaseLane:
             return await loop.run_in_executor(self._executor, job)
 
     def _run_job(self, func: Callable[..., T], *args, **kwargs) -> T:
-        # Executes on the worker thread (round 91: "cancellation is
+        # Executes on the worker thread ("cancellation is
         # safe by a property of the mechanism" -- if the awaiting
         # coroutine is cancelled, this function keeps running to
         # completion regardless, since Python cannot abort a thread

@@ -199,7 +199,7 @@ class Session(ABC):
     async def read_editor_key(self) -> EditorKey:
         """
         Read one structured key event for a full-screen editor (design
-        doc -- welcome banner round B1, `netbbs.net.ansi_editor`).
+        doc -- welcome banner, `netbbs.net.ansi_editor`).
 
         Unlike `read_key` (which discards every escape sequence
         outright -- there's no line for a cursor to move within in a

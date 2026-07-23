@@ -1,5 +1,4 @@
-"""Tests for netbbs.chat.nick — transparent display aliases (design
-doc round 32/41)."""
+"""Tests for netbbs.chat.nick — transparent display aliases."""
 
 from __future__ import annotations
 
@@ -77,9 +76,9 @@ def test_set_nick_allows_own_username(db, alice):
 
 
 def test_set_nick_rejects_the_reserved_marker_character(db, alice):
-    # design doc round 53: NICK_MARKER is reserved for chat_stream_label
-    # to attach unambiguously -- must never be something /nick itself
-    # would accept as real alias content.
+    # NICK_MARKER is reserved for chat_stream_label to attach
+    # unambiguously -- must never be something /nick itself would
+    # accept as real alias content.
     with pytest.raises(NickError):
         set_nick(db, alice, f"Deep{NICK_MARKER}Parse")
 
@@ -107,7 +106,7 @@ def test_display_label_reverts_after_clearing(db, alice):
     assert display_label(db, alice) == "alice"
 
 
-# -- chat_stream_label (design doc round 53) --------------------------------
+# -- chat_stream_label -------------------------------------------------------
 
 
 def test_chat_stream_label_is_bare_username_when_no_nick(db, alice):

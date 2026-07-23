@@ -70,7 +70,7 @@ def test_display_falls_back_to_default_when_no_node_config_set(tmp_path):
     db.close()
 
 
-# -- resolve_display_preferences (design doc round 91/issue #57) -----------
+# -- resolve_display_preferences (issue #57) ---------------------------------
 
 
 def test_resolve_display_preferences_defaults_with_no_config_set(tmp_path):

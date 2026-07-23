@@ -5,7 +5,7 @@ issue #3's unauthenticated idle timeout) is reliable.
 
 Not redundant with tests/test_login_throttling.py's idle-timeout tests,
 which use a `FakeSession` and therefore can't exercise this: this
-session's own round-5 sign-off note records a real, empirically-found
+this test suite's own sign-off note records a real, empirically-found
 asyncio bug where a *nested* `asyncio.wait_for` (an outer one wrapping a
 call chain that itself uses `asyncio.wait_for` internally --
 `TelnetSession.read_byte_with_timeout` does, for CSI escape-sequence
@@ -98,7 +98,7 @@ def test_outer_timeout_survives_an_escape_sequence_mid_read(run):
     test's own outer asyncio.wait_for around the whole read_line() call
     is also armed. Repeated 5x (parametrized, not looped, so pytest -v
     shows each run and a flaky one doesn't get silently averaged away)
-    to catch intermittent failures the way the round-5 nested-wait_for
+    to catch intermittent failures the way an empirically-found nested-wait_for
     bug originally surfaced -- only visible under repetition.
     """
     results = []

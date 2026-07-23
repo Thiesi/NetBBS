@@ -1,14 +1,14 @@
 """
 The ANSI rendering framework (design doc §4/§15) — color/cursor/
-screen-clearing helpers, text reflow, and `sanitize_text` (round 29,
+screen-clearing helpers, text reflow, and `sanitize_text` (design doc,
 issue #8) for the untrusted-content half of what reaches a terminal.
 
 Transport-independent character-mode input lives in
 `netbbs.net.char_input`, not here. The screen-buffer/diff abstraction
-for heavy cursor-addressable screens ("TUI", design doc round 26)
+for heavy cursor-addressable screens ("TUI", design doc)
 lives in `netbbs.rendering.screen_buffer`, built alongside its first
-real consumer, `netbbs.net.ansi_editor` (design doc -- welcome banner
-round B1).
+real consumer, `netbbs.net.ansi_editor` (design doc -- the welcome
+banner editor).
 """
 
 from netbbs.rendering.ansi import (

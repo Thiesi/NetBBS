@@ -3,8 +3,8 @@ NetBBS Link protocol foundation (design doc §7/§11, Phase 3).
 
 Nothing in this package talks to a network yet — no transport, no
 gossip, no sync. `netbbs.link.events` is the canonical event-envelope
-primitive (design doc rounds 27/90/110); `netbbs.link.node_identity` is
-the first real consumer of it, implementing round 89's node key-
+primitive; `netbbs.link.node_identity` is
+the first real consumer of it, implementing the node key-
 lifecycle model. Everything downstream of these two (Linked boards,
 Link messages, remote file-area discovery, the actual HTTP+JSON
 transport) is later Phase 3 work, per the design doc §15 dependency

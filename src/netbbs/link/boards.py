@@ -1,6 +1,6 @@
 """
-Local-origination bridge for linked boards (design doc round 124,
-round 128 wiring) -- turns an existing local board/post into a signed
+Local-origination bridge for linked boards (design doc) -- turns an
+existing local board/post into a signed
 `board_genesis`/`board_post` Link event, persists it on the board's/
 post's own row, and (for a board's genesis specifically) registers it
 with the running node so it's reachable both ways: recognized when a
@@ -15,7 +15,7 @@ events` already reuses its content-ID canonicalization), never the
 reverse. The two real call sites that create/approve a post
 (`netbbs.net.login_flow`, `netbbs.net.admin_flow`) call `queue_board_
 post_if_linked` themselves, explicitly, right after the local
-operation succeeds (design doc round 128, confirmed with Thiesi) --
+operation succeeds (design doc, confirmed with Thiesi) --
 `netbbs.boards.posts` itself stays untouched.
 
 Every function here is plain and synchronous, `db`-first -- the same
@@ -89,7 +89,7 @@ class LinkContext:
     shutdown.NodeControls`, and for the same reason: threaded through
     `netbbs.net.login_flow`'s whole call chain down to `netbbs.net.
     admin_flow`'s board screens, `None` whenever this node has Link
-    disabled (design doc round 87: Phase 3 is opt-in/experimental) or
+    disabled (design doc: Phase 3 is opt-in/experimental) or
     when reached via the standalone `netbbs.admin` CLI, which has no
     running `LinkNode` at all.
 
@@ -127,7 +127,7 @@ def is_board_linked(db: Database, board: Board) -> bool:
     """Whether `board` already has a `board_genesis` on file -- the
     single source of truth for "is this board Linked," queried
     directly against its row rather than duplicated into the `Board`
-    dataclass itself (design doc round 124/128: `netbbs.boards` stays
+    dataclass itself (design doc: `netbbs.boards` stays
     Link-unaware)."""
     row = db.connection.execute(
         "SELECT link_genesis_json FROM boards WHERE id = ?", (board.id,)
@@ -151,21 +151,21 @@ def link_board(
 ) -> BoardGenesis:
     """
     Put `board` into Link scope: build and sign a `board_genesis`
-    event referencing its existing `board_id` (design doc round 124 --
+    event referencing its existing `board_id` (design doc --
     never mints a new one; this is exactly the "promote an existing
-    local board" case round 124 confirmed as the normal one, not a
+    local board" case confirmed as the normal one, not a
     special one) and persist it on the board's own row.
 
-    `forked_from` (design doc §13, round 94/issue #53) optionally names
+    `forked_from` (design doc §13, issue #53) optionally names
     a different, already-Linked board's own `board_id` this one started
     as a copy of -- purely a non-authoritative discoverability pointer,
     see `build_board_genesis`'s own docstring for why nothing here
     verifies or acts on it.
 
     Raises `LinkBoardsError` if `board` is already Linked -- one
-    genesis per board, ever (design doc round 124/94: transfer is a
-    separate, later object type, built in round 94/issue #53's own
-    implementation -- see `offer_board_origin_transfer`).
+    genesis per board, ever (design doc: transfer is a
+    separate, later object type -- see issue #53's
+    `offer_board_origin_transfer`).
 
     Deliberately does **not** register the result with a live
     `netbbs.link.protocol.LinkNode` -- that mutation must happen on the
@@ -252,7 +252,7 @@ def materialize_carried_board(
     """
     Turn a *received* (not self-originated) `board_genesis` into a real,
     locally browsable `Board` row (design doc §13's default-carry
-    policy, round 94/issue #53's own prerequisite finding) -- before
+    policy, issue #53) -- before
     this, a node that merely relayed/stored a peer's `board_genesis`
     had nothing a user could actually read or post to through this
     node's own UI; "carrying" meant holding opaque signed bytes, not a
@@ -582,7 +582,7 @@ def rebuild_carried_post_materialization(db: Database) -> int:
 def board_origin_fingerprint(db: Database, board: Board) -> str:
     """
     The fingerprint currently authoritative for `board` (design doc §13,
-    round 94/issue #53) -- checks the mutable `link_origin_fingerprint`
+    issue #53) -- checks the mutable `link_origin_fingerprint`
     override column first (only ever written once a `board_origin_
     transfer_accepted` is verified/accepted, whether this node was a
     party to that transfer or merely witnessed it -- see `netbbs.link.
@@ -627,7 +627,7 @@ def offer_board_origin_transfer(
     """
     Build, sign, and persist a `board_origin_transfer_offer` proposing
     `new_origin_fingerprint` as `board`'s next origin (design doc §13,
-    round 94/issue #53) -- the current origin's half of the mutual-
+    issue #53) -- the current origin's half of the mutual-
     consent handoff; see `BoardOriginTransferOffer`'s own docstring for
     why this alone changes nothing until a matching acceptance is seen.
 
@@ -673,7 +673,7 @@ def accept_board_origin_transfer(
 ) -> BoardOriginTransferAccepted:
     """
     Build, sign, and persist a `board_origin_transfer_accepted` for
-    `offer` (design doc §13, round 94/issue #53) -- the new origin's
+    `offer` (design doc §13, issue #53) -- the new origin's
     consent-completing half; see `BoardOriginTransferAccepted`'s own
     docstring for why nothing else about the board's authority changes
     until this specific event is seen. Immediately records this node's
@@ -711,7 +711,7 @@ def accept_board_origin_transfer(
 def record_board_origin_change(db: Database, board_id: str, new_origin_fingerprint: str) -> None:
     """
     Update the locally-materialized board's own `link_origin_fingerprint`
-    override to `new_origin_fingerprint` (design doc §13, round 94/issue
+    override to `new_origin_fingerprint` (design doc §13, issue
     #53) -- called for *every* verified `board_origin_transfer_accepted`
     this node ever sees, whether this node was the accepting party
     (`accept_board_origin_transfer` calls this itself) or merely a
@@ -742,10 +742,10 @@ def is_board_origin_orphaned(peer: PeerRecord) -> bool:
     Whether `peer` (a board's current origin) has no currently-
     authorized signing key left -- their most recent `key_transition`
     for the `signing` purpose is an unreplaced `revoke` (design doc §13,
-    round 94/issue #53). Purely a computed property of data this node
+    issue #53). Purely a computed property of data this node
     already has from directly hello-ing `peer` at some point (verifying
     their `board_genesis`/lifecycle events requires exactly that) --
-    no new event type, no network-wide signal (round 94's own framing:
+    no new event type, no network-wide signal (the design doc's own framing:
     "no cryptographic proof an origin is gone versus merely offline," so
     no single node's observation gets an automatic network-wide
     effect). A board whose origin is orphaned keeps existing exactly as
@@ -769,7 +769,7 @@ def queue_board_post_if_linked(
     If `board` is Linked and `post` is currently `'approved'`, build
     and sign a `board_post` event for it and store it on the post's
     own row for `netbbs.link.sync` to push -- a no-op returning `None`
-    otherwise (design doc round 124: a board_post is only ever built
+    otherwise (design doc: a board_post is only ever built
     once a post reaches `'approved'`, never while still `'pending'` --
     a moderated board's queue must never leak onto the Link before its
     own moderation acts on it).
@@ -782,18 +782,18 @@ def queue_board_post_if_linked(
     board, `approve_post` on a moderated one), so a caller never needs
     to know which path got it there.
 
-    Only the `node_vouched_user` author tier is built (design doc round
-    124) -- `local_user_id` is always `post.author_label` (the plain
+    Only the `node_vouched_user` author tier is built (design doc)
+    -- `local_user_id` is always `post.author_label` (the plain
     username), never `post.author_fingerprint`, regardless of whether
     the author happens to hold a personal keypair: that fingerprint is
     a local display/attestation detail (§18), not a signal that `user_
-    key`-tier signing is available, which this round doesn't build
+    key`-tier signing is available, which is not yet built
     (see `build_board_post`'s own docstring for why).
 
     `parent_post_id` is set only if `post`'s local parent (if any) is
     *itself* already Linked (has its own queued `board_post`) -- a
     reply to a post that predates this board going Linked has no
-    Link-native parent to point at (design doc round 124: pre-Link
+    Link-native parent to point at (design doc: pre-Link
     history lives in an incompatible ID space, never backfilled), so
     it's queued as a Link-native top-level post instead of silently
     dropping the reply relationship or referencing an ID nothing else
@@ -849,8 +849,8 @@ def queue_board_post_edit_if_linked(
 ) -> BoardPostEdit | None:
     """
     If `board` is Linked, `edited_post` is currently `'approved'`, and
-    `edited_by` is the post's *original author* (design doc round 129:
-    moderator edits aren't propagated this round -- the local model
+    `edited_by` is the post's *original author* (design doc:
+    moderator edits aren't propagated -- the local model
     has no author-bypass for `delete_post` at all, so a tombstone has
     no honest simple slice either, and a moderator edit needs grant
     verification that doesn't exist yet), build and sign a `board_post_
@@ -868,8 +868,8 @@ def queue_board_post_edit_if_linked(
     own queued Link event, or this returns `None` rather than guessing
     at a `previous_event_id` to reference. A gap appears only if the
     board was Linked partway through a post's edit history (some
-    revisions predate Linking) -- an edge case this round accepts
-    rather than solves, the same "no backfill" shape round 124 already
+    revisions predate Linking) -- an edge case accepted
+    rather than solved, the same "no backfill" shape already
     applies to pre-Link posts generally.
 
     `author` is copied **verbatim** from the root `board_post`'s own
@@ -934,16 +934,15 @@ def load_own_board_events(
     own columns -- what `netbbs.link.sync`'s push loop sends to every
     seed every pass, mirroring how `node.identity.transitions` is
     already re-pushed in full regardless of per-peer delivery history
-    (round 119's "harmless no-op" model) rather than tracked per-peer
+    (the same "harmless no-op" model) rather than tracked per-peer
     here either.
 
-    `own_fingerprint` (design doc round 94/issue #53's own finding,
-    required since `materialize_carried_board` started this round) is
-    needed now to tell a board this node actually *originated* apart
+    `own_fingerprint` (design doc, issue #53) is
+    needed to tell a board this node actually *originated* apart
     from one it merely *carries*: both populate `boards.link_genesis_
     json`, but only the former is this node's own to re-push -- a
     carried board's genesis was signed by (and belongs to) its own
-    origin, not this node, and round 116's "no relay from a stranger"
+    origin, not this node, and the "no relay from a stranger"
     scope note means this node re-pushing it as if it were its own
     would misrepresent who actually originated it. `link_lifecycle_
     json` (an offer or acceptance) has no such ambiguity -- it's only
@@ -952,7 +951,7 @@ def load_own_board_events(
     self-originated by construction.
 
     `posts.link_event_json` holds a `board_post` on a root row or a
-    `board_post_edit` on a later revision row (round 130) -- decided by
+    `board_post_edit` on a later revision row -- decided by
     peeking at the stored envelope's own `object_type`, not by which
     row it came from, since that's already unambiguous and avoids a
     second local-schema-dependent branch.

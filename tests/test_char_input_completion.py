@@ -1,6 +1,6 @@
 """
-Tests for Tab completion in netbbs.net.char_input (design doc round
-49/Track 5g) -- the generic `apply_tab_completion` primitive and its
+Tests for Tab completion in netbbs.net.char_input -- the generic
+`apply_tab_completion` primitive and its
 wiring into `read_line` via the `completer` parameter. The BBS-specific
 completer built in `netbbs.net.chat_flow` is covered separately in
 tests/test_chat_completion.py; this file only exercises the generic

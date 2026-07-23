@@ -1,6 +1,6 @@
 """
-Tests for `netbbs.link.seedlist` (design doc round 97): live
-supplementary seed-list refresh over the same GitHub raw-content
+Tests for `netbbs.link.seedlist`: live supplementary seed-list refresh
+over the same GitHub raw-content
 channel `netbbs.selfupdate` uses. Real network access is never
 exercised here -- see `tests/test_selfupdate.py`'s own docstring for
 the identical reasoning; every test drives real fetch/parse/cache logic

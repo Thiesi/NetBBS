@@ -81,7 +81,7 @@ def test_list_channels_returns_all_in_creation_order(db, alice):
     assert [c.name for c in channels] == ["first", "second"]
 
 
-# -- update/delete (design doc -- channel management round) --------------
+# -- update/delete -----------------------------------------------------------
 
 
 def test_create_channel_records_an_audit_entry(db, alice):

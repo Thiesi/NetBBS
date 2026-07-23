@@ -1,7 +1,7 @@
 """
 POSIX-only pty-based smoke test for
-`netbbs.net.local_terminal.raw_terminal` (design doc -- SysOp
-foundation round). Skipped on Windows, where that function is a no-op
+`netbbs.net.local_terminal.raw_terminal`. Skipped on Windows, where
+that function is a no-op
 by design (see its own docstring) -- this test genuinely cannot run in
 the current Windows dev sandbox; it's here for whenever this project's
 tests next run on POSIX/NetBSD hardware, alongside this project's other

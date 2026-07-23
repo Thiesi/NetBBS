@@ -1,6 +1,6 @@
 """
-Tests for post editing (design doc -- prose editor round B2 planning
-phase): `netbbs.boards.posts.edit_post`, and the `root_post_id`/
+Tests for post editing: `netbbs.boards.posts.edit_post`, and the
+`root_post_id`/
 `edit_of_post_id`-based resolution `list_posts_page`/`list_pinned_posts`
 now do so a post's feed position and pagination cursors stay stable
 across edits while still showing the latest approved content.

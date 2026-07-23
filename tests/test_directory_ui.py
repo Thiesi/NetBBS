@@ -1,6 +1,6 @@
 """
 Integration tests for the user directory/profile screens in
-netbbs.net.login_flow (design doc §13, sign-off round 38) — distinct
+netbbs.net.login_flow (design doc §13) — distinct
 from tests/test_directory.py, which tests netbbs.directory in
 isolation. Same lightweight duck-typed FakeSession as
 tests/test_board_pagination_ui.py (no need to subclass the Session
@@ -195,10 +195,8 @@ def test_edit_profile_visibility_toggles_from_public_to_private(tmp_path):
 
 
 def test_edit_profile_invalid_key_does_not_redraw_the_screen(tmp_path):
-    # Regression test for a real round-44 bug (design doc round 48),
-    # further tightened in round 52: round 48's own fix still reprinted
-    # the "Choice: " prompt after the bell, which Thiesi later judged
-    # added no value -- an unrecognized key must now produce genuinely
+    # Regression test: reprinting the "Choice: " prompt after the bell
+    # would add no value -- an unrecognized key must produce genuinely
     # nothing beyond the bell, not even a fresh prompt line.
     db = Database(tmp_path / "node.db")
     user = create_user(db, "alice", password="hunter2", user_level=10)

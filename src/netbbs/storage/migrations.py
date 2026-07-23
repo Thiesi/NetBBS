@@ -1,7 +1,7 @@
 """
 Schema migrations, applied in order and tracked via `PRAGMA user_version`.
 
-This follows the first attempt's actual approach (design doc round 2
+This follows the first attempt's actual approach (design doc
 sign-off notes) rather than a separate migrations-tracking table — one
 integer pragma is enough to know how far a given database has been
 migrated, and SQLite persists it for free.
@@ -205,8 +205,8 @@ MIGRATIONS = [
         """,
     ),
     Migration(
-        description="Bounded, disk-backed chat scrollback (design doc round "
-        "19/20) — solves a channel looking empty after a local node "
+        description="Bounded, disk-backed chat scrollback (design doc) "
+        "— solves a channel looking empty after a local node "
         "restart, not the separate/harder Link catch-up question, which "
         "stays explicitly deferred. Join/leave events are stored "
         "alongside messages (kind discriminator) so a replayed scrollback "
@@ -238,7 +238,7 @@ MIGRATIONS = [
         description="File areas (design doc §1 terminology: 'area' always "
         "means file area, never 'board'; §9). Categories/pinning/sort "
         "order are included from the start, unlike boards/channels (which "
-        "got them retrofitted in round 18) — same anti-retrofit reasoning "
+        "got them retrofitted later) — same anti-retrofit reasoning "
         "as building level-gating plumbing early (§13).",
         sql="""
         CREATE TABLE file_area_categories (
@@ -298,13 +298,13 @@ MIGRATIONS = [
     Migration(
         description=(
             "Composite index matching the paginated post-listing query pattern "
-            "(design doc round 30, issue #10)."
+            "(design doc, issue #10)."
         ),
         sql="""
         -- netbbs.boards.posts.list_posts_page orders/filters by exactly
         -- (board_id, created_at, post_id) -- this index lets SQLite
         -- satisfy that with an index range scan instead of a full table
-        -- scan + sort. Deliberately left idx_posts_board_id (round 2's
+        -- scan + sort. Deliberately left idx_posts_board_id (an earlier
         -- migration) in place rather than dropping it in this same
         -- migration: this composite index's leading column already
         -- makes the single-column one redundant for query planning, but
@@ -319,13 +319,13 @@ MIGRATIONS = [
     Migration(
         description=(
             "Composite index matching the paginated file-listing query pattern "
-            "(design doc round 31, issue #10's file-area follow-up)."
+            "(design doc, issue #10's file-area follow-up)."
         ),
         sql="""
         -- Same reasoning as the posts composite index directly above:
         -- netbbs.files.entries.list_files_page orders/filters by
         -- exactly (area_id, created_at, file_id). idx_files_area_id
-        -- (round 2's migration) deliberately left in place for the same
+        -- (an earlier migration) deliberately left in place for the same
         -- reason idx_posts_board_id was -- redundant for query planning
         -- once this composite index exists, but dropping a shipped
         -- index is its own separate, non-urgent cleanup.
@@ -335,7 +335,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Moderator grants (design doc §13/round 34): the "
+            "Moderator grants (design doc §13): the "
             "read/write/edit/delete/approve (boards/file areas) and "
             "edit/moderate/manage_members (channels) permission model, "
             "plus a generic moderation-action audit log shared by grants "
@@ -356,7 +356,7 @@ MIGRATIONS = [
             -- ChannelPermission, chosen by object_type. A single
             -- integer column rather than one row per permission, per
             -- §13's own "settable individually or combined" phrasing
-            -- (design doc round 34).
+            -- (design doc).
             permissions         INTEGER NOT NULL,
             granted_by_user_id  INTEGER NOT NULL REFERENCES users(id),
             created_at          TEXT NOT NULL
@@ -383,7 +383,7 @@ MIGRATIONS = [
             -- Free-text action label ("grant", "revoke", and later
             -- "mute"/"ban"/"kick"/"approve"/etc.) rather than a
             -- CHECK-constrained allowlist -- this table is
-            -- deliberately generic so later tracks' actions reuse it
+            -- deliberately generic so future action types reuse it
             -- without a schema change, and a CHECK would need editing
             -- a shipped migration (disallowed per this file's own
             -- module docstring) every time a new action type is added.
@@ -402,7 +402,7 @@ MIGRATIONS = [
     Migration(
         description=(
             "Moderated-board approval flow and the post maintenance/"
-            "expiry state machine (design doc §13/§15, round 35). Boards "
+            "expiry state machine (design doc §13/§15). Boards "
             "gain a moderated flag and a per-board max post age; posts "
             "gain an approval/expiry status plus independent pin and "
             "exempt-from-expiry flags."
@@ -451,8 +451,8 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "File-area mirror of round 35's board/post moderation "
-            "lifecycle (design doc §13/§15, round 36): moderated-area "
+            "File-area mirror of the board/post moderation "
+            "lifecycle (design doc §13/§15): moderated-area "
             "approval flow and the file maintenance/expiry state "
             "machine, structurally identical to boards/posts."
         ),
@@ -483,7 +483,7 @@ MIGRATIONS = [
     Migration(
         description=(
             "Chat channel moderation restrictions -- mute/ban (design "
-            "doc §13, round 37), gated by "
+            "doc §13), gated by "
             "netbbs.moderation.roles.ChannelPermission.MODERATE. Also "
             "widens channel_messages.kind's CHECK constraint to admit "
             "the five new scrollback event kinds mute/ban/kick land."
@@ -545,11 +545,11 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Generic per-user preference store (design doc §13, round "
-            "38) -- a per-user mirror of node_config, backing the "
+            "Generic per-user preference store (design doc §13) -- a "
+            "per-user mirror of node_config, backing the "
             "vCard bio/visibility fields now and any future per-user "
-            "setting (e.g. a per-user chat timestamp preference, "
-            "round 32) without needing its own storage mechanism."
+            "setting (e.g. a per-user chat timestamp preference) "
+            "without needing its own storage mechanism."
         ),
         sql="""
         CREATE TABLE user_preferences (
@@ -563,12 +563,12 @@ MIGRATIONS = [
     Migration(
         description=(
             "Widens channel_messages.kind's CHECK constraint again to "
-            "admit 'action' (/me, design doc round 32/40) -- same "
-            "standard SQLite table-rebuild as round 37's widening, "
+            "admit 'action' (/me, design doc) -- same "
+            "standard SQLite table-rebuild as the previous widening, "
             "since there's still no ALTER TABLE for changing a CHECK "
-            "in place. Deliberately widened only for what this round "
-            "needs, not speculatively for /nick's not-yet-designed "
-            "event kind too -- see round 40's sign-off note."
+            "in place. Deliberately widened only for what this "
+            "migration needs, not speculatively for /nick's not-yet-designed "
+            "event kind too."
         ),
         sql="""
         CREATE TABLE channel_messages_new (
@@ -597,8 +597,8 @@ MIGRATIONS = [
     Migration(
         description=(
             "Widens channel_messages.kind's CHECK constraint again to "
-            "admit 'nick' (/nick, design doc round 32/41) -- same "
-            "standard SQLite table-rebuild pattern as rounds 37/40."
+            "admit 'nick' (/nick, design doc) -- same "
+            "standard SQLite table-rebuild pattern as the earlier widenings."
         ),
         sql="""
         CREATE TABLE channel_messages_new (
@@ -629,8 +629,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Adds channels.topic (design doc §8/round 33 point 5, Phase "
-            "2 Track 5d) -- a moderator-editable /topic, distinct from "
+            "Adds channels.topic (design doc §8) -- a moderator-editable /topic, distinct from "
             "the existing description column (a creation-time blurb "
             "shown in listings, never edited afterward). Nullable, no "
             "default: a channel starts with no topic set."
@@ -641,13 +640,12 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Adds invite-only/hidden channel support (design doc §8/"
-            "round 33 points 8/9/11, Phase 2 Track 5h): channels.hidden "
+            "Adds invite-only/hidden channel support (design doc §8): channels.hidden "
             "and channels.members_only are independent axes (a "
             "members_only-but-not-hidden channel still appears in "
             "listings -- 'hidden + open is obscurity, not access "
-            "control', round 33 point 9), channels.allow_member_invites "
-            "is the opt-in described in round 33 point 11. All three "
+            "control'), channels.allow_member_invites "
+            "is the opt-in described in the design doc. All three "
             "default to 0 (off) -- an existing channel's behavior is "
             "unchanged unless a moderator explicitly opts in. "
             "channel_members is persistent membership -- deliberately "
@@ -657,7 +655,7 @@ MIGRATIONS = [
             "accept flow separately from that direct-grant path; expiry "
             "follows channel_restrictions' precedent (filter at check "
             "time via expires_at, no sweep-on-access needed) rather "
-            "than posts/files' round 35 sweep-and-delete pattern -- an "
+            "than posts/files' sweep-and-delete pattern -- an "
             "invitation row isn't storage anyone needs reclaimed the "
             "way expired content is, it just needs to stop granting "
             "access once past its expiry."
@@ -699,7 +697,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "SysOp soft-disable (design doc -- SysOp foundation round): "
+            "SysOp soft-disable (design doc -- SysOp foundation): "
             "a nullable ISO timestamp marking an account as reversibly "
             "login-blocked, following the created_at/last_login_at "
             "TEXT-ISO convention already used on this table. NULL means "
@@ -712,12 +710,12 @@ MIGRATIONS = [
     Migration(
         description=(
             "Hard-delete support for user accounts (design doc -- SysOp "
-            "foundation round): every foreign key into users(id) "
+            "foundation): every foreign key into users(id) "
             "currently uses SQLite's bare default (NO ACTION), so "
             "deleting a user row today just raises IntegrityError if "
             "anything still references it. This adds real ON DELETE "
             "behavior across every referencing table, via the same "
-            "table-rebuild pattern rounds 37/40/41 already used for "
+            "table-rebuild pattern already used for "
             "channel_messages (SQLite has no ALTER TABLE to add a "
             "foreign-key clause in place). Two shapes, chosen per "
             "table: content authorship (posts/files) goes ON DELETE SET "
@@ -942,11 +940,11 @@ MIGRATIONS = [
             "coexist as two distinct, mutually-invisible accounts. A "
             "plain `CREATE UNIQUE INDEX ... (username COLLATE NOCASE)` "
             "closes both, without the table-rebuild this project's "
-            "'never edit a shipped migration' rule and rounds 37/40/41/"
-            "the SysOp-deletion round would otherwise suggest: `users` "
+            "'never edit a shipped migration' rule and the earlier "
+            "CHECK-widening/hard-delete migrations would otherwise suggest: `users` "
             "is the referenced *parent* of nine tables' foreign keys "
             "(several with ON DELETE CASCADE/SET NULL from the "
-            "SysOp-deletion round), and SQLite's DROP TABLE performs an "
+            "hard-delete migration above), and SQLite's DROP TABLE performs an "
             "implicit DELETE FROM first when foreign_keys=ON (as this "
             "connection always runs) -- rebuilding `users` itself the "
             "same way would cascade-wipe every other user's moderator "
@@ -965,7 +963,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Post editing (design doc -- prose editor round B2, planning "
+            "Post editing (design doc -- prose editor, planning "
             "phase): `posts.root_post_id` groups every revision of the same "
             "logical post together (a post's own post_id for an original "
             "creation; the *original* post's post_id for every edit of it, "
@@ -982,7 +980,7 @@ MIGRATIONS = [
             "its own fresh content-addressed post_id, chained back via "
             "these two columns. Plain ADD COLUMN, not a table rebuild -- "
             "posts is a live parent of several other tables' foreign keys, "
-            "and design doc sign-off round 60 already found the hard way "
+            "and the design doc's own sign-off notes already found the hard way "
             "that SQLite's DROP TABLE (the rebuild pattern's first step) "
             "applies its own cascade/SET-NULL side effects to *any* row "
             "still referencing the dropped table, independent of that "
@@ -1001,7 +999,7 @@ MIGRATIONS = [
     Migration(
         description=(
             "Self-service registration + node-wide approval gate (design "
-            "doc round 76): users.pending_approval marks an account "
+            "doc): users.pending_approval marks an account "
             "created via self-service Telnet/SSH/web registration as not "
             "yet allowed to log in, when the node-wide "
             "'require_registration_approval' SysOp setting (netbbs.config) "
@@ -1014,11 +1012,11 @@ MIGRATIONS = [
             "and a SysOp reviewing the user list needs to tell 'awaiting "
             "approval' apart from 'disabled/banned' at a glance, not see "
             "them collapsed into one status. Plain ADD COLUMN, not a "
-            "table rebuild -- same reasoning as round 46's "
-            "posts.root_post_id migration (users is itself a live parent "
+            "table rebuild -- same reasoning as the earlier "
+            "posts.root_post_id migration above (users is itself a live parent "
             "of many other tables' foreign keys, and SQLite's DROP TABLE "
             "cascade side effect during a rebuild is exactly what that "
-            "round's migration comment already warns against)."
+            "migration's own comment already warns against)."
         ),
         sql="""
         ALTER TABLE users ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0;
@@ -1027,11 +1025,11 @@ MIGRATIONS = [
     Migration(
         description=(
             "Widens channel_messages.kind's CHECK constraint again to "
-            "admit 'daybreak' (design doc round 78) -- a local, per-node "
+            "admit 'daybreak' (design doc) -- a local, per-node "
             "system announcement broadcast to every channel that "
             "currently has at least one participant, once at local "
             "midnight (netbbs.chat.daybreak). Same standard SQLite "
-            "table-rebuild pattern as rounds 37/40/41, since there's "
+            "table-rebuild pattern as the earlier CHECK widenings, since there's "
             "still no ALTER TABLE for changing a CHECK in place."
         ),
         sql="""
@@ -1063,7 +1061,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Identity attestation (design doc round 85/86/98/99, "
+            "Identity attestation (design doc, "
             "netbbs.attestation): users.can_verify_identity is a new, "
             "narrow, SysOp-grantable permission independent of the "
             "four moderator scope tiers -- a plain boolean, since "
@@ -1082,8 +1080,8 @@ MIGRATIONS = [
             "which every verify action also writes to. min_age/"
             "name_requirement on boards/channels/file_areas are "
             "nullable -- NULL currently just means no gate, but the "
-            "same nullable-means-inherit shape round 86 already "
-            "confirmed will let a future Community cascade a default "
+            "same nullable-means-inherit shape already used elsewhere "
+            "will let a future Community cascade a default "
             "onto them without a second migration."
         ),
         sql="""
@@ -1123,14 +1121,14 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Local asynchronous personal mail (design doc round 93, "
+            "Local asynchronous personal mail (design doc, "
             "netbbs.mail) -- deliberately not the same mechanism as "
             "/msg (netbbs.chat.mailbox), which stays ephemeral and "
             "online-only. One row per message; sender_user_id is "
             "nullable (SET NULL on account deletion, same reasoning as "
             "posts.author_user_id) with sender_label denormalized "
             "alongside it so a message's provenance survives the "
-            "sender's account being deleted, matching round 57's "
+            "sender's account being deleted, matching an existing "
             "precedent. recipient_user_id is NOT NULL and CASCADEs --  "
             "unlike a post, this row has no meaning independent of the "
             "one recipient's inbox it belongs to. sender_deleted_at/ "
@@ -1163,47 +1161,47 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Communities (design doc §16, rounds 71/83/84/86): a "
+            "Communities (design doc §16): a "
             "topic-oriented navigation/container layer above boards/"
             "channels/file areas. Local Communities only in this "
-            "migration -- Link Communities (round 86) are a property "
+            "migration -- Link Communities are a property "
             "layered onto the same `communities` row once Phase 6's "
             "signed-event machinery exists, not a separate table. "
             "community_id is a nullable FK on all three resource "
-            "tables (round 83: zero-or-one, never several -- see the "
+            "tables (zero-or-one, never several -- see the "
             "design doc for why many-to-many and a mandatory-with-"
             "default-'Uncategorized' shape were both rejected). "
             "boards.min_read_level/min_write_level and file_areas."
-            "min_read_level/min_write_level become nullable here (round "
-            "84's correction): NULL now means 'inherit this Community's "
+            "min_read_level/min_write_level become nullable here: "
+            "NULL now means 'inherit this Community's "
             "default, or the hardcoded system default of 0 if the "
             "resource has no Community' -- an explicit stored value, "
             "including 0, always wins outright and is never overridden "
             "by a Community default. Existing rows keep their current "
             "explicit 0 unchanged by this migration (a plain column-"
             "relax, no data rewritten) -- a SysOp opts a given resource "
-            "into inheriting by explicitly clearing it afterwards, per "
-            "round 84. Uses the same table-rebuild pattern as the "
+            "into inheriting by explicitly clearing it afterwards. "
+            "Uses the same table-rebuild pattern as the "
             "user-deletion-cascade migration above (SQLite has no ALTER "
             "TABLE to relax a NOT NULL/remove a DEFAULT in place). "
             "channels.min_level is deliberately NOT touched by this "
-            "migration -- the design doc's round 84 Community edit-"
+            "migration -- the design doc's Community edit-"
             "screen spec names exactly four inheritable defaults "
             "(min_read_level, min_write_level, min_age, "
             "name_requirement), all sized for boards/file-areas' read/"
             "write-pair or all-three-types' age/name shape; it never "
             "names a channel-specific level default, and channels "
-            "already deliberately have no read/write split (round 18) "
+            "already deliberately have no read/write split "
             "that a hypothetical single inherited level would map onto "
             "cleanly. Filling that in as a new field the design doc "
             "never specified would be scope creep, not implementation "
             "-- channels.min_level stays exactly what it is today, "
             "not gated through Community, while min_age/"
             "name_requirement (already nullable on all three tables "
-            "since round 101) gain Community inheritance for channels "
+            "since the identity attestation migration above) gain Community inheritance for channels "
             "same as boards/file-areas. "
             "moderator_grants gains a nullable community_id column for "
-            "the new Community-blanket grant tier (round 83: 'the same "
+            "the new Community-blanket grant tier ('the same "
             "shape local-blanket already has over the whole node,' "
             "narrowed to one Community's membership) -- the two "
             "existing partial unique indexes are replaced: local-"
@@ -1300,7 +1298,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "NetBBS Link persistent storage (design doc round 120): peer table and "
+            "NetBBS Link persistent storage (design doc): peer table and "
             "seen-event/event-body store, replacing netbbs.link.protocol.LinkNode's "
             "previously in-memory-only peers/known_event_ids/events."
         ),
@@ -1313,9 +1311,9 @@ MIGRATIONS = [
             updated_at        TEXT NOT NULL
         );
 
-        -- Round 120: doubles as both the seen-event dedup table and the event-body
+        -- Doubles as both the seen-event dedup table and the event-body
         -- store (§7 already describes them as one concept, not two). No retention-
-        -- window purging yet -- see round 120's sign-off note for the real chain-
+        -- window purging yet -- blocked on the real chain-
         -- idempotency gap that has to close first.
         CREATE TABLE link_events (
             content_id          TEXT PRIMARY KEY,
@@ -1329,12 +1327,12 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Local-origination columns for linked boards (design doc round 124/"
-            "125/126, round 128 wiring): NULL means 'not Linked yet' / 'no board_"
+            "Local-origination columns for linked boards (design doc): "
+            "NULL means 'not Linked yet' / 'no board_"
             "post built yet' -- an explicit value means this row's own signed "
             "board_genesis/board_post envelope (netbbs.link.events.BoardGenesis/"
             "BoardPost .to_dict()), built and stored once, then pushed to peers "
-            "every sync pass same as a key_transition (round 119's own 'harmless "
+            "every sync pass same as a key_transition ('harmless "
             "no-op resend' model) rather than tracked as delivered per-peer."
         ),
         sql="""
@@ -1344,7 +1342,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Link messages (design doc round 93): mail_messages rebuilt so one "
+            "Link messages (design doc): mail_messages rebuilt so one "
             "row can also represent an outbound message addressed to a remote "
             "Link user, or a message actually received via Link -- confirmed "
             "with Thiesi to unify into this table rather than a separate "
@@ -1362,15 +1360,15 @@ MIGRATIONS = [
             "status leaves 'pending' (same 'push everything, dedup handles "
             "idempotency' model board_post/board_post_edit already use); "
             "'expired' is included in that CHECK now even though nothing "
-            "produces it yet (link_message_expired isn't built this round) "
-            "since round 93 already names it and widening this CHECK later "
+            "produces it yet (link_message_expired isn't built yet) "
+            "since the design doc already names it and widening this CHECK later "
             "would mean yet another rebuild for one enum value. "
             "link_source_event_id marks a row as arrived via Link (the "
             "original message's own content_id) -- an explicit marker, not "
             "inferred from sender_user_id IS NULL, since that already means "
             "something else on this table (the local sender's account was "
             "deleted) and the two must never be confused. Tier 1 "
-            "(tier1_home_node_key) only this round (design doc round 93's "
+            "(tier1_home_node_key) only (design doc's "
             "tier-2 finding: the server can never hold a tier-2 user's "
             "decryption key, so nothing here assumes or names a tier at all). "
             "The new link_mail_acknowledgements table holds pending outbound "
@@ -1440,13 +1438,13 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Peer-list exchange (design doc round 95): unverified candidate "
+            "Peer-list exchange (design doc): unverified candidate "
             "endpoint descriptors learned secondhand from an already-verified "
             "peer -- deliberately a separate table from link_peers, never "
             "promoted into it until a real hello with that fingerprint "
             "actually completes (netbbs.link.protocol.LinkNode.handle_hello "
             "already deletes the matching row here when that happens, in "
-            "memory; the corresponding on-disk delete is this round's own "
+            "memory; the corresponding on-disk delete is "
             "netbbs.link.store function's job, not a trigger)."
         ),
         sql="""
@@ -1459,7 +1457,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "Origin succession/transfer (design doc round 94, issue #53): "
+            "Origin succession/transfer (design doc, issue #53): "
             "two new nullable columns on boards, both NULL for every "
             "existing row including already-Linked ones -- deliberately no "
             "backfill (this codebase parses link_genesis_json in Python "
@@ -1487,7 +1485,7 @@ MIGRATIONS = [
     ),
     Migration(
         description=(
-            "WAN reachability / relay selection (design doc §12 round 95, "
+            "WAN reachability / relay selection (design doc §12, "
             "issue #58). link_reliability: this node's own direct-observation "
             "dial-outcome tally per fingerprint (netbbs.link.reliability) -- "
             "the from-scratch tracker built because §6's own reputation "
@@ -1663,7 +1661,7 @@ MIGRATIONS = [
         );
 
         -- Matches list_posts_page's own precedent for "pending work"
-        -- tables (design doc round 30): a partial index over exactly the
+        -- tables: a partial index over exactly the
         -- predicate load_due_work_items filters on, not a full-table scan
         -- of every resolved row too.
         CREATE INDEX idx_link_work_items_due

@@ -1,9 +1,9 @@
 """
 Tests for cursor-addressable line editing in netbbs.net.char_input
-(design doc §15 Phase 2, sign-off round 47/Track 5f) — Left/Right/Home/
+(design doc §15 Phase 2) — Left/Right/Home/
 End movement, mid-line Backspace/Delete, and Insert/overwrite toggling.
 Command history is covered separately in
-tests/test_char_input_history.py; the original (pre-Track-5f)
+tests/test_char_input_history.py; the original (pre-cursor-editing)
 append/Backspace-from-the-end/escape-discarding behavior is still
 covered by tests/test_char_input.py and remains unchanged for masked
 (echo=False) reads.

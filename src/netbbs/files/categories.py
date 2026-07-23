@@ -2,7 +2,7 @@
 File area categories: at most two levels, identical shape and reasoning
 to `netbbs.boards.categories` — see that module's docstring. Kept as a
 separate table/module rather than a shared polymorphic implementation,
-consistent with design doc round 18's explicit choice to keep board and
+consistent with the design doc's explicit choice to keep board and
 channel categories independent ("boards and channels already being fully
 independent subsystems everywhere else in the schema") — file areas are
 a third, equally independent subsystem.
@@ -48,7 +48,7 @@ def create_category(
     """Create a new file area category, optionally as a sub-category of
     an existing top-level category. No permission check here — same
     precedent as board/channel category creation. `created_by` is only
-    for the audit-log entry (design doc -- board/area management round)."""
+    for the audit-log entry."""
     if parent_category_id is not None:
         parent = get_category_by_id(db, parent_category_id)
         if not parent.is_top_level:

@@ -103,7 +103,7 @@ def test_create_subcategory_under_nonexistent_parent_fails(db, creator):
         create_category(db, "Manuals", parent_category_id=999, created_by=creator)
 
 
-# -- delete_category (design doc -- board/area management round) ----------
+# -- delete_category ----------
 
 
 def test_delete_category_sets_areas_using_it_to_uncategorized(db, creator):

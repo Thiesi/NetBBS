@@ -1,13 +1,13 @@
 """
 Persistent storage for `netbbs.link.protocol.LinkNode`'s peer table and
-seen-event/event-body store (design doc round 120) -- backs the
+seen-event/event-body store (design doc) -- backs the
 `link_peers`/`link_events` tables (`netbbs.storage.migrations`) with
 plain `db`-first sync functions, matching every other lane-dispatched
 function's existing convention (`netbbs.storage.execution.DatabaseLane.
 run` injects `db` as the first positional argument).
 
 Deliberately outside `netbbs.link.protocol` itself -- `LinkNode` stays
-pure, synchronous, in-memory; see round 120's sign-off note for why
+pure, synchronous, in-memory
 (`tests/link_harness.py`'s `ScriptedTransport` calls `handle_hello`/
 `handle_events` directly with zero I/O, a property this module doesn't
 disturb). Callers -- `netbbs.link.transport`'s `LinkServer` and
@@ -15,8 +15,8 @@ disturb). Callers -- `netbbs.link.transport`'s `LinkServer` and
 call these functions themselves, via `DatabaseLane.run`, after a
 successful `handle_hello`/`handle_events`.
 
-No retention-window purging here (round 120: `link_events` rows
-accumulate indefinitely) -- see that round's sign-off note for the
+No retention-window purging here (`link_events` rows
+accumulate indefinitely) -- purging is blocked on a
 real chain-idempotency gap in `netbbs.link.protocol.handle_events`
 that has to close first before purging a `key_transition` dedup entry
 would be safe.
@@ -48,23 +48,22 @@ from netbbs.timeutil import utc_now_iso
 def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     """
     Reconstruct a `LinkNode` from persisted `link_peers`/`link_events`
-    rows -- the round-120 replacement for a bare `LinkNode(identity=
+    rows -- the replacement for a bare `LinkNode(identity=
     ...)` construction, so a restarted node doesn't forget its peers or
     reprocess/re-forward events it has already seen.
 
-    Round 126 (found by tracing, not hypothetical): `LinkServer._handle_
-    events` already persists *any* accepted event generically, board_
-    genesis/board_post included, with no type-specific code of its own
-    -- so `link_events` already held board_genesis rows before this
-    function knew to do anything with them. Without also rebuilding
+    `LinkServer._handle_events` already persists *any* accepted event
+    generically, board_genesis/board_post included, with no type-specific
+    code of its own -- so `link_events` already holds board_genesis rows
+    that this function must do something with. Without also rebuilding
     `node.boards` here, a restarted node would forget every board_
     genesis it had already verified, and `handle_events` would then
     wrongly reject a legitimate resent board_post as having "no
-    verified board_genesis on file" -- exactly the restart-forgets-
-    state shape round 120 already fixed for peers/events, just not yet
-    extended to this newer derived index.
+    verified board_genesis on file" -- the same restart-forgets-
+    state hazard already fixed for peers/events, extended to this
+    derived index too.
 
-    Round 128: a board this node itself originated (`netbbs.link.
+    A board this node itself originated (`netbbs.link.
     boards.link_board`) never goes through `handle_events` at all --
     there's no peer to verify it against, it's self-signed -- so its
     genesis lives only on the local `boards` row's own `link_genesis_
@@ -74,7 +73,7 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     *own* Linked boards and wrongly reject a remote user's legitimate
     `board_post` on a board it itself originated.
 
-    Round 130: the same two-source shape, applied to `node.post_edits`
+    The same two-source shape applies to `node.post_edits`
     -- peer-received `board_post_edit` rows come from `link_events`
     (queried in `received_at` order, since a chain reconstructed out of
     order would fail its own "does previous_event_id match the current
@@ -84,7 +83,7 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     as a self-originated `board_genesis` lives on `boards.link_genesis_
     json` rather than ever passing through `handle_events`.
 
-    Round 94/issue #53: the same two-source shape again, applied to
+    Issue #53: the same two-source shape again, applied to
     `node.board_origin`/`board_lifecycle_head`/`pending_origin_
     transfers` -- peer-received `board_origin_transfer_offer`/
     `_accepted` come from `link_events`; this node's own self-
@@ -106,7 +105,7 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             descriptor=EndpointDescriptor.from_dict(json.loads(row["descriptor_json"])),
         )
 
-    # Round 94/issue #53: this node's own self-originated lifecycle
+    # Issue #53: this node's own self-originated lifecycle
     # event (an offer made as current origin, or an acceptance made as
     # a newly-accepted origin), if any -- deliberately reconstructed
     # *before* the link_events loop below, not after (unlike genesis's
@@ -192,7 +191,7 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
 
     for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peer_candidates"):
         # Skip a fingerprint that's since become a real verified peer --
-        # handle_hello's own in-memory candidate cleanup (round 95)
+        # handle_hello's own in-memory candidate cleanup
         # could predate this row's own on-disk delete if a crash landed
         # between the two; never resurrect a stale candidate for
         # someone already directly known.
@@ -202,12 +201,12 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             json.loads(row["descriptor_json"])
         )
 
-    # Round 95/issue #58: both directions of a completed relay-consent
+    # Issue #58: both directions of a completed relay-consent
     # exchange (`netbbs.link.transport`'s `/relay-consent` route) --
     # `relaying_for` (this node granted, acting as the relay) and
     # `relays_serving_me` (a candidate granted this node's own request)
     # are otherwise only ever set in-memory at the moment consent
-    # completes, same restart-forgets-state gap round 120 already fixed
+    # completes, the same restart-forgets-state gap already fixed
     # for peers/events. An outstanding, not-yet-answered `relay_consent_
     # request` this node itself sent is deliberately NOT reconstructed
     # here -- `pending_own_relay_requests` only ever holds something
@@ -244,13 +243,13 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     """
     Upsert one peer's current record. Called after any successful
     `handle_hello`/`handle_events` unconditionally, not only when the
-    caller can prove something changed -- matching round 119's own
+    caller can prove something changed -- matching this codebase's
     "harmless no-op" tolerance for a redundant write at this project's
     declared scale (§14), rather than this module owning the extra
     complexity of tracking what's already on disk.
 
-    Also deletes any on-disk candidate row for the same fingerprint
-    (round 95) -- mirrors `LinkNode.handle_hello`'s own in-memory
+    Also deletes any on-disk candidate row for the same fingerprint --
+    mirrors `LinkNode.handle_hello`'s own in-memory
     cleanup automatically, so a caller that already calls `save_peer`
     after every successful hello (every caller does) doesn't need a
     second explicit cleanup call to keep the on-disk candidate table
@@ -280,7 +279,7 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
 
 def save_candidate_descriptor(db: Database, fingerprint: str, descriptor: EndpointDescriptor) -> None:
     """
-    Upsert one unverified candidate descriptor (round 95) -- called for
+    Upsert one unverified candidate descriptor -- called for
     each fingerprint `LinkNode.handle_peer_list` newly recorded or
     refreshed. No "is this already a real peer" guard here -- `handle_
     peer_list` itself already refuses to record a candidate for an
@@ -322,8 +321,8 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
 
 def save_relay_consent(db: Database, fingerprint: str, *, role: str, accepted_at: str) -> None:
     """
-    Persist one completed relay-consent grant (design doc §12, round
-    95/issue #58) -- `role` is `"i_relay_for"` (this node, as the relay,
+    Persist one completed relay-consent grant (design doc §12,
+    issue #58) -- `role` is `"i_relay_for"` (this node, as the relay,
     granted `fingerprint`'s request) or `"relay_for_me"` (`fingerprint`,
     as a candidate relay, granted this node's own request), matching
     `link_relay_consents`' own `CHECK` constraint exactly. Called after
@@ -352,7 +351,7 @@ def save_relay_consent(db: Database, fingerprint: str, *, role: str, accepted_at
 def delete_relay_consent(db: Database, fingerprint: str, *, role: str) -> None:
     """
     Remove one previously-granted relay-consent row (design doc §12,
-    round 95/issue #58) -- called when self-healing drops a relay whose
+    issue #58) -- called when self-healing drops a relay whose
     observed reliability has fallen below `netbbs.link.relay_selection`'s
     floor (`role="relay_for_me"`), so a restarted node doesn't resurrect
     a relay it already gave up on via `load_link_node`'s own

@@ -1,5 +1,5 @@
-"""Tests for netbbs.net.editor_preference (design doc -- prose editor
-round B2), the per-user fullscreen-editor opt-in preference -- mirrors
+"""Tests for netbbs.net.editor_preference, the per-user
+fullscreen-editor opt-in preference -- mirrors
 tests/test_chat_timestamps.py's shape for the analogous /timestamps
 preference."""
 

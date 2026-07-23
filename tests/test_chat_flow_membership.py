@@ -1,16 +1,15 @@
 """
-Tests for Phase 2 Track 5h (design doc §8/round 33 points 8/9/11):
-`/invite`, `/uninvite`, `/grantaccess`, `/revokeaccess`, `/members`
-through the real `_chat_loop` dispatcher, plus `/join` consuming a
-pending invitation and marking it accepted, and a rejected `/join`
-against a `members_only` channel with no invitation. Library-level
-membership behavior is covered separately in
-tests/test_channel_membership.py.
+Tests for `/invite`, `/uninvite`, `/grantaccess`, `/revokeaccess`,
+`/members` (design doc §8) through the real
+`_chat_loop` dispatcher, plus `/join` consuming a pending invitation
+and marking it accepted, and a rejected `/join` against a
+`members_only` channel with no invitation. Library-level membership
+behavior is covered separately in tests/test_channel_membership.py.
 
-`netbbs.net.chat_flow` is the third module migrated onto design doc
-round 91's two-lane database execution model (issue #57/round 114) --
-`_chat_loop` now takes a `DatabaseLane` instead of a `Database`. `db`
-stays for setup/assertion calls throughout, unchanged.
+`netbbs.net.chat_flow` uses the two-lane database execution model
+(issue #57) -- `_chat_loop` takes a `DatabaseLane` instead of a
+`Database`. `db` stays for setup/assertion calls throughout,
+unchanged.
 """
 
 from __future__ import annotations
@@ -429,7 +428,9 @@ def test_revokeaccess_ejects_a_present_target_from_a_members_only_channel(db, la
             chat_flow._chat_loop(target_session, lane, hub, presence, mailbox, history, channel, bob)
         )
         # Let bob actually join before revoking -- polled, not a fixed
-        # asyncio.sleep(0) (design doc round 114).
+        # asyncio.sleep(0), since lane dispatch involves genuine
+        # wall-clock latency a zero-duration sleep can't reliably
+        # outlast.
         while hub.participant_count(channel.name) < 1:
             await asyncio.sleep(0)
 

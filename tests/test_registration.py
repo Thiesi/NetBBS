@@ -1,10 +1,10 @@
 """
-Tests for self-service account registration (design doc round 76):
+Tests for self-service account registration:
 
 - `netbbs.auth.users`: the reserved `new` sentinel, `pending_approval`
   gating login, and `approve_pending_user`.
-- `netbbs.config`: the node-wide `registration_mode` setting (design doc
-  round 96) -- open/approval_required/closed.
+- `netbbs.config`: the node-wide `registration_mode` setting --
+  open/approval_required/closed.
 - `netbbs.net.login_flow`'s Telnet/web registration entry point
   (`_register_new_account`, triggered from `_login` by typing `new` at
   the username prompt), driven end to end via `handle_session` with a
@@ -169,7 +169,7 @@ def test_approve_pending_user_is_a_no_op_when_not_pending(db):
     assert list_actions_for_target_user(db, alice.id) == []
 
 
-# -- netbbs.config: registration_mode (design doc round 96) -----------------
+# -- netbbs.config: registration_mode ----------------------------------------
 
 
 def test_registration_mode_defaults_open(db):
@@ -183,10 +183,10 @@ def test_registration_mode_round_trips(db):
 
 
 def test_registration_mode_falls_back_to_legacy_boolean_key(db):
-    # A pre-round-96 database that only ever wrote the old boolean key
+    # A legacy database that only ever wrote the old boolean key
     # (never migrated) must still resolve correctly -- no explicit
-    # migration step, per round 96's own "migration is a non-event"
-    # framing.
+    # migration step is needed; falling back to the legacy key is
+    # itself the compatibility path.
     from netbbs.config import set_config
 
     set_config(db, "require_registration_approval", "1")

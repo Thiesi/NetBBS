@@ -1,6 +1,6 @@
 """
 Pure, I/O-free text-editing core for the fullscreen prose editor (design
-doc -- prose editor round B2): a logical line buffer plus cursor,
+doc -- prose editor): a logical line buffer plus cursor,
 soft-wrapped for display, with no dependency on a session, a terminal,
 or `netbbs.rendering.screen_buffer` -- mirrors that module's own
 "pure and testable independent of any I/O" shape.

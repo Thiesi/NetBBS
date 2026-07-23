@@ -1,6 +1,6 @@
 """
 Tests for `netbbs.admin.__main__`'s actor-resolution and bootstrap
-logic (design doc -- SysOp foundation round): `_resolve_actor`,
+logic: `_resolve_actor`,
 `_bootstrap_first_sysop`, `run_admin_session`. Driven with the same
 scripted `FakeSession` `tests/test_admin_flow.py` already defines
 (single ordered input queue serving both `read_key`/`read_line`).
