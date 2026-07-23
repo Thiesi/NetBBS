@@ -1690,9 +1690,10 @@ shaped rows live" question this project doesn't have an established answer
 to yet, not specific to work items); applying this abstraction to any
 future work kind beyond the two named here without first checking it
 actually fits the shape (see the scope-decision table above — the fit
-matters more than the count of kinds); and the quotas/integrity-check/
-log-retention/upgrade-rollback/graceful-shutdown bullets in §13.6, all
-separate, still fully open pieces of issue #60.
+matters more than the count of kinds). The quotas/integrity-check/
+log-retention/upgrade-rollback/graceful-shutdown bullets in §13.6, separate
+pieces of issue #60, were open when this slice was written and have since
+been closed by §13.9/§13.11.
 
 Implemented: `netbbs.link.work_items` (schema, backoff/dead-letter,
 replay/cancel, all audit-logged); `netbbs.link.mail.compose_link_message`/
@@ -2225,24 +2226,69 @@ Implemented or substantially working:
   fallback;
 - deterministic multi-node fault harness;
 - linked-board genesis, posts, self-authored edits, and origin transfer/
-  orphan/fork behavior; local materialization of the board itself (a carried
-  board is a real, browsable local board), but not yet of received posts/
-  edits (§9.3 specifies this; tracked as issue #73);
+  orphan/fork behavior; local materialization both of the board shell and of
+  received posts/edits (§9.3, issue #73, closed);
 - tier-1 Link messages with accepted/bounced delivery state;
 - reliability scoring, relay consent, automatic relay selection, and bounded
-  relay mailboxes for outgoing-only recipients.
+  relay mailboxes for outgoing-only recipients;
+- issue #60's operational controls and recovery model: backup/restore
+  (§13.4, §13.10, issue #75, closed), outbound work items/retry/dead-letter
+  for Link mail (§13.7), bounded quotas (§13.9), and startup integrity
+  checking, diagnostic log retention, protocol/database upgrade
+  compatibility, and graceful Link drain on shutdown (§13.11) — issue #60 is
+  closed.
 
 Still required for Phase 3 completeness:
 
-- materializing received board_post/board_post_edit into ordinary local
-  posts (§9.3, issue #73);
 - inventory/pull-based catch-up and efficient synchronization;
 - correctness-preserving event/dedup retention;
 - linked channels and channel lifecycle;
 - remaining linked-board governance, closure, moderator edits, and tombstones;
 - remote file catalogue and on-demand chunks;
-- issue #60’s operational controls and recovery model;
-- broader real-world multi-node deployment validation.
+- broader real-world multi-node deployment validation (issue #83).
+
+### Phase 3 stabilization gate (issue #84)
+
+Phase 3 already contains enough working federation behavior that later
+roadmap phases could plausibly begin opportunistically. They must not.
+Substantial *implementation* work on Phase 4 (trust/reputation), Phase 5
+(real-time Link chat), Phase 6 (advanced governance/Link Communities), or
+Phase 7 (doors) is deferred until this gate is met, unless a specific
+later-phase task is required to unblock or validate Phase 3 itself. Small
+preparatory design work for a later phase — for example, drafting the issue
+#55 or #63 threat models — is not blocked by this gate; committing
+engineering effort to *building* a later phase is.
+
+The gate is met when all of the following hold:
+
+- every currently implemented Link product vertical (linked boards, Link
+  mail) has at least one end-to-end regression test that exercises the real
+  sender/receiver/acknowledgement or sender/receiver/materialization
+  boundary across a restart, not only isolated unit coverage (issue #80);
+- offline/missed-event catch-up exists and demonstrably converges after a
+  partition, not only live delivery during an already-connected pass;
+- retained event/dedup state has a correctness-preserving retention policy:
+  purging the fast dedup cache must not make an old control event
+  re-applicable, nor let suppressed or deleted content reappear;
+- issue #60's operational controls have been *rehearsed*, not only
+  implemented: backup/restore and an upgrade/rollback have each been
+  exercised against a real running node at least once beyond their original
+  implementation test;
+- a sustained real-world multi-node dogfood deployment (issue #83) has run
+  long enough to exercise repeated sync cycles, at least one restart, and at
+  least one planned partition/recovery, with findings converted into issues
+  or worklog invariants rather than left as a diary;
+- the README, this design document, and the worklog agree on Phase 3's
+  actual boundary, and a newcomer can install and run a node from a
+  documented path (issues #76, #82);
+- known protocol/interoperability correctness issues (issue #70, and issue
+  #71's independent-implementation proof) are either closed or explicitly
+  deferred here with a stated compatibility story.
+
+Meeting this gate does not imply public federation. Phase 4 remains the
+public-readiness security gate regardless of Phase 3 stabilization, and
+completing this gate does not by itself authorize starting Phase 4
+implementation — Phase 4 additionally requires the issue #55 threat model.
 
 ### Phase 4 — Trust, reputation, and public readiness
 
@@ -2335,23 +2381,23 @@ disabling search.
 
 Issue #56 is fully implemented; all four §6.6 subsections have shipped.
 
-### Issue #60 — production operations
+### Issue #60 — production operations — closed
 
-Implement bounded persistent work queues, retry/dead-letter control, quotas,
-health/status surfaces, integrity checks, log retention, backup/restore drills,
-and upgrade/disaster recovery.
+Implemented across four slices, all merged: backup/restore (§13.4,
+`netbbs.backup`, verified against a real running node including a
+create-wipe-restore round trip and the live-lock restore refusal); outbound
+work items/retry/dead-letter (§13.7, `netbbs.link.work_items`, scoped to
+Link mail delivery and acknowledgement delivery specifically — not gossip or
+relay maintenance, which don't fit the same shape — wired into
+`netbbs.link.mail`/`netbbs.link.sync` and surfaced as an `[O]utbox` SysOp
+screen); bounded quotas (§13.9); and startup integrity checking, diagnostic
+log retention, protocol/database upgrade compatibility, and graceful Link
+drain on shutdown (§13.11). Staged/validated restore (§13.10) shipped
+separately as issue #75.
 
-First slice (backup/restore, §13.4) is designed and implemented
-(`netbbs.backup`), verified against a real running node including a
-create-wipe-restore round trip and the live-lock restore refusal. Second
-slice (outbound work items/retry/dead-letter, §13.7) is designed and
-implemented (`netbbs.link.work_items`, scoped to Link mail delivery and
-acknowledgement delivery specifically — not gossip or relay maintenance,
-which don't fit the same shape), wired into `netbbs.link.mail`/`netbbs.link.
-sync`, and surfaced as an `[O]utbox` SysOp screen. Quotas,
-integrity/crash-recovery checks, log retention, upgrade/rollback
-compatibility, graceful shutdown, and disaster-recovery drills remain
-fully open.
+Rehearsing these controls against a real long-running node (not just their
+original implementation tests) is tracked by the Phase 3 stabilization gate
+above, not by this issue.
 
 ### Issue #55 — trust and quarantine
 
