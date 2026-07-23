@@ -1550,7 +1550,8 @@ including:
   implemented; §13.10 replaces its original restore mechanism with a
   staged, validated, interruption-recoverable one and proves it against
   corrupt/truncated backups, missing components, and mid-switch
-  interruption — issue #75, design-complete, not yet implemented).
+  interruption — issue #75, implemented, including a documented drill at
+  `docs/NetBBS-disaster-recovery-drill.md`).
 
 An externally operated persistent Link node should not be considered production
 ready before these controls exist and have been exercised.
@@ -1815,7 +1816,7 @@ display precedent) and a carried-boards `current/max_carried_boards` line;
 rate-limit rejections are logged the same way `LoginThrottle` rejections
 already are, not surfaced as a separate screen in this slice.
 
-Design-complete, not yet implemented.
+Implemented.
 
 ### 13.10 Staged, validated restore (issue #75)
 
@@ -1914,20 +1915,25 @@ superseded release directory. The CLI prints its path; cleanup is an
 explicit operator/cron action (retention/rotation stays out of scope here,
 same as §13.4's own already-deferred list), not automatic.
 
-**Disaster-recovery drill.** A documented procedure (`docs/` or the CLI's
-own `--help`, not repeated here) walks an operator through: stop the node;
-corrupt or truncate a real backup and confirm restore refuses before
-touching anything live; kill the restore process mid-switch (a test hook,
-not a production flag) and confirm the previous generation is intact or
-the state file clearly names what to do; complete a real restore and
-confirm identity continuity (same fingerprint), every configured transport
-still authenticates, previously created local content is still browsable,
-and Link resumes gossiping with its peers on restart. To be proven
-functionally against real interruption/corruption scenarios as part of
-implementing this slice; running it specifically on NetBSD hardware will
-remain an operator step this design enables but does not itself execute.
+**Disaster-recovery drill.** Documented at `docs/NetBBS-disaster-recovery-
+drill.md`: stop the node; corrupt or truncate a real backup and confirm
+restore refuses before touching anything live; interrupt the restore
+process mid-switch and confirm the previous generation is intact or the
+state file clearly names what to do; complete a real restore and confirm
+identity continuity (same fingerprint), every configured transport still
+authenticates, previously created local content is still browsable, and
+Link resumes gossiping with its peers on restart. Proven functionally,
+live, against a real running/killed/restarted node process during
+implementation -- corruption refusal (checksum mismatch caught before any
+live byte moved, confirmed via before/after hashing), the PID-file check
+against a genuinely running process, a stale PID file from a hard-killed
+process correctly tolerated rather than blocking restore, and a full
+restore-then-restart cycle with identity/content verified. Running the
+drill specifically on NetBSD hardware remains the one piece this design
+enables but does not itself execute from a non-NetBSD development
+environment.
 
-Design-complete, not yet implemented.
+Implemented.
 
 ---
 

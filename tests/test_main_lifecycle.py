@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sqlite3
 import sys
@@ -436,6 +437,32 @@ def test_shutdown_closes_the_database(tmp_path):
         conn.execute("SELECT 1")
     finally:
         conn.close()
+
+
+def test_run_writes_and_removes_its_own_pid_file(tmp_path):
+    """Design doc §13.10, issue #75: netbbs.backup.restore_backup's
+    liveness check depends on this existing across every real node
+    lifetime and being gone again on a clean exit -- proven here
+    against a real run(), not just the write_pid_file/remove_pid_file
+    unit round trip in tests/test_backup.py."""
+    captured_db_path = tmp_path / "node.db"
+    pid_path = tmp_path / "node.pid"
+
+    async def scenario():
+        config = _config(tmp_path, db_path=captured_db_path)
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        await asyncio.sleep(0.1)
+
+        assert pid_path.exists()
+        assert int(pid_path.read_text().strip()) == os.getpid()  # this test process is what's actually running
+
+        shutdown_event.set()
+        await task
+
+        assert not pid_path.exists()
+
+    asyncio.run(scenario())
 
 
 # -- zero-SysOp startup refusal (design doc -- SysOp foundation round) ------

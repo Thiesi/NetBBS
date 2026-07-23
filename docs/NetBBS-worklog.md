@@ -1169,15 +1169,49 @@ Implemented and verified against a real, separately-started node process
 concurrent writer holding `BEGIN IMMEDIATE`, and confirmed a full
 create-wipe-restore cycle round-trips the database, blobs, and node
 identity (same Link fingerprint, no new SSH host key generated) intact.
-One real limitation worth remembering, not just a hypothetical: the
-`BEGIN IMMEDIATE` probe only catches a write actually in flight at that
-exact instant — SQLite's WAL-mode locking does not hold the write lock
-between transactions, and this project's own writes are always short
-`execute()`-then-`commit()` pairs with no surrounding delay. So this
-check reliably catches "restoring during an active write," not "the
-node happens to be running but idle" — the latter is the overwhelmingly
-common case, and the actual guarantee against it remains the documented
-operator precondition (stop the node first), not this code.
+
+**Restore is staged and validated (design doc §13.10, issue #75) --
+never a direct copy onto a live path again.** The `BEGIN IMMEDIATE`
+probe alone only ever catches a write actually in flight at that exact
+instant, not an idle-but-running node (SQLite's WAL-mode locking holds
+the write lock only for a transaction's duration) -- closed by a PID
+file `netbbs.__main__` writes/removes across every real exit path
+(including a hard kill, which leaves it behind as a stale, correctly-
+tolerated leftover rather than a permanent block -- verified live by
+actually `taskkill /F`-ing a running node and confirming the next
+restore both refused while the PID was genuinely still alive, and later
+proceeded once it wasn't). Two invariants worth remembering for any
+future validation-before-mutation code in this codebase:
+
+- **Validating a backup must never itself mutate it.** Opening the
+  original snapshot as a real `netbbs.storage.database.Database`
+  applies any pending migration in place -- fine, even desirable, for a
+  disposable staged copy about to be switched into place, but it would
+  silently invalidate the manifest's own recorded checksum if run
+  against the original backup directory, which must stay byte-identical
+  across repeated validation runs. `_validate_backup_source`'s
+  `allow_migrate` flag exists specifically to keep these two cases from
+  being accidentally conflated into one code path.
+- **A content-addressed store needs no separate manifest checksums at
+  all.** `netbbs.files.storage` already names every blob after its own
+  sha256 (`root/{hash[:2]}/{hash}`), so integrity verification is just
+  recomputing and comparing against the filename -- no bookkeeping that
+  grows with the file area, unlike every other backed-up artifact,
+  which genuinely does need an explicit checksum recorded somewhere
+  else.
+
+The switch itself is a same-filesystem atomic rename per artifact (old
+live content renamed into a dated rollback directory first, staged
+content renamed into place second), not a copy -- proven live by
+monkeypatching a mid-sequence failure and confirming every already-
+switched artifact rolls back automatically, restoring the exact
+pre-restore state. A small state file records progress across the
+switch and is removed only once every artifact has switched or every
+switched artifact has been rolled back -- if the process is killed
+outright (not a catchable exception) partway through, that file is the
+one deliberately-left-behind trace of an in-progress restore, and a
+subsequent restore attempt refuses to start a second one over it rather
+than compounding the mess.
 
 ### Bounds and visibility
 

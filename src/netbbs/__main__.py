@@ -19,6 +19,7 @@ import signal
 import sys
 
 from netbbs.auth.users import count_sysops
+from netbbs.backup import remove_pid_file, write_pid_file
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
@@ -466,6 +467,17 @@ async def run(
     link_sync_session = None
     seed_refresh_task: asyncio.Task | None = None
     try:
+        # Design doc §13.10, issue #75: this node's own PID, so a later
+        # `netbbs.backup restore` can reliably refuse against an idle-
+        # but-running node (the write-lock probe it also uses only ever
+        # catches a transaction genuinely in flight, not a process
+        # sitting idle between them). Written inside this try/finally,
+        # not before it, so it's guaranteed removed by the matching
+        # remove_pid_file() below on every exit path -- same reasoning
+        # the node identity load just below already documents for
+        # itself.
+        write_pid_file(config.db_path)
+
         # Design doc round 89/111: a node's Link identity (root key +
         # signing/transport operational keys) auto-generates silently on
         # first-ever startup and just loads on every one after that -- no
@@ -663,6 +675,7 @@ async def run(
         foreground_lane.close()
         background_lane.close()
         db.close()
+        remove_pid_file(config.db_path)
         _logger.info("NetBBS node shut down cleanly")
 
 

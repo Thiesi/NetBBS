@@ -7,6 +7,7 @@ invariants around them, and the `python -m netbbs.backup` CLI.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -18,12 +19,21 @@ from netbbs.backup import (
     create_backup,
     get_last_backup_summary,
     main,
+    remove_pid_file,
     restore_backup,
+    write_pid_file,
 )
+from netbbs import backup as backup_module
 from netbbs.link.node_identity import NodeIdentity, bootstrap_node_identity
 from netbbs.storage.database import Database
 
-_BLOB_HASH = "ab" + "0" * 62
+_BLOB_CONTENT = b"blob content"
+# A real content-addressed store always names a blob after its own
+# sha256 (netbbs.files.storage) -- issue #75's restore validation now
+# actually checks this, so a fixture with a fabricated, non-matching
+# hash (this test's own pre-issue-#75 shape) would be correctly
+# rejected as "corrupt."
+_BLOB_HASH = hashlib.sha256(_BLOB_CONTENT).hexdigest()
 
 
 def _storage_root(db_path):
@@ -56,7 +66,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
     staging file that must never survive into a backup."""
     blob_path = _storage_root(db_path) / _BLOB_HASH[:2] / _BLOB_HASH
     blob_path.parent.mkdir(parents=True)
-    blob_path.write_bytes(b"blob content")
+    blob_path.write_bytes(_BLOB_CONTENT)
 
     incoming_path = _storage_root(db_path) / ".incoming" / "partial-upload"
     incoming_path.parent.mkdir(parents=True)
@@ -244,6 +254,267 @@ def test_restore_backup_succeeds_once_the_holder_releases_the_lock(tmp_path, db_
     holder.close()
 
     restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)  # must not raise
+
+
+# -- staged/validated restore (design doc §13.10, issue #75) ----------------
+
+
+def test_restore_backup_validates_before_touching_any_live_path(tmp_path, db_path, identity_dir):
+    """A corrupt backup must be refused before a single live artifact
+    is overwritten -- not partway through, and not after."""
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    # Corrupt the database snapshot after the fact -- a truncated file,
+    # not a well-formed-but-tampered one, so PRAGMA integrity_check
+    # itself (not just the checksum) has something real to catch too.
+    (destination / "netbbs.db").write_bytes(b"not a real sqlite file")
+
+    live_db_bytes_before = db_path.read_bytes()
+
+    with pytest.raises(BackupError):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+    assert db_path.read_bytes() == live_db_bytes_before  # untouched
+
+
+def test_restore_backup_refuses_on_checksum_mismatch(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    # Tamper with the SSH host key after the manifest recorded its
+    # checksum -- a well-formed file, just not the one the manifest
+    # says it should be.
+    (destination / "netbbs_ssh_host_key").write_bytes(b"tampered")
+
+    with pytest.raises(BackupError, match="checksum mismatch"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_backup_refuses_on_a_corrupted_blob(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    blob_in_backup = destination / "files" / _BLOB_HASH[:2] / _BLOB_HASH
+    blob_in_backup.write_bytes(b"corrupted content, wrong hash now")
+
+    with pytest.raises(BackupError, match="does not match its own content hash"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_backup_refuses_on_missing_checksummed_file(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    (destination / "identity" / "signing.identity").unlink()
+
+    with pytest.raises(BackupError, match="missing"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_backup_refuses_if_identity_does_not_load_cleanly(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    # Swap the root identity file's bytes for the signing key's --
+    # still a file that "exists" and (if checksums didn't already catch
+    # it) wouldn't parse/verify as the right key, so this also proves
+    # the identity check is a real functional load, not just presence.
+    # Recompute the checksum too, isolating this test to the identity-
+    # load check specifically rather than tripping the checksum check
+    # first.
+    swapped = (destination / "identity" / "signing.identity").read_bytes()
+    (destination / "identity" / "root.identity").write_bytes(swapped)
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["checksums"]["identity/root.identity"] = hashlib.sha256(swapped).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    with pytest.raises(BackupError, match="node identity does not load cleanly"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_backup_refuses_a_snapshot_from_a_newer_schema_version(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    db_snapshot = destination / "netbbs.db"
+    conn = sqlite3.connect(str(db_snapshot))
+    conn.execute("PRAGMA user_version = 999999")
+    conn.commit()
+    conn.close()
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["checksums"]["netbbs.db"] = backup_module._sha256_of_file(db_snapshot)
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    with pytest.raises(BackupError, match="newer than this NetBBS build supports"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_backup_source_directory_is_never_mutated_by_validation(tmp_path, db_path, identity_dir):
+    """A backup must stay byte-identical across repeated restores --
+    validating it must never itself apply a schema migration to the
+    original snapshot (only to the disposable staged copy)."""
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    db_snapshot_bytes_before = (destination / "netbbs.db").read_bytes()
+
+    restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+    assert (destination / "netbbs.db").read_bytes() == db_snapshot_bytes_before
+
+
+def test_restore_backup_does_not_delete_the_rollback_generation(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO node_config (key, value) VALUES ('marker', 'pre-restore-generation')")
+    conn.commit()
+    conn.close()
+
+    rollback_dir = restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+    assert rollback_dir is not None
+    assert rollback_dir.exists()
+    conn = sqlite3.connect(str(rollback_dir / "db"))
+    marker = conn.execute("SELECT value FROM node_config WHERE key = 'marker'").fetchone()
+    conn.close()
+    assert marker == ("pre-restore-generation",)
+
+
+def test_restore_backup_returns_none_when_nothing_was_live_to_preserve(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    fresh_db_path = tmp_path / "restored" / "netbbs.db"
+    fresh_identity_dir = tmp_path / "restored_identity"
+    fresh_db_path.parent.mkdir()
+
+    rollback_dir = restore_backup(source=destination, db_path=fresh_db_path, identity_dir=fresh_identity_dir)
+
+    assert rollback_dir is None
+
+
+def test_restore_backup_no_staging_or_state_files_left_behind_on_success(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+    remaining = {p.name for p in db_path.parent.iterdir()}
+    assert not any(name.startswith(".netbbs-restore-staging-") for name in remaining)
+    assert ".netbbs-restore-state.json" not in remaining
+
+
+def test_restore_backup_recovers_the_previous_generation_when_a_switch_step_fails(
+    tmp_path, db_path, identity_dir, monkeypatch
+):
+    """Simulates an interruption partway through the switch phase (the
+    third artifact fails) and confirms everything already switched is
+    rolled back automatically -- the live node ends up exactly as it
+    was before the restore was attempted, not a mixture."""
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO node_config (key, value) VALUES ('marker', 'original-before-failed-restore')")
+    conn.commit()
+    conn.close()
+    original_identity_root_bytes = (identity_dir / "root.identity").read_bytes()
+
+    real_switch_one = backup_module._switch_one
+    call_count = 0
+
+    def _flaky_switch_one(name, staged_path, live_path, rollback_dir):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 3:
+            raise OSError("simulated interruption")
+        real_switch_one(name, staged_path, live_path, rollback_dir)
+
+    monkeypatch.setattr(backup_module, "_switch_one", _flaky_switch_one)
+
+    with pytest.raises(BackupError, match="automatically rolled back"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+    # The live node is back to exactly its pre-restore state.
+    conn = sqlite3.connect(str(db_path))
+    marker = conn.execute("SELECT value FROM node_config WHERE key = 'marker'").fetchone()
+    conn.close()
+    assert marker == ("original-before-failed-restore",)
+    assert (identity_dir / "root.identity").read_bytes() == original_identity_root_bytes
+
+    # No leftover state file -- the rollback fully recovered, so the
+    # marker is cleared, not left as a stuck "restore in progress" sign.
+    assert not (db_path.parent / ".netbbs-restore-state.json").exists()
+
+
+def test_restore_backup_refuses_a_second_restore_over_an_unresolved_state_file(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    state_path = db_path.parent / ".netbbs-restore-state.json"
+    state_path.write_text(json.dumps({"started_at": "2026-01-01T00:00:00Z", "pending_artifacts": ["db"]}))
+
+    with pytest.raises(BackupError, match="did not complete cleanly"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+# -- PID-file liveness check (design doc §13.10, issue #75) -----------------
+
+
+def test_restore_backup_refuses_while_the_pid_file_names_a_live_process(tmp_path, db_path, identity_dir):
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    write_pid_file(db_path)  # writes this test process's own PID -- genuinely alive
+    try:
+        with pytest.raises(BackupError, match="appears to still be running"):
+            restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+    finally:
+        remove_pid_file(db_path)
+
+
+def test_restore_backup_tolerates_a_stale_pid_file(tmp_path, db_path, identity_dir):
+    """A PID file naming a process that no longer exists (crash, kill
+    -9, power loss -- anything that skipped the normal remove_pid_file
+    cleanup) must not permanently block restore."""
+    destination = tmp_path / "backup1"
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    # An implausibly large PID essentially guaranteed not to be a real,
+    # currently-running process on any platform this runs on.
+    (db_path.parent / f"{db_path.stem}.pid").write_text("999999999")
+
+    restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)  # must not raise
+
+
+def test_write_and_remove_pid_file_round_trip(tmp_path, db_path):
+    pid_path = db_path.parent / f"{db_path.stem}.pid"
+    assert not pid_path.exists()
+
+    write_pid_file(db_path)
+    assert pid_path.exists()
+
+    remove_pid_file(db_path)
+    assert not pid_path.exists()
+
+    remove_pid_file(db_path)  # must not raise if already gone
 
 
 # -- CLI ----------------------------------------------------------------
