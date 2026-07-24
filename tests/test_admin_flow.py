@@ -525,7 +525,12 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["s", "n", "s", "g", "", "n", "b", "b", "b"])
+        # "g" (graceful) now also prompts for a delay (blank keeps the
+        # configured default) before the custom-message prompt -- design
+        # doc, node management: [S]hutdown now behaves exactly like
+        # [D]rain, an operator-chosen delay rather than a fixed config
+        # value with no override.
+        admin_session = FakeSession(["s", "n", "s", "g", "", "", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -697,6 +702,139 @@ def test_drain_screen_declined_confirmation_does_nothing(db, lane, sysop):
 
         other_task.cancel()
         await asyncio.gather(other_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+# -- cancelling/replacing a scheduled drain or shutdown (design doc -- node --
+# -- management, the stacking-bug fix Thiesi's own dogfood testing found) ----
+
+
+def test_drain_screen_offers_to_cancel_an_already_scheduled_drain(db, lane, sysop):
+    """The actual fix for the reported bug: running [D]rain again while
+    one is already scheduled must offer an explicit cancel choice
+    rather than silently launching a second, uncoordinated countdown."""
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        loop = asyncio.get_running_loop()
+        first_task = asyncio.create_task(asyncio.Event().wait())
+        node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
+
+        # "d" -> already-scheduled notice -> "y" (cancel it) -> back x3
+        admin_session = FakeSession(["s", "n", "d", "y", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        text = _written_text(admin_session)
+        assert "already scheduled" in text
+        assert "Scheduled drain cancelled." in text
+        assert node_controls.drain_scheduler.is_scheduled() is False
+        assert first_task.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_drain_screen_declining_the_cancel_offer_replaces_the_existing_schedule(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        loop = asyncio.get_running_loop()
+        first_task = asyncio.create_task(asyncio.Event().wait())
+        node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message="old message")
+
+        # "d" -> already-scheduled notice -> "n" (don't cancel, continue)
+        # -> the ordinary delay/message/confirm prompts for a new one.
+        admin_session = FakeSession(["s", "n", "d", "n", "0", "", "y", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+        await asyncio.sleep(0)  # let the replaced task's cancellation actually settle
+
+        assert "Drain started" in _written_text(admin_session)
+        assert first_task.cancelled()  # the old one was replaced, not left running
+        # The new drain's own delay_seconds=0 means it already ran to
+        # completion by this point -- is_scheduled() correctly reports
+        # False once a task finishes normally, same as any other
+        # completed drain; nothing meaningful is left to observe about
+        # its own transient scheduled state here.
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_screen_now_prompts_for_a_delay_like_drain_does(db, lane, sysop):
+    """Design doc -- node management, Thiesi's own request: [S]hutdown
+    behaves exactly like [D]rain now, an operator-chosen delay instead
+    of a fixed config value with no override."""
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+
+        admin_session = FakeSession(["s", "n", "s", "g", "0.2", "", "y", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        assert "Shutdown sequence started." in _written_text(admin_session)
+        remaining = node_controls.shutdown_scheduler.remaining_seconds()
+        assert remaining is not None and remaining <= 0.25
+
+        node_controls.shutdown_scheduler.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_screen_offers_to_cancel_an_already_scheduled_shutdown(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        node_controls.maintenance.activate()  # a real scheduled shutdown would have done this
+        loop = asyncio.get_running_loop()
+        first_task = asyncio.create_task(asyncio.Event().wait())
+        node_controls.shutdown_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
+
+        admin_session = FakeSession(["s", "n", "s", "y", "b", "b", "b"])
+        node_controls.session_registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            node_controls.session_registry.leave(admin_session)
+
+        text = _written_text(admin_session)
+        assert "already scheduled" in text
+        assert "Scheduled shutdown cancelled." in text
+        assert node_controls.shutdown_scheduler.is_scheduled() is False
+        assert first_task.cancelled()
+        # Cancelling a *scheduled* shutdown must reopen new-login
+        # admission -- see MaintenanceMode.deactivate()'s own docstring.
+        assert node_controls.maintenance.is_active() is False
+
+    asyncio.run(scenario())
+
+
+def test_node_menu_shows_maintenance_and_schedule_status(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        node_controls.maintenance.enable_lockdown()
+        loop = asyncio.get_running_loop()
+        drain_task = asyncio.create_task(asyncio.Event().wait())
+        node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 90.0, message=None)
+
+        session = FakeSession(["s", "n", "b", "b", "b"])
+        await admin_menu(session, lane, sysop, node_controls=node_controls)
+
+        text = _written_text(session)
+        assert "Maintenance mode: ON" in text
+        assert "Drain scheduled" in text
+
+        drain_task.cancel()
+        await asyncio.gather(drain_task, return_exceptions=True)
 
     asyncio.run(scenario())
 

@@ -44,6 +44,14 @@ PRIVILEGE_COLOR = 196  # red — a user's own moderator/SysOp badge ("[mod]",
                        # "[sysop]") in the chat status line, distinct from the
                        # muted gray used for state that's merely informational
                        # (mute expiry, the clock) rather than elevated access
+ALERT_COLOR = 202  # deep orange-red — node-wide operational alerts (an active
+                   # drain/shutdown countdown, maintenance mode being on) in a
+                   # live prompt or a post-login reminder; distinct from
+                   # PRIVILEGE_COLOR (an account's own elevated-access badge,
+                   # a permanent fact about who's connected) and MUTED_COLOR
+                   # (routine informational text) since this specifically
+                   # means "something time-sensitive is happening to the node
+                   # itself, act on it"
 STATUS_BAR_BACKGROUND = 236  # dark neutral gray — the chat status line's own
                              # solid background band (Thiesi's own explicit
                              # choice: literal per-field foreground colors on

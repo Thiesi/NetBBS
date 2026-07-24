@@ -49,6 +49,7 @@ established independently).
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import nacl.signing
 
@@ -158,7 +159,12 @@ from netbbs.net.confirm import prompt_yes_no, prompt_yes_no_or_keep
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.net.session_registry import SessionSummary
-from netbbs.net.shutdown import NodeControls, run_drain_sequence, run_shutdown_sequence
+from netbbs.net.shutdown import (
+    NodeControls,
+    format_remaining_seconds,
+    run_drain_sequence,
+    run_shutdown_sequence,
+)
 from netbbs.selfupdate import (
     UpdateError,
     check_latest_release,
@@ -176,7 +182,16 @@ from netbbs.net.welcome_banner import (
     set_welcome_banner_enabled,
     welcome_banner_status,
 )
-from netbbs.rendering import HEADER_COLOR, MUTED_COLOR, colored, menu_key, reflow, reject_keystroke, sanitize_text
+from netbbs.rendering import (
+    ALERT_COLOR,
+    HEADER_COLOR,
+    MUTED_COLOR,
+    colored,
+    menu_key,
+    reflow,
+    reject_keystroke,
+    sanitize_text,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import (
@@ -185,6 +200,12 @@ from netbbs.timeutil import (
     set_display_format,
     set_display_timezone,
 )
+
+# Design doc -- node management, Thiesi's own request: an operator
+# watching this node's own stdout/journal should see a shutdown/drain
+# being scheduled (or maintenance mode toggled) as it happens, not only
+# via the DB-backed moderation log (`record_action`, queried separately).
+_logger = logging.getLogger(__name__)
 
 
 async def admin_menu(
@@ -1200,7 +1221,7 @@ async def _revoke_live_sessions(
 
 
 async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
-    await _draw_node_menu(session)
+    await _draw_node_menu(session, node_controls)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1210,24 +1231,35 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
         elif choice == "w":
             await session.write_line("")
             await _who_screen(session, lane, actor, node_controls)
-            await _draw_node_menu(session)
+            await _draw_node_menu(session, node_controls)
         elif choice == "s":
             await session.write_line("")
             await _shutdown_screen(session, lane, actor, node_controls)
-            await _draw_node_menu(session)
+            await _draw_node_menu(session, node_controls)
         elif choice == "m":
             await session.write_line("")
             await _maintenance_mode_screen(session, lane, actor, node_controls)
-            await _draw_node_menu(session)
+            await _draw_node_menu(session, node_controls)
         elif choice == "d":
             await session.write_line("")
             await _drain_screen(session, lane, actor, node_controls)
-            await _draw_node_menu(session)
+            await _draw_node_menu(session, node_controls)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_node_menu(session: Session) -> None:
+async def _draw_node_menu(session: Session, node_controls: NodeControls) -> None:
+    """
+    Design doc -- node management, Thiesi's own dogfood-testing report:
+    a SysOp who toggled `[M]aintenance mode` and then moved on to
+    something else has no way to notice it's still on except this
+    screen (and the live main-menu prompt's own tag, `netbbs.net.
+    login_flow._draw_main_menu`) -- the actual incident that prompted
+    this: a SysOp left it on and only found out when a user reported
+    being unable to log in. Shown unconditionally here (this is already
+    the node-management screen, not a place that needs restraint about
+    operational detail) rather than only when something's active.
+    """
     header = colored("Node management:", fg_color=HEADER_COLOR, bold=True)
     options = "  ".join(
         [
@@ -1236,6 +1268,16 @@ async def _draw_node_menu(session: Session) -> None:
         ]
     )
     await session.write_line(f"\r\n{header} {options}")
+    status_lines = [
+        f"Maintenance mode: {'ON' if node_controls.maintenance.is_lockdown_active() else 'off'}"
+    ]
+    if node_controls.drain_scheduler.is_scheduled():
+        remaining = node_controls.drain_scheduler.remaining_seconds()
+        status_lines.append(f"Drain scheduled -- disconnecting non-SysOps in {format_remaining_seconds(remaining)}")
+    if node_controls.shutdown_scheduler.is_scheduled():
+        remaining = node_controls.shutdown_scheduler.remaining_seconds()
+        status_lines.append(f"Shutdown scheduled -- going down in {format_remaining_seconds(remaining)}")
+    await session.write_line(colored("  ".join(status_lines), fg_color=ALERT_COLOR, bold=True))
     await session.write("Choice: ")
 
 
@@ -1297,18 +1339,60 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
 
 
 async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+    """
+    Design doc -- node management, Thiesi's own request: now behaves
+    exactly like `[D]rain` rather than a differently-shaped sibling
+    command -- an operator-chosen delay (prefilled from `config.
+    shutdown.graceful_delay_seconds`, not a hard-coded mandate) instead
+    of a fixed config value with no override, and the same "already
+    scheduled? offer to cancel" check `_drain_screen` has, backed by the
+    same `SequenceScheduler` mechanism.
+    """
+    if node_controls.shutdown_scheduler.is_scheduled():
+        remaining = node_controls.shutdown_scheduler.remaining_seconds()
+        await session.write_line(
+            colored(
+                f"\r\nA shutdown is already scheduled -- going down in "
+                f"{format_remaining_seconds(remaining)}.",
+                fg_color=ALERT_COLOR, bold=True,
+            )
+        )
+        if await prompt_yes_no(session, "Cancel it?", default=False):
+            node_controls.shutdown_scheduler.cancel()
+            node_controls.maintenance.deactivate()
+            await lane.run(record_action, actor=actor, action="cancel_shutdown")
+            _logger.info("scheduled shutdown cancelled by %s", actor.username)
+            await session.write_line("Scheduled shutdown cancelled.")
+            return
+        await session.write_line(
+            colored("Continuing -- scheduling a new shutdown will replace it.", fg_color=MUTED_COLOR)
+        )
+
     await session.write_line(
         colored(
             "\r\nThis locks out new logins and warns every connected session "
             "(including this one) immediately. Everyone is then disconnected -- "
             "either right away, or after a grace period, depending on your choice "
-            "below. This cannot be undone once confirmed.",
+            "below. This cannot be undone once the grace period actually elapses.",
             fg_color=MUTED_COLOR,
         )
     )
     await session.write("Graceful (wait, then disconnect) or immediate? [G/i]: ")
     mode_answer = (await session.read_line()).strip().lower()
     graceful = mode_answer != "i"
+
+    delay_seconds = node_controls.graceful_delay_seconds
+    if graceful:
+        await session.write(f"Delay in seconds before disconnecting [{int(node_controls.graceful_delay_seconds)}]: ")
+        delay_raw = (await session.read_line()).strip()
+        try:
+            delay_seconds = float(delay_raw) if delay_raw else node_controls.graceful_delay_seconds
+        except ValueError:
+            await session.write_line("Not a number -- cancelled.")
+            return
+        if delay_seconds < 0:
+            await session.write_line("Delay cannot be negative -- cancelled.")
+            return
 
     await session.write("Custom broadcast message (leave blank for the default): ")
     message_raw = (await session.read_line()).strip()
@@ -1326,17 +1410,24 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
     # enough afterward to still be able to write an audit row.
     await lane.run(
         record_action, actor=actor, action="trigger_shutdown",
-        detail=f"graceful={graceful}, message={message!r}",
+        detail=f"graceful={graceful}, delay_seconds={delay_seconds}, message={message!r}",
     )
-    asyncio.create_task(
+    _logger.info(
+        "shutdown scheduled by %s (graceful=%s, delay_seconds=%s)", actor.username, graceful, delay_seconds
+    )
+    task = asyncio.create_task(
         run_shutdown_sequence(
             graceful=graceful,
             session_registry=node_controls.session_registry,
             maintenance=node_controls.maintenance,
-            graceful_delay_seconds=node_controls.graceful_delay_seconds,
+            delay_seconds=delay_seconds,
             shutdown_event=node_controls.shutdown_event,
             message=message,
         )
+    )
+    loop = asyncio.get_running_loop()
+    node_controls.shutdown_scheduler.schedule(
+        task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=message
     )
     await session.write_line("Shutdown sequence started.")
 
@@ -1374,6 +1465,7 @@ async def _maintenance_mode_screen(session: Session, lane: DatabaseLane, actor: 
     else:
         node_controls.maintenance.enable_lockdown()
     await lane.run(record_action, actor=actor, action="set_maintenance_mode", detail=f"enabled={not currently_on}")
+    _logger.info("maintenance mode set to %s by %s", "ON" if not currently_on else "off", actor.username)
     await session.write_line(f"Maintenance mode is now {'ON' if not currently_on else 'off'}.")
 
 
@@ -1384,12 +1476,41 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
     (including this one), and never shuts the node down or changes
     `[M]aintenance mode`'s own lockdown flag (design doc §13.8: the two
     are meant to be composed deliberately, not implied by each other).
+
+    `node_controls.drain_scheduler` (design doc -- node management,
+    Thiesi's own dogfood-testing report) is what fixes the stacking bug
+    a plain `asyncio.create_task(run_drain_sequence(...))` call had: a
+    SysOp running this command again while a drain is already scheduled
+    is now explicitly offered a chance to cancel it first, rather than
+    silently launching a second, uncoordinated countdown racing the
+    first one -- see `SequenceScheduler`'s own docstring.
     """
+    if node_controls.drain_scheduler.is_scheduled():
+        remaining = node_controls.drain_scheduler.remaining_seconds()
+        await session.write_line(
+            colored(
+                f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
+                f"{format_remaining_seconds(remaining)}.",
+                fg_color=ALERT_COLOR, bold=True,
+            )
+        )
+        if await prompt_yes_no(session, "Cancel it?", default=False):
+            node_controls.drain_scheduler.cancel()
+            await lane.run(record_action, actor=actor, action="cancel_drain")
+            _logger.info("scheduled drain cancelled by %s", actor.username)
+            await session.write_line("Scheduled drain cancelled.")
+            return
+        await session.write_line(
+            colored("Continuing -- scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
+        )
+
     await session.write_line(
         colored(
             "\r\nThis warns every connected non-SysOp session, waits, then disconnects "
             "them. SysOp sessions (including this one) are never warned or "
-            "disconnected by this. The node itself is not shut down.",
+            "disconnected by this. The node itself is not shut down, and new non-SysOp "
+            "logins are not blocked either -- turn on [M]aintenance mode too if you want "
+            "the node to actually stay empty afterward.",
             fg_color=MUTED_COLOR,
         )
     )
@@ -1416,11 +1537,14 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
         record_action, actor=actor, action="trigger_drain",
         detail=f"delay_seconds={delay_seconds}, message={message!r}",
     )
-    asyncio.create_task(
+    _logger.info("drain scheduled by %s (delay_seconds=%s)", actor.username, delay_seconds)
+    task = asyncio.create_task(
         run_drain_sequence(
             session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
         )
     )
+    loop = asyncio.get_running_loop()
+    node_controls.drain_scheduler.schedule(task, deadline=loop.time() + delay_seconds, message=message)
     await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s.")
 
 

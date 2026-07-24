@@ -33,7 +33,7 @@ from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.nodeconfig import ConfigError, LinkConfig, NodeConfig, load_config
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.net.shutdown import run_shutdown_sequence
+from netbbs.net.shutdown import SequenceScheduler, run_shutdown_sequence
 from netbbs.net.throttle import LinkRequestThrottle, LoginThrottle
 from netbbs.selfupdate import run_scheduled_update_check
 from netbbs.storage.database import Database, DatabaseIntegrityError
@@ -278,18 +278,20 @@ async def run(
     shutdown_event: asyncio.Event | None = None,
     session_registry: ActiveSessionRegistry | None = None,
     maintenance: MaintenanceMode | None = None,
+    drain_scheduler: SequenceScheduler | None = None,
+    shutdown_scheduler: SequenceScheduler | None = None,
 ) -> None:
     """
     Run one node's lifetime: open the database, start every configured
     listener, and block until `shutdown_event` is set — then stop every
     listener and close the database, in that order, before returning.
 
-    `shutdown_event`/`session_registry`/`maintenance` are all
-    injectable specifically so this coordinated shutdown path is
-    testable without sending real OS signals (see
-    `tests/test_main_lifecycle.py`/`tests/test_shutdown.py`); the real
-    top-level `main()` below constructs its own and wires actual
-    SIGTERM/SIGINT handling to them (design doc) — by the time
+    `shutdown_event`/`session_registry`/`maintenance`/`drain_scheduler`/
+    `shutdown_scheduler` are all injectable specifically so this
+    coordinated shutdown path is testable without sending real OS
+    signals (see `tests/test_main_lifecycle.py`/`tests/test_shutdown.
+    py`); the real top-level `main()` below constructs its own and wires
+    actual SIGTERM/SIGINT handling to them (design doc) — by the time
     `shutdown_event` is set, whatever triggered it (a real signal, or a
     test setting it directly) has already had its chance to warn/
     disconnect connected sessions first; this function itself doesn't
@@ -376,6 +378,10 @@ async def run(
         session_registry = ActiveSessionRegistry()
     if maintenance is None:
         maintenance = MaintenanceMode()
+    if drain_scheduler is None:
+        drain_scheduler = SequenceScheduler()
+    if shutdown_scheduler is None:
+        shutdown_scheduler = SequenceScheduler()
     # Constructed here, before session_handler is defined below, rather
     # than lazily right before `await shutdown_event.wait()` (as this
     # used to) -- a real connection could in principle reach
@@ -452,6 +458,8 @@ async def run(
             session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+            drain_scheduler=drain_scheduler,
+            shutdown_scheduler=shutdown_scheduler,
             lane=foreground_lane,
             # Design doc: None whenever this node has Link
             # disabled (Phase 3 is opt-in/experimental) --
@@ -475,6 +483,8 @@ async def run(
             session, db, hub, presence, mailbox, session_registry, maintenance,
             shutdown_event=shutdown_event,
             graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
+            drain_scheduler=drain_scheduler,
+            shutdown_scheduler=shutdown_scheduler,
             lane=foreground_lane,
             link_context=(
                 LinkContext(
@@ -668,6 +678,15 @@ async def run(
 
                 seed_refresh_task.add_done_callback(_log_seed_refresh_failure)
 
+        # Design doc -- node management, Thiesi's own request: every
+        # configured listener/background task above has already started
+        # successfully by this point (an earlier failure would have
+        # raised out of this function already, before ever reaching
+        # here) -- this is the one line an operator watching stdout/the
+        # journal needs to know the node is actually up and taking
+        # callers now, not just that individual listeners logged their
+        # own "listening on..." lines along the way.
+        _logger.info("NetBBS is ready to accept connections")
         await shutdown_event.wait()
     finally:
         # GitHub issue #48: cancelling an already-failed task is a
@@ -752,18 +771,28 @@ def _install_signal_handlers(
     shutdown_event: asyncio.Event,
     session_registry: ActiveSessionRegistry,
     maintenance: MaintenanceMode,
+    shutdown_scheduler: SequenceScheduler,
     graceful_delay_seconds: float,
 ) -> None:
     def _request_shutdown(graceful: bool) -> None:
         _logger.info("shutdown requested (%s)", "graceful" if graceful else "immediate")
-        loop.create_task(
+        task = loop.create_task(
             run_shutdown_sequence(
                 graceful=graceful,
                 session_registry=session_registry,
                 maintenance=maintenance,
-                graceful_delay_seconds=graceful_delay_seconds,
+                delay_seconds=graceful_delay_seconds,
                 shutdown_event=shutdown_event,
             )
+        )
+        # Design doc -- node management: registering a signal-triggered
+        # shutdown with the same scheduler an in-session [S]hutdown
+        # command uses means a connected SysOp sees accurate remaining-
+        # time status (the [N]ode menu, the main-menu prompt tag) and
+        # could even cancel it from there -- one shared source of truth
+        # rather than the signal path silently bypassing it.
+        shutdown_scheduler.schedule(
+            task, deadline=loop.time() + (graceful_delay_seconds if graceful else 0.0), message=None
         )
 
     # SIGTERM is the conventional "please shut down properly" signal
@@ -800,11 +829,14 @@ async def main() -> None:
     shutdown_event = asyncio.Event()
     session_registry = ActiveSessionRegistry()
     maintenance = MaintenanceMode()
+    drain_scheduler = SequenceScheduler()
+    shutdown_scheduler = SequenceScheduler()
     _install_signal_handlers(
         asyncio.get_running_loop(),
         shutdown_event=shutdown_event,
         session_registry=session_registry,
         maintenance=maintenance,
+        shutdown_scheduler=shutdown_scheduler,
         graceful_delay_seconds=config.shutdown.graceful_delay_seconds,
     )
 
@@ -814,6 +846,8 @@ async def main() -> None:
             shutdown_event=shutdown_event,
             session_registry=session_registry,
             maintenance=maintenance,
+            drain_scheduler=drain_scheduler,
+            shutdown_scheduler=shutdown_scheduler,
         )
     except StartupError as exc:
         _logger.error("startup failed: %s", exc)

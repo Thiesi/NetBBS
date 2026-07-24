@@ -2491,9 +2491,9 @@ connect and who stays connected, each answering a different question:
 
 | Control | Question it answers | New logins | Already-connected sessions | Reversible | Ends the node process |
 |---|---|---|---|---|---|
-| `[S]hutdown` | "Take this node down" | Blocked for everyone, no bypass | Warned, then all disconnected (immediately, or after a grace period) | No | Yes |
+| `[S]hutdown` | "Take this node down" | Blocked for everyone, no bypass | Warned (staged), then all disconnected (immediately, or after an operator-chosen grace period) | Yes, while still counting down — see below | Yes, once the countdown finishes |
 | `[M]aintenance mode` | "Stop admitting ordinary users for now" | Blocked for non-SysOps; a SysOp can still log in | Untouched | Yes — toggle again | No |
-| `[D]rain` | "Clear ordinary users off, right now" | Unaffected (not this control's job) | Non-SysOps warned, then disconnected after an operator-chosen delay; SysOps (including the issuer) untouched | N/A — one-shot action | No |
+| `[D]rain` | "Clear ordinary users off, right now" | Unaffected (not this control's job — see the reminder below) | Non-SysOps warned (staged), then disconnected after an operator-chosen delay; SysOps (including the issuer) untouched | Yes, while still counting down | No |
 
 `[S]hutdown`'s own sequence (round 51) already had the right order in
 code — lock out new logins and warn everyone immediately, then disconnect
@@ -2515,7 +2515,13 @@ while it's active sees a `(Maintenance mode is ON.)` notice appended to
 their welcome line; a non-SysOp sees `LOCKDOWN_MESSAGE` and is disconnected
 before ever reaching the main menu. Turning lockdown on does nothing to
 sessions already connected — that is `[D]rain`'s job, a deliberately
-separate action, not an implied side effect.
+separate action, not an implied side effect. The `[D]rain` screen's own
+intro text now says so explicitly too (issue below): draining alone does
+not block new non-SysOp logins, only `[M]aintenance mode` does that — a
+real point of confusion in practice (Thiesi's own dogfood-testing report:
+a SysOp assumed draining alone would leave the node empty afterward, when
+in fact it only guarantees an empty node at the one instant the disconnect
+actually fires).
 
 **`[D]rain`** (`netbbs.net.shutdown.run_drain_sequence`) borrows
 `run_shutdown_sequence`'s warn-then-disconnect shape but never touches
@@ -2535,6 +2541,129 @@ coupled: `[D]rain` never enables lockdown itself, and enabling lockdown
 never triggers a drain — each is a deliberate, separate SysOp decision,
 matching how follow/membership/node-carry are kept independent elsewhere
 in this design (§6.6) rather than one silently implying another.
+
+#### 13.8.1 Scheduling, cancellation, staged reminders, and visibility (round-trip closed after real dogfood use)
+
+A real multi-day dogfood run of the three controls above (§17's own
+"run it for real, not just test it" mandate) surfaced five concrete UX
+gaps, all closed together since they share one root cause and one fix:
+
+**The bug.** `[D]rain`/`[S]hutdown` each launched their sequence as a bare
+`asyncio.create_task(...)` with nothing tracking that one was already in
+flight. Running the same command twice launched two independent,
+uncoordinated countdowns racing each other — a second, shorter delay could
+disconnect everyone while a reconnecting user still had to wait out
+whatever remained of the *first*, now-orphaned countdown too, with zero
+visibility into any of it.
+
+**The fix: `netbbs.net.shutdown.SequenceScheduler`.** One instance per
+node *per sequence kind* (`drain_scheduler`, `shutdown_scheduler` —
+constructed in `netbbs.__main__` alongside `session_registry`/
+`maintenance`, threaded the same way) tracks at most one currently
+in-flight sequence: its deadline, its custom message (if any), and the
+`asyncio.Task` actually running it. `schedule()` always cancels-and-
+replaces any existing one first — the actual fix for the stacking bug.
+Deadlines are `asyncio.get_running_loop().time()`-based (monotonic,
+process-local); nothing here needs to survive a restart or be compared
+across processes. A signal-triggered shutdown (SIGTERM/SIGINT) registers
+with the same `shutdown_scheduler` a live SysOp session's `[S]hutdown`
+command would use — one shared source of truth regardless of what
+triggered it, so a connected SysOp sees accurate status (and could even
+cancel it) either way.
+
+This one piece of state is what makes the remaining four gaps closable as
+straightforward reads/writes against it, not four separate mechanisms:
+
+**1. Explicit cancel-or-replace, not silent stacking.** Re-running
+`[D]rain`/`[S]hutdown` while one is already scheduled now shows its
+remaining time and offers "Cancel it?" before proceeding — answering yes
+cancels cleanly and stops; answering no continues into the ordinary
+prompts, and the resulting new schedule replaces the old one via
+`schedule()`. `[S]hutdown` also gained a per-invocation delay prompt for
+the first time (previously a fixed `graceful_delay_seconds` config value
+with no override) — it now behaves exactly like `[D]rain`, Thiesi's own
+explicit ask to close a "these two feel like different features" mental
+disconnect that had never been intentional, just an artifact of the two
+having been built in separate rounds. The config value is now only the
+*prefill default* for the prompt, and what the SIGTERM/SIGINT signal path
+still uses (no one to prompt there).
+
+Cancelling a *scheduled* graceful shutdown needed one real design
+decision: `MaintenanceMode.activate()`'s own docstring already stated "no
+way back" — true once a shutdown reaches its actual disconnect step, but
+no longer true for the countdown window before that, now that the window
+is cancellable. `MaintenanceMode.deactivate()` is the one narrow
+exception, called only from `run_shutdown_sequence`'s own
+`except asyncio.CancelledError: maintenance.deactivate(); raise` handling
+around the graceful countdown — reopens new-login admission if (and only
+if) the countdown itself is what got cancelled, never after
+`disconnect_all()` has actually run.
+
+**2. Staged countdown broadcasts, Unix-`shutdown`-style.** Both sequences
+now broadcast on schedule, then again at 5 minutes remaining and 1 minute
+remaining (only the ones the total delay actually reaches — a 30-second
+drain never fabricates a "5 minutes remaining" reminder it could never
+pass through), then once more immediately before disconnecting —
+`netbbs.net.shutdown._run_staged_countdown`, shared by both. A custom
+message, if given, is broadcast verbatim at every stage rather than
+varying with the remaining-time phrase — consistent with the existing
+"message replaces the default text entirely" rule (Thiesi's own wording,
+unchanged from before this round), just now applied at more than one
+point in time.
+
+**3. A freshly-connecting or freshly-logged-in user is told what a
+one-off broadcast alone never could.** Before this round, drain state was
+purely a one-shot broadcast — a user not connected at the moment it fired
+(including one reconnecting *after* an earlier drain pass already
+disconnected them) had no way to know a drain was still in progress until
+it silently disconnected them again. Now: `netbbs.net.login_flow.
+run_authenticated_session` tells a non-SysOp, once, right after login
+(the same one-time-notice convention `_announce_pending_invitations`
+already established), that a drain is scheduled and roughly how long until
+disconnection — SysOp-exempt, since drain never actually affects them.
+Separately, `netbbs.net.maintenance.LOCKDOWN_NOTICE` (deliberately
+distinct wording from `LOCKDOWN_MESSAGE`, the actual non-SysOp rejection)
+is shown to *every* connecting client right after the welcome banner,
+before credentials are even checked — SysOp-ness isn't known yet, so this
+can't be targeted any more narrowly, and a SysOp who's about to
+successfully log in anyway must not be told "please try again later." The
+existing hard pre-login `MAINTENANCE_MESSAGE` (shutdown's own unconditional
+gate) also gained the scheduled shutdown's own remaining time, read from
+`shutdown_scheduler`, when one is available.
+
+**4. A visual, persistent indicator — not just a one-time line easy to
+scroll past or never see at all.** The real dogfood incident this closes:
+a SysOp turned maintenance mode on, then forgot, and only found out when a
+user reported being unable to log in. `netbbs.net.login_flow.
+_draw_main_menu`'s own `Choice: ` prompt (given a live `node_controls`) now
+carries a compact prefix: the current BBS time (a snapshot at draw time,
+deliberately not a ticking live clock — this codebase has no per-session
+background refresh mechanism, and building one just for a clock would be
+disproportionate to what was actually asked for), plus at most one alert
+tag, most urgent first — `[SHUTDOWN M:SS]`, else `[DRAINING M:SS]`, else
+(SysOps only, by construction: a non-SysOp who reached the menu at all
+already implies lockdown isn't blocking them) `[MAINT MODE]`. The `[N]ode`
+admin menu itself also gained an unconditional status line (maintenance
+on/off, plus either scheduled control's own remaining time) — the SysOp's
+own dashboard for the exact "did I leave this on" question that prompted
+the whole fix. `netbbs.rendering.ALERT_COLOR` (a new palette entry) marks
+all of this consistently, distinct from `PRIVILEGE_COLOR` (an account's
+own permanent access badge) and `MUTED_COLOR` (routine informational
+text) — this specifically means "something time-sensitive is happening to
+the node itself."
+
+**5. Operator-visible in stdout/the process log, not only the DB-backed
+moderation log.** Scheduling or cancelling a drain/shutdown, and toggling
+maintenance mode, now each log one `INFO`-level line
+(`netbbs.net.admin_flow`'s own `_logger`) alongside the existing
+`record_action` audit row — an operator watching a foreground terminal or
+`journalctl` sees it happen without a separate DB query. `netbbs.__main__.
+run()` also gained one `"NetBBS is ready to accept connections"` line,
+logged once every configured listener/background task has actually
+started successfully (immediately before the process blocks on
+`shutdown_event.wait()`) — previously each transport only logged its own
+"listening on..." line individually, with no single line marking that
+startup as a whole had actually finished.
 
 ### 13.9 Quotas: closing the remaining bounded-remote-influence gaps (issue #60's third operational slice)
 

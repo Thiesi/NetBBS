@@ -35,6 +35,7 @@ from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.theme import (
     ACCENT_COLOR,
+    ALERT_COLOR,
     CHANNEL_TYPE_COLOR,
     HEADER_COLOR,
     MENU_KEY_COLOR,
@@ -76,6 +77,7 @@ __all__ = [
     "diff_ansi",
     "full_render_ansi",
     "ACCENT_COLOR",
+    "ALERT_COLOR",
     "CHANNEL_TYPE_COLOR",
     "HEADER_COLOR",
     "MENU_KEY_COLOR",

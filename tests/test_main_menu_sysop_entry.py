@@ -16,6 +16,9 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _draw_main_menu, _main_menu
+from netbbs.net.maintenance import MaintenanceMode
+from netbbs.net.session_registry import ActiveSessionRegistry
+from netbbs.net.shutdown import NodeControls
 from netbbs.storage.database import Database
 
 
@@ -132,4 +135,112 @@ def test_pressing_s_does_nothing_for_a_non_sysop_user(tmp_path):
     text = _written_text(session)
     assert "\b \b\a" in text  # rejected -- meets_level(SYSOP_LEVEL) fails
     assert "SysOp menu is not available in this context." not in text
+    db.close()
+
+
+# -- the Choice: prompt's own BBS-time/status-tag prefix (design doc -- ------
+# -- node management, Thiesi's own request) -----------------------------
+
+
+def _node_controls() -> NodeControls:
+    return NodeControls(
+        session_registry=ActiveSessionRegistry(),
+        maintenance=MaintenanceMode(),
+        shutdown_event=asyncio.Event(),
+        graceful_delay_seconds=60.0,
+    )
+
+
+def test_prompt_is_unchanged_without_node_controls(tmp_path):
+    """The many existing tests in this file (and elsewhere) that call
+    `_draw_main_menu`/`_main_menu` without a `node_controls` at all must
+    see the exact same prompt they always have -- no time, no tag."""
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession()
+
+    asyncio.run(_draw_main_menu(session, db, MessageMailbox(), user))
+
+    assert _written_text(session).endswith("Choice: ")
+    db.close()
+
+
+def test_prompt_shows_bbs_time_with_node_controls_and_nothing_scheduled(tmp_path):
+    db = Database(tmp_path / "node.db")
+    user = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession()
+    node_controls = _node_controls()
+
+    asyncio.run(_draw_main_menu(session, db, MessageMailbox(), user, node_controls=node_controls))
+
+    text = _written_text(session)
+    assert text.endswith("Choice: ")
+    assert "[DRAINING" not in text
+    assert "[SHUTDOWN" not in text
+    assert "[MAINT MODE]" not in text
+
+
+def test_prompt_shows_a_draining_tag_when_a_drain_is_scheduled(tmp_path):
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            user = create_user(db, "alice", password="hunter2", user_level=10)
+            session = FakeSession()
+            node_controls = _node_controls()
+            loop = asyncio.get_running_loop()
+            task = asyncio.create_task(asyncio.Event().wait())
+            node_controls.drain_scheduler.schedule(task, deadline=loop.time() + 42.0, message=None)
+
+            await _draw_main_menu(session, db, MessageMailbox(), user, node_controls=node_controls)
+
+            assert "[DRAINING" in _written_text(session)
+
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_prompt_shows_a_shutdown_tag_when_scheduled_taking_priority_over_drain(tmp_path):
+    """Shutdown is the more urgent of the two -- shown instead of
+    [DRAINING] whenever both happen to be scheduled at once."""
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            user = create_user(db, "alice", password="hunter2", user_level=10)
+            session = FakeSession()
+            node_controls = _node_controls()
+            loop = asyncio.get_running_loop()
+            drain_task = asyncio.create_task(asyncio.Event().wait())
+            shutdown_task = asyncio.create_task(asyncio.Event().wait())
+            node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 42.0, message=None)
+            node_controls.shutdown_scheduler.schedule(shutdown_task, deadline=loop.time() + 99.0, message=None)
+
+            await _draw_main_menu(session, db, MessageMailbox(), user, node_controls=node_controls)
+
+            text = _written_text(session)
+            assert "[SHUTDOWN" in text
+            assert "[DRAINING" not in text
+
+            for task in (drain_task, shutdown_task):
+                task.cancel()
+            await asyncio.gather(drain_task, shutdown_task, return_exceptions=True)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_prompt_shows_a_maintenance_mode_tag_for_a_sysop_when_lockdown_is_on(tmp_path):
+    db = Database(tmp_path / "node.db")
+    sysop = create_user(db, "root", password="hunter2", user_level=255)
+    session = FakeSession()
+    node_controls = _node_controls()
+    node_controls.maintenance.enable_lockdown()
+
+    asyncio.run(_draw_main_menu(session, db, MessageMailbox(), sysop, node_controls=node_controls))
+
+    assert "[MAINT MODE]" in _written_text(session)
     db.close()

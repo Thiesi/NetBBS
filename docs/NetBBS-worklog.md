@@ -1915,3 +1915,48 @@ These are recurring failure patterns, not a defect catalogue:
   have a remote catalogue is a small honesty gap, not a crash, but the
   same class of "capability enabled somewhere in the stack" vs "capability
   applies to *this* specific resource" confusion.
+
+**Drain/shutdown stacking, cancellation, staged reminders, visibility
+(design doc §13.8.1, found during real dogfood use, not by reasoning about
+the code).** A single missing piece of state (`netbbs.net.shutdown.
+SequenceScheduler` — one instance per node per sequence kind) turned out
+to be the root cause behind five separately-reported symptoms at once:
+two independent `asyncio.create_task(run_drain_sequence(...))` calls
+stacking with zero coordination, no way to cancel a scheduled sequence, no
+staged reminders as the deadline approached, no way for a freshly-
+connecting/freshly-logged-in user to learn a drain/lockdown was already in
+effect, and no persistent on-screen indicator once a SysOp toggled
+something and moved on. Worth remembering as a pattern: a cluster of
+seemingly separate operational-UX complaints ("this feels buggy," "I keep
+forgetting X is on," "nobody warned me twice") is worth checking for one
+missing shared piece of state before treating each as its own patch —
+here, one scheduler object made four of the five fixes nearly free once it
+existed.
+
+Two narrower implementation lessons from building it:
+
+- `asyncio.Task.cancel()` only *requests* cancellation — it does not
+  settle synchronously. A test (or any code) that cancels/replaces a task
+  and then immediately inspects `.cancelled()` needs an intervening
+  genuine event-loop suspension (`await asyncio.sleep(0)`, or any other
+  real `await` that actually yields) before the cancellation has visibly
+  taken effect. This bit twice while testing `SequenceScheduler.schedule`'s
+  own cancel-and-replace behavior driven through a `FakeSession` whose
+  `read_key`/`read_line`/`write_line` never genuinely suspend (they
+  return a scripted value directly, with no real `await` inside) — the
+  entire admin-menu call chain executed as one synchronous burst with no
+  point where the event loop could run the replaced task's own pending
+  cancellation callback, unless something *else* in the same call chain
+  (a real `await lane.run(...)` dispatching to a background thread, for
+  instance) happened to force a genuine suspension first.
+- `MaintenanceMode.activate()`/`is_active()` had a docstring claiming
+  unconditional "no way back" before this round — true of the *original*
+  design (shutdown was always immediate-and-final), but a new feature
+  (cancelling a still-counting-down graceful shutdown) can turn a
+  previously-true "no way back" claim into "no way back, past this one
+  specific point" without that being a contradiction, as long as the
+  docstring is updated to say exactly where the line now is rather than
+  silently falling out of date. `deactivate()` was added as a narrowly-
+  scoped, single-caller exception (only `run_shutdown_sequence`'s own
+  cancellation handling, only for the pre-disconnect countdown window),
+  not a general-purpose undo.

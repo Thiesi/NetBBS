@@ -17,11 +17,18 @@ from __future__ import annotations
 import asyncio
 
 from netbbs.__main__ import run
+from netbbs.net import shutdown as shutdown_module
 from netbbs.net.maintenance import MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import TransportConfig
 from netbbs.net.session import SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.net.shutdown import NodeControls, run_drain_sequence, run_shutdown_sequence
+from netbbs.net.shutdown import (
+    NodeControls,
+    SequenceScheduler,
+    format_remaining_seconds,
+    run_drain_sequence,
+    run_shutdown_sequence,
+)
 from tests.test_main_lifecycle import _config, _open_connection_when_ready
 
 
@@ -479,6 +486,17 @@ def test_activate_flips_the_flag():
     assert mode.is_active() is True
 
 
+def test_deactivate_reverses_activate():
+    """The one narrow exception to activate()'s own "no way back" claim
+    -- a *scheduled* graceful shutdown, cancelled before it fires, needs
+    this to reopen new-login admission (see `netbbs.net.shutdown.
+    run_shutdown_sequence`'s own cancellation handling)."""
+    mode = MaintenanceMode()
+    mode.activate()
+    mode.deactivate()
+    assert mode.is_active() is False
+
+
 # -- lockdown (design doc §13.8, [M]aintenance mode) -----------------------
 
 
@@ -586,7 +604,7 @@ def test_immediate_shutdown_broadcasts_and_disconnects_without_waiting(tmp_path)
                     graceful=False,
                     session_registry=session_registry,
                     maintenance=maintenance,
-                    graceful_delay_seconds=60.0,  # must be ignored entirely on this path
+                    delay_seconds=60.0,  # must be ignored entirely on this path
                     shutdown_event=shutdown_event,
                 ),
                 timeout=5.0,
@@ -635,7 +653,7 @@ def test_graceful_shutdown_actually_waits_before_disconnecting(tmp_path):
                     graceful=True,
                     session_registry=session_registry,
                     maintenance=maintenance,
-                    graceful_delay_seconds=0.3,
+                    delay_seconds=0.3,
                     shutdown_event=shutdown_event,
                 ),
                 timeout=5.0,
@@ -665,7 +683,7 @@ def test_shutdown_activates_maintenance_mode():
             graceful=False,
             session_registry=registry,
             maintenance=maintenance,
-            graceful_delay_seconds=60.0,
+            delay_seconds=60.0,
             shutdown_event=shutdown_event,
         )
 
@@ -690,7 +708,7 @@ def test_run_shutdown_sequence_custom_message_replaces_the_default(tmp_path):
             graceful=False,
             session_registry=registry,
             maintenance=MaintenanceMode(),
-            graceful_delay_seconds=60.0,
+            delay_seconds=60.0,
             shutdown_event=asyncio.Event(),
             message="Emergency maintenance, back in five minutes.",
         )
@@ -714,7 +732,7 @@ def test_run_shutdown_sequence_without_a_message_uses_the_default():
             graceful=False,
             session_registry=registry,
             maintenance=MaintenanceMode(),
-            graceful_delay_seconds=60.0,
+            delay_seconds=60.0,
             shutdown_event=asyncio.Event(),
         )
 
@@ -915,5 +933,573 @@ def test_no_lockdown_notice_when_lockdown_is_off(tmp_path):
             assert not any("Maintenance mode is ON" in line for line in session.written)
         finally:
             db.close()
+
+    asyncio.run(scenario())
+
+
+# -- pre-login maintenance notice / post-login drain notice (design doc -- --
+# -- node management, Thiesi's own dogfood-testing report) ------------------
+
+
+class _ScriptedLoginSession:
+    """Supports a real interactive login (`read_line`, from `lines`)
+    followed by however much of the main menu the test actually needs
+    (`read_key`, from `keys`) -- the same two-list shape `tests/
+    test_login_outcomes.py`'s own `FakeSession`/`_SSHFakeSession` split
+    into two separate classes, combined here since these tests need
+    both in the same session."""
+
+    def __init__(self, lines, keys=None):
+        self._lines = iter(lines)
+        self._keys = iter(keys or [])
+        self.written = []
+        self.terminal_width = 80
+        self.terminal_height = 24
+        self.peer_address = "203.0.113.5"
+
+    async def write(self, text: str) -> None:
+        self.written.append(text)
+
+    async def write_line(self, text: str = "") -> None:
+        self.written.append(text + "\n")
+
+    async def read_line(self, echo: bool = True) -> str:
+        return next(self._lines)
+
+    async def read_key(self, echo: bool = True) -> str:
+        return next(self._keys)
+
+    @property
+    def output(self) -> str:
+        return "".join(self.written)
+
+
+def _real_throttle():
+    from netbbs.net.nodeconfig import ThrottleConfig
+    from netbbs.net.throttle import LoginThrottle
+
+    config = ThrottleConfig()
+    throttle = LoginThrottle(
+        per_source_capacity=config.per_source_capacity,
+        per_source_refill_per_minute=config.per_source_refill_per_minute,
+        per_username_capacity=config.per_username_capacity,
+        per_username_refill_per_minute=config.per_username_refill_per_minute,
+        global_capacity=config.global_capacity,
+        global_refill_per_minute=config.global_refill_per_minute,
+        max_tracked_keys=config.max_tracked_keys,
+        max_concurrent_unauthenticated_sessions=config.max_concurrent_unauthenticated_sessions,
+    )
+    return throttle, config
+
+
+def test_lockdown_notice_shown_before_login_regardless_of_who_is_connecting(tmp_path):
+    """The pre-login heads-up (design doc, distinct from `LOCKDOWN_
+    MESSAGE`'s own hard-rejection wording) is shown to *everyone*
+    connecting while lockdown is on, before credentials are even
+    checked -- SysOp-ness isn't known yet. Proven here against a
+    non-SysOp account, which then still gets rejected afterward by the
+    existing post-authentication check -- both the heads-up and the
+    rejection fire, not one instead of the other."""
+    from netbbs.auth.users import create_user
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import login_flow
+    from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE
+    from netbbs.storage.database import Database
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            create_user(db, "alice", password="hunter2", user_level=10)
+            maintenance = MaintenanceMode()
+            maintenance.enable_lockdown()
+            throttle, throttle_config = _real_throttle()
+            session = _ScriptedLoginSession(["alice", "hunter2"])
+
+            await login_flow.handle_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(),
+                throttle, throttle_config, ActiveSessionRegistry(), maintenance,
+            )
+
+            assert LOCKDOWN_NOTICE in session.output
+            assert LOCKDOWN_MESSAGE in session.output  # the actual rejection, still fires too
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_no_lockdown_notice_before_login_when_lockdown_is_off(tmp_path):
+    from netbbs.auth.users import create_user
+    from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+    from netbbs.net import login_flow
+    from netbbs.net.maintenance import LOCKDOWN_NOTICE
+    from netbbs.storage.database import Database
+
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        try:
+            create_user(db, "alice", password="hunter2", user_level=10)
+            throttle, throttle_config = _real_throttle()
+            session = _ScriptedLoginSession(["alice", "hunter2"], keys=["l"])
+
+            await login_flow.handle_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(),
+                throttle, throttle_config, ActiveSessionRegistry(), MaintenanceMode(),
+            )
+
+            assert LOCKDOWN_NOTICE not in session.output
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_pre_login_message_includes_remaining_time_when_scheduled():
+    """The existing hard pre-login `MAINTENANCE_MESSAGE` gains the
+    scheduled shutdown's own remaining time when a `shutdown_scheduler`
+    is given -- a plain, unenhanced message otherwise (no scheduler
+    passed, e.g. a caller that never registered one)."""
+    async def scenario():
+        maintenance = MaintenanceMode()
+        maintenance.activate()
+        shutdown_scheduler = SequenceScheduler()
+        task = asyncio.create_task(asyncio.Event().wait())
+        loop = asyncio.get_running_loop()
+        shutdown_scheduler.schedule(task, deadline=loop.time() + 42.0, message=None)
+
+        session = _FakeSession()
+        throttle, throttle_config = _real_throttle()
+
+        from netbbs.net import login_flow
+
+        # db/hub/presence/mailbox are never touched -- maintenance.is_active()
+        # returns before any of them are used.
+        await login_flow.handle_session(
+            session, object(), object(), object(), object(),
+            throttle, throttle_config, ActiveSessionRegistry(), maintenance,
+            shutdown_scheduler=shutdown_scheduler,
+        )
+
+        text = "".join(session.written)
+        assert MAINTENANCE_MESSAGE in text
+        assert "going down in" in text
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_drain_notice_shown_to_a_non_sysop_after_login_when_a_drain_is_scheduled(tmp_path):
+    async def scenario():
+        from netbbs.auth.users import create_user
+        from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+        from netbbs.net import login_flow
+        from netbbs.storage.database import Database
+
+        db = Database(tmp_path / "node.db")
+        try:
+            alice = create_user(db, "alice", password="hunter2", user_level=10)
+            node_controls = NodeControls(
+                session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
+                shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0,
+            )
+            loop = asyncio.get_running_loop()
+            drain_task = asyncio.create_task(asyncio.Event().wait())
+            node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 30.0, message=None)
+            session = _ScriptedLoginSession([], keys=["l"])
+
+            await login_flow.run_authenticated_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), alice,
+                node_controls=node_controls,
+            )
+
+            assert "you will be disconnected in about" in session.output
+
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_no_drain_notice_shown_to_a_sysop_even_when_a_drain_is_scheduled(tmp_path):
+    async def scenario():
+        from netbbs.auth.users import SYSOP_LEVEL, create_user
+        from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
+        from netbbs.net import login_flow
+        from netbbs.storage.database import Database
+
+        db = Database(tmp_path / "node.db")
+        try:
+            sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+            node_controls = NodeControls(
+                session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
+                shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0,
+            )
+            loop = asyncio.get_running_loop()
+            drain_task = asyncio.create_task(asyncio.Event().wait())
+            node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 30.0, message=None)
+            session = _ScriptedLoginSession([], keys=["l"])
+
+            await login_flow.run_authenticated_session(
+                session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), sysop,
+                node_controls=node_controls,
+            )
+
+            assert "you will be disconnected" not in session.output
+
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+# -- format_remaining_seconds ------------------------------------------------
+
+
+def test_format_remaining_seconds_formats_as_mmss():
+    assert format_remaining_seconds(75) == "1:15"
+    assert format_remaining_seconds(9) == "0:09"
+    assert format_remaining_seconds(0) == "0:00"
+
+
+def test_format_remaining_seconds_floors_at_zero_for_a_negative_input():
+    assert format_remaining_seconds(-5) == "0:00"
+
+
+# -- SequenceScheduler (design doc -- node management, the stacking-bug fix) --
+
+
+async def _pending_task() -> None:
+    await asyncio.Event().wait()
+
+
+def test_sequence_scheduler_starts_unscheduled():
+    scheduler = SequenceScheduler()
+    assert scheduler.is_scheduled() is False
+    assert scheduler.message() is None
+
+
+def test_schedule_marks_it_scheduled_and_records_deadline_and_message():
+    async def scenario():
+        scheduler = SequenceScheduler()
+        task = asyncio.create_task(_pending_task())
+        loop = asyncio.get_running_loop()
+
+        scheduler.schedule(task, deadline=loop.time() + 60.0, message="be right back")
+
+        assert scheduler.is_scheduled() is True
+        assert scheduler.message() == "be right back"
+        remaining = scheduler.remaining_seconds()
+        assert remaining is not None and 59.0 <= remaining <= 60.0
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_remaining_seconds_counts_down():
+    async def scenario():
+        scheduler = SequenceScheduler()
+        task = asyncio.create_task(_pending_task())
+        loop = asyncio.get_running_loop()
+        scheduler.schedule(task, deadline=loop.time() + 0.3, message=None)
+
+        first = scheduler.remaining_seconds()
+        await asyncio.sleep(0.2)
+        second = scheduler.remaining_seconds()
+
+        assert first is not None and second is not None
+        assert second < first
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_schedule_cancels_and_replaces_an_existing_one():
+    """The actual fix for Thiesi's own reported stacking bug: scheduling
+    a second sequence must cancel the first, never leave both running
+    independently."""
+
+    async def scenario():
+        scheduler = SequenceScheduler()
+        loop = asyncio.get_running_loop()
+        first_task = asyncio.create_task(_pending_task())
+        scheduler.schedule(first_task, deadline=loop.time() + 60.0, message="first")
+
+        second_task = asyncio.create_task(_pending_task())
+        scheduler.schedule(second_task, deadline=loop.time() + 10.0, message="second")
+        await asyncio.sleep(0)  # let the cancellation actually land
+
+        assert first_task.cancelled()
+        assert not second_task.done()
+        assert scheduler.message() == "second"
+
+        second_task.cancel()
+        await asyncio.gather(second_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_cancel_returns_false_when_nothing_scheduled():
+    assert SequenceScheduler().cancel() is False
+
+
+def test_cancel_stops_it_being_scheduled_and_cancels_the_task():
+    async def scenario():
+        scheduler = SequenceScheduler()
+        task = asyncio.create_task(_pending_task())
+        loop = asyncio.get_running_loop()
+        scheduler.schedule(task, deadline=loop.time() + 60.0, message=None)
+
+        cancelled = scheduler.cancel()
+        await asyncio.sleep(0)
+
+        assert cancelled is True
+        assert scheduler.is_scheduled() is False
+        assert scheduler.remaining_seconds() is None
+        assert scheduler.message() is None
+        assert task.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_is_scheduled_becomes_false_once_the_task_finishes_naturally():
+    async def scenario():
+        scheduler = SequenceScheduler()
+        loop = asyncio.get_running_loop()
+
+        async def _quick() -> None:
+            await asyncio.sleep(0)
+
+        task = asyncio.create_task(_quick())
+        scheduler.schedule(task, deadline=loop.time() + 60.0, message=None)
+        await asyncio.gather(task)
+
+        assert scheduler.is_scheduled() is False
+        assert scheduler.remaining_seconds() is None
+
+    asyncio.run(scenario())
+
+
+# -- staged countdown broadcasts (design doc -- node management, Thiesi's ---
+# -- own Unix-`shutdown`-style request) --------------------------------------
+
+
+def test_run_drain_sequence_broadcasts_a_five_minute_and_one_minute_reminder(monkeypatch):
+    """Scaled-down thresholds (the same monkeypatch-an-interval-constant
+    trick `test_account_revocation_watcher.py` already uses) so this
+    proves the *staging logic* -- an initial broadcast, a reminder at
+    each threshold the total delay actually reaches, then a final one --
+    without a real test waiting out real minutes. Whole-second values
+    throughout (not sub-second) so `_countdown_phrase`'s own rounding
+    doesn't collapse distinct stages into identical wording -- that's a
+    property of using unrealistically tiny thresholds for test speed,
+    not something worth asserting on here."""
+    monkeypatch.setattr(shutdown_module, "_STAGE_THRESHOLDS_SECONDS", (2, 1))
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        await run_drain_sequence(session_registry=registry, delay_seconds=3.0)
+
+        broadcasts = [line for line in session.written if "drained" in line]
+        assert len(broadcasts) == 4  # initial (3s), 2s-remaining, 1s-remaining, final
+        assert any("in 3 seconds" in line for line in broadcasts)
+        assert any("in 2 seconds" in line for line in broadcasts)
+        assert any("in 1 second" in line for line in broadcasts)
+        assert any("now" in line for line in broadcasts)
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_skips_a_threshold_the_delay_never_reaches(monkeypatch):
+    """A delay shorter than even the smallest threshold must not
+    fabricate a reminder for a checkpoint it never actually passes
+    through -- only the initial and final broadcasts happen."""
+    monkeypatch.setattr(shutdown_module, "_STAGE_THRESHOLDS_SECONDS", (5, 2))
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        await run_drain_sequence(session_registry=registry, delay_seconds=1.0)
+
+        broadcasts = [line for line in session.written if "drained" in line]
+        assert len(broadcasts) == 2  # initial + final "now" only
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_zero_delay_broadcasts_exactly_once():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        await run_drain_sequence(session_registry=registry, delay_seconds=0.0)
+
+        broadcasts = [line for line in session.written if "drained" in line]
+        assert len(broadcasts) == 1
+        assert "now" in broadcasts[0]
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_drain_sequence_custom_message_is_broadcast_at_every_stage(monkeypatch):
+    monkeypatch.setattr(shutdown_module, "_STAGE_THRESHOLDS_SECONDS", (1,))
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        await run_drain_sequence(
+            session_registry=registry, delay_seconds=2.0, message="Reconnect after the upgrade."
+        )
+
+        broadcasts = [line for line in session.written if "Reconnect after the upgrade" in line]
+        assert len(broadcasts) == 3  # initial, the one threshold, final -- verbatim every time
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_run_shutdown_sequence_graceful_stages_reminders_the_same_way(monkeypatch):
+    monkeypatch.setattr(shutdown_module, "_STAGE_THRESHOLDS_SECONDS", (1,))
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+
+        await run_shutdown_sequence(
+            graceful=True,
+            session_registry=registry,
+            maintenance=MaintenanceMode(),
+            delay_seconds=2.0,
+            shutdown_event=asyncio.Event(),
+        )
+
+        broadcasts = [line for line in session.written if "going down" in line]
+        assert len(broadcasts) == 3
+
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+# -- cancelling a scheduled sequence (design doc -- node management) --------
+
+
+def test_cancelling_a_scheduled_graceful_shutdown_deactivates_maintenance_and_disconnects_nobody():
+    """The one exception to MaintenanceMode.activate()'s own "no way
+    back" claim: a *scheduled* graceful shutdown, cancelled before it
+    fires, must reopen new-login admission again -- otherwise a
+    cancelled shutdown would leave the node silently unreachable
+    forever."""
+
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        maintenance = MaintenanceMode()
+        shutdown_event = asyncio.Event()
+
+        sequence_task = asyncio.create_task(
+            run_shutdown_sequence(
+                graceful=True,
+                session_registry=registry,
+                maintenance=maintenance,
+                delay_seconds=60.0,
+                shutdown_event=shutdown_event,
+            )
+        )
+        await asyncio.sleep(0)
+        assert maintenance.is_active() is True  # locked out immediately on scheduling
+
+        sequence_task.cancel()
+        await asyncio.gather(sequence_task, return_exceptions=True)
+
+        assert maintenance.is_active() is False  # reopened by the cancellation
+        assert shutdown_event.is_set() is False
+        assert not task.cancelled()  # nobody was actually disconnected
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_scheduled_drain_disconnects_nobody():
+    async def scenario():
+        session = _FakeSession()
+        registry = ActiveSessionRegistry()
+        task = asyncio.create_task(_hold_registered(registry, session))
+        await asyncio.sleep(0)
+        registry.mark_authenticated(session, "alice", is_sysop=False)
+
+        drain_task = asyncio.create_task(
+            run_drain_sequence(session_registry=registry, delay_seconds=60.0)
+        )
+        await asyncio.sleep(0)
+
+        drain_task.cancel()
+        await asyncio.gather(drain_task, return_exceptions=True)
+
+        assert not task.cancelled()  # nobody was actually disconnected
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_immediate_shutdown_is_not_cancellable_via_maintenance_deactivate():
+    """An *immediate* shutdown never enters the graceful countdown's own
+    try/except at all -- cancelling it after the fact must not reopen
+    admission, unlike the graceful case above, since there was never a
+    cancellable window to begin with once the single broadcast is sent."""
+
+    async def scenario():
+        registry = ActiveSessionRegistry()
+        maintenance = MaintenanceMode()
+
+        await run_shutdown_sequence(
+            graceful=False,
+            session_registry=registry,
+            maintenance=maintenance,
+            delay_seconds=60.0,  # ignored entirely -- immediate
+            shutdown_event=asyncio.Event(),
+        )
+
+        assert maintenance.is_active() is True
 
     asyncio.run(scenario())

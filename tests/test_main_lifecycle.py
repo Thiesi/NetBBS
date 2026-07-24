@@ -23,6 +23,7 @@ import sys
 import pytest
 
 from netbbs.__main__ import StartupError, _install_signal_handlers, run
+from netbbs.net.shutdown import SequenceScheduler
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode
@@ -922,6 +923,7 @@ def test_signal_handler_registration_triggers_shutdown_event():
             shutdown_event=shutdown_event,
             session_registry=ActiveSessionRegistry(),
             maintenance=MaintenanceMode(),
+            shutdown_scheduler=SequenceScheduler(),
             # A tiny delay, not 0 -- confirms the graceful/SIGTERM path's
             # `asyncio.sleep` actually runs (not skipped entirely) without
             # this test waiting anywhere near the real default.

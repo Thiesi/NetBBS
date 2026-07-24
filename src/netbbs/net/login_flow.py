@@ -128,18 +128,19 @@ from netbbs.net.chat_flow import browse_channels, has_visible_channels, list_vis
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.file_flow import browse_file_areas, enter_file_area, has_visible_areas
 from netbbs.net.mail_flow import browse_mail
-from netbbs.net.maintenance import LOCKDOWN_MESSAGE, MAINTENANCE_MESSAGE, MaintenanceMode
+from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.nodeconfig import ThrottleConfig
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry
-from netbbs.net.shutdown import NodeControls
+from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.permissions import meets_level
 from netbbs.rendering import (
     ACCENT_COLOR,
+    ALERT_COLOR,
     HEADER_COLOR,
     MUTED_COLOR,
     colored,
@@ -160,7 +161,7 @@ from netbbs.search import (
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
-from netbbs.timeutil import format_for_display
+from netbbs.timeutil import format_for_display, utc_now_iso
 
 _MAX_LOGIN_ATTEMPTS = 3
 
@@ -202,6 +203,8 @@ async def handle_session(
     *,
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
+    drain_scheduler: SequenceScheduler | None = None,
+    shutdown_scheduler: SequenceScheduler | None = None,
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
 ) -> None:
@@ -220,16 +223,20 @@ async def handle_session(
     uses unmigrated — the two coexist deliberately during this
     transition, not a contradiction.
 
-    `shutdown_event`/`graceful_delay_seconds` (design doc -- node
-    management) are bundled with `session_registry`/`maintenance`
-    into a `NodeControls`, threaded down through `_run_authenticated_
-    session`/`_main_menu` to `netbbs.net.admin_flow.admin_menu` — what
-    the in-session `[N]ode` admin command needs to trigger a shutdown
-    directly, the same sequence a real OS signal already triggers (see
-    `netbbs.net.shutdown`). Both optional/defaulted so every existing
+    `shutdown_event`/`graceful_delay_seconds`/`drain_scheduler`/
+    `shutdown_scheduler` (design doc -- node management) are bundled
+    with `session_registry`/`maintenance` into a `NodeControls`,
+    threaded down through `_run_authenticated_session`/`_main_menu` to
+    `netbbs.net.admin_flow.admin_menu` — what the in-session `[N]ode`
+    admin command needs to trigger a shutdown/drain directly, the same
+    sequence a real OS signal already triggers for shutdown (see
+    `netbbs.net.shutdown`). All optional/defaulted so every existing
     caller of this function (many tests, none of which exercise node
     management) needs no changes; `netbbs.__main__.run()` is the only
-    caller that passes its own real values.
+    caller that passes its own real values. `shutdown_scheduler` is also
+    read directly below, before `node_controls` even exists yet, to
+    tell a rejected connection how much longer a *scheduled* graceful
+    shutdown's countdown has left.
 
     `throttle`/`throttle_config` implement issue #3's cross-connection
     login throttling: `throttle` is node-lifetime shared state (one
@@ -276,7 +283,11 @@ async def handle_session(
     when `config.link.enabled`.
     """
     if maintenance.is_active():
-        await session.write_line(MAINTENANCE_MESSAGE)
+        if shutdown_scheduler is not None and shutdown_scheduler.is_scheduled():
+            remaining = shutdown_scheduler.remaining_seconds()
+            await session.write_line(f"{MAINTENANCE_MESSAGE} (going down in {format_remaining_seconds(remaining)})")
+        else:
+            await session.write_line(MAINTENANCE_MESSAGE)
         return
 
     node_controls = NodeControls(
@@ -284,6 +295,8 @@ async def handle_session(
         maintenance=maintenance,
         shutdown_event=shutdown_event if shutdown_event is not None else asyncio.Event(),
         graceful_delay_seconds=graceful_delay_seconds,
+        drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
+        shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
     )
 
     session_registry.enter(session)
@@ -341,6 +354,15 @@ async def _run_authenticated_session(
 
     try:
         await session.write_line(load_welcome_banner(db))
+        # Design doc -- node management, Thiesi's own request: shown to
+        # *every* connecting client, SysOp-to-be or not -- account level
+        # isn't known until credentials verify below, so this can't be
+        # targeted any more narrowly than that. Purely informational: it
+        # never blocks anyone by itself, unlike the post-authentication
+        # `[M]aintenance mode` rejection a non-SysOp still gets further
+        # down for actually trying to log in while this is on.
+        if node_controls is not None and node_controls.maintenance.is_lockdown_active():
+            await session.write_line(colored(f"\r\n{LOCKDOWN_NOTICE}", fg_color=ALERT_COLOR, bold=True))
         try:
             login_result = await asyncio.wait_for(
                 _login(
@@ -501,6 +523,28 @@ async def run_authenticated_session(
         welcome += " (Maintenance mode is ON.)"
     await session.write_line(welcome)
     await _announce_pending_invitations(session, db, user)
+    # Design doc -- node management, Thiesi's own report: drain never
+    # persisted any state before, so a user who wasn't connected when it
+    # was scheduled -- or who reconnects after being disconnected by an
+    # earlier drain pass -- had no way to know one was still in
+    # progress until it disconnected them again with no warning at all.
+    # Non-SysOp only (reaching this point at all already implies
+    # lockdown isn't active for this account, see the rejection branch
+    # above) -- a SysOp is exempt from drain by design and would never
+    # actually be disconnected by it.
+    if (
+        node_controls is not None
+        and not meets_level(user, SYSOP_LEVEL)
+        and node_controls.drain_scheduler.is_scheduled()
+    ):
+        remaining = node_controls.drain_scheduler.remaining_seconds()
+        await session.write_line(
+            colored(
+                f"\r\nNote: this node is currently being drained for maintenance -- "
+                f"you will be disconnected in about {format_remaining_seconds(remaining)}.",
+                fg_color=ALERT_COLOR, bold=True,
+            )
+        )
 
     # One InputHistory per connection (design doc),
     # not node-wide like hub/presence/mailbox -- constructed here rather
@@ -590,6 +634,8 @@ async def handle_ssh_session(
     *,
     shutdown_event: asyncio.Event | None = None,
     graceful_delay_seconds: float = 60.0,
+    drain_scheduler: SequenceScheduler | None = None,
+    shutdown_scheduler: SequenceScheduler | None = None,
     lane: DatabaseLane | None = None,
     link_context: LinkContext | None = None,
 ) -> None:
@@ -625,7 +671,11 @@ async def handle_ssh_session(
     docstring for the reasoning, not repeated here.
     """
     if maintenance.is_active():
-        await session.write_line(MAINTENANCE_MESSAGE)
+        if shutdown_scheduler is not None and shutdown_scheduler.is_scheduled():
+            remaining = shutdown_scheduler.remaining_seconds()
+            await session.write_line(f"{MAINTENANCE_MESSAGE} (going down in {format_remaining_seconds(remaining)})")
+        else:
+            await session.write_line(MAINTENANCE_MESSAGE)
         return
 
     node_controls = NodeControls(
@@ -633,6 +683,8 @@ async def handle_ssh_session(
         maintenance=maintenance,
         shutdown_event=shutdown_event if shutdown_event is not None else asyncio.Event(),
         graceful_delay_seconds=graceful_delay_seconds,
+        drain_scheduler=drain_scheduler if drain_scheduler is not None else SequenceScheduler(),
+        shutdown_scheduler=shutdown_scheduler if shutdown_scheduler is not None else SequenceScheduler(),
     )
 
     session_registry.enter(session)
@@ -720,10 +772,30 @@ async def _show_pending_invitations(session: Session, db: Database, user: User) 
     )
 
 
-async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbox, user: User) -> None:
+async def _draw_main_menu(
+    session: Session, db: Database, mailbox: MessageMailbox, user: User,
+    *, node_controls: NodeControls | None = None,
+) -> None:
     """
     Shows any private messages that arrived while away from this menu,
     then the menu itself.
+
+    `node_controls` (design doc -- node management, Thiesi's own
+    request), if given, prefixes the `Choice: ` prompt with the current
+    BBS time (a snapshot at draw time, not a ticking live clock -- this
+    codebase has no per-session background refresh mechanism, and
+    building one just for a clock would be disproportionate to what was
+    actually asked for) and, at most one at a time (most urgent first: a
+    scheduled shutdown, then a scheduled drain, then -- SysOps only,
+    since a non-SysOp who reached the menu at all already implies
+    lockdown isn't blocking them -- maintenance mode being on), a visual
+    alert tag. `None` (a direct test call site bypassing `handle_
+    session`) leaves the prompt exactly as it always was -- bare
+    `Choice: `, no time, no tag -- the same degrade-gracefully
+    convention every other optional `node_controls` parameter in this
+    module already follows, and deliberately conservative about not
+    changing output text for the many existing tests that call this
+    function directly without one.
 
     This is the one place `/msg`'s mailbox-plus-next-prompt delivery
     (design doc) actually flushes:
@@ -820,7 +892,29 @@ async def _draw_main_menu(session: Session, db: Database, mailbox: MessageMailbo
     option_list.append(menu_key("L", "ogoff"))
     options = "  ".join(option_list)
     await session.write_line(f"\r\n{header} {options}")
-    await session.write("Choice: ")
+    await session.write(_main_menu_prompt(db, user, node_controls))
+
+
+def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | None) -> str:
+    """`Choice: `, optionally prefixed with the current BBS time and a
+    node-status alert tag -- see `_draw_main_menu`'s own docstring for
+    why `node_controls is None` leaves this completely unchanged."""
+    if node_controls is None:
+        return "Choice: "
+
+    time_str = format_for_display(utc_now_iso(), db)
+    tag = ""
+    if node_controls.shutdown_scheduler.is_scheduled():
+        remaining = node_controls.shutdown_scheduler.remaining_seconds()
+        tag = colored(f"[SHUTDOWN {format_remaining_seconds(remaining)}] ", fg_color=ALERT_COLOR, bold=True)
+    elif node_controls.drain_scheduler.is_scheduled():
+        remaining = node_controls.drain_scheduler.remaining_seconds()
+        tag = colored(f"[DRAINING {format_remaining_seconds(remaining)}] ", fg_color=ALERT_COLOR, bold=True)
+    elif node_controls.maintenance.is_lockdown_active():
+        # Only ever reached by a SysOp -- a non-SysOp who made it to the
+        # main menu at all already implies lockdown wasn't blocking them.
+        tag = colored("[MAINT MODE] ", fg_color=ALERT_COLOR, bold=True)
+    return f"{time_str} {tag}Choice: "
 
 
 async def _main_menu(
@@ -855,7 +949,7 @@ async def _main_menu(
     leaves the screen exactly as it was, no reprinted prompt, since
     nothing was actually communicated worth a fresh line for.
     """
-    await _draw_main_menu(session, db, mailbox, user)
+    await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -888,21 +982,21 @@ async def _main_menu(
                 session, db, hub, presence, mailbox, history, user,
                 node_controls=node_controls, lane=lane, link_context=link_context,
             )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "u" and _has_uncategorized_resources(db, user):
             await session.write_line("")
             await _enter_uncategorized(
                 session, db, hub, presence, mailbox, history, user,
                 node_controls=node_controls, lane=lane, link_context=link_context,
             )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "j":
             await session.write_line("")
             await _jump_to(
                 session, db, hub, presence, mailbox, history, user,
                 node_controls=node_controls, lane=lane, link_context=link_context,
             )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "n":
             await session.write_line("")
             # Issue #56: same lane-is-None degrade-gracefully reasoning
@@ -917,7 +1011,7 @@ async def _main_menu(
                 await session.write_line(
                     colored("New scan is not available in this context.", fg_color=MUTED_COLOR)
                 )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "f":
             await session.write_line("")
             if lane is not None:
@@ -928,15 +1022,15 @@ async def _main_menu(
                 await session.write_line(
                     colored("Find is not available in this context.", fg_color=MUTED_COLOR)
                 )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "d":
             await session.write_line("")
             await _browse_directory(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "p":
             await session.write_line("")
             await _edit_profile(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "e":
             await session.write_line("")
             # design doc, issue #57: mail is one of the features
@@ -952,15 +1046,15 @@ async def _main_menu(
                 await session.write_line(
                     colored("Mail is not available in this context.", fg_color=MUTED_COLOR)
                 )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "i" and list_pending_invitations_for_user(db, user):
             await session.write_line("")
             await _show_pending_invitations(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "v" and (user.can_verify_identity or meets_level(user, SYSOP_LEVEL)):
             await session.write_line("")
             await _verify_identity_menu(session, db, user)
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         elif choice == "s" and meets_level(user, SYSOP_LEVEL):
             await session.write_line("")
             # design doc: admin is one of the features
@@ -976,7 +1070,7 @@ async def _main_menu(
                 await session.write_line(
                     colored("SysOp menu is not available in this context.", fg_color=MUTED_COLOR)
                 )
-            await _draw_main_menu(session, db, mailbox, user)
+            await _draw_main_menu(session, db, mailbox, user, node_controls=node_controls)
         else:
             await session.write(reject_keystroke())
 
