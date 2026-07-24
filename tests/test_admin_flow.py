@@ -830,6 +830,112 @@ def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
     assert "ink this board" not in text  # the [L]ink option itself is hidden
 
 
+# -- linked file areas ---------------------------------------------------
+
+
+def test_link_this_file_area_flow(db, lane, sysop):
+    """`netbbs.link.files.link_file_area` existed since issue #89 but,
+    unlike `link_board`, was never actually reachable from any live UI
+    action -- this proves the missing `[L]ink this file area` call site
+    added to the file-area admin screen."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.link.files import is_area_linked
+
+    area = create_file_area(db, "Docs", creator=sysop)
+    link_context = _link_context()
+
+    inputs = [
+        "m", "f", "l", "0", "1",  # navigate to file area detail
+        "l",  # [L]ink this file area
+        "", "",  # recommended min read/write level: keep current (0)
+        "",  # recommend moderated? blank = no recommendation
+        "",  # recommended max file age: blank = no recommendation
+        "", "",  # min age / name requirement: keep current (none)
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked 'Docs'" in text
+    assert is_area_linked(db, area)
+    assert area.area_id in link_context.link_node.file_areas
+    genesis = link_context.link_node.file_areas[area.area_id]
+    assert genesis.content_id in link_context.link_node.known_event_ids
+    assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
+
+
+def test_link_this_file_area_is_not_offered_once_already_linked(db, lane, sysop):
+    from netbbs.files.areas import create_file_area
+    from netbbs.link.files import link_file_area
+
+    from netbbs.files.areas import list_file_areas
+
+    create_file_area(db, "Docs", creator=sysop)
+    link_context = _link_context()
+    area = list_file_areas(db)[0]
+    link_file_area(db, area, node_identity=link_context.node_identity)
+
+    inputs = ["m", "f", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked: yes" in text
+    assert "ink this file area" not in text  # the [L]ink option itself is hidden
+
+
+# -- linked channels ------------------------------------------------------
+
+
+def test_link_this_channel_flow(db, lane, sysop):
+    """`netbbs.link.channels.link_channel` existed since issue #87 but,
+    unlike `link_board`, was never actually reachable from any live UI
+    action -- this proves the missing `[L]ink this channel` call site
+    added to the channel admin screen."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.link.channels import is_channel_linked
+
+    channel = create_channel(db, "Lobby", creator=sysop)
+    link_context = _link_context()
+
+    inputs = [
+        "m", "n", "l", "0", "1",  # navigate to channel detail
+        "l",  # [L]ink this channel
+        "",  # recommended minimum level: keep current (0)
+        "", "",  # min age / name requirement: keep current (none)
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked 'Lobby'" in text
+    assert is_channel_linked(db, channel)
+    assert channel.channel_id in link_context.link_node.channels
+    genesis = link_context.link_node.channels[channel.channel_id]
+    assert genesis.content_id in link_context.link_node.known_event_ids
+    assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
+
+
+def test_link_this_channel_is_not_offered_once_already_linked(db, lane, sysop):
+    from netbbs.chat.channels import create_channel, list_channels
+    from netbbs.link.channels import link_channel
+
+    create_channel(db, "Lobby", creator=sysop)
+    link_context = _link_context()
+    channel = list_channels(db)[0]
+    link_channel(db, channel, node_identity=link_context.node_identity)
+
+    inputs = ["m", "n", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Linked: yes" in text
+    assert "ink this channel" not in text  # the [L]ink option itself is hidden
+
+
 def _add_fake_peer(link_context, *, descriptor=None):
     """A minimal but real, correctly-shaped `PeerRecord` for a second
     node -- enough for `_transfer_board_origin_screen` to recognize a

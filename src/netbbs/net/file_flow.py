@@ -75,7 +75,7 @@ from netbbs.files.categories import (
 )
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
-from netbbs.link.files import RemoteFile, list_remote_files
+from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
 from netbbs.net.confirm import prompt_yes_no
@@ -351,24 +351,29 @@ async def _show_area(
     what can be referenced by a name the user already knows (from an
     earlier page, or from outside this session entirely).
 
-    `link_context` (design doc, issue #92), if given, offers `/remote` —
-    browse this area's carried-but-not-yet-fetched remote catalogue and
-    fetch one on demand (`_browse_remote_files`). Reachable both from the
-    ordinary pagination loop and from the "has no files yet" fallback
-    prompt below it, since a Linked area can have remote catalogue
-    entries even with zero *local* uploads of its own. No extra
-    per-file access check is applied inside that sub-screen — entering
-    `_show_area` at all already required passing this area's own
-    effective read/age/name-requirement gate (enforced by whichever
-    picker offered it), and a remote catalogue entry carries no
-    additional moderation state of its own to re-check.
+    `link_context` (design doc, issue #92), if given *and this specific
+    area is actually Linked* (`is_area_linked` — Link being enabled
+    node-wide is not enough, the same distinction `netbbs.net.admin_flow`'s
+    board admin screen already draws between "Link is on" and "this
+    board is Linked"), offers `/remote` — browse this area's carried-
+    but-not-yet-fetched remote catalogue and fetch one on demand
+    (`_browse_remote_files`). Reachable both from the ordinary
+    pagination loop and from the "has no files yet" fallback prompt
+    below it, since a Linked area can have remote catalogue entries even
+    with zero *local* uploads of its own. No extra per-file access check
+    is applied inside that sub-screen — entering `_show_area` at all
+    already required passing this area's own effective read/age/name-
+    requirement gate (enforced by whichever picker offered it), and a
+    remote catalogue entry carries no additional moderation state of its
+    own to re-check.
     """
     area_name = sanitize_text(area.name)
 
-    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool]:
+    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool]:
         # Bundled into one lane call: the page, the effective
-        # name_requirement, and the can_write gate all come from the
-        # same worker-thread pass rather than three round trips.
+        # name_requirement, the can_write gate, and whether this area is
+        # actually Linked all come from the same worker-thread pass
+        # rather than four round trips.
         page = list_files_page(db, area, user, after=initial_cursor) if initial_cursor else list_files_page(db, area, user)
         if initial_cursor and not page.entries:
             # Nothing newer than the cursor -- caught up, not a
@@ -380,11 +385,11 @@ async def _show_area(
             and meets_age(db, user, get_effective_min_age(db, area))
             and meets_name_requirement(db, user, effective_name_requirement)
         )
-        return page, effective_name_requirement, can_write
+        return page, effective_name_requirement, can_write, is_area_linked(db, area)
 
-    page, effective_name_requirement, can_write = await lane.run(_load)
+    page, effective_name_requirement, can_write, area_linked = await lane.run(_load)
 
-    show_remote_hint = link_context is not None
+    show_remote_hint = link_context is not None and area_linked
 
     async def _render_and_advance_cursor(current_page: FileEntryPage) -> None:
         """The one place every render in this loop funnels through
@@ -429,7 +434,7 @@ async def _show_area(
                 filename = choice[len("/download ") :].strip()
                 await _handle_download(session, lane, area, filename, user)
                 return
-            elif choice.lower() == "/remote" and link_context is not None:
+            elif choice.lower() == "/remote" and show_remote_hint:
                 await _browse_remote_files(session, lane, area, user, link_context)
                 return
             else:
@@ -452,7 +457,7 @@ async def _show_area(
         return
     elif command.lower() == "/upload" and can_write:
         await _handle_upload(session, lane, area, user)
-    elif command.lower() == "/remote" and link_context is not None:
+    elif command.lower() == "/remote" and show_remote_hint:
         await _browse_remote_files(session, lane, area, user, link_context)
     else:
         await session.write_line("Unknown command.")

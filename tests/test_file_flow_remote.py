@@ -84,6 +84,22 @@ def test_remote_command_reports_no_catalogue_entries(db, lane, alice, node_ident
     assert "has no remote catalogue entries" in _written(session)
 
 
+def test_remote_hint_hidden_when_link_enabled_but_this_area_was_never_linked(db, lane, alice, node_identity):
+    """Link being enabled node-wide is not the same as this specific
+    area being Linked (`is_area_linked`) -- offering /remote on an area
+    that structurally can never have a remote catalogue (never
+    `link_file_area`'d) is misleading, the same distinction `netbbs.
+    net.admin_flow`'s board admin screen already draws between "Link is
+    on" and "this board is Linked"."""
+    area = create_file_area(db, "downloads", creator=alice)
+    link_context = _link_context_for(node_identity)
+    session = FakeSession(["b"])
+
+    asyncio.run(file_flow._show_area(session, lane, area, alice, link_context=link_context))
+
+    assert "/remote" not in _written(session)
+
+
 def test_remote_hint_shown_even_with_zero_local_uploads(db, lane, alice, node_identity):
     """A Linked area can have remote catalogue entries even with zero
     *local* uploads of its own -- /remote must be reachable from the

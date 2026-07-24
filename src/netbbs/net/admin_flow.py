@@ -129,7 +129,9 @@ from netbbs.link.boards import (
     queue_board_post_if_linked,
     rebuild_carried_post_materialization,
 )
+from netbbs.link.channels import LinkChannelsError, is_channel_linked, link_channel
 from netbbs.link.diagnostics import list_diagnostic_log_entries
+from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
@@ -1586,11 +1588,11 @@ async def _content_menu(
             await _draw_content_menu(session)
         elif choice == "f":
             await session.write_line("")
-            await _area_menu(session, lane, actor)
+            await _area_menu(session, lane, actor, link_context=link_context)
             await _draw_content_menu(session)
         elif choice == "n":
             await session.write_line("")
-            await _channel_menu(session, lane, actor)
+            await _channel_menu(session, lane, actor, link_context=link_context)
             await _draw_content_menu(session)
         elif choice == "c":
             await session.write_line("")
@@ -2693,7 +2695,9 @@ async def _post_action_screen(
 # -- file areas ----------------------------------------------------------
 
 
-async def _area_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _area_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     await _draw_area_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -2707,7 +2711,7 @@ async def _area_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
             await _draw_area_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_areas_screen(session, lane, actor)
+            await _list_areas_screen(session, lane, actor, link_context=link_context)
             await _draw_area_menu(session)
         elif choice == "g":
             await session.write_line("")
@@ -2832,7 +2836,9 @@ async def _create_area_screen(session: Session, lane: DatabaseLane, actor: User)
     await session.write_line(f"Created file area {area.name!r}.")
 
 
-async def _list_areas_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _list_areas_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     areas = await lane.run(list_file_areas, order_by="alphabetical")
     selected = await pick_item(
         session, areas,
@@ -2843,7 +2849,7 @@ async def _list_areas_screen(session: Session, lane: DatabaseLane, actor: User) 
         empty_message="No file areas yet.",
     )
     if selected is not None:
-        await _area_detail_screen(session, lane, actor, selected)
+        await _area_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
 def _area_description(area: FileArea) -> str:
@@ -2853,8 +2859,11 @@ def _area_description(area: FileArea) -> str:
     return f"read {read_level}/write {write_level}, {status}"
 
 
-async def _area_detail_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> None:
-    await _draw_area_detail(session, lane, area)
+async def _area_detail_screen(
+    session: Session, lane: DatabaseLane, actor: User, area: FileArea, *, link_context: LinkContext | None = None
+) -> None:
+    linked = await lane.run(is_area_linked, area) if link_context is not None else False
+    await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -2866,22 +2875,34 @@ async def _area_detail_screen(session: Session, lane: DatabaseLane, actor: User,
             updated = await _edit_area_screen(session, lane, actor, area)
             if updated is not None:
                 area = updated
-            await _draw_area_detail(session, lane, area)
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_area_screen(session, lane, actor, area)
             if deleted:
                 return
-            await _draw_area_detail(session, lane, area)
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context)
         elif choice == "p":
             await session.write_line("")
             await _pending_files_screen(session, lane, actor, area)
-            await _draw_area_detail(session, lane, area)
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context)
+        elif choice == "l" and link_context is not None and not linked:
+            await session.write_line("")
+            await _link_area_screen(session, lane, area, link_context)
+            linked = await lane.run(is_area_linked, area)
+            await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_area_detail(session: Session, lane: DatabaseLane, area: FileArea) -> None:
+async def _draw_area_detail(
+    session: Session,
+    lane: DatabaseLane,
+    area: FileArea,
+    *,
+    linked: bool = False,
+    link_context: LinkContext | None = None,
+) -> None:
     header = colored(sanitize_text(area.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(f"Description: {sanitize_text(area.description) if area.description else '(none)'}")
@@ -2898,11 +2919,78 @@ async def _draw_area_detail(session: Session, lane: DatabaseLane, area: FileArea
         f"Minimum age: {area.min_age if area.min_age is not None else 'none'}  "
         f"Name requirement: {area.name_requirement or 'none'}"
     )
-    options = "  ".join(
-        [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending files"), menu_key("B", "ack")]
-    )
-    await session.write_line(f"\r\n{options}")
+    if link_context is not None:
+        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+    options = [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending files")]
+    if link_context is not None and not linked:
+        options.append(menu_key("L", "ink this file area"))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
+
+
+async def _link_area_screen(session: Session, lane: DatabaseLane, area: FileArea, link_context: LinkContext) -> None:
+    """
+    `[L]ink this file area` (design doc §11, issue #89 -- previously
+    defined by `netbbs.link.files.link_file_area` but, unlike `link_
+    board`, never actually reachable from any live UI action; this is
+    that missing call site). Mirrors `_link_board_screen` exactly, minus
+    the fields `FileArea` has no equivalent of (no `forked_from` --
+    file-area origin succession is not built, design doc §11) and with
+    `max_file_age_days` in place of `max_post_age_days`.
+    """
+    await session.write_line(colored("\r\nLink this file area", fg_color=HEADER_COLOR, bold=True))
+    default_min_read_level, ok = await _prompt_optional_int(
+        session, "Recommended minimum read level", current=area.min_read_level
+    )
+    if not ok:
+        return
+    default_min_write_level, ok = await _prompt_optional_int(
+        session, "Recommended minimum write level", current=area.min_write_level
+    )
+    if not ok:
+        return
+    await session.write(f"Recommend moderated? [{'y' if area.moderated else 'N'}/blank=no recommendation]: ")
+    moderated_answer = (await session.read_line()).strip().lower()
+    default_moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else None
+    current_age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
+    await session.write(f"Recommended max file age in days [{current_age}] (blank = no recommendation): ")
+    max_age_raw = (await session.read_line()).strip()
+    default_max_file_age_days = None
+    if max_age_raw:
+        try:
+            default_max_file_age_days = int(max_age_raw)
+        except ValueError:
+            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
+            return
+    default_min_age, ok = await _prompt_min_age(session, current=area.min_age)
+    if not ok:
+        return
+    default_name_requirement, ok = await _prompt_name_requirement(session, current=area.name_requirement)
+    if not ok:
+        return
+
+    try:
+        genesis = await lane.run(
+            link_file_area,
+            area,
+            node_identity=link_context.node_identity,
+            default_min_read_level=default_min_read_level,
+            default_min_write_level=default_min_write_level,
+            default_moderated=default_moderated,
+            default_max_file_age_days=default_max_file_age_days,
+            default_min_age=default_min_age,
+            default_name_requirement=default_name_requirement,
+        )
+    except LinkFilesError as exc:
+        await session.write_line(colored(f"Could not Link file area: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.file_areas[area.area_id] = genesis
+    link_context.link_node.known_event_ids.add(genesis.content_id)
+    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+
+    await session.write_line(f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
 
 
 async def _edit_area_screen(session: Session, lane: DatabaseLane, actor: User, area: FileArea) -> FileArea | None:
@@ -3063,7 +3151,9 @@ async def _file_action_screen(session: Session, lane: DatabaseLane, actor: User,
 # approval.
 
 
-async def _channel_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _channel_menu(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     await _draw_channel_menu(session)
     while True:
         choice = (await session.read_key()).lower()
@@ -3077,7 +3167,7 @@ async def _channel_menu(session: Session, lane: DatabaseLane, actor: User) -> No
             await _draw_channel_menu(session)
         elif choice == "l":
             await session.write_line("")
-            await _list_channels_screen(session, lane, actor)
+            await _list_channels_screen(session, lane, actor, link_context=link_context)
             await _draw_channel_menu(session)
         else:
             await session.write(reject_keystroke())
@@ -3137,7 +3227,9 @@ async def _create_channel_screen(session: Session, lane: DatabaseLane, actor: Us
     await session.write_line(f"Created channel {channel.name!r}.")
 
 
-async def _list_channels_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _list_channels_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+) -> None:
     channels = await lane.run(list_channels)
     selected = await pick_item(
         session, channels,
@@ -3148,7 +3240,7 @@ async def _list_channels_screen(session: Session, lane: DatabaseLane, actor: Use
         empty_message="No channels yet.",
     )
     if selected is not None:
-        await _channel_detail_screen(session, lane, actor, selected)
+        await _channel_detail_screen(session, lane, actor, selected, link_context=link_context)
 
 
 def _channel_description(channel: Channel) -> str:
@@ -3160,8 +3252,11 @@ def _channel_description(channel: Channel) -> str:
     return ", ".join(bits)
 
 
-async def _channel_detail_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> None:
-    await _draw_channel_detail(session, lane, channel)
+async def _channel_detail_screen(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, link_context: LinkContext | None = None
+) -> None:
+    linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
+    await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -3173,18 +3268,30 @@ async def _channel_detail_screen(session: Session, lane: DatabaseLane, actor: Us
             updated = await _edit_channel_screen(session, lane, actor, channel)
             if updated is not None:
                 channel = updated
-            await _draw_channel_detail(session, lane, channel)
+            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context)
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_channel_screen(session, lane, actor, channel)
             if deleted:
                 return
-            await _draw_channel_detail(session, lane, channel)
+            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context)
+        elif choice == "l" and link_context is not None and not linked:
+            await session.write_line("")
+            await _link_channel_screen(session, lane, channel, link_context)
+            linked = await lane.run(is_channel_linked, channel)
+            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context)
         else:
             await session.write(reject_keystroke())
 
 
-async def _draw_channel_detail(session: Session, lane: DatabaseLane, channel: Channel) -> None:
+async def _draw_channel_detail(
+    session: Session,
+    lane: DatabaseLane,
+    channel: Channel,
+    *,
+    linked: bool = False,
+    link_context: LinkContext | None = None,
+) -> None:
     header = colored(sanitize_text(channel.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
     await session.write_line(
@@ -3203,9 +3310,58 @@ async def _draw_channel_detail(session: Session, lane: DatabaseLane, channel: Ch
         f"Minimum age: {channel.min_age if channel.min_age is not None else 'none'}  "
         f"Name requirement: {channel.name_requirement or 'none'}"
     )
-    options = "  ".join([menu_key("E", "dit"), menu_key("D", "elete"), menu_key("B", "ack")])
-    await session.write_line(f"\r\n{options}")
+    if link_context is not None:
+        await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+    options = [menu_key("E", "dit"), menu_key("D", "elete")]
+    if link_context is not None and not linked:
+        options.append(menu_key("L", "ink this channel"))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
+
+
+async def _link_channel_screen(session: Session, lane: DatabaseLane, channel: Channel, link_context: LinkContext) -> None:
+    """
+    `[L]ink this channel` (design doc §9.6, issue #87 -- previously
+    defined by `netbbs.link.channels.link_channel` but, unlike `link_
+    board`, never actually reachable from any live UI action; this is
+    that missing call site). Mirrors `_link_board_screen`, minus every
+    field `Channel` has no equivalent setting for (no `default_min_
+    write_level`/`_moderated`/`_max_post_age_days`, no `forked_from` --
+    channel origin succession is reused by reference only, not built,
+    design doc §9.6).
+    """
+    await session.write_line(colored("\r\nLink this channel", fg_color=HEADER_COLOR, bold=True))
+    default_min_level, ok = await _prompt_optional_int(
+        session, "Recommended minimum level", current=channel.min_level
+    )
+    if not ok:
+        return
+    default_min_age, ok = await _prompt_min_age(session, current=channel.min_age)
+    if not ok:
+        return
+    default_name_requirement, ok = await _prompt_name_requirement(session, current=channel.name_requirement)
+    if not ok:
+        return
+
+    try:
+        genesis = await lane.run(
+            link_channel,
+            channel,
+            node_identity=link_context.node_identity,
+            default_min_level=default_min_level,
+            default_min_age=default_min_age,
+            default_name_requirement=default_name_requirement,
+        )
+    except LinkChannelsError as exc:
+        await session.write_line(colored(f"Could not Link channel: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.channels[channel.channel_id] = genesis
+    link_context.link_node.known_event_ids.add(genesis.content_id)
+    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+
+    await session.write_line(f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
 
 
 async def _edit_channel_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> Channel | None:

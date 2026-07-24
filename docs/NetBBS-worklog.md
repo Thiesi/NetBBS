@@ -1896,3 +1896,22 @@ These are recurring failure patterns, not a defect catalogue:
   be distinguished before fork detection.
 - Explicit failure, bounded resource use, and visible degradation are preferred
   over silent fallback for security, administration, and federation state.
+- “The domain function and its tests exist” does not mean any live UI path
+  reaches it — a passing test suite proved `link_channel`/`link_file_area`
+  (issues #87/#89) worked, but a plain `grep -rn "link_channel\("
+  src/netbbs/net` turned up zero call sites: the board admin screen's own
+  `[L]ink this board` action was never mirrored for channels or file areas,
+  so a SysOp had no way to Link either one at all (fixed in `netbbs.net.
+  admin_flow`, mirroring `_link_board_screen` exactly). Worth checking for
+  on any future object type that reuses an existing subsystem's domain
+  layer without also reusing its UI layer — passing tests only prove the
+  function works when called, not that anything calls it. The same audit
+  also caught a related but different mistake in `netbbs.net.file_flow`'s
+  `/remote` hint: it was gated on Link being enabled *node-wide*
+  (`link_context is not None`) rather than on the specific area actually
+  being Linked (`is_area_linked`), unlike the board admin screen's own
+  `[L]ink`/`[T]ransfer`/`[C]lose` gating, which already drew that exact
+  distinction — offering `/remote` on an area that structurally can never
+  have a remote catalogue is a small honesty gap, not a crash, but the
+  same class of "capability enabled somewhere in the stack" vs "capability
+  applies to *this* specific resource" confusion.
