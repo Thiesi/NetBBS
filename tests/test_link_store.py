@@ -16,8 +16,15 @@ import json
 from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
-from netbbs.boards.posts import create_post, edit_post
-from netbbs.link.boards import link_board, queue_board_post_edit_if_linked, queue_board_post_if_linked
+from netbbs.boards.posts import create_post, edit_post, tombstone_post
+from netbbs.link.boards import (
+    close_board_if_linked,
+    link_board,
+    queue_board_post_edit_if_linked,
+    queue_board_post_if_linked,
+    queue_board_post_moderator_edit_if_linked,
+    queue_board_post_tombstone_if_linked,
+)
 from netbbs.link.events import (
     build_board_genesis,
     build_board_post,
@@ -28,6 +35,7 @@ from netbbs.link.events import (
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import load_link_node, load_peer_last_contact, save_candidate_descriptor, save_event, save_peer
+from netbbs.moderation.roles import BoardPermission, grant_permissions
 from netbbs.storage.database import Database
 
 
@@ -526,6 +534,80 @@ def test_load_link_node_reconstructs_self_originated_board_post_edit(tmp_path):
 
     assert board_post.content_id in node.post_edits
     assert [e.content_id for e in node.post_edits[board_post.content_id]] == [edit.content_id]
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_board_post_moderator_edit(tmp_path):
+    """Design doc §9.5, issue #88: a self-originated moderator edit
+    (`queue_board_post_moderator_edit_if_linked`) never goes through
+    `handle_events` either -- lives on the same `posts.link_event_json`
+    column a self-authored edit does. Proves `load_link_node`
+    reconstructs `node.post_edits` from it, mirroring the self-authored
+    case above."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    author = create_user(db, "alice", password="hunter2", user_level=10)
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=author)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=author
+    )
+    link_board(db, board, node_identity=own_identity)
+    post = create_post(db, board, author, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=own_identity)
+    edited = edit_post(db, post, board, subject="hello (moderator edit)", body="redacted", edited_by=moderator)
+    mod_edit = queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=own_identity, edited_by=moderator
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert board_post.content_id in node.post_edits
+    assert [e.content_id for e in node.post_edits[board_post.content_id]] == [mod_edit.content_id]
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_board_post_tombstone(tmp_path):
+    """Design doc §9.5, issue #88: same restart reconstruction as the
+    moderator-edit case above, for a self-originated tombstone."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    author = create_user(db, "alice", password="hunter2", user_level=10)
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=author)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=author
+    )
+    link_board(db, board, node_identity=own_identity)
+    post = create_post(db, board, author, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=own_identity)
+    tombstoned = tombstone_post(db, post, board, tombstoned_by=moderator)
+    tombstone = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=own_identity)
+
+    node = load_link_node(db, own_identity)
+
+    assert board_post.content_id in node.post_edits
+    assert [e.content_id for e in node.post_edits[board_post.content_id]] == [tombstone.content_id]
+    db.close()
+
+
+def test_load_link_node_reconstructs_self_originated_board_closure(tmp_path):
+    """Design doc §9.5, issue #88: a self-originated board_closure
+    lives on `boards.link_lifecycle_json`, the same column an
+    origin-transfer offer/acceptance does. Proves `load_link_node`
+    reconstructs `node.board_closures`/`board_lifecycle_head` from it."""
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=creator)
+    link_board(db, board, node_identity=own_identity)
+    closure = close_board_if_linked(db, board, node_identity=own_identity)
+
+    node = load_link_node(db, own_identity)
+
+    assert board.board_id in node.board_closures
+    assert node.board_closures[board.board_id].content_id == closure.content_id
+    assert node.board_lifecycle_head[board.board_id] == closure.content_id
     db.close()
 
 

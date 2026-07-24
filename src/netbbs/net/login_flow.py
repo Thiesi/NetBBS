@@ -81,6 +81,7 @@ from netbbs.boards import (
     edit_post,
     list_boards,
     list_posts_page,
+    tombstone_post,
 )
 from netbbs.boards.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.chat import (
@@ -111,7 +112,13 @@ from netbbs.directory import (
     set_bio_visible,
 )
 from netbbs.files.areas import FileArea, list_file_areas
-from netbbs.link.boards import LinkContext, queue_board_post_edit_if_linked, queue_board_post_if_linked
+from netbbs.link.boards import (
+    LinkContext,
+    queue_board_post_edit_if_linked,
+    queue_board_post_if_linked,
+    queue_board_post_moderator_edit_if_linked,
+    queue_board_post_tombstone_if_linked,
+)
 from netbbs.mail import unread_count as unread_mail_count
 from netbbs.moderation import BoardPermission, has_permission, is_blocked
 from netbbs.net.admin_flow import admin_menu
@@ -1854,10 +1861,24 @@ def _can_edit_post(db: Database, post: Post, user: User) -> bool:
     `netbbs.boards.posts.edit_post` itself enforces, checked here too
     so `[E]dit` only offers itself when it would actually succeed,
     rather than letting a SysOp compose a whole edit only to be
-    rejected at the very end."""
+    rejected at the very end. `False` for an already-tombstoned post
+    (design doc §9.5, issue #88) -- `edit_post` itself refuses those too."""
+    if post.tombstoned_at is not None:
+        return False
     return post.author_user_id == user.id or has_permission(
         db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.EDIT
     )
+
+
+def _can_tombstone_post(db: Database, post: Post, user: User) -> bool:
+    """`BoardPermission.DELETE`, no author bypass (design doc §9.5,
+    issue #88) -- the exact same authorization `netbbs.boards.posts.
+    tombstone_post` itself enforces, checked here so `[T]ombstone` only
+    offers itself when it would actually succeed. `False` for an
+    already-tombstoned post."""
+    if post.tombstoned_at is not None:
+        return False
+    return has_permission(db, user, object_type="board", object_id=post.board_id, permission=BoardPermission.DELETE)
 
 
 async def _render_board_page(
@@ -1883,6 +1904,8 @@ async def _render_board_page(
         options.append(menu_key("R", "ecent"))
     if any(_can_edit_post(db, post, user) for post in page.posts):
         options.append(menu_key("E", "dit"))
+    if any(_can_tombstone_post(db, post, user) for post in page.posts):
+        options.append(menu_key("T", "ombstone"))
     if can_post:
         options.append(menu_key("P", "ost"))
     options.append(menu_key("B", "ack"))
@@ -2027,6 +2050,11 @@ async def _show_board(
             await _edit_existing_post(session, db, board, page, user, link_context=link_context)
             page = _refetch_current_page()
             await _render_and_advance_cursor(page)
+        elif choice == "t" and any(_can_tombstone_post(db, post, user) for post in page.posts):
+            await session.write_line("")
+            await _tombstone_existing_post(session, db, board, page, user, link_context=link_context)
+            page = _refetch_current_page()
+            await _render_and_advance_cursor(page)
         elif choice == "p" and can_post:
             await session.write_line("")
             await _compose_new_post()
@@ -2061,12 +2089,14 @@ async def _edit_existing_post(
     SysOp who picks a post they can't actually edit finds out
     immediately, not after composing a whole revision.
 
-    `link_context` (design doc), if given, queues a
-    `board_post_edit` for a Linked board right after a successful
-    `edit_post` -- but only when `user` is the post's own original
-    author; a moderator's edit (someone else holding `BoardPermission.
-    EDIT`) is silently not propagated, since that needs grant
-    verification this deliberately doesn't build (design doc).
+    `link_context` (design doc), if given, queues a `board_post_edit`
+    for a Linked board right after a successful `edit_post` when `user`
+    is the post's own original author, or a `board_post_moderator_edit`
+    (design doc §9.5, issue #88) when `user` is instead a moderator
+    editing someone else's post *and* this node is the board's own
+    current origin -- a carrying (non-origin) node's own local moderator
+    edit stays purely local, not propagated (see `queue_board_post_
+    moderator_edit_if_linked`'s own docstring for why).
     """
     await session.write(f"Edit which post number [1-{len(page.posts)}]? ")
     choice = (await session.read_key()).strip()
@@ -2101,7 +2131,62 @@ async def _edit_existing_post(
         return
     if link_context is not None:
         queue_board_post_edit_if_linked(db, edited, board, node_identity=link_context.node_identity, edited_by=user)
+        queue_board_post_moderator_edit_if_linked(
+            db, edited, board, node_identity=link_context.node_identity, edited_by=user
+        )
     await session.write_line("Post updated.")
+
+
+async def _tombstone_existing_post(
+    session: Session,
+    db: Database,
+    board: Board,
+    page: PostPage,
+    user: User,
+    *,
+    link_context: LinkContext | None = None,
+) -> None:
+    """
+    `[T]ombstone` one of the posts currently on screen (design doc §9.5,
+    issue #88) -- selected the same page-relative way `_edit_existing_
+    post` already is. Redacts the post to a placeholder revision
+    (`netbbs.boards.posts.tombstone_post`) rather than deleting it
+    outright, so the edit chain and any reply's `parent_post_id` stay
+    intact -- there was no existing live UI action to redact an
+    already-published post at all before this issue (the only existing
+    `delete_post` call site handles pending-post rejection, a different
+    case that never reaches an approved post).
+
+    `link_context`, if given, queues a `board_post_tombstone` right
+    after a successful `tombstone_post`, but only when this node is the
+    board's own current origin -- same origin-only reasoning as
+    `queue_board_post_moderator_edit_if_linked` (see that function's own
+    docstring).
+    """
+    await session.write(f"Tombstone which post number [1-{len(page.posts)}]? ")
+    choice = (await session.read_key()).strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
+        await session.write_line(colored("\r\nNot a valid post number.", fg_color=MUTED_COLOR))
+        return
+    post = page.posts[int(choice) - 1]
+    await session.write_line("")
+
+    if not _can_tombstone_post(db, post, user):
+        await session.write_line(colored("You can't tombstone that post.", fg_color=MUTED_COLOR))
+        return
+
+    if not await prompt_yes_no(session, "Redact this post? This cannot be undone.", default=False):
+        await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+        return
+
+    try:
+        tombstoned = tombstone_post(db, post, board, tombstoned_by=user)
+    except PostError as exc:
+        await session.write_line(colored(f"Could not tombstone: {exc}", fg_color=MUTED_COLOR))
+        return
+    if link_context is not None:
+        queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=link_context.node_identity)
+    await session.write_line("Post tombstoned.")
 
 
 def _post_draft_path(db: Database, *, kind: str, board: Board, user: User, root_post_id: str = "") -> Path:

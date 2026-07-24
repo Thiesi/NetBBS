@@ -273,6 +273,47 @@ def test_editing_a_post_does_not_reset_to_the_newest_page(db, alice):
     assert "Subject 0" in text  # the oldest post, only visible on the older page
 
 
+# -- tombstoning an existing post (design doc §9.5, issue #88) ---------------
+
+
+def test_tombstone_option_hidden_without_delete_permission(db, alice):
+    board = create_board(db, "general", creator=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    # alice owns the post but holds no BoardPermission.DELETE grant --
+    # unlike [E]dit, there is no author bypass for [T]ombstone.
+    assert "[T]ombstone" not in _written_text(session)
+
+
+def test_tombstone_existing_post_via_plain_line_flow(db, alice):
+    from netbbs.moderation.roles import BoardPermission, grant_permissions
+
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice)
+    create_post(db, board, alice, "Original subject", "Original body")
+    # t -> pick post 1 -> confirm -> back -> skip new post
+    session = FakeSession(["t", "1", "y", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Post tombstoned" in _written_text(session)
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.subject == "[removed by moderator]"
+    assert saved.tombstoned_at is not None
+
+
+def test_tombstone_existing_post_cancelled_leaves_it_unchanged(db, alice):
+    from netbbs.moderation.roles import BoardPermission, grant_permissions
+
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice)
+    create_post(db, board, alice, "Subject", "Body")
+    session = FakeSession(["t", "1", "n", "b", ""])
+    asyncio.run(login_flow._show_board(session, db, board, alice))
+    assert "Cancelled" in _written_text(session)
+    saved = list_posts_page(db, board, alice).posts[0]
+    assert saved.tombstoned_at is None
+
+
 # -- editing the bio ---------------------------------------------------------
 
 

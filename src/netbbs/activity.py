@@ -296,6 +296,7 @@ def _root_row_to_post(row) -> Post:
         exempt_from_expiry=bool(row["exempt_from_expiry"]),
         root_post_id=row["root_post_id"],
         edit_of_post_id=row["edit_of_post_id"],
+        tombstoned_at=row["tombstoned_at"],
     )
 
 

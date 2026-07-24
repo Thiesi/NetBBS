@@ -1813,4 +1813,33 @@ MIGRATIONS = [
         CREATE INDEX idx_link_events_channel_id ON link_events(channel_id, object_type);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #88: board closure and origin-authorized post changes. "
+            "boards.link_closed_at is a nullable ISO timestamp, set once a "
+            "verified board_closure is accepted (netbbs.link.boards.close_"
+            "board_if_linked, or netbbs.link.protocol.LinkNode.handle_events "
+            "for a bystander witnessing someone else's board being closed) "
+            "-- enforced by netbbs.boards.posts.create_post refusing new "
+            "posts once set, the same 'additive nullable column on boards' "
+            "shape link_genesis_json/link_origin_fingerprint/"
+            "link_lifecycle_json already established. posts.tombstoned_at "
+            "is the terminal-revision marker netbbs.boards.posts."
+            "tombstone_post sets, deliberately a plain ADD COLUMN rather "
+            "than widening posts.status's CHECK constraint (which would "
+            "need the usual drop/rebuild pattern) -- the post-root_post_id "
+            "migration above already found and documented that rebuilding "
+            "posts specifically risks SQLite's DROP TABLE applying FK "
+            "cascade/SET-NULL side effects to rows still referencing it via "
+            "posts' own self-referencing parent_post_id/root_post_id/"
+            "edit_of_post_id columns, independent of any column's declared "
+            "ON DELETE behavior -- avoided entirely by never dropping posts "
+            "again rather than re-verifying that risk is actually safe "
+            "this time too."
+        ),
+        sql="""
+        ALTER TABLE boards ADD COLUMN link_closed_at TEXT;
+        ALTER TABLE posts ADD COLUMN tombstoned_at TEXT;
+        """,
+    ),
 ]

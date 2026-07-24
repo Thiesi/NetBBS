@@ -81,9 +81,24 @@ ENDPOINT_DESCRIPTOR_OBJECT_TYPE = "endpoint_descriptor"
 BOARD_GENESIS_OBJECT_TYPE = "board_genesis"
 BOARD_POST_OBJECT_TYPE = "board_post"
 
-# A self-authored edit to an existing board_post -- never a
-# moderator edit or a tombstone (design doc).
+# A self-authored edit to an existing board_post -- see
+# BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE/BOARD_POST_TOMBSTONE_OBJECT_TYPE
+# below (design doc §9.5, issue #88) for the origin-authorized
+# counterparts this type does *not* cover.
 BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
+
+# Design doc §9.5, issue #88: an origin-signed edit to someone else's
+# board_post -- extends the exact same per-post chain BOARD_POST_EDIT_
+# OBJECT_TYPE does, but verified against the board's current origin
+# rather than the post's own author (see BoardPostModeratorEdit's own
+# docstring).
+BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE = "board_post_moderator_edit"
+
+# Design doc §9.5, issue #88: a terminal entry on that same per-post
+# chain -- redacts a post's content while preserving the chain and any
+# reply's parent_post_id, never a row-level delete (see
+# BoardPostTombstone's own docstring).
+BOARD_POST_TOMBSTONE_OBJECT_TYPE = "board_post_tombstone"
 
 # Design doc/issue #53: the mutual-consent origin-succession
 # pair -- the current origin's handoff offer, and the new origin's
@@ -91,6 +106,11 @@ BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
 # docstring).
 BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE = "board_origin_transfer_offer"
 BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
+
+# Design doc §9.5, issue #88: a terminal board-lifecycle event, extending
+# the same board_lifecycle_head chain the origin-transfer pair above
+# extends -- see BoardClosure's own docstring.
+BOARD_CLOSURE_OBJECT_TYPE = "board_closure"
 
 # Design doc §9.6, issue #87: the channel-side counterpart to board_
 # genesis/board_post -- structurally identical minus what doesn't apply
@@ -675,11 +695,9 @@ class BoardPostEdit:
     """
     One signed `board_post_edit` event (design doc §7/§13):
     a self-authored revision of an existing `board_post` — never a
-    moderator edit, never a tombstone, both explicitly deferred to
-    Phase 6 (design doc: the local model has no "delete your
-    own post" capability to propagate even for the simple tombstone
-    case, and a moderator edit needs grant verification that doesn't
-    exist yet).
+    moderator edit or a tombstone; see `BoardPostModeratorEdit`/
+    `BoardPostTombstone` (design doc §9.5, issue #88) for those, which
+    extend this exact same chain under a different authorization rule.
 
     Unlike `BoardGenesis`/`KeyTransition`, this is **never** the head of
     its own chain — `payload["previous_event_id"]` is always present,
@@ -733,9 +751,10 @@ def build_board_post_edit(
     guarantees an exact match with the root post's author by
     construction rather than by separately re-deriving the same fields
     and hoping they stay in sync. Whether this edit is actually
-    self-authored (as opposed to a moderator edit, not yet
-    supported) is decided by the caller before ever reaching this function
-    — see `netbbs.link.boards.queue_board_post_edit_if_linked`.
+    self-authored (as opposed to a moderator edit, which builds a
+    `BoardPostModeratorEdit` instead — design doc §9.5, issue #88) is
+    decided by the caller before ever reaching this function — see
+    `netbbs.link.boards.queue_board_post_edit_if_linked`.
 
     `root_post_id`/`previous_event_id` are both always required (never
     optional the way a chain's first entry's predecessor field is
@@ -769,6 +788,180 @@ def verify_board_post_edit(edit: BoardPostEdit, signing_verify_key: nacl.signing
     events`), since it needs the root post's own payload, not just this
     edit's."""
     return verify_signature(signing_verify_key, canonical_bytes(edit.envelope), edit.signature)
+
+
+@dataclass(frozen=True)
+class BoardPostModeratorEdit:
+    """
+    One signed `board_post_moderator_edit` event (design doc §9.5, issue
+    #88): an origin-authorized revision of an existing `board_post` —
+    the moderator-edit counterpart `BoardPostEdit`'s own docstring names
+    as not yet built. Extends the *exact same* per-post
+    `payload["previous_event_id"]` chain `BoardPostEdit` does (a root
+    post's edit history is one linear chain regardless of which of the
+    two types produced any given entry) — but carries no `author` field
+    to cross-check, since verification is against the board's *current
+    origin*, not the edited post's own author's home node (see
+    `verify_board_post_moderator_edit`).
+
+    Deliberately not a new cross-network moderator-grant primitive: the
+    local permission check (`BoardPermission.EDIT`) happens once, on the
+    origin node, before `netbbs.link.boards.queue_board_post_moderator_
+    edit_if_linked` ever builds and signs this — see that function's own
+    docstring for why a carrying (non-origin) node's own local moderator
+    action never reaches this far.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardPostModeratorEdit":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_post_moderator_edit(
+    *,
+    signing_identity: Identity,
+    board_id: str,
+    root_post_id: str,
+    previous_event_id: str,
+    subject: str,
+    body: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardPostModeratorEdit:
+    """
+    Build and sign one `board_post_moderator_edit` event, per design
+    doc. Always signed by `signing_identity` — the board's *current
+    origin's* own current signing key (`netbbs.link.boards.board_origin_
+    fingerprint` resolves which node that is), never the edited post's
+    own author's key — that's the entire mechanical difference from
+    `build_board_post_edit`.
+    """
+    payload = {
+        "board_id": board_id,
+        "root_post_id": root_post_id,
+        "previous_event_id": previous_event_id,
+        "subject": subject,
+        "body": body,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardPostModeratorEdit(envelope=envelope, signature=signature)
+
+
+def verify_board_post_moderator_edit(
+    edit: BoardPostModeratorEdit, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `edit`'s signature against the claimed current origin's
+    *current signing key* — resolving which key that currently is, and
+    confirming the sender actually is the board's current origin, are
+    both the caller's job (`netbbs.link.protocol.LinkNode.handle_
+    events`), same division of responsibility as `verify_board_origin_
+    transfer_offer`."""
+    return verify_signature(signing_verify_key, canonical_bytes(edit.envelope), edit.signature)
+
+
+@dataclass(frozen=True)
+class BoardPostTombstone:
+    """
+    One signed `board_post_tombstone` event (design doc §9.5, issue
+    #88): a *terminal* entry on the same per-post chain `BoardPostEdit`/
+    `BoardPostModeratorEdit` extend — redacts a post's content while
+    preserving the chain itself and any reply's `parent_post_id`,
+    never a row-level delete (`netbbs.boards.posts.delete_post` stays
+    reserved for a still-`'pending'` post's rejection, unrelated to
+    this). Carries its own placeholder `subject`/`body` — chosen once
+    by `netbbs.boards.posts.tombstone_post`, not reconstructed by
+    convention on each receiving node — plus an optional `reason`.
+
+    Same origin-signed authorization model as `BoardPostModeratorEdit`
+    (`BoardPermission.DELETE`, checked locally on the origin node before
+    this is ever built). Once a chain's current head is a tombstone, no
+    further `board_post_edit`/`board_post_moderator_edit`/a second
+    tombstone extends it — enforced by `netbbs.link.protocol.LinkNode.
+    handle_events`, which has to inspect the chain's own current tail to
+    know this, not something this type can enforce on its own.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardPostTombstone":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_post_tombstone(
+    *,
+    signing_identity: Identity,
+    board_id: str,
+    root_post_id: str,
+    previous_event_id: str,
+    subject: str,
+    body: str,
+    reason: str | None,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardPostTombstone:
+    """Build and sign one `board_post_tombstone` event, per design doc.
+    Always signed by `signing_identity` — the board's current origin's
+    own current signing key, same as `build_board_post_moderator_edit`."""
+    payload = {
+        "board_id": board_id,
+        "root_post_id": root_post_id,
+        "previous_event_id": previous_event_id,
+        "subject": subject,
+        "body": body,
+        "reason": reason,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(BOARD_POST_TOMBSTONE_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardPostTombstone(envelope=envelope, signature=signature)
+
+
+def verify_board_post_tombstone(
+    tombstone: BoardPostTombstone, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `tombstone`'s signature against the claimed current
+    origin's *current signing key* — same division of responsibility as
+    `verify_board_post_moderator_edit`."""
+    return verify_signature(signing_verify_key, canonical_bytes(tombstone.envelope), tombstone.signature)
 
 
 @dataclass(frozen=True)
@@ -1125,6 +1318,81 @@ def verify_board_origin_transfer_accepted(
     are both the caller's job, same division of responsibility as
     `verify_board_origin_transfer_offer`."""
     return verify_signature(signing_verify_key, canonical_bytes(accepted.envelope), accepted.signature)
+
+
+@dataclass(frozen=True)
+class BoardClosure:
+    """
+    One signed `board_closure` event (design doc §9.5, issue #88): a
+    *terminal* board-lifecycle event, extending the same `payload
+    ["previous_event_id"]` chain `BoardOriginTransferOffer`/
+    `BoardOriginTransferAccepted` extend (the board's own genesis, or
+    the latest accepted lifecycle event). Signed by the board's
+    *current* origin, same as an origin-transfer offer.
+
+    Once accepted, `netbbs.link.protocol.LinkNode.handle_events` accepts
+    no further lifecycle event for this board_id — not a second closure,
+    not a fresh origin-transfer offer — closure is not reversible in
+    this slice (design doc §9.5). It stops new `board_post`s to the
+    board (`netbbs.boards.posts.create_post`'s own check); it does not
+    restrict moderator edits or tombstones of existing content.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BoardClosure":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_board_closure(
+    *,
+    signing_identity: Identity,
+    board_id: str,
+    previous_event_id: str,
+    reason: str | None,
+    created_at: str,
+    nonce: str | None = None,
+) -> BoardClosure:
+    """Build and sign one `board_closure` event, per design doc. Always
+    signed by `signing_identity` — the board's current origin's own
+    current signing key, matching `build_board_origin_transfer_offer`'s
+    own signing choice."""
+    payload = {
+        "board_id": board_id,
+        "previous_event_id": previous_event_id,
+        "reason": reason,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(BOARD_CLOSURE_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return BoardClosure(envelope=envelope, signature=signature)
+
+
+def verify_board_closure(closure: BoardClosure, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `closure`'s signature against the claimed current origin's
+    *current signing key* — resolving which key that currently is, and
+    confirming the sender actually is the board's current origin, are
+    both the caller's job, same division of responsibility as `verify_
+    board_origin_transfer_offer`."""
+    return verify_signature(signing_verify_key, canonical_bytes(closure.envelope), closure.signature)
 
 
 @dataclass(frozen=True)

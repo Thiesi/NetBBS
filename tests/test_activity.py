@@ -328,7 +328,31 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
     db = Database(db_path)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "general", creator=alice)
-    post = create_post(db, board, alice, "hello", "world")
+    # Write the post via a raw INSERT rather than create_post itself --
+    # issue #88's board-closure check (create_post's own docstring)
+    # queries boards.link_closed_at, a column this truncated pre-#72
+    # schema doesn't have yet, the same reason record_board_seen below
+    # can't be used against this older schema either.
+    from netbbs.boards.content_id import compute_content_id
+    from netbbs.timeutil import utc_now_iso
+
+    created_at = utc_now_iso()
+    post_id = compute_content_id(
+        {
+            "type": "board_post", "board_id": board.board_id, "parent_post_id": None,
+            "author": alice.username, "subject": "hello", "body": "world", "created_at": created_at,
+        }
+    )
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status, root_post_id)
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'approved', ?)
+        """,
+        (post_id, board.id, alice.id, alice.username, alice.fingerprint, "hello", "world", created_at, post_id),
+    )
+    db.connection.commit()
     # Write the cursor row the same shape the pre-#72 code actually
     # wrote -- record_board_seen itself now assumes last_seen_arrival_id
     # already exists, so it can't be used against this older schema.
@@ -336,7 +360,7 @@ def test_migration_backfills_arrival_id_for_a_pre_existing_board_cursor(tmp_path
         "INSERT INTO user_read_cursors "
         "(user_id, object_type, object_id, last_seen_created_at, last_seen_stable_id, updated_at) "
         "VALUES (?, 'board', ?, ?, ?, ?)",
-        (alice.id, board.id, post.created_at, post.post_id, post.created_at),
+        (alice.id, board.id, created_at, post_id, created_at),
     )
     db.connection.commit()
     db.close()

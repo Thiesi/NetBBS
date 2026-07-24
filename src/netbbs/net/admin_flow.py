@@ -120,6 +120,8 @@ from netbbs.link.boards import (
     accept_board_origin_transfer,
     board_origin_fingerprint,
     carried_board_count,
+    close_board_if_linked,
+    is_board_closed,
     is_board_linked,
     is_board_origin_orphaned,
     link_board,
@@ -2124,7 +2126,7 @@ async def _board_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, *, link_context: LinkContext | None = None
 ) -> None:
     linked = await lane.run(is_board_linked, board) if link_context is not None else False
-    is_origin, has_incoming_offer = await _draw_board_detail(
+    is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
         session, lane, board, linked=linked, link_context=link_context
     )
     while True:
@@ -2138,7 +2140,7 @@ async def _board_detail_screen(
             updated = await _edit_board_screen(session, lane, actor, board)
             if updated is not None:
                 board = updated
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
         elif choice == "d":
@@ -2146,32 +2148,38 @@ async def _board_detail_screen(
             deleted = await _delete_board_screen(session, lane, actor, board)
             if deleted:
                 return
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
         elif choice == "p":
             await session.write_line("")
             await _pending_posts_screen(session, lane, actor, board, link_context=link_context)
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
             await _link_board_screen(session, lane, board, link_context)
             linked = await lane.run(is_board_linked, board)
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
-        elif choice == "t" and link_context is not None and linked and is_origin:
+        elif choice == "t" and link_context is not None and linked and is_origin and not is_closed:
             await session.write_line("")
             await _transfer_board_origin_screen(session, lane, board, link_context)
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
+                session, lane, board, linked=linked, link_context=link_context
+            )
+        elif choice == "c" and link_context is not None and linked and is_origin and not is_closed:
+            await session.write_line("")
+            await _close_board_screen(session, lane, board, link_context)
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
         elif choice == "a" and has_incoming_offer:
             await session.write_line("")
             await _accept_board_origin_transfer_screen(session, lane, board, link_context)
-            is_origin, has_incoming_offer = await _draw_board_detail(
+            is_origin, has_incoming_offer, is_closed = await _draw_board_detail(
                 session, lane, board, linked=linked, link_context=link_context
             )
         else:
@@ -2343,6 +2351,44 @@ async def _transfer_board_origin_screen(
     await session.write_line("Offer sent -- it will be pushed to peers on the next sync pass.")
 
 
+async def _close_board_screen(session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext) -> None:
+    """
+    `[C]lose board` (design doc §9.5, issue #88): the current origin's
+    terminal board_closure, stopping new posts network-wide. Only
+    reachable when `_draw_board_detail` already confirmed this node is
+    the current origin and `board` isn't already closed, re-checked here
+    too like every other admin mutation in this file, since closure
+    can't be undone in this slice -- confirmed explicitly before acting.
+    """
+    await session.write_line(
+        colored(
+            "\r\nClosing a board is permanent in this slice -- no new posts, network-wide, "
+            "and this cannot be reversed here.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write("Optional reason (blank for none): ")
+    reason = (await session.read_line()).strip() or None
+    if not await prompt_yes_no(session, f"Close {board.name!r}?", default=False):
+        await session.write_line("Cancelled.")
+        return
+
+    try:
+        closure = await lane.run(
+            close_board_if_linked, board, node_identity=link_context.node_identity, reason=reason,
+        )
+    except LinkBoardsError as exc:
+        await session.write_line(colored(f"Could not close board: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    link_context.link_node.board_closures[board.board_id] = closure
+    link_context.link_node.board_lifecycle_head[board.board_id] = closure.content_id
+    link_context.link_node.known_event_ids.add(closure.content_id)
+    link_context.link_node.events[closure.content_id] = closure.to_dict()
+
+    await session.write_line(f"{board.name!r} closed -- it will be pushed to peers on the next sync pass.")
+
+
 async def _accept_board_origin_transfer_screen(
     session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
 ) -> None:
@@ -2396,15 +2442,18 @@ async def _draw_board_detail(
     *,
     linked: bool = False,
     link_context: LinkContext | None = None,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
     """
-    Returns `(is_origin, has_incoming_offer)` (design doc §13, issue
-    #53) -- whether this node is currently `board`'s own
-    origin (gates `[T]ransfer origin`) and whether a pending incoming
-    origin-transfer offer names this node as the proposed new origin
-    (gates `[A]ccept transfer`). `_board_detail_screen`'s own dispatch
-    loop needs both every time it redraws, so returning them here
-    avoids a second, separately-timed recomputation immediately after.
+    Returns `(is_origin, has_incoming_offer, is_closed)` (design doc
+    §13/§9.5, issues #53/#88) -- whether this node is currently
+    `board`'s own origin (gates `[T]ransfer origin`/`[C]lose`), whether a
+    pending incoming origin-transfer offer names this node as the
+    proposed new origin (gates `[A]ccept transfer`), and whether `board`
+    has already been closed (suppresses both `[T]ransfer origin` and
+    `[C]lose` -- closure is terminal, design doc §9.5).
+    `_board_detail_screen`'s own dispatch loop needs all three every time
+    it redraws, so returning them here avoids a second, separately-timed
+    recomputation immediately after.
     """
     header = colored(sanitize_text(board.name), fg_color=HEADER_COLOR, bold=True)
     await session.write_line(f"\r\n{header}")
@@ -2424,9 +2473,13 @@ async def _draw_board_detail(
     )
     is_origin = False
     has_incoming_offer = False
+    is_closed = False
     if link_context is not None:
         await session.write_line(f"Linked: {'yes' if linked else 'no'}")
         if linked:
+            is_closed = await lane.run(is_board_closed, board)
+            if is_closed:
+                await session.write_line(colored("Closed: yes -- no longer accepts new posts", fg_color=MUTED_COLOR))
             origin_fingerprint = await lane.run(board_origin_fingerprint, board)
             is_origin = origin_fingerprint == link_context.node_identity.fingerprint
             orphan_note = ""
@@ -2462,14 +2515,18 @@ async def _draw_board_detail(
     options = [menu_key("E", "dit"), menu_key("D", "elete"), menu_key("P", "ending posts")]
     if link_context is not None and not linked:
         options.append(menu_key("L", "ink this board"))
-    if link_context is not None and linked and is_origin and board.board_id not in link_context.link_node.pending_origin_transfers:
+    if (
+        link_context is not None and linked and is_origin and not is_closed
+        and board.board_id not in link_context.link_node.pending_origin_transfers
+    ):
         options.append(menu_key("T", "ransfer origin"))
+        options.append(menu_key("C", "lose board"))
     if has_incoming_offer:
         options.append(menu_key("A", "ccept transfer"))
     options.append(menu_key("B", "ack"))
     await session.write_line(f"\r\n{'  '.join(options)}")
     await session.write("Choice: ")
-    return is_origin, has_incoming_offer
+    return is_origin, has_incoming_offer, is_closed
 
 
 async def _edit_board_screen(session: Session, lane: DatabaseLane, actor: User, board: Board) -> Board | None:

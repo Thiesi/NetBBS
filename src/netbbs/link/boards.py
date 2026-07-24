@@ -35,19 +35,28 @@ from netbbs.auth.users import User
 from netbbs.boards.boards import Board
 from netbbs.boards.posts import Post
 from netbbs.link.events import (
+    BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
+    BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+    BoardClosure,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    BoardPostModeratorEdit,
+    BoardPostTombstone,
+    build_board_closure,
     build_board_genesis,
     build_board_origin_transfer_accepted,
     build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
+    build_board_post_moderator_edit,
+    build_board_post_tombstone,
     event_content_id,
 )
 from netbbs.link.node_identity import NodeIdentity, resolve_current_operational_key
@@ -354,6 +363,7 @@ def _post_from_row(row) -> Post:
         subject=row["subject"], body=row["body"], created_at=row["created_at"],
         status=row["status"], pinned=bool(row["pinned"]), exempt_from_expiry=bool(row["exempt_from_expiry"]),
         root_post_id=row["root_post_id"], edit_of_post_id=row["edit_of_post_id"],
+        tombstoned_at=row["tombstoned_at"],
     )
 
 
@@ -540,25 +550,171 @@ def materialize_carried_post_edit(db: Database, edit: BoardPostEdit, *, sender_f
     )
 
 
+def materialize_carried_board_post_moderator_edit(
+    db: Database, edit: BoardPostModeratorEdit, *, sender_fingerprint: str
+) -> Post | None:
+    """
+    Turn a *received* `board_post_moderator_edit` into a new `posts`
+    revision row (design doc §9.5, issue #88) -- mirrors
+    `materialize_carried_post_edit` exactly, with one difference:
+    `author_label`/`author_fingerprint`/`author_user_id` are copied
+    from the *root post's own row*, not from this edit's payload (which
+    has no `author` field at all -- a moderator edit never changes who
+    the post is attributed to, the same "authorship is invariant across
+    a chain" reasoning `materialize_carried_post_edit` already applies,
+    just reading it from a local row instead of a payload dict since
+    there's no payload copy to read here).
+    """
+    existing = db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
+    if existing is not None:
+        return _post_from_row(existing)
+
+    payload = edit.payload
+    root_row = db.connection.execute(
+        "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
+    ).fetchone()
+    if root_row is None:
+        return None
+    predecessor_exists = db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
+    ).fetchone()
+    if predecessor_exists is None:
+        return None
+
+    db.connection.execute(
+        """
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_id) DO NOTHING
+        """,
+        (
+            edit.content_id, sender_fingerprint, BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
+            json.dumps(edit.to_dict()), utc_now_iso(), payload["board_id"],
+        ),
+    )
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status,
+             root_post_id, edit_of_post_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)
+        """,
+        (
+            edit.content_id, root_row["board_id"], root_row["parent_post_id"],
+            root_row["author_user_id"], root_row["author_label"], root_row["author_fingerprint"],
+            payload["subject"], payload["body"], payload["created_at"],
+            payload["root_post_id"], payload["previous_event_id"],
+        ),
+    )
+    reindex_post(db, root_row["board_id"], payload["root_post_id"])
+    db.connection.commit()
+
+    return _post_from_row(
+        db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (edit.content_id,)).fetchone()
+    )
+
+
+def materialize_carried_board_post_tombstone(
+    db: Database, tombstone: BoardPostTombstone, *, sender_fingerprint: str
+) -> Post | None:
+    """
+    Turn a *received* `board_post_tombstone` into a new, terminal
+    `posts` revision row (design doc §9.5, issue #88) -- mirrors
+    `materialize_carried_board_post_moderator_edit` exactly, plus
+    setting `tombstoned_at` so `netbbs.boards.posts.edit_post`/
+    `tombstone_post` both correctly refuse to extend this chain any
+    further, the local mirror of `handle_events`' own terminality check.
+    """
+    existing = db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (tombstone.content_id,)).fetchone()
+    if existing is not None:
+        return _post_from_row(existing)
+
+    payload = tombstone.payload
+    root_row = db.connection.execute(
+        "SELECT * FROM posts WHERE post_id = ?", (payload["root_post_id"],)
+    ).fetchone()
+    if root_row is None:
+        return None
+    predecessor_exists = db.connection.execute(
+        "SELECT 1 FROM posts WHERE post_id = ?", (payload["previous_event_id"],)
+    ).fetchone()
+    if predecessor_exists is None:
+        return None
+
+    db.connection.execute(
+        """
+        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(content_id) DO NOTHING
+        """,
+        (
+            tombstone.content_id, sender_fingerprint, BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+            json.dumps(tombstone.to_dict()), utc_now_iso(), payload["board_id"],
+        ),
+    )
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status,
+             root_post_id, edit_of_post_id, tombstoned_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+        """,
+        (
+            tombstone.content_id, root_row["board_id"], root_row["parent_post_id"],
+            root_row["author_user_id"], root_row["author_label"], root_row["author_fingerprint"],
+            payload["subject"], payload["body"], payload["created_at"],
+            payload["root_post_id"], payload["previous_event_id"], payload["created_at"],
+        ),
+    )
+    reindex_post(db, root_row["board_id"], payload["root_post_id"])
+    db.connection.commit()
+
+    return _post_from_row(
+        db.connection.execute("SELECT * FROM posts WHERE post_id = ?", (tombstone.content_id,)).fetchone()
+    )
+
+
+def materialize_carried_board_closure(db: Database, closure: BoardClosure) -> None:
+    """
+    Record a *received* `board_closure` locally (design doc §9.5, issue
+    #88) -- sets `boards.link_closed_at` so `netbbs.boards.posts.
+    create_post`'s own gate takes effect for a carrying (non-origin)
+    node too, not just the closing origin itself
+    (`close_board_if_linked` sets this directly for the origin's own
+    case). A silent no-op if this node has no local row for the
+    closure's `board_id` at all, mirroring `record_board_origin_
+    change`'s own defensive shape.
+    """
+    board_id = closure.payload["board_id"]
+    db.connection.execute(
+        "UPDATE boards SET link_closed_at = ? WHERE board_id = ? AND link_closed_at IS NULL",
+        (closure.payload["created_at"], board_id),
+    )
+    db.connection.commit()
+
+
 def rebuild_carried_post_materialization(db: Database) -> int:
     """
     Repair pass (design doc §9.3, issue #73's own "supported rebuild
     path" acceptance criterion): materializes every accepted
-    `board_post`/`board_post_edit` in `link_events` that has no
-    corresponding `posts` row yet.
+    `board_post`/`board_post_edit`/`board_post_moderator_edit`/`board_
+    post_tombstone` (the latter two, issue #88) in `link_events` that
+    has no corresponding `posts` row yet.
 
     Only needed for a gap that predates this feature (persistence and
     projection are atomic for every *new* event going forward, via
-    `materialize_carried_post`/`_edit` themselves -- see their own
-    docstrings) or a chain with more than one missing link at once.
-    Loops until a full pass makes no further progress, so a multi-edit
-    gap resolves in dependency order in one call rather than needing
-    one invocation per missing link; terminates either because
-    everything is caught up or because whatever remains is permanently
-    unmaterializable (e.g. a board this node never carried), the same
-    "derived state rebuildable from authoritative data" principle
-    issue #74 applies to FTS indexes. Returns how many rows were newly
-    materialized.
+    `materialize_carried_post`/`_edit`/`_moderator_edit`/`_tombstone`
+    themselves -- see their own docstrings) or a chain with more than
+    one missing link at once. Loops until a full pass makes no further
+    progress, so a multi-edit gap resolves in dependency order in one
+    call rather than needing one invocation per missing link;
+    terminates either because everything is caught up or because
+    whatever remains is permanently unmaterializable (e.g. a board this
+    node never carried), the same "derived state rebuildable from
+    authoritative data" principle issue #74 applies to FTS indexes.
+    Returns how many rows were newly materialized.
     """
     rebuilt = 0
     while True:
@@ -567,10 +723,13 @@ def rebuild_carried_post_materialization(db: Database) -> int:
             """
             SELECT content_id, sender_fingerprint, object_type, envelope_json
             FROM link_events
-            WHERE object_type IN (?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
+            WHERE object_type IN (?, ?, ?, ?) AND content_id NOT IN (SELECT post_id FROM posts)
             ORDER BY received_at ASC
             """,
-            (BOARD_POST_OBJECT_TYPE, BOARD_POST_EDIT_OBJECT_TYPE),
+            (
+                BOARD_POST_OBJECT_TYPE, BOARD_POST_EDIT_OBJECT_TYPE,
+                BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE, BOARD_POST_TOMBSTONE_OBJECT_TYPE,
+            ),
         ).fetchall()
         for row in gaps:
             envelope = json.loads(row["envelope_json"])
@@ -578,9 +737,17 @@ def rebuild_carried_post_materialization(db: Database) -> int:
                 result = materialize_carried_post(
                     db, BoardPost.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
                 )
-            else:
+            elif row["object_type"] == BOARD_POST_EDIT_OBJECT_TYPE:
                 result = materialize_carried_post_edit(
                     db, BoardPostEdit.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                )
+            elif row["object_type"] == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+                result = materialize_carried_board_post_moderator_edit(
+                    db, BoardPostModeratorEdit.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
+                )
+            else:
+                result = materialize_carried_board_post_tombstone(
+                    db, BoardPostTombstone.from_dict(envelope), sender_fingerprint=row["sender_fingerprint"]
                 )
             if result is not None:
                 progressed += 1
@@ -612,6 +779,15 @@ def board_origin_fingerprint(db: Database, board: Board) -> str:
         return row["link_origin_fingerprint"]
     genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
     return genesis.payload["origin_fingerprint"]
+
+
+def is_board_closed(db: Database, board: Board) -> bool:
+    """Whether `board` has a verified `board_closure` on file (design
+    doc §9.5, issue #88) -- `False` for a board that isn't Linked at
+    all, same as `is_board_linked`'s own "not Linked" framing, since
+    there's nothing to be closed for a purely local board."""
+    row = db.connection.execute("SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)).fetchone()
+    return row is not None and row["link_closed_at"] is not None
 
 
 def _current_lifecycle_head(db: Database, board: Board) -> str:
@@ -747,6 +923,52 @@ def record_board_origin_change(db: Database, board_id: str, new_origin_fingerpri
     db.connection.commit()
 
 
+def close_board_if_linked(
+    db: Database, board: Board, *, node_identity: NodeIdentity, reason: str | None = None,
+) -> BoardClosure | None:
+    """
+    Build, sign, and persist a `board_closure` for `board` (design doc
+    §9.5, issue #88) -- a terminal board-lifecycle event, the same
+    authority model `offer_board_origin_transfer` already uses (only the
+    board's *current* origin may act; no separate `BoardPermission`
+    check, since only a SysOp reaches this call site in the first
+    place). Extends `_current_lifecycle_head` exactly like a transfer
+    offer would.
+
+    Returns `None` (not an error) if `board` isn't Linked at all -- there
+    is nothing to close on the network side for a purely local board.
+    Raises `LinkBoardsError` if this node isn't currently the origin, or
+    if `board` is already closed.
+    """
+    if not is_board_linked(db, board):
+        return None
+    current_origin = board_origin_fingerprint(db, board)
+    if current_origin != node_identity.fingerprint:
+        raise LinkBoardsError(f"this node is not board {board.name!r}'s current origin")
+
+    row = db.connection.execute(
+        "SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)
+    ).fetchone()
+    if row["link_closed_at"] is not None:
+        raise LinkBoardsError(f"board {board.name!r} is already closed")
+
+    closure = build_board_closure(
+        signing_identity=node_identity.signing_key,
+        board_id=board.board_id,
+        previous_event_id=_current_lifecycle_head(db, board),
+        reason=reason,
+        created_at=utc_now_iso(),
+    )
+
+    db.connection.execute(
+        "UPDATE boards SET link_lifecycle_json = ?, link_closed_at = ? WHERE id = ?",
+        (json.dumps(closure.to_dict()), closure.payload["created_at"], board.id),
+    )
+    db.connection.commit()
+
+    return closure
+
+
 def is_board_origin_orphaned(peer: PeerRecord) -> bool:
     """
     Whether `peer` (a board's current origin) has no currently-
@@ -859,12 +1081,12 @@ def queue_board_post_edit_if_linked(
 ) -> BoardPostEdit | None:
     """
     If `board` is Linked, `edited_post` is currently `'approved'`, and
-    `edited_by` is the post's *original author* (design doc:
-    moderator edits aren't propagated -- the local model
-    has no author-bypass for `delete_post` at all, so a tombstone has
-    no honest simple slice either, and a moderator edit needs grant
-    verification that doesn't exist yet), build and sign a `board_post_
-    edit` for it and store it on the edited revision's own row.
+    `edited_by` is the post's *original author*, build and sign a
+    `board_post_edit` for it and store it on the edited revision's own
+    row. If `edited_by` is instead a moderator editing someone else's
+    post, this returns `None` -- see `queue_board_post_moderator_edit_
+    if_linked` (design doc §9.5, issue #88) for that case, a distinct
+    origin-authorized event type, not a variant of this one.
 
     `netbbs.boards.posts.edit_post` copies `author_user_id` forward
     unchanged across every revision regardless of who actually
@@ -900,19 +1122,10 @@ def queue_board_post_edit_if_linked(
     if existing is not None and existing["link_event_json"] is not None:
         return BoardPostEdit.from_dict(json.loads(existing["link_event_json"]))
 
-    root_row = db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.root_post_id,)
-    ).fetchone()
-    if root_row is None or root_row["link_event_json"] is None:
+    chain = _resolve_edit_chain_predecessors(db, edited_post)
+    if chain is None:
         return None
-    root_post = BoardPost.from_dict(json.loads(root_row["link_event_json"]))
-
-    predecessor_row = db.connection.execute(
-        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.edit_of_post_id,)
-    ).fetchone()
-    if predecessor_row is None or predecessor_row["link_event_json"] is None:
-        return None
-    previous_event_id = event_content_id(json.loads(predecessor_row["link_event_json"])["envelope"])
+    root_post, previous_event_id = chain
 
     edit = build_board_post_edit(
         signing_identity=node_identity.signing_key,
@@ -934,18 +1147,172 @@ def queue_board_post_edit_if_linked(
     return edit
 
 
-def load_own_board_events(
-    db: Database, own_fingerprint: str
-) -> list[BoardGenesis | BoardPost | BoardPostEdit | BoardOriginTransferOffer | BoardOriginTransferAccepted]:
+def _resolve_edit_chain_predecessors(db: Database, edited_post: Post) -> tuple[BoardPost, str] | None:
+    """
+    `edited_post`'s own root `BoardPost` and the `content_id` its own
+    immediate local predecessor (`edited_post.edit_of_post_id`) was
+    queued under -- the shared "requires an unbroken local chain back to
+    a Linked root" lookup `queue_board_post_edit_if_linked`/`_moderator_
+    edit_if_linked`/`_tombstone_if_linked` all need identically. Returns
+    `None` if either isn't queued locally yet (see `queue_board_post_
+    edit_if_linked`'s own docstring for why that's a real, accepted gap,
+    not an error).
+    """
+    root_row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.root_post_id,)
+    ).fetchone()
+    if root_row is None or root_row["link_event_json"] is None:
+        return None
+    root_post = BoardPost.from_dict(json.loads(root_row["link_event_json"]))
+
+    predecessor_row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.edit_of_post_id,)
+    ).fetchone()
+    if predecessor_row is None or predecessor_row["link_event_json"] is None:
+        return None
+    previous_event_id = event_content_id(json.loads(predecessor_row["link_event_json"])["envelope"])
+
+    return root_post, previous_event_id
+
+
+def queue_board_post_moderator_edit_if_linked(
+    db: Database,
+    edited_post: Post,
+    board: Board,
+    *,
+    node_identity: NodeIdentity,
+    edited_by: User,
+) -> BoardPostModeratorEdit | None:
+    """
+    Origin-authorized counterpart to `queue_board_post_edit_if_linked`
+    (design doc §9.5, issue #88): if `board` is Linked, `edited_post` is
+    currently `'approved'`, `edited_by` is *not* the post's original
+    author (a moderator edit -- `netbbs.boards.posts.edit_post` itself
+    already required `edited_by` to hold `BoardPermission.EDIT` to reach
+    this point at all), and *this node is `board`'s own current origin*,
+    build and sign a `board_post_moderator_edit`.
+
+    That last condition is the whole point: only the origin's assertion
+    is recognized network-wide (design doc §9.5 -- this is deliberately
+    not a new cross-network moderator-grant primitive). A carrying
+    (non-origin) node's own local moderator editing a post it doesn't
+    own returns `None` here -- the edit stays purely local, exactly as
+    `edit_post` already allowed before this issue, just never
+    propagated, since this node has no origin authority to assert an
+    edit the rest of the network would recognize.
+    """
+    if edited_post.status != "approved":
+        return None
+    if not is_board_linked(db, board):
+        return None
+    if edited_by.id == edited_post.author_user_id:
+        return None
+    if board_origin_fingerprint(db, board) != node_identity.fingerprint:
+        return None
+
+    existing = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited_post.post_id,)
+    ).fetchone()
+    if existing is not None and existing["link_event_json"] is not None:
+        return BoardPostModeratorEdit.from_dict(json.loads(existing["link_event_json"]))
+
+    chain = _resolve_edit_chain_predecessors(db, edited_post)
+    if chain is None:
+        return None
+    root_post, previous_event_id = chain
+
+    edit = build_board_post_moderator_edit(
+        signing_identity=node_identity.signing_key,
+        board_id=board.board_id,
+        root_post_id=root_post.content_id,
+        previous_event_id=previous_event_id,
+        subject=edited_post.subject,
+        body=edited_post.body,
+        created_at=edited_post.created_at,
+    )
+
+    db.connection.execute(
+        "UPDATE posts SET link_event_json = ? WHERE post_id = ?",
+        (json.dumps(edit.to_dict()), edited_post.post_id),
+    )
+    db.connection.commit()
+
+    return edit
+
+
+def queue_board_post_tombstone_if_linked(
+    db: Database, tombstoned_post: Post, board: Board, *, node_identity: NodeIdentity,
+) -> BoardPostTombstone | None:
+    """
+    If `board` is Linked, `tombstoned_post` was just produced by
+    `netbbs.boards.posts.tombstone_post` (its own `tombstoned_at` is
+    set), and this node is `board`'s current origin, build and sign a
+    `board_post_tombstone` -- same origin-only authorization reasoning
+    as `queue_board_post_moderator_edit_if_linked` (design doc §9.5,
+    issue #88); `tombstone_post` itself already required
+    `BoardPermission.DELETE` to reach this point.
+    """
+    if tombstoned_post.tombstoned_at is None:
+        return None
+    if not is_board_linked(db, board):
+        return None
+    if board_origin_fingerprint(db, board) != node_identity.fingerprint:
+        return None
+
+    existing = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (tombstoned_post.post_id,)
+    ).fetchone()
+    if existing is not None and existing["link_event_json"] is not None:
+        return BoardPostTombstone.from_dict(json.loads(existing["link_event_json"]))
+
+    chain = _resolve_edit_chain_predecessors(db, tombstoned_post)
+    if chain is None:
+        return None
+    root_post, previous_event_id = chain
+
+    tombstone = build_board_post_tombstone(
+        signing_identity=node_identity.signing_key,
+        board_id=board.board_id,
+        root_post_id=root_post.content_id,
+        previous_event_id=previous_event_id,
+        subject=tombstoned_post.subject,
+        body=tombstoned_post.body,
+        reason=None,
+        created_at=tombstoned_post.created_at,
+    )
+
+    db.connection.execute(
+        "UPDATE posts SET link_event_json = ? WHERE post_id = ?",
+        (json.dumps(tombstone.to_dict()), tombstoned_post.post_id),
+    )
+    db.connection.commit()
+
+    return tombstone
+
+
+_OwnBoardEvent = (
+    BoardGenesis
+    | BoardPost
+    | BoardPostEdit
+    | BoardPostModeratorEdit
+    | BoardPostTombstone
+    | BoardOriginTransferOffer
+    | BoardOriginTransferAccepted
+    | BoardClosure
+)
+
+
+def load_own_board_events(db: Database, own_fingerprint: str) -> list[_OwnBoardEvent]:
     """
     This node's own originated `board_genesis`/`board_post`/`board_
-    post_edit`/`board_origin_transfer_offer`/`board_origin_transfer_
-    accepted` events, read directly off the `boards`/`posts` tables'
-    own columns -- what `netbbs.link.sync`'s push loop sends to every
-    seed every pass, mirroring how `node.identity.transitions` is
-    already re-pushed in full regardless of per-peer delivery history
-    (the same "harmless no-op" model) rather than tracked per-peer
-    here either.
+    post_edit`/`board_post_moderator_edit`/`board_post_tombstone`
+    (issue #88)/`board_origin_transfer_offer`/`board_origin_transfer_
+    accepted`/`board_closure` (issue #88) events, read directly off the
+    `boards`/`posts` tables' own columns -- what `netbbs.link.sync`'s
+    push loop sends to every seed every pass, mirroring how `node.
+    identity.transitions` is already re-pushed in full regardless of
+    per-peer delivery history (the same "harmless no-op" model) rather
+    than tracked per-peer here either.
 
     `own_fingerprint` (design doc, issue #53) is
     needed to tell a board this node actually *originated* apart
@@ -955,18 +1322,23 @@ def load_own_board_events(
     origin, not this node, and the "no relay from a stranger"
     scope note means this node re-pushing it as if it were its own
     would misrepresent who actually originated it. `link_lifecycle_
-    json` (an offer or acceptance) has no such ambiguity -- it's only
-    ever populated by this node's own `offer_board_origin_transfer`/
-    `accept_board_origin_transfer` calls in the first place, always
+    json` (an offer, an acceptance, or a closure) has no such
+    ambiguity -- it's only ever populated by this node's own
+    `offer_board_origin_transfer`/`accept_board_origin_transfer`/
+    `close_board_if_linked` calls in the first place, always
     self-originated by construction.
 
     `posts.link_event_json` holds a `board_post` on a root row or a
-    `board_post_edit` on a later revision row -- decided by
-    peeking at the stored envelope's own `object_type`, not by which
-    row it came from, since that's already unambiguous and avoids a
-    second local-schema-dependent branch.
+    `board_post_edit`/`board_post_moderator_edit`/`board_post_tombstone`
+    on a later revision row -- decided by peeking at the stored
+    envelope's own `object_type`, not by which row it came from, since
+    that's already unambiguous and avoids a second local-schema-dependent
+    branch. A `board_post_moderator_edit`/`board_post_tombstone` this
+    node holds is always self-originated too: `queue_board_post_
+    moderator_edit_if_linked`/`_tombstone_if_linked` only ever build one
+    when this node is the board's own current origin.
     """
-    events: list[BoardGenesis | BoardPost | BoardPostEdit | BoardOriginTransferOffer | BoardOriginTransferAccepted] = []
+    events: list[_OwnBoardEvent] = []
     for row in db.connection.execute(
         "SELECT link_genesis_json, link_lifecycle_json FROM boards WHERE link_genesis_json IS NOT NULL"
     ):
@@ -975,16 +1347,24 @@ def load_own_board_events(
             events.append(genesis)
         if row["link_lifecycle_json"] is not None:
             raw = json.loads(row["link_lifecycle_json"])
-            if raw["envelope"]["object_type"] == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
+            lifecycle_object_type = raw["envelope"]["object_type"]
+            if lifecycle_object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
                 events.append(BoardOriginTransferOffer.from_dict(raw))
+            elif lifecycle_object_type == BOARD_CLOSURE_OBJECT_TYPE:
+                events.append(BoardClosure.from_dict(raw))
             else:
                 events.append(BoardOriginTransferAccepted.from_dict(raw))
     for row in db.connection.execute(
         "SELECT link_event_json FROM posts WHERE link_event_json IS NOT NULL"
     ):
         raw = json.loads(row["link_event_json"])
-        if raw["envelope"]["object_type"] == BOARD_POST_EDIT_OBJECT_TYPE:
+        post_object_type = raw["envelope"]["object_type"]
+        if post_object_type == BOARD_POST_EDIT_OBJECT_TYPE:
             events.append(BoardPostEdit.from_dict(raw))
+        elif post_object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+            events.append(BoardPostModeratorEdit.from_dict(raw))
+        elif post_object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
+            events.append(BoardPostTombstone.from_dict(raw))
         else:
             events.append(BoardPost.from_dict(raw))
     return events

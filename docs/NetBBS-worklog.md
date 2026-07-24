@@ -1341,6 +1341,65 @@ node through the live TUI as a result; received content still
 materializes and is browsable correctly. Worth a small, scoped follow-up
 issue rather than silently assuming this gap doesn't exist.
 
+**Board closure, moderator edits, tombstones (design doc §9.5, issue #88).**
+All three new event types (`board_closure`, `board_post_moderator_edit`,
+`board_post_tombstone`) reuse `board_origin_transfer_offer`'s existing
+verification shape (resolve the board's current origin, confirm it's an
+independently-known peer, verify against its current signing key) rather
+than inventing a new authorization primitive -- the two post-scoped types
+carry no `author` field at all, since verification is against the origin,
+never the edited post's own author. The actual gate is a local
+`BoardPermission.EDIT`/`DELETE` check performed once, on the origin node,
+before `netbbs.link.boards.queue_board_post_moderator_edit_if_linked`/
+`queue_board_post_tombstone_if_linked` ever build and sign the event -- a
+carrying (non-origin) node's own local moderator action on a post it
+doesn't own stays purely local, never propagated, since it has no origin
+authority to assert. This is deliberately *not* the general "linked-board
+moderator grants/revocations" feature (delegating that authority to a
+non-origin node) -- that remains out of scope.
+
+`board_closure` extends the *same* `board_lifecycle_head` chain
+`board_origin_transfer_offer`/`_accepted` already extend, and is terminal:
+`handle_events` refuses any further lifecycle event (a fresh offer, or a
+second closure) for a closed board_id. `board_post_moderator_edit`/`board_
+post_tombstone` extend the *same* per-post chain `board_post_edit` already
+does -- a tombstone is terminal for its own chain the same way, refusing any
+further edit of any kind past it (`BoardEventState.is_tombstoned`, checked
+by all three edit-chain-extending branches, not just the new ones).
+
+`posts.tombstoned_at` is a plain, nullable `ALTER TABLE ADD COLUMN` --
+deliberately **not** a `posts.status` CHECK-widening rebuild, the pattern
+used ~4 times elsewhere for that same column. A much earlier migration
+(the one adding `root_post_id`/`edit_of_post_id`) already found and
+documented that rebuilding `posts` is specifically unsafe: it's a live
+*self-referencing* FK parent (`parent_post_id`/`root_post_id`/`edit_of_
+post_id` all reference `posts.post_id`), and SQLite's `DROP TABLE` (the
+rebuild pattern's first step) applies FK cascade/SET-NULL side effects to
+any row still referencing the dropped table, independent of that column's
+declared `ON DELETE` behavior. **Any future issue that wants to add a new
+`posts` (or similarly self-referencing) status/state value should reach for
+an additive nullable column first, not assume the existing CHECK-widening
+rebuild pattern is still safe to reuse.** `netbbs.boards.posts.
+tombstone_post` is a genuinely new local function, not a repurposed
+`delete_post` -- it inserts a further content-addressed revision
+(placeholder content, `tombstoned_at` set) rather than removing the row, so
+the edit chain and any reply's `parent_post_id` stay intact; `delete_post`
+itself is unchanged, still reserved for a still-`'pending'` post's
+rejection.
+
+A real bug found by writing the UI-level test for this issue, not by
+inspection: `netbbs.boards.posts._resolve_current_version` (which builds
+the `Post` a reader/menu actually sees, substituting the latest revision's
+`subject`/`body` onto the root row via `dataclasses.replace`) forgot to
+also substitute `tombstoned_at` -- a tombstoned post displayed its
+placeholder content correctly, but `_can_edit_post`/`_can_tombstone_post`
+still read `tombstoned_at=None` off the never-tombstoned root row, wrongly
+keeping `[E]dit`/`[T]ombstone` on offer for it. Worth remembering for any
+future field added to a post revision: `_resolve_current_version` must
+explicitly carry over *every* field that can legitimately differ on the
+latest revision, not just the ones the feature adding it happened to think
+of first.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required

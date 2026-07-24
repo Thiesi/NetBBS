@@ -47,6 +47,9 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from netbbs.link.boards import (
     BoardCarryLimitError,
     materialize_carried_board,
+    materialize_carried_board_closure,
+    materialize_carried_board_post_moderator_edit,
+    materialize_carried_board_post_tombstone,
     materialize_carried_post,
     materialize_carried_post_edit,
     record_board_origin_change,
@@ -57,20 +60,26 @@ from netbbs.link.channels import (
     materialize_carried_channel_message,
 )
 from netbbs.link.events import (
+    BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
+    BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     CHANNEL_MESSAGE_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
+    BoardClosure,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    BoardPostModeratorEdit,
+    BoardPostTombstone,
     ChannelGenesis,
     ChannelMessage,
     KeyTransition,
@@ -211,6 +220,20 @@ async def persist_accepted_events(
                 materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
             )
             continue
+        elif object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: same "skip the generic save_
+            # event dispatch" shape as BOARD_POST_EDIT_OBJECT_TYPE above.
+            await lane.run(
+                materialize_carried_board_post_moderator_edit,
+                BoardPostModeratorEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint,
+            )
+            continue
+        elif object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
+            await lane.run(
+                materialize_carried_board_post_tombstone,
+                BoardPostTombstone.from_dict(envelope), sender_fingerprint=sender_fingerprint,
+            )
+            continue
         elif object_type == CHANNEL_MESSAGE_OBJECT_TYPE:
             # Design doc §9.6, issue #87: same "skip the generic save_
             # event dispatch, materialize does its own link_events
@@ -285,6 +308,13 @@ async def persist_accepted_events(
                 transfer_accepted.payload["board_id"],
                 transfer_accepted.payload["new_origin_fingerprint"],
             )
+        elif object_type == BOARD_CLOSURE_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: a bystander witnessing someone
+            # else's board being closed needs the same local-materialization
+            # follow-up BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE above
+            # needs -- the closing origin's own case is handled directly
+            # by close_board_if_linked itself.
+            await lane.run(materialize_carried_board_closure, BoardClosure.from_dict(envelope))
 
 
 class LinkTransportError(Exception):
@@ -658,7 +688,8 @@ async def push_events(
     base_url: str,
     events: list[
         KeyTransition | BoardGenesis | BoardPost | BoardPostEdit
-        | BoardOriginTransferOffer | BoardOriginTransferAccepted
+        | BoardPostModeratorEdit | BoardPostTombstone
+        | BoardOriginTransferOffer | BoardOriginTransferAccepted | BoardClosure
         | LinkMessage | LinkMessageAccepted | LinkMessageBounced
     ],
     *,
@@ -666,10 +697,11 @@ async def push_events(
 ) -> list[str]:
     """
     Push `events` — this node's *own* originated events (`key_
-    transition`s, `board_genesis`/`board_post`/`board_post_edit`,
+    transition`s, `board_genesis`/`board_post`/`board_post_edit`/`board_
+    post_moderator_edit`/`board_post_tombstone` (issue #88),
     `board_origin_transfer_offer`/`board_origin_transfer_
-    accepted` (issue #53), and `link_message`/`link_
-    message_accepted`/`link_message_bounced`) — per the
+    accepted`/`board_closure` (issues #53/#88), and `link_
+    message`/`link_message_accepted`/`link_message_bounced`) — per the
     "no relay from a stranger" scope note —
     to a peer at `base_url`. Returns whichever content_ids the peer
     newly accepted; purely informational, since the sender's own copies

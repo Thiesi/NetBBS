@@ -84,6 +84,12 @@ class Post:
     exempt_from_expiry: bool
     root_post_id: str
     edit_of_post_id: str | None
+    # Nullable ISO timestamp (design doc §9.5, issue #88): set once
+    # `tombstone_post` redacts this revision -- a *further* chain
+    # revision, never an in-place mutation, so `root_post_id`/`edit_of_
+    # post_id` above stay intact. `edit_post`/`tombstone_post` both
+    # refuse to extend a chain whose current head already has this set.
+    tombstoned_at: str | None = None
     # True only on a Post resolved by list_posts_page/list_pinned_posts
     # whose displayed subject/body came from a later edit, not this row
     # itself -- see _resolve_current_version. Always False on a Post
@@ -119,9 +125,19 @@ def create_post(
     Starts `'pending'` if `board.moderated`, else `'approved'` — see
     `approve_post`/`delete_post` for how a pending post gets resolved,
     and `list_pending_posts` for the moderation queue view.
+
+    Refuses with a `PostError` if `board` has been closed (design doc
+    §9.5, issue #88 -- `boards.link_closed_at` set by a verified
+    `board_closure`) -- a closed board accepts no further posts of any
+    kind, replies included.
     """
     require_level(author, board.min_write_level)
     _check_content_length(subject, body)
+    closed_row = db.connection.execute(
+        "SELECT link_closed_at FROM boards WHERE id = ?", (board.id,)
+    ).fetchone()
+    if closed_row is not None and closed_row["link_closed_at"] is not None:
+        raise PostError(f"board {board.name!r} is closed and no longer accepts new posts")
 
     status = "pending" if board.moderated else "approved"
     created_at = utc_now_iso()
@@ -230,6 +246,8 @@ def edit_post(
     ).fetchone()
     if current is None:
         raise PostError("no currently-approved version of this post exists to edit")
+    if current["tombstoned_at"] is not None:
+        raise PostError("this post has been tombstoned and can no longer be edited")
 
     if subject == current["subject"] and body == current["body"]:
         # No-op edit (GitHub issue #41): every edit gets a fresh
@@ -340,7 +358,14 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     orders *distinct* root posts' feed positions (an accepted rare-tie
     display-order pick, not "which revision is the true current one"),
     this query picks among competing revisions of the *same* post, where
-    picking wrong is a real correctness bug, not just a display quirk."""
+    picking wrong is a real correctness bug, not just a display quirk.
+
+    `tombstoned_at` is also substituted from the latest revision (design
+    doc §9.5, issue #88), same as `subject`/`body` -- without this, a
+    tombstoned post's placeholder content would display correctly but
+    `_can_edit_post`/`_can_tombstone_post` would still see `tombstoned_
+    at=None` from the never-tombstoned root row and wrongly keep
+    offering `[E]dit`/`[T]ombstone` for it."""
     latest = db.connection.execute(
         """
         SELECT * FROM posts
@@ -353,7 +378,9 @@ def _resolve_current_version(db: Database, root_row: sqlite3.Row) -> Post:
     root = _row_to_post(root_row)
     if latest is None or latest["post_id"] == root.post_id:
         return root
-    return replace(root, subject=latest["subject"], body=latest["body"], is_edited=True)
+    return replace(
+        root, subject=latest["subject"], body=latest["body"], tombstoned_at=latest["tombstoned_at"], is_edited=True
+    )
 
 
 _DEFAULT_PAGE_SIZE = 5
@@ -620,6 +647,86 @@ def delete_post(db: Database, post: Post, *, deleted_by: User) -> None:
     reindex_post(db, post.board_id, post.root_post_id)
 
 
+_TOMBSTONE_PLACEHOLDER = "[removed by moderator]"
+
+
+def tombstone_post(db: Database, post: Post, board: Board, *, tombstoned_by: User) -> Post:
+    """
+    Redact `post` to a placeholder revision (design doc §9.5, issue
+    #88) rather than deleting its row outright. Requires `tombstoned_by`
+    to hold `BoardPermission.DELETE`, no author bypass -- the same
+    authority `delete_post` already requires, just expressed as a
+    further chain revision instead of a row removal, which is what lets
+    a Linked board propagate it (`netbbs.link.boards.queue_board_post_
+    tombstone_if_linked`) without breaking the edit chain a
+    `board_post_tombstone` must extend, or orphaning a reply's
+    `parent_post_id` the way an in-place delete would.
+
+    Like `edit_post`, always re-resolves the actual current approved
+    revision via `post.root_post_id` rather than trusting `post.
+    post_id`. Refuses with a `PostError` if that revision is already
+    tombstoned (a chain accepts at most one terminal tombstone, mirrored
+    by `netbbs.link.protocol.LinkNode.handle_events`' own rejection of a
+    second `board_post_tombstone` for the same root post).
+    """
+    _require_board_permission(db, post, tombstoned_by, BoardPermission.DELETE)
+
+    current = db.connection.execute(
+        """
+        SELECT * FROM posts
+        WHERE root_post_id = ? AND board_id = ? AND status = 'approved'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (post.root_post_id, board.id),
+    ).fetchone()
+    if current is None:
+        raise PostError("no currently-approved version of this post exists to tombstone")
+    if current["tombstoned_at"] is not None:
+        raise PostError("this post has already been tombstoned")
+
+    created_at = utc_now_iso()
+    author_identifier = current["author_fingerprint"] or current["author_label"]
+    new_post_id = compute_content_id(
+        {
+            "type": "board_post_tombstone",
+            "board_id": board.board_id,
+            "parent_post_id": current["parent_post_id"],
+            "author": author_identifier,
+            "created_at": created_at,
+        }
+    )
+
+    db.connection.execute(
+        """
+        INSERT INTO posts
+            (post_id, board_id, parent_post_id, author_user_id, author_label,
+             author_fingerprint, subject, body, created_at, status,
+             root_post_id, edit_of_post_id, tombstoned_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+        """,
+        (
+            new_post_id, board.id, current["parent_post_id"], current["author_user_id"],
+            current["author_label"], current["author_fingerprint"],
+            _TOMBSTONE_PLACEHOLDER, _TOMBSTONE_PLACEHOLDER, created_at,
+            post.root_post_id, current["post_id"], created_at,
+        ),
+    )
+    db.connection.commit()
+
+    record_action(
+        db,
+        actor=tombstoned_by,
+        action="tombstone",
+        object_type="board",
+        object_id=board.id,
+        target_user_id=current["author_user_id"],
+        detail=new_post_id,
+    )
+    reindex_post(db, board.id, post.root_post_id)
+    return get_post(db, new_post_id)
+
+
 def set_post_pinned(db: Database, post: Post, pinned: bool, *, changed_by: User) -> Post:
     """
     Pin or unpin a post within its own board's listing — a distinct
@@ -855,5 +962,6 @@ def _row_to_post(row: sqlite3.Row, *, is_edited: bool = False) -> Post:
         exempt_from_expiry=bool(row["exempt_from_expiry"]),
         root_post_id=row["root_post_id"],
         edit_of_post_id=row["edit_of_post_id"],
+        tombstoned_at=row["tombstoned_at"],
         is_edited=is_edited,
     )

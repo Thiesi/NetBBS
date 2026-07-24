@@ -12,33 +12,43 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
-from netbbs.boards.posts import approve_post, create_post, edit_post
+from netbbs.boards.posts import approve_post, create_post, edit_post, tombstone_post
 from netbbs.link.boards import (
     BoardCarryLimitError,
     LinkBoardsError,
     accept_board_origin_transfer,
     board_origin_fingerprint,
     carried_board_count,
+    close_board_if_linked,
+    is_board_closed,
     is_board_linked,
     is_board_origin_orphaned,
     link_board,
     load_own_board_events,
     materialize_carried_board,
+    materialize_carried_board_closure,
+    materialize_carried_board_post_moderator_edit,
+    materialize_carried_board_post_tombstone,
     materialize_carried_post,
     materialize_carried_post_edit,
     offer_board_origin_transfer,
     queue_board_post_edit_if_linked,
     queue_board_post_if_linked,
+    queue_board_post_moderator_edit_if_linked,
+    queue_board_post_tombstone_if_linked,
     rebuild_carried_post_materialization,
     record_board_origin_change,
 )
 from netbbs.link.events import (
     BoardGenesis,
     BoardPostEdit,
+    build_board_closure,
     build_board_genesis,
     build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
+    build_board_post_moderator_edit,
+    build_board_post_tombstone,
     build_key_transition,
 )
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -988,3 +998,346 @@ def test_typo_edit_does_not_reopen_an_already_read_root_post_as_unread(db, alice
     # rows, and record_board_seen's cursor already covers this root's
     # own arrival id.
     assert unread_post_count(db, alice, board) == 0
+
+
+# -- close_board_if_linked / is_board_closed (design doc §9.5, issue #88) --
+
+
+def test_close_board_if_linked_builds_a_valid_closure(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    genesis = link_board(db, board, node_identity=node_identity)
+
+    closure = close_board_if_linked(db, board, node_identity=node_identity, reason="archived")
+
+    assert closure.payload["board_id"] == board.board_id
+    assert closure.payload["previous_event_id"] == genesis.content_id
+    assert closure.payload["reason"] == "archived"
+    assert is_board_closed(db, board) is True
+
+
+def test_close_board_if_linked_is_a_noop_when_board_is_not_linked(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+
+    assert close_board_if_linked(db, board, node_identity=node_identity) is None
+    assert is_board_closed(db, board) is False
+
+
+def test_close_board_if_linked_refuses_when_not_the_current_origin(db, alice, node_identity, remote_node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    record_board_origin_change(db, board.board_id, remote_node_identity.fingerprint)
+
+    with pytest.raises(LinkBoardsError):
+        close_board_if_linked(db, board, node_identity=node_identity)
+
+
+def test_close_board_if_linked_refuses_an_already_closed_board(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    close_board_if_linked(db, board, node_identity=node_identity)
+
+    with pytest.raises(LinkBoardsError):
+        close_board_if_linked(db, board, node_identity=node_identity)
+
+
+def test_is_board_closed_false_for_an_unlinked_board(db, alice):
+    board = create_board(db, "general", creator=alice)
+    assert is_board_closed(db, board) is False
+
+
+def test_materialize_carried_board_closure_sets_link_closed_at(db, remote_node_identity):
+    genesis = _remote_genesis(remote_node_identity)
+    board = materialize_carried_board(db, genesis)
+    closure = build_board_closure(
+        signing_identity=remote_node_identity.signing_key,
+        board_id=genesis.payload["board_id"],
+        previous_event_id=genesis.content_id,
+        reason=None,
+        created_at="2026-01-02T00:00:00Z",
+    )
+
+    materialize_carried_board_closure(db, closure)
+
+    assert is_board_closed(db, board) is True
+
+
+def test_materialize_carried_board_closure_is_a_noop_for_an_unknown_board(db, remote_node_identity):
+    # Defensive only -- must not raise even if this node has no local
+    # row for the closed board_id at all.
+    closure = build_board_closure(
+        signing_identity=remote_node_identity.signing_key,
+        board_id="never-carried-board-id",
+        previous_event_id="some-genesis-content-id",
+        reason=None,
+        created_at="2026-01-02T00:00:00Z",
+    )
+    materialize_carried_board_closure(db, closure)
+
+
+# -- queue_board_post_moderator_edit_if_linked (design doc §9.5, issue #88) --
+
+
+def test_queue_board_post_moderator_edit_builds_and_persists(db, alice, node_identity):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    edited = edit_post(db, post, board, subject="redacted", body="redacted", edited_by=moderator)
+    mod_edit = queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=moderator
+    )
+
+    assert mod_edit is not None
+    assert mod_edit.payload["root_post_id"] == board_post.content_id
+    assert mod_edit.payload["previous_event_id"] == board_post.content_id
+    assert "author" not in mod_edit.payload
+    row = db.connection.execute(
+        "SELECT link_event_json FROM posts WHERE post_id = ?", (edited.post_id,)
+    ).fetchone()
+    assert row["link_event_json"] is not None
+
+
+def test_queue_board_post_moderator_edit_is_a_noop_for_a_self_authored_edit(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+    edited = edit_post(db, post, board, subject="hello (edited)", body="world, edited", edited_by=alice)
+
+    assert queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=alice
+    ) is None
+
+
+def test_queue_board_post_moderator_edit_is_a_noop_when_this_node_is_not_the_origin(
+    db, alice, node_identity, remote_node_identity
+):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+    record_board_origin_change(db, board.board_id, remote_node_identity.fingerprint)
+
+    edited = edit_post(db, post, board, subject="redacted", body="redacted", edited_by=moderator)
+
+    # This node merely carries the board now -- a local moderator edit
+    # stays purely local, never propagated (no origin authority to
+    # assert it network-wide).
+    assert queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=moderator
+    ) is None
+
+
+def test_queue_board_post_moderator_edit_is_idempotent(db, alice, node_identity):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+    edited = edit_post(db, post, board, subject="redacted", body="redacted", edited_by=moderator)
+
+    first = queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=moderator
+    )
+    second = queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=moderator
+    )
+
+    assert first.content_id == second.content_id
+
+
+def test_materialize_carried_board_post_moderator_edit_preserves_root_authorship(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    mod_edit = build_board_post_moderator_edit(
+        signing_identity=remote_node_identity.signing_key,
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="redacted",
+        body="redacted",
+        created_at="2026-01-02T00:00:00Z",
+    )
+
+    materialized = materialize_carried_board_post_moderator_edit(
+        db, mod_edit, sender_fingerprint=remote_node_identity.fingerprint
+    )
+
+    assert materialized is not None
+    assert materialized.subject == "redacted"
+    assert materialized.author_label == f"wanderer@{remote_node_identity.fingerprint}"  # unchanged from root
+
+
+def test_materialize_carried_board_post_moderator_edit_is_idempotent(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    mod_edit = build_board_post_moderator_edit(
+        signing_identity=remote_node_identity.signing_key,
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="redacted",
+        body="redacted",
+        created_at="2026-01-02T00:00:00Z",
+    )
+
+    first = materialize_carried_board_post_moderator_edit(db, mod_edit, sender_fingerprint=remote_node_identity.fingerprint)
+    second = materialize_carried_board_post_moderator_edit(db, mod_edit, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert first.id == second.id
+
+
+# -- queue_board_post_tombstone_if_linked (design doc §9.5, issue #88) ----
+
+
+def test_queue_board_post_tombstone_builds_and_persists(db, alice, node_identity):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    board_post = queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    tombstoned = tombstone_post(db, post, board, tombstoned_by=moderator)
+    tombstone = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=node_identity)
+
+    assert tombstone is not None
+    assert tombstone.payload["root_post_id"] == board_post.content_id
+    assert tombstone.payload["previous_event_id"] == board_post.content_id
+
+
+def test_queue_board_post_tombstone_is_a_noop_when_not_tombstoned(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+
+    assert queue_board_post_tombstone_if_linked(db, post, board, node_identity=node_identity) is None
+
+
+def test_queue_board_post_tombstone_is_idempotent(db, alice, node_identity):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+    tombstoned = tombstone_post(db, post, board, tombstoned_by=moderator)
+
+    first = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=node_identity)
+    second = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=node_identity)
+
+    assert first.content_id == second.content_id
+
+
+def test_materialize_carried_board_post_tombstone_sets_tombstoned_at(db, remote_node_identity):
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+
+    tombstone = build_board_post_tombstone(
+        signing_identity=remote_node_identity.signing_key,
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="[removed by moderator]",
+        body="[removed by moderator]",
+        reason=None,
+        created_at="2026-01-02T00:00:00Z",
+    )
+
+    materialized = materialize_carried_board_post_tombstone(db, tombstone, sender_fingerprint=remote_node_identity.fingerprint)
+
+    assert materialized is not None
+    assert materialized.tombstoned_at is not None
+
+
+def test_rebuild_carried_post_materialization_repairs_a_moderator_edit_gap(db, remote_node_identity):
+    """Design doc §9.5, issue #88: the repair pass must also catch up a
+    board_post_moderator_edit whose materialize call was skipped (e.g. a
+    crash between save_event and its own follow-up)."""
+    board_id = _carried_board(db, remote_node_identity)
+    post = _remote_post(remote_node_identity, board_id=board_id)
+    materialize_carried_post(db, post, sender_fingerprint=remote_node_identity.fingerprint)
+    mod_edit = build_board_post_moderator_edit(
+        signing_identity=remote_node_identity.signing_key,
+        board_id=board_id,
+        root_post_id=post.content_id,
+        previous_event_id=post.content_id,
+        subject="redacted",
+        body="redacted",
+        created_at="2026-01-02T00:00:00Z",
+    )
+    # Simulate the event having been persisted to link_events (e.g. by
+    # netbbs.link.transport) without its own materialization follow-up
+    # ever completing.
+    db.connection.execute(
+        "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id) "
+        "VALUES (?, ?, 'board_post_moderator_edit', ?, ?, ?)",
+        (mod_edit.content_id, remote_node_identity.fingerprint, json.dumps(mod_edit.to_dict()), "2026-01-02T00:00:00Z", board_id),
+    )
+    db.connection.commit()
+
+    rebuilt = rebuild_carried_post_materialization(db)
+
+    assert rebuilt == 1
+    row = db.connection.execute("SELECT subject FROM posts WHERE post_id = ?", (mod_edit.content_id,)).fetchone()
+    assert row["subject"] == "redacted"
+
+
+# -- load_own_board_events includes issue #88's new event types -----------
+
+
+def test_load_own_board_events_includes_closure(db, alice, node_identity):
+    board = create_board(db, "general", creator=alice)
+    link_board(db, board, node_identity=node_identity)
+    closure = close_board_if_linked(db, board, node_identity=node_identity)
+
+    events = load_own_board_events(db, node_identity.fingerprint)
+
+    assert closure.content_id in {e.content_id for e in events}
+
+
+def test_load_own_board_events_includes_moderator_edit_and_tombstone(db, alice, node_identity):
+    moderator = create_user(db, "modmin", password="hunter2", user_level=10)
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=alice
+    )
+    grant_permissions(
+        db, moderator, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=alice
+    )
+    link_board(db, board, node_identity=node_identity)
+    post = create_post(db, board, alice, "hello", "world")
+    queue_board_post_if_linked(db, post, board, node_identity=node_identity)
+    edited = edit_post(db, post, board, subject="redacted", body="redacted", edited_by=moderator)
+    mod_edit = queue_board_post_moderator_edit_if_linked(
+        db, edited, board, node_identity=node_identity, edited_by=moderator
+    )
+    tombstoned = tombstone_post(db, edited, board, tombstoned_by=moderator)
+    tombstone = queue_board_post_tombstone_if_linked(db, tombstoned, board, node_identity=node_identity)
+
+    events = load_own_board_events(db, node_identity.fingerprint)
+
+    content_ids = {e.content_id for e in events}
+    assert mod_edit.content_id in content_ids
+    assert tombstone.content_id in content_ids

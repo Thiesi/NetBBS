@@ -2,12 +2,13 @@
 Transport-agnostic NetBBS Link handshake and gossip protocol (design doc
 §11/§12/§13) — bootstrap first contact between two nodes (mutual
 endpoint-descriptor exchange, §12) plus event gossip across
-`key_transition`, `board_genesis`/`board_post`/`board_post_edit`,
-`channel_genesis`/`channel_message` (design doc §9.6, issue #87), and
-`link_message`/`link_message_accepted` event types, all through the same
-`handle_events` dispatch. Reuses the key-lifecycle and event-envelope
-machinery (`netbbs.link.node_identity`/`netbbs.link.events`) for
-verification rather than inventing a parallel path.
+`key_transition`, `board_genesis`/`board_post`/`board_post_edit`/`board_
+post_moderator_edit`/`board_post_tombstone`/`board_closure` (design doc
+§9.5, issue #88), `channel_genesis`/`channel_message` (design doc §9.6,
+issue #87), and `link_message`/`link_message_accepted` event types, all
+through the same `handle_events` dispatch. Reuses the key-lifecycle and
+event-envelope machinery (`netbbs.link.node_identity`/`netbbs.link.
+events`) for verification rather than inventing a parallel path.
 
 Deliberately has no idea how a message actually reaches its peer —
 `LinkNode.build_hello()`/`handle_hello()`/`handle_events()` operate on
@@ -61,11 +62,14 @@ from netbbs.boards.limits import MAX_BODY_BYTES as _MAX_BOARD_POST_BODY_BYTES
 from netbbs.boards.limits import MAX_SUBJECT_BYTES as _MAX_BOARD_POST_SUBJECT_BYTES
 from netbbs.identity.keys import fingerprint_from_verify_key
 from netbbs.link.events import (
+    BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
+    BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     CHANNEL_MESSAGE_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
@@ -73,11 +77,14 @@ from netbbs.link.events import (
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
     NETBBS_PROTOCOL_VERSION,
+    BoardClosure,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    BoardPostModeratorEdit,
+    BoardPostTombstone,
     ChannelGenesis,
     ChannelMessage,
     EndpointDescriptor,
@@ -88,11 +95,14 @@ from netbbs.link.events import (
     RelayConsentRequest,
     RelayConsentResponse,
     build_endpoint_descriptor,
+    verify_board_closure,
     verify_board_genesis,
     verify_board_origin_transfer_accepted,
     verify_board_origin_transfer_offer,
     verify_board_post,
     verify_board_post_edit,
+    verify_board_post_moderator_edit,
+    verify_board_post_tombstone,
     verify_channel_genesis,
     verify_channel_message,
     verify_endpoint_descriptor,
@@ -358,12 +368,18 @@ class BoardEventState:
     # applied to boards).
     boards: dict[str, BoardGenesis] = field(default_factory=dict)
     # root_post_id (a board_post's own content_id) -> its verified edit
-    # chain, oldest first. Deliberately not a generic reusable
-    # chain-walker -- a single linear list per post, ordering enforced
-    # by "does previous_event_id match the current head" alone, a
-    # shape simpler than key_transition's two-interleaved-purposes
+    # chain, oldest first. Holds a mix of BoardPostEdit (self-authored)
+    # and BoardPostModeratorEdit/BoardPostTombstone (origin-authorized,
+    # design doc §9.5, issue #88) entries -- all three extend the same
+    # linear chain, distinguished only by which type a given entry
+    # actually is, not by separate storage. Deliberately not a generic
+    # reusable chain-walker -- a single linear list per post, ordering
+    # enforced by "does previous_event_id match the current head" alone,
+    # a shape simpler than key_transition's two-interleaved-purposes
     # chain.
-    post_edits: dict[str, tuple[BoardPostEdit, ...]] = field(default_factory=dict)
+    post_edits: dict[str, tuple[BoardPostEdit | BoardPostModeratorEdit | BoardPostTombstone, ...]] = field(
+        default_factory=dict
+    )
 
     def genesis_for(self, board_id: str) -> BoardGenesis | None:
         return self.boards.get(board_id)
@@ -378,10 +394,19 @@ class BoardEventState:
     def record_genesis(self, genesis: BoardGenesis) -> None:
         self.boards[genesis.payload["board_id"]] = genesis
 
-    def edit_chain(self, root_post_id: str) -> tuple[BoardPostEdit, ...]:
+    def edit_chain(self, root_post_id: str) -> tuple[BoardPostEdit | BoardPostModeratorEdit | BoardPostTombstone, ...]:
         return self.post_edits.get(root_post_id, ())
 
-    def extend_edit_chain(self, root_post_id: str, edit: BoardPostEdit) -> None:
+    def is_tombstoned(self, root_post_id: str) -> bool:
+        """Whether `root_post_id`'s current chain head is already a
+        `BoardPostTombstone` -- design doc §9.5: a tombstone is
+        terminal, so no further edit of any kind may extend past it."""
+        chain = self.edit_chain(root_post_id)
+        return bool(chain) and isinstance(chain[-1], BoardPostTombstone)
+
+    def extend_edit_chain(
+        self, root_post_id: str, edit: BoardPostEdit | BoardPostModeratorEdit | BoardPostTombstone
+    ) -> None:
         self.post_edits[root_post_id] = self.edit_chain(root_post_id) + (edit,)
 
 
@@ -435,6 +460,13 @@ class BoardLifecycleState:
     # flight per board at a time (see BoardOriginTransferOffer's own
     # docstring for why this doesn't support more).
     pending_origin_transfers: dict[str, BoardOriginTransferOffer] = field(default_factory=dict)
+    # Design doc §9.5, issue #88: board_id -> the verified board_closure
+    # on file for it, once accepted -- absent means "not closed."
+    # Closure is terminal: once present, no further lifecycle event
+    # (another closure, or a fresh origin-transfer offer) is accepted
+    # for that board_id (see handle_events' own BOARD_CLOSURE_OBJECT_
+    # TYPE/BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE branches).
+    board_closures: dict[str, BoardClosure] = field(default_factory=dict)
 
     def current_origin(self, board_id: str, genesis_origin_fingerprint: str) -> str:
         """The fingerprint currently authoritative for `board_id` --
@@ -463,6 +495,13 @@ class BoardLifecycleState:
         self.board_origin[board_id] = new_origin_fingerprint
         self.board_lifecycle_head[board_id] = accepted_content_id
         del self.pending_origin_transfers[board_id]
+
+    def is_closed(self, board_id: str) -> bool:
+        return board_id in self.board_closures
+
+    def record_closure(self, board_id: str, closure: BoardClosure) -> None:
+        self.board_closures[board_id] = closure
+        self.board_lifecycle_head[board_id] = closure.content_id
 
 
 @dataclass
@@ -575,6 +614,10 @@ class LinkNode:
     @property
     def pending_origin_transfers(self) -> dict[str, BoardOriginTransferOffer]:
         return self.board_lifecycle.pending_origin_transfers
+
+    @property
+    def board_closures(self) -> dict[str, BoardClosure]:
+        return self.board_lifecycle.board_closures
 
     @property
     def pending_own_relay_requests(self) -> dict[str, RelayConsentRequest]:
@@ -984,32 +1027,52 @@ class LinkNode:
         already-applied event does not depend solely on `known_event_
         ids` still holding the entry, see below).
 
-        Nine recognized `object_type`s: `key_transition`,
-        `board_genesis`/`board_post`, `board_post_edit`,
-        `board_origin_transfer_offer`/`board_origin_transfer_
-        accepted` (design doc §13, issue #53), and `link_message`/
-        `link_message_accepted`/`link_message_bounced` (design doc §13).
-        `board_genesis`/`board_post` have no per-object chain to
-        self-heal against (`board_post` is immutable content, nothing to
-        project beyond "does it exist"; `board_genesis` itself is still
-        one-per-board, never resent as a candidate extension of
-        anything) -- for both, `known_event_ids` dedup alone is what's
-        built so far, which is already correct for content that's never
-        resent as a *candidate extension* of anything. `board_post_edit`
-        *is* a candidate extension (a single linear chain per root post)
-        and gets the same chain-membership self-heal `key_transition`
-        has, just against `self.post_edits` instead of a peer's own
-        `transitions`. `board_origin_transfer_offer`/`_accepted` extend
+        Recognized `object_type`s: `key_transition`; `board_genesis`/
+        `board_post`; `board_post_edit`/`board_post_moderator_edit`/
+        `board_post_tombstone` (design doc §9.5, issue #88); `board_
+        origin_transfer_offer`/`board_origin_transfer_accepted`/`board_
+        closure` (design doc §9.4/§9.5, issues #53/#88); `channel_
+        genesis`/`channel_message` (design doc §9.6, issue #87); and
+        `link_message`/`link_message_accepted`/`link_message_bounced`
+        (design doc §13). `board_genesis`/`board_post`/`channel_
+        genesis`/`channel_message` have no per-object chain to
+        self-heal against (immutable content, nothing to project beyond
+        "does it exist," or one-per-board/channel and never resent as a
+        candidate extension of anything) -- for these, `known_event_ids`
+        dedup alone is what's built so far, which is already correct.
+
+        `board_post_edit`/`board_post_moderator_edit`/`board_post_
+        tombstone` all extend the *same* single linear per-root-post
+        chain (`self.post_edits`) and get the same chain-membership
+        self-heal `key_transition` has. They differ only in
+        authorization and terminality: `board_post_edit` requires the
+        edit's claimed author to match the root post's own author,
+        verified against that author's home node; `board_post_
+        moderator_edit`/`board_post_tombstone` carry no author to check
+        at all, verified instead against the board's *current origin*
+        (`current_board_origin`) -- the local `BoardPermission.EDIT`/
+        `DELETE` check that gates *building* either of these two happens
+        once, on the origin node, before it's ever signed (see
+        `netbbs.link.boards.queue_board_post_moderator_edit_if_linked`/
+        `queue_board_post_tombstone_if_linked`). A tombstone is terminal
+        for its chain -- once a chain's head is one, no further edit of
+        any kind is accepted for that root post (`BoardEventState.is_
+        tombstoned`).
+
+        `board_origin_transfer_offer`/`_accepted`/`board_closure` extend
         a *different* per-board chain (`board_lifecycle_head`, starting
         from the board's own genesis) with the same "does previous_
         event_id match the current head" discipline, plus their own
-        mutual-consent rule: an offer is only accepted directly from a
+        rules: an offer or a closure is only accepted directly from a
         board's own *current* origin (`current_board_origin`, not
         merely `board_genesis`'s original claim -- a board can change
-        hands more than once), and an acceptance is only accepted
-        directly from that specific offer's own named new origin, with
-        at most one outstanding offer tolerated per board at a time
-        (see `BoardOriginTransferOffer`'s own docstring for why).
+        hands more than once), an acceptance is only accepted directly
+        from that specific offer's own named new origin, with at most
+        one outstanding offer tolerated per board at a time (see
+        `BoardOriginTransferOffer`'s own docstring for why), and a
+        `board_closure` is terminal for the whole board -- once a board
+        is closed, no further lifecycle event of any kind (a fresh
+        offer, or a second closure) is accepted for it.
 
         `link_message`/`link_message_accepted`/`link_message_bounced`
         are immutable, single-shot content like `board_post` -- `known_
@@ -1192,8 +1255,8 @@ class LinkNode:
                 if edit_author != root_post.payload.get("author"):
                     raise LinkProtocolError(
                         f"board_post_edit for root post {root_post_id!r} has an author that "
-                        "doesn't match the root post's own author -- moderator edits aren't "
-                        "supported yet"
+                        "doesn't match the root post's own author -- a moderator edit must be "
+                        "sent as board_post_moderator_edit instead (design doc §9.5, issue #88)"
                     )
                 # Issue #85: same relaxation as board_post above.
                 home_node_fingerprint = edit_author.get("home_node_fingerprint")
@@ -1212,6 +1275,14 @@ class LinkNode:
                     self.known_event_ids.add(edit.content_id)
                     self.events.setdefault(edit.content_id, raw)
                     continue
+
+                # Design doc §9.5, issue #88: a tombstone is terminal --
+                # no further edit of any kind extends past it.
+                if self.board_events.is_tombstoned(root_post_id):
+                    raise LinkProtocolError(
+                        f"root post {root_post_id!r} has been tombstoned -- refusing a further "
+                        "board_post_edit"
+                    )
 
                 current_head = existing_chain[-1].content_id if existing_chain else root_post_id
                 if edit.payload.get("previous_event_id") != current_head:
@@ -1234,6 +1305,140 @@ class LinkNode:
                 self.known_event_ids.add(edit.content_id)
                 self.events[edit.content_id] = raw
                 accepted.append(edit.content_id)
+
+            elif object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+                # Design doc §9.5, issue #88: mirrors BOARD_POST_EDIT_
+                # OBJECT_TYPE above exactly (same per-post chain), except
+                # verified against the board's *current origin* -- there
+                # is no author to cross-check here, since this type
+                # never claims to be self-authored.
+                mod_edit = BoardPostModeratorEdit.from_dict(raw)
+                if mod_edit.content_id in self.known_event_ids:
+                    continue
+
+                root_post_id = mod_edit.payload.get("root_post_id")
+                if root_post_id not in self.events:
+                    raise LinkProtocolError(
+                        f"received a board_post_moderator_edit for root post {root_post_id!r}, "
+                        "which is unknown -- refusing (no relay from a stranger yet)"
+                    )
+                board_id = mod_edit.payload.get("board_id")
+                if self.board_events.genesis_for(board_id) is None:
+                    raise LinkProtocolError(
+                        f"received a board_post_moderator_edit for board_id {board_id!r}, which "
+                        "has no verified board_genesis on file -- refusing (no relay from a "
+                        "stranger yet)"
+                    )
+                self._check_board_post_content_size(mod_edit.payload, sender_fingerprint, "board_post_moderator_edit")
+
+                existing_chain = self.board_events.edit_chain(root_post_id)
+                if any(existing.content_id == mod_edit.content_id for existing in existing_chain):
+                    self.known_event_ids.add(mod_edit.content_id)
+                    self.events.setdefault(mod_edit.content_id, raw)
+                    continue
+
+                if self.board_events.is_tombstoned(root_post_id):
+                    raise LinkProtocolError(
+                        f"root post {root_post_id!r} has been tombstoned -- refusing a further "
+                        "board_post_moderator_edit"
+                    )
+
+                current_head = existing_chain[-1].content_id if existing_chain else root_post_id
+                if mod_edit.payload.get("previous_event_id") != current_head:
+                    raise LinkProtocolError(
+                        f"board_post_moderator_edit for root post {root_post_id!r} does not "
+                        f"extend the current head ({current_head!r})"
+                    )
+
+                # Issue #85-shaped relaxation: the board's current origin
+                # must independently be a known peer, regardless of who
+                # relayed this edit.
+                current_origin = self.current_board_origin(board_id)
+                origin_peer = self.peers.get(current_origin)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a board_post_moderator_edit for board_id {board_id!r} whose "
+                        f"current origin ({current_origin!r}) has no completed hello with this "
+                        "node -- refusing (no relay from a stranger)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    origin_peer, current_origin, "board_post_moderator_edit"
+                )
+                if not verify_board_post_moderator_edit(mod_edit, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"board_post_moderator_edit from current origin {current_origin} does "
+                        "not verify against its current signing key"
+                    )
+
+                self.board_events.extend_edit_chain(root_post_id, mod_edit)
+                self.known_event_ids.add(mod_edit.content_id)
+                self.events[mod_edit.content_id] = raw
+                accepted.append(mod_edit.content_id)
+
+            elif object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
+                # Design doc §9.5, issue #88: a terminal entry on the
+                # same per-post chain -- otherwise verified exactly like
+                # BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE above.
+                tombstone = BoardPostTombstone.from_dict(raw)
+                if tombstone.content_id in self.known_event_ids:
+                    continue
+
+                root_post_id = tombstone.payload.get("root_post_id")
+                if root_post_id not in self.events:
+                    raise LinkProtocolError(
+                        f"received a board_post_tombstone for root post {root_post_id!r}, which "
+                        "is unknown -- refusing (no relay from a stranger yet)"
+                    )
+                board_id = tombstone.payload.get("board_id")
+                if self.board_events.genesis_for(board_id) is None:
+                    raise LinkProtocolError(
+                        f"received a board_post_tombstone for board_id {board_id!r}, which has "
+                        "no verified board_genesis on file -- refusing (no relay from a stranger "
+                        "yet)"
+                    )
+
+                existing_chain = self.board_events.edit_chain(root_post_id)
+                if any(existing.content_id == tombstone.content_id for existing in existing_chain):
+                    self.known_event_ids.add(tombstone.content_id)
+                    self.events.setdefault(tombstone.content_id, raw)
+                    continue
+
+                if self.board_events.is_tombstoned(root_post_id):
+                    raise LinkProtocolError(
+                        f"root post {root_post_id!r} is already tombstoned -- refusing a second "
+                        "board_post_tombstone"
+                    )
+
+                current_head = existing_chain[-1].content_id if existing_chain else root_post_id
+                if tombstone.payload.get("previous_event_id") != current_head:
+                    raise LinkProtocolError(
+                        f"board_post_tombstone for root post {root_post_id!r} does not extend "
+                        f"the current head ({current_head!r})"
+                    )
+
+                current_origin = self.current_board_origin(board_id)
+                origin_peer = self.peers.get(current_origin)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a board_post_tombstone for board_id {board_id!r} whose "
+                        f"current origin ({current_origin!r}) has no completed hello with this "
+                        "node -- refusing (no relay from a stranger)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    origin_peer, current_origin, "board_post_tombstone"
+                )
+                if not verify_board_post_tombstone(tombstone, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"board_post_tombstone from current origin {current_origin} does not "
+                        "verify against its current signing key"
+                    )
+
+                self.board_events.extend_edit_chain(root_post_id, tombstone)
+                self.known_event_ids.add(tombstone.content_id)
+                self.events[tombstone.content_id] = raw
+                accepted.append(tombstone.content_id)
 
             elif object_type == CHANNEL_GENESIS_OBJECT_TYPE:
                 # Design doc §9.6, issue #87: mirrors BOARD_GENESIS_
@@ -1332,6 +1537,13 @@ class LinkNode:
                         f"received a board_origin_transfer_offer for board_id {board_id!r}, "
                         "which has no verified board_genesis on file -- refusing (no relay "
                         "from a stranger yet)"
+                    )
+                # Design doc §9.5, issue #88: closure is terminal -- no
+                # further lifecycle event, including a fresh transfer
+                # offer, is accepted once a board is closed.
+                if self.board_lifecycle.is_closed(board_id):
+                    raise LinkProtocolError(
+                        f"board_id {board_id!r} is closed -- refusing a further lifecycle event"
                     )
 
                 # Issue #85: same relaxation as board_genesis above --
@@ -1464,6 +1676,66 @@ class LinkNode:
                 self.known_event_ids.add(transfer_accepted.content_id)
                 self.events[transfer_accepted.content_id] = raw
                 accepted.append(transfer_accepted.content_id)
+
+            elif object_type == BOARD_CLOSURE_OBJECT_TYPE:
+                # Design doc §9.5, issue #88: extends the same lifecycle
+                # chain the offer/accepted branches above extend, and is
+                # verified the same way an offer is (current origin's
+                # signing key) -- but is terminal, recorded via
+                # record_closure rather than record_offer/_acceptance.
+                closure = BoardClosure.from_dict(raw)
+                if closure.content_id in self.known_event_ids:
+                    continue
+
+                board_id = closure.payload.get("board_id")
+                if self.board_events.genesis_for(board_id) is None:
+                    raise LinkProtocolError(
+                        f"received a board_closure for board_id {board_id!r}, which has no "
+                        "verified board_genesis on file -- refusing (no relay from a stranger "
+                        "yet)"
+                    )
+                existing_closure = self.board_lifecycle.board_closures.get(board_id)
+                if existing_closure is not None:
+                    if existing_closure.content_id == closure.content_id:
+                        # Exact resend of the already-recorded closure --
+                        # a safe no-op, self-healing known_event_ids from
+                        # the authoritative board_closures state, the
+                        # same shape the offer/accepted branches use.
+                        self.known_event_ids.add(closure.content_id)
+                        self.events.setdefault(closure.content_id, raw)
+                        continue
+                    raise LinkProtocolError(
+                        f"board_id {board_id!r} is already closed -- refusing a second, "
+                        "different board_closure"
+                    )
+
+                current_origin = self.current_board_origin(board_id)
+                origin_peer = self.peers.get(current_origin)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a board_closure for board_id {board_id!r} whose current "
+                        f"origin ({current_origin!r}) has no completed hello with this node -- "
+                        "refusing (no relay from a stranger)"
+                    )
+
+                current_head = self.current_board_lifecycle_head(board_id)
+                if closure.payload.get("previous_event_id") != current_head:
+                    raise LinkProtocolError(
+                        f"board_closure for board_id {board_id!r} does not extend the current "
+                        f"lifecycle head ({current_head!r})"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(origin_peer, current_origin, "board_closure")
+                if not verify_board_closure(closure, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"board_closure from current origin {current_origin} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.board_lifecycle.record_closure(board_id, closure)
+                self.known_event_ids.add(closure.content_id)
+                self.events[closure.content_id] = raw
+                accepted.append(closure.content_id)
 
             elif object_type == LINK_MESSAGE_OBJECT_TYPE:
                 message = LinkMessage.from_dict(raw)

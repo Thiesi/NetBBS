@@ -26,6 +26,7 @@ from netbbs.boards.posts import (
     list_posts_page,
     set_post_exempt,
     set_post_pinned,
+    tombstone_post,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "list_posts_page",
     "set_post_exempt",
     "set_post_pinned",
+    "tombstone_post",
 ]

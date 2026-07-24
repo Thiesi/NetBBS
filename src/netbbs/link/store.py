@@ -32,21 +32,27 @@ import json
 from datetime import datetime, timedelta
 
 from netbbs.link.events import (
+    BOARD_CLOSURE_OBJECT_TYPE,
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
+    BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
+    BoardClosure,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
-    BoardPost,
     BoardPostEdit,
+    BoardPostModeratorEdit,
+    BoardPostTombstone,
     ChannelGenesis,
     ChannelMessage,
     EndpointDescriptor,
     KeyTransition,
+    event_content_id,
 )
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import InventoryRequest, LinkNode, PeerRecord
@@ -131,11 +137,19 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
         "SELECT link_lifecycle_json FROM boards WHERE link_lifecycle_json IS NOT NULL"
     ):
         raw = json.loads(row["link_lifecycle_json"])
-        if raw["envelope"]["object_type"] == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
+        lifecycle_object_type = raw["envelope"]["object_type"]
+        if lifecycle_object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
             offer = BoardOriginTransferOffer.from_dict(raw)
             board_id = offer.payload["board_id"]
             node.pending_origin_transfers[board_id] = offer
             node.board_lifecycle_head[board_id] = offer.content_id
+        elif lifecycle_object_type == BOARD_CLOSURE_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: this node's own self-originated
+            # closure of a board it's the current origin of.
+            own_closure = BoardClosure.from_dict(raw)
+            board_id = own_closure.payload["board_id"]
+            node.board_closures[board_id] = own_closure
+            node.board_lifecycle_head[board_id] = own_closure.content_id
         else:
             own_accepted = BoardOriginTransferAccepted.from_dict(raw)
             board_id = own_accepted.payload["board_id"]
@@ -161,6 +175,16 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             edit = BoardPostEdit.from_dict(envelope)
             root_post_id = edit.payload["root_post_id"]
             node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (edit,)
+        elif row["object_type"] == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: same restart reconstruction as
+            # BOARD_POST_EDIT_OBJECT_TYPE above, same shared chain.
+            mod_edit = BoardPostModeratorEdit.from_dict(envelope)
+            root_post_id = mod_edit.payload["root_post_id"]
+            node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (mod_edit,)
+        elif row["object_type"] == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
+            tombstone = BoardPostTombstone.from_dict(envelope)
+            root_post_id = tombstone.payload["root_post_id"]
+            node.post_edits[root_post_id] = node.post_edits.get(root_post_id, ()) + (tombstone,)
         elif row["object_type"] == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
             offer = BoardOriginTransferOffer.from_dict(envelope)
             board_id = offer.payload["board_id"]
@@ -172,6 +196,13 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             node.board_origin[board_id] = peer_accepted.payload["new_origin_fingerprint"]
             node.board_lifecycle_head[board_id] = peer_accepted.content_id
             node.pending_origin_transfers.pop(board_id, None)
+        elif row["object_type"] == BOARD_CLOSURE_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: a bystander's own restart
+            # reconstruction of someone else's board being closed.
+            peer_closure = BoardClosure.from_dict(envelope)
+            board_id = peer_closure.payload["board_id"]
+            node.board_closures[board_id] = peer_closure
+            node.board_lifecycle_head[board_id] = peer_closure.content_id
 
     for row in db.connection.execute(
         "SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"
@@ -205,9 +236,19 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
         "ORDER BY created_at ASC, id ASC"
     ):
         envelope = json.loads(row["link_event_json"])
-        if envelope["envelope"]["object_type"] != BOARD_POST_EDIT_OBJECT_TYPE:
+        post_object_type = envelope["envelope"]["object_type"]
+        if post_object_type == BOARD_POST_EDIT_OBJECT_TYPE:
+            edit: BoardPostEdit | BoardPostModeratorEdit | BoardPostTombstone = BoardPostEdit.from_dict(envelope)
+        elif post_object_type == BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE:
+            # Design doc §9.5, issue #88: same self-originated
+            # reconstruction as BOARD_POST_EDIT_OBJECT_TYPE, since
+            # queue_board_post_moderator_edit_if_linked only ever builds
+            # one when this node is the board's own current origin.
+            edit = BoardPostModeratorEdit.from_dict(envelope)
+        elif post_object_type == BOARD_POST_TOMBSTONE_OBJECT_TYPE:
+            edit = BoardPostTombstone.from_dict(envelope)
+        else:
             continue
-        edit = BoardPostEdit.from_dict(envelope)
         root_post_id = edit.payload["root_post_id"]
         if edit.content_id in {e.content_id for e in node.post_edits.get(root_post_id, ())}:
             continue
@@ -328,6 +369,7 @@ _BOARD_SCOPED_OBJECT_TYPES = frozenset(
         BOARD_GENESIS_OBJECT_TYPE,
         BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
         BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
+        BOARD_CLOSURE_OBJECT_TYPE,
     }
 )
 
@@ -342,15 +384,18 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     no-op, not the primary dedup mechanism.
 
     Issue #85: `board_id` is populated directly from
-    `envelope["envelope"]["payload"]` for the three board-scoped object
+    `envelope["envelope"]["payload"]` for the four board-scoped object
     types this function still handles
-    (`board_genesis`, `board_origin_transfer_offer`, `_accepted`) --
-    `board_post`/`board_post_edit` never reach here at all
-    (`netbbs.link.boards.materialize_carried_post`/`_edit` insert their
-    own `link_events` row directly, in the same transaction as their
-    `posts` projection, and populate `board_id` themselves the same way).
-    `None` for every other object type (`key_transition`, `link_message`
-    and its acknowledgements), which don't belong to a board.
+    (`board_genesis`, `board_origin_transfer_offer`, `_accepted`,
+    `board_closure` -- the last added by issue #88) --
+    `board_post`/`board_post_edit`/`board_post_moderator_edit`/`board_
+    post_tombstone` never reach here at all
+    (`netbbs.link.boards.materialize_carried_post`/`_edit`/`_moderator_
+    edit`/`_tombstone` insert their own `link_events` row directly, in
+    the same transaction as their `posts` projection, and populate
+    `board_id` themselves the same way). `None` for every other object
+    type (`key_transition`, `link_message` and its acknowledgements),
+    which don't belong to a board.
 
     Issue #87: `channel_id` is populated the same way for `channel_
     genesis`, the one channel-scoped type this function still handles --
@@ -568,22 +613,23 @@ def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
         raw = json.loads(board_row["link_genesis_json"])
         events[BoardGenesis.from_dict(raw).content_id] = raw
     if board_row["link_lifecycle_json"] is not None:
+        # Design doc §9.5, issue #88: `link_lifecycle_json` can now also
+        # be a self-originated `board_closure` -- `event_content_id`
+        # works directly off the envelope regardless of which of the
+        # three lifecycle object types this actually is, so there's no
+        # need to reconstruct the specific dataclass just to key this
+        # dict by its content_id.
         raw = json.loads(board_row["link_lifecycle_json"])
-        object_type = raw["envelope"]["object_type"]
-        lifecycle_event = (
-            BoardOriginTransferOffer.from_dict(raw)
-            if object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE
-            else BoardOriginTransferAccepted.from_dict(raw)
-        )
-        events[lifecycle_event.content_id] = raw
+        events[event_content_id(raw["envelope"])] = raw
 
     for row in db.connection.execute(
         "SELECT link_event_json FROM posts WHERE board_id = ? AND link_event_json IS NOT NULL", (board_row["id"],)
     ):
+        # Design doc §9.5, issue #88: same reasoning -- a self-originated
+        # board_post/board_post_edit/board_post_moderator_edit/board_
+        # post_tombstone all key by their own envelope's content_id alike.
         raw = json.loads(row["link_event_json"])
-        object_type = raw["envelope"]["object_type"]
-        post_event = BoardPostEdit.from_dict(raw) if object_type == BOARD_POST_EDIT_OBJECT_TYPE else BoardPost.from_dict(raw)
-        events[post_event.content_id] = raw
+        events[event_content_id(raw["envelope"])] = raw
 
     for row in db.connection.execute(
         "SELECT content_id, envelope_json FROM link_events WHERE board_id = ? ORDER BY received_at ASC", (board_id,)

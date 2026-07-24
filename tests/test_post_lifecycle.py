@@ -23,6 +23,7 @@ from netbbs.boards.posts import (
     list_posts_page,
     set_post_exempt,
     set_post_pinned,
+    tombstone_post,
 )
 from netbbs.config import get_expiry_grace_period_days, set_expiry_grace_period_days
 from netbbs.moderation import BoardPermission, grant_permissions, list_actions_for_target_user
@@ -77,6 +78,34 @@ def test_post_on_moderated_board_starts_pending(db, alice):
     board = create_board(db, "reviewed", moderated=True, creator=alice)
     post = create_post(db, board, alice, "Hello", "Body")
     assert post.status == "pending"
+
+
+def test_create_post_is_refused_on_a_closed_board(db, alice):
+    """Design doc §9.5, issue #88: boards.link_closed_at set by a
+    verified board_closure -- create_post's own gate, exercised here
+    directly against the raw column rather than through the full Link
+    stack (netbbs.link.boards.close_board_if_linked's own tests cover
+    how that column actually gets set)."""
+    board = create_board(db, "general", creator=alice)
+    db.connection.execute(
+        "UPDATE boards SET link_closed_at = ? WHERE id = ?", ("2026-01-01T00:00:00.000000Z", board.id)
+    )
+    db.connection.commit()
+
+    with pytest.raises(PostError):
+        create_post(db, board, alice, "Hello", "Body")
+
+
+def test_create_post_reply_is_also_refused_on_a_closed_board(db, alice):
+    board = create_board(db, "general", creator=alice)
+    parent = create_post(db, board, alice, "Hello", "Body")
+    db.connection.execute(
+        "UPDATE boards SET link_closed_at = ? WHERE id = ?", ("2026-01-01T00:00:00.000000Z", board.id)
+    )
+    db.connection.commit()
+
+    with pytest.raises(PostError):
+        create_post(db, board, alice, "Re: Hello", "Reply", parent_post_id=parent.post_id)
 
 
 def test_pending_post_is_hidden_from_normal_listing(db, alice, bob):
@@ -240,6 +269,81 @@ def test_delete_post_with_no_references_still_works(db, sysop, alice, bob):
     delete_post(db, post, deleted_by=sysop)
     with pytest.raises(PostError):
         get_post(db, post.post_id)
+
+
+# -- tombstone: redact without breaking the chain (design doc §9.5, issue #88) --
+
+
+def test_tombstone_post_requires_delete_permission(db, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, bob, "Hello", "Body")
+    with pytest.raises(PostError):
+        tombstone_post(db, post, board, tombstoned_by=bob)
+
+
+def test_tombstone_post_requires_delete_permission_even_for_the_original_author(db, alice):
+    """Mirrors delete_post's own "no author bypass" rule exactly (design
+    doc §9.5) -- unlike edit_post, tombstoning is never self-service."""
+    board = create_board(db, "general", creator=alice)
+    post = create_post(db, board, alice, "Hello", "Body")
+    with pytest.raises(PostError):
+        tombstone_post(db, post, board, tombstoned_by=alice)
+
+
+def test_tombstone_post_replaces_content_with_a_placeholder(db, sysop, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    post = create_post(db, board, bob, "Hello", "Body")
+
+    tombstoned = tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    assert tombstoned.tombstoned_at is not None
+    assert tombstoned.subject == tombstoned.body == "[removed by moderator]"
+    # A further content-addressed revision, not an in-place mutation --
+    # the original row is untouched and still individually reachable.
+    original = get_post(db, post.post_id)
+    assert original.subject == "Hello" and original.tombstoned_at is None
+
+
+def test_tombstone_post_preserves_the_edit_chain_and_reply_references(db, sysop, alice, bob):
+    """Unlike delete_post, tombstoning never removes the row -- proves a
+    reply's parent_post_id and the post's own root_post_id/edit_of_
+    post_id all still resolve after tombstoning."""
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    post = create_post(db, board, bob, "Hello", "Body")
+    reply = create_post(db, board, alice, "Re: Hello", "Reply body", parent_post_id=post.post_id)
+
+    tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    still_there = get_post(db, post.post_id)
+    assert still_there.root_post_id == post.post_id
+    reply_still_there = get_post(db, reply.post_id)
+    assert reply_still_there.parent_post_id == post.post_id
+
+
+def test_tombstone_post_is_refused_once_already_tombstoned(db, sysop, alice, bob):
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    post = create_post(db, board, bob, "Hello", "Body")
+    tombstoned = tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    with pytest.raises(PostError):
+        tombstone_post(db, tombstoned, board, tombstoned_by=sysop)
+
+
+def test_edit_post_is_refused_once_tombstoned(db, sysop, alice, bob):
+    """A tombstone is terminal for its chain -- edit_post must refuse to
+    extend past it, mirroring handle_events' own rejection on the Link
+    side (design doc §9.5)."""
+    board = create_board(db, "general", creator=alice)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.DELETE, granted_by=sysop)
+    grant_permissions(db, sysop, object_type="board", object_id=board.id, permissions=BoardPermission.EDIT, granted_by=sysop)
+    post = create_post(db, board, bob, "Hello", "Body")
+    tombstone_post(db, post, board, tombstoned_by=sysop)
+
+    with pytest.raises(PostError):
+        edit_post(db, post, board, subject="Hello", body="new body", edited_by=sysop)
 
 
 # -- pin/exempt: require edit permission -----------------------------------

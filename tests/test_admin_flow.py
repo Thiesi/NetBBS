@@ -878,6 +878,49 @@ def test_transfer_board_origin_flow(db, lane, sysop):
     assert offer.payload["old_origin_fingerprint"] == link_context.node_identity.fingerprint
 
 
+def test_close_board_flow(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import is_board_closed, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+
+    inputs = [
+        "m", "m", "l", "0", "1",  # navigate to board detail
+        "c",  # [C]lose board
+        "archived",  # optional reason
+        "y",  # confirm
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "closed" in text
+    assert is_board_closed(db, board)
+    assert board.board_id in link_context.link_node.board_closures
+
+
+def test_close_board_option_is_hidden_once_already_closed(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import close_board_if_linked, link_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    close_board_if_linked(db, board, node_identity=link_context.node_identity)
+
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "lose board" not in text
+    assert "ransfer origin" not in text  # closure also suppresses transfer
+    assert "Closed: yes" in text
+
+
 def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.link.boards import link_board, offer_board_origin_transfer
