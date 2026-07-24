@@ -1889,25 +1889,150 @@ never directly synced with) rather than building it speculatively now.
 
 ---
 
-## 11. Remote file areas
+## 11. Remote file areas (issue #89)
 
-A linked file area remains owned and stored by its source node.
+A linked file area remains owned and stored by its source node — unlike a
+linked board, where a carrying node eagerly materializes a full local copy of
+every post (§9.3), file content is deliberately **not** eagerly replicated:
+bytes can be large, so they are fetched on demand, in bounded resumable
+chunks, only when a local user actually wants one. The catalogue (what files
+exist, their names/sizes/hashes) is still gossiped and fully browsable
+without ever fetching any content — mirroring §9's promotion/genesis model
+for the metadata half, then adding one genuinely new mechanism (chunk
+transfer) for the content half that boards/channels never needed.
 
-NetBBS Link should propagate catalogue/descriptor events sufficient to discover:
+### 11.1 Promotion and genesis
 
-- area identity and metadata;
-- files, hashes, sizes, and source availability;
-- access policy needed before attempting transfer.
+An existing local file area may be promoted into Link scope exactly like a
+board (§9.1): one signed `file_area_genesis` referencing the existing stable
+`area_id`, never a newly minted one. `file_areas` gains `link_genesis_json`/
+`link_origin_fingerprint` columns mirroring `boards`' own pair exactly (the
+table's pre-existing `origin_node_fingerprint` column is unrelated dead
+Phase-1/2 scaffolding, left untouched, the same precedent `boards.
+origin_node_fingerprint` already set — a fresh column, not a repurposed old
+one). No `link_lifecycle_json`/origin-succession event types in this issue —
+same deliberate deferral §9.6 already applied to channels, for the same
+reason: genesis, catalogue, and transfer are the actual scope; add transfer
+event types alongside a future issue that actually needs them rather than
+carrying an unused column now.
 
-File content is fetched on demand in bounded resumable chunks. Chunk transport
-may use signed JSON metadata plus raw HTTP bodies; it is not required to embed
-large bytes as base64 JSON.
+`file_area_genesis` payload: `origin_fingerprint`, `area_id`, `name`,
+`created_at`, and optional cascading-recommendation fields mirroring
+`board_genesis`'s own shape (`description`, `default_min_read_level`,
+`default_min_write_level`, `default_moderated`, `default_max_file_age_days`,
+`default_min_age`, `default_name_requirement`) — one per `area_id`, ever,
+same conflict rule §9.1 already states.
 
-Chunk IDs and transfer IDs provide exact deduplication. Completed content is
-stored once by hash even when referenced from several catalogues.
+### 11.2 File descriptors (catalogue, no content)
 
-Remote file catalogue discovery and chunk transfer are Phase-3 work and are not
-yet implemented end to end.
+`file_descriptor`: the catalogue entry for one file, gossiped the same way a
+`board_post` is, but describing metadata only — `area_id`, `file_id` (the
+existing local content-addressed id, computed the same way
+`netbbs.files.entries.upload_file` already computes one), `filename`,
+`description`, `size_bytes`, `sha256`, `created_at`. No `parent_post_id`
+(files aren't threaded); no `author` tagged union the way `board_post` has
+one — attribution is a local admin-log concern (§18), not something a
+catalogue entry needs to assert network-wide, and an uploader's identity
+carries no bearing on whether a peer should fetch the bytes. Only an
+`area.moderated`-approved, locally-uploaded file is ever queued as a
+`file_descriptor` — the identical "never leak a moderation queue onto the
+network" rule §9.2 already states for `board_post`. Immutable, single-shot,
+like `board_post`/`channel_message` — no edit chain; a changed file is a new
+upload with its own new `file_id`, not a revision of an old one.
+
+A receiving node's catalogue materialization is genuinely different from a
+carried board's: the *area* becomes a real local `FileArea` row (browsable
+via the ordinary `list_file_areas`), but an individual `file_descriptor`
+does **not** become a `files` row — `netbbs.files.entries`' own invariant
+("a file row is only ever created after its bytes are already safely
+written to storage") stays true unconditionally, so a catalogued-but-not-
+yet-fetched file cannot live there. It lives instead in a new `remote_files`
+table (`file_id`, `area_id`, `origin_fingerprint`, `filename`, `description`,
+`size_bytes`, `sha256`, `created_at`, `link_event_json`, `fetched_file_id`)
+— catalogue metadata only, browsable and listable (the acceptance
+criterion's own "discover and list... without fetching any file content"),
+with `fetched_file_id` set only once §11.3's transfer completes and
+verifies, at which point the content is promoted into a genuine `files` row
+indistinguishable from a local upload for browsing/download purposes.
+
+### 11.3 On-demand chunk transfer
+
+Unlike every other Link mechanism so far, chunk transfer is a direct,
+point-to-point pull against one specific peer — the file's own
+`origin_fingerprint` (§11.2), never relayed, never gossiped, and not part of
+`handle_events`'s dispatch at all: nothing here is a candidate extension of
+a shared chain the way board/channel events are, so there is nothing to
+verify against a "current origin" the way `board_post_edit` does.
+
+**Wire shape.** A new pair of HTTP routes (`netbbs.link.transport`),
+alongside `/events`/`/inventory`: `POST /link/v1/file-chunk/{fingerprint}`.
+The **request** is a small, unsigned JSON bundle (mirroring
+`InventoryRequest`'s own "not a candidate chain extension, nothing to sign"
+reasoning) — `transfer_id`, `file_id`, `chunk_index`, `max_chunk_size`. The
+**response** carries the chunk's raw bytes as the literal HTTP body — never
+base64-embedded in JSON, per the issue's own explicit requirement — plus a
+*signed* `file_chunk_descriptor` (`file_id`, `chunk_index`, `chunk_sha256`,
+`chunk_size`, `total_size`, `is_last`, `created_at`), delivered in a response
+header (`X-NetBBS-Chunk-Envelope`, base64 JSON) rather than the body, so the
+body stays purely raw bytes. Signed by the origin's current signing key —
+the same `_resolve_sender_signing_key` resolution every other Link
+verification already uses — so a requester can verify the chunk's
+authenticity and integrity (`chunk_sha256` against the actual bytes
+received) independent of transport-level trust, the same "objectively
+verifiable" standard §12.3 holds every piece of Link content to.
+
+**Requester side is required to already be a completed peer** of the
+origin (unlike `/inventory`, which serves already-gossiped small metadata to
+anyone) — serving arbitrary bytes to an unauthenticated caller is a new
+resource-exposure the metadata-only routes don't have, so this route
+requires the same "no relay from a stranger" hello precondition
+`/events` already enforces.
+
+**Deduplication and resume.** `transfer_id` is deterministic — a content
+hash of `(file_id, requester_fingerprint)` — so a retried or resumed fetch
+naturally reuses the same id rather than minting a new one every attempt;
+the origin uses it to bound concurrent transfers per requester (§13.5's
+bounded-remote-influence principle: an explicit `max_concurrent_file_
+transfers`-per-peer cap, visible rejection once exceeded, never silent
+unbounded growth). `chunk_id` is the chunk's own `sha256` — an exact-content
+dedup key, not a sequence number alone: a resent identical chunk (the same
+request repeated, or a resumed transfer re-requesting a chunk it turns out
+it already has) is recognized as already-applied and skipped rather than
+re-written, the same idempotent-resend discipline every gossiped chain
+already applies, just against a `link_file_transfer_chunks` row instead of
+`known_event_ids`. `link_file_transfers` tracks one row per transfer
+(`transfer_id`, `remote_file_id`, `total_size`, `chunk_size`,
+`bytes_received`, `status`, staging path) — resuming an interrupted transfer
+means asking for the next chunk index past what's already recorded, nothing
+more elaborate. Once every chunk is received, the reassembled content's
+sha256 is verified against the file's own catalogued claim (§11.2) before
+promotion into real storage — a peer claiming a `file_descriptor` with a
+hash that doesn't match what it actually serves is refused at that point,
+never silently accepted.
+
+**Completed content is stored once by hash.** The verified reassembly is
+handed to `netbbs.files.storage.move_temp_file_into_storage` — the exact
+same content-addressed layout local uploads already use, so a file fetched
+from two different catalogues (or already locally uploaded, coincidentally
+identical bytes) shares one stored blob automatically, no special-casing
+needed; `remote_files.fetched_file_id` then references the resulting real
+`files` row.
+
+**Not a generic work-item/DLQ instance.** Chunk transfer is deliberately
+*not* folded into issue #60's outbound-retry abstraction (§13.7) — like
+board/channel gossip (§13.7's own "not every retry-shaped mechanism fits"
+lesson), it already has a natural resumable-by-construction terminal state
+(`link_file_transfers.status`) and no correct "give up" state distinct from
+"the requester stopped asking"; a second, differently-shaped retry
+abstraction bolted on top would only compete with that.
+
+**Explicitly out of scope for this issue** (mirroring §9.6's own precedent
+for channels): file-area origin succession (reused by reference, §9.4's
+model, if ever needed); inventory/pull catch-up (§8.8) extended to file
+areas — a peer that missed a `file_descriptor` while offline recovers it
+only via ordinary re-push on next sync, not a bounded diff request yet;
+write-back/uploading to a remote area (§11 itself: "remains owned and stored
+by its source node"); public/untrusted file discovery (Phase 4).
 
 ---
 
@@ -2749,11 +2874,11 @@ class of test: a complete real-transport (real `LinkServer`, real
 SQLite, real node identities), real-domain-read-path (an ordinary
 inbox/board read, not a raw row or `known_event_ids` check) vertical
 slice per currently implemented Link product surface — linked boards,
-Link mail, and (issue #87) linked channels — each covering
-restart-between-stages and duplicate-delivery. A future Link vertical
-slice (remote files) is not complete until it adds or extends a
-scenario in that file, the same way it is not complete without unit
-tests for its own protocol logic. Tier-2 message routing is
+Link mail, (issue #87) linked channels, and (issue #89) remote file
+catalogue/chunk transfer — each covering restart-between-stages and
+duplicate-delivery. A future Link vertical slice is not complete until it
+adds or extends a scenario in that file, the same way it is not complete
+without unit tests for its own protocol logic. Tier-2 message routing is
 deliberately not in that list — see §10.6 for why it remains deferred
 rather than an active future slice.
 
@@ -2871,10 +2996,12 @@ Implemented or substantially working:
 - board closure, origin-authorized moderator post edits, and tombstones
   (§9.5, issue #88, closed); linked-board moderator grants/revocations
   remain out of scope.
+- remote file area catalogue exchange and on-demand, resumable, deduplicated
+  chunk transfer (§11, issue #89, closed); file-area origin succession and
+  inventory/pull catch-up extended to file areas remain out of scope.
 
 Still required for Phase 3 completeness:
 
-- remote file catalogue and on-demand chunks (issue #89);
 - broader real-world multi-node deployment validation (issue #83).
 
 ### Phase 3 stabilization gate (issue #84)
