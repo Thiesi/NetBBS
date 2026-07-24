@@ -53,6 +53,7 @@ from netbbs.link.events import (
     ChannelMessage,
     EndpointDescriptor,
     FileAreaGenesis,
+    FileDescriptor,
     KeyTransition,
     event_content_id,
 )
@@ -422,6 +423,12 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     `channel_message` never reaches here either, for the identical
     reason (`netbbs.link.channels.materialize_carried_channel_message`
     inserts its own row directly).
+
+    Issue #93: `file_area_id` is populated the same way for `file_area_
+    genesis`, the one file-area-scoped type this function still handles
+    -- `file_descriptor` never reaches here either, for the identical
+    reason (`netbbs.link.files.materialize_carried_file_descriptor`
+    inserts its own row directly, with its own `file_area_id`).
     """
     # Conditional, not unconditional -- a malformed/tampered envelope for
     # an object type that needs neither field (e.g. a resend attempt
@@ -433,15 +440,19 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     channel_id = (
         envelope["envelope"]["payload"].get("channel_id") if object_type == CHANNEL_GENESIS_OBJECT_TYPE else None
     )
+    file_area_id = (
+        envelope["envelope"]["payload"].get("area_id") if object_type == FILE_AREA_GENESIS_OBJECT_TYPE else None
+    )
     now = utc_now_iso()
     db.connection.execute(
         """
         INSERT INTO link_events
-            (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id, channel_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (content_id, sender_fingerprint, object_type, envelope_json, received_at,
+             board_id, channel_id, file_area_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id, channel_id),
+        (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id, channel_id, file_area_id),
     )
     db.connection.commit()
     if object_type == KEY_TRANSITION_OBJECT_TYPE:
@@ -572,20 +583,34 @@ def carried_channel_ids(db: Database) -> list[str]:
     ]
 
 
+def carried_file_area_ids(db: Database) -> list[str]:
+    """Every `area_id` this node currently has *some* Linked copy of --
+    mirrors `carried_board_ids`/`carried_channel_ids` exactly (design doc
+    §11, issue #93)."""
+    return [
+        row["area_id"]
+        for row in db.connection.execute("SELECT area_id FROM file_areas WHERE link_genesis_json IS NOT NULL")
+    ]
+
+
 def build_inventory_request(db: Database) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
-    §8.8, issue #85; §9.6, issue #87): every board/channel it currently
-    carries, each mapped to the full set of content IDs it already has
-    for it -- reusing `_all_board_events`/`_all_channel_events` for
-    exactly the same "union self-authored, carried, and peer-received
-    sources" reasoning those functions' own docstrings already give,
-    since a requester's own gap-detection needs the identical complete
-    picture a responder's diff needs, just read from the requester's own
-    database instead of the responder's."""
+    §8.8, issue #85; §9.6, issue #87; §11, issue #93): every board/
+    channel/file area it currently carries, each mapped to the full set
+    of content IDs it already has for it -- reusing `_all_board_events`/
+    `_all_channel_events`/`_all_file_area_events` for exactly the same
+    "union self-authored, carried, and peer-received sources" reasoning
+    those functions' own docstrings already give, since a requester's own
+    gap-detection needs the identical complete picture a responder's diff
+    needs, just read from the requester's own database instead of the
+    responder's."""
     boards = {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
     channels = {channel_id: tuple(_all_channel_events(db, channel_id)) for channel_id in carried_channel_ids(db)}
-    return InventoryRequest(boards=boards, channels=channels)
+    file_areas = {
+        area_id: tuple(_all_file_area_events(db, area_id)) for area_id in carried_file_area_ids(db)
+    }
+    return InventoryRequest(boards=boards, channels=channels, file_areas=file_areas)
 
 
 def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
@@ -769,6 +794,87 @@ def channel_event_diff(
             break
         known_ids = set(requested_channels[channel_id])
         for content_id, envelope in _all_channel_events(db, channel_id).items():
+            if content_id in known_ids:
+                continue
+            if len(collected) >= limit:
+                truncated = True
+                break
+            collected.append(envelope)
+    return collected, truncated
+
+
+def _all_file_area_events(db: Database, area_id: str) -> dict[str, dict]:
+    """
+    Every file-area-scoped event this node has on file for `area_id`,
+    keyed by `content_id` -- mirrors `_all_board_events`/`_all_channel_
+    events` exactly (design doc §11, issue #93), minus origin-succession
+    lifecycle state (not built for file areas, see `netbbs.link.files`'
+    own module docstring) and any edit-chain equivalent (a `file_
+    descriptor` has none):
+
+    1. `file_areas.link_genesis_json` for this area's own row -- a
+       self-originated area's genesis (never in `link_events`) or a
+       carried area's genesis (redundant with `link_events` below,
+       harmless -- same `content_id`-keyed-dict reasoning every other
+       source in this module already relies on).
+    2. `files.link_event_json` for every file in this area -- populated
+       only for a locally-authored upload (`netbbs.link.files.queue_
+       file_descriptor_if_linked`), regardless of whether this node
+       originated or merely carries the area it's in.
+    3. `link_events.file_area_id = ?` -- peer-received content: a
+       carried area's genesis (redundant with source 1) and every
+       `file_descriptor` this node accepted from a peer.
+    """
+    events: dict[str, dict] = {}
+
+    area_row = db.connection.execute(
+        "SELECT id, link_genesis_json FROM file_areas WHERE area_id = ?", (area_id,)
+    ).fetchone()
+    if area_row is None:
+        return events
+    if area_row["link_genesis_json"] is not None:
+        raw = json.loads(area_row["link_genesis_json"])
+        events[FileAreaGenesis.from_dict(raw).content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT link_event_json FROM files WHERE area_id = ? AND link_event_json IS NOT NULL", (area_row["id"],)
+    ):
+        raw = json.loads(row["link_event_json"])
+        events[FileDescriptor.from_dict(raw).content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT content_id, envelope_json FROM link_events WHERE file_area_id = ? ORDER BY received_at ASC",
+        (area_id,),
+    ):
+        events.setdefault(row["content_id"], json.loads(row["envelope_json"]))
+
+    return events
+
+
+def file_area_event_diff(
+    db: Database, requested_file_areas: dict[str, list[str]], *, limit: int
+) -> tuple[list[dict], bool]:
+    """
+    The file-area-side responder logic for one `InventoryRequest` --
+    mirrors `board_event_diff`/`channel_event_diff` exactly, using `_all_
+    file_area_events` instead (design doc §11, issue #93). Callers
+    combining all three results (`netbbs.link.transport._handle_
+    inventory`) are responsible for sharing one overall `_MAX_EVENTS_
+    PER_REQUEST` budget across all of them -- this function's own
+    `limit` is whatever budget remains after the board/channel halves
+    already ran, not a third independent cap. Only catalogue metadata
+    (`file_area_genesis`/`file_descriptor`) is ever returned here --
+    chunk bytes stay outside inventory entirely, fetched point-to-point
+    on demand through `netbbs.link.file_transfer`, unchanged by this
+    issue.
+    """
+    collected: list[dict] = []
+    truncated = False
+    for area_id in sorted(requested_file_areas):
+        if truncated:
+            break
+        known_ids = set(requested_file_areas[area_id])
+        for content_id, envelope in _all_file_area_events(db, area_id).items():
             if content_id in known_ids:
                 continue
             if len(collected) >= limit:

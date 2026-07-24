@@ -307,6 +307,14 @@ def materialize_carried_file_descriptor(
     resend of an already-catalogued file is exempt from the cap, same
     "resend never blocked by a cap reached after the first materialization"
     rule `materialize_carried_board`'s own tests establish.
+
+    Issue #93: the `link_events` row this function inserts directly
+    (rather than through `netbbs.link.store.save_event`, same shape
+    `materialize_carried_post`/`materialize_carried_channel_message`
+    already use) now also carries `file_area_id` -- the file-area-scoped
+    counterpart to `board_id`/`channel_id`, feeding `netbbs.link.store.
+    _all_file_area_events`'s own inventory-diff query the identical way
+    those columns already feed the board/channel diffs.
     """
     file_id = descriptor.payload["file_id"]
     existing = db.connection.execute(
@@ -343,11 +351,15 @@ def materialize_carried_file_descriptor(
 
     db.connection.execute(
         """
-        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO link_events
+            (content_id, sender_fingerprint, object_type, envelope_json, received_at, file_area_id)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (descriptor.content_id, sender_fingerprint, FILE_DESCRIPTOR_OBJECT_TYPE, json.dumps(descriptor.to_dict()), utc_now_iso()),
+        (
+            descriptor.content_id, sender_fingerprint, FILE_DESCRIPTOR_OBJECT_TYPE,
+            json.dumps(descriptor.to_dict()), utc_now_iso(), descriptor.payload["area_id"],
+        ),
     )
     db.connection.execute(
         """

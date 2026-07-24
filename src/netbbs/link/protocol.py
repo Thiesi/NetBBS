@@ -284,8 +284,13 @@ class InventoryRequest:
     this request's size is therefore already bounded by an existing
     cap, not a new one), mapped to that board's full known-`content_id`
     list. `channels` (design doc §9.6, issue #87) is the identical shape,
-    bounded by `max_carried_channels`, for linked channels. The response
-    is not a new message type either -- it reuses `push_events`'s
+    bounded by `max_carried_channels`, for linked channels. `file_areas`
+    (design doc §11, issue #93) is the identical shape again, bounded by
+    `max_carried_file_areas`, for linked file-area catalogues -- chunk
+    bytes themselves are never part of this: only `file_area_genesis`/
+    `file_descriptor` metadata is in scope, the same "catalogue, not
+    content" boundary issue #89 already drew for direct push. The
+    response is not a new message type either -- it reuses `push_events`'s
     existing raw-event-list wire shape, verified and applied through the
     exact same `LinkNode.handle_events` path a push response already
     uses (see `netbbs.link.transport`'s `/inventory` route and
@@ -294,11 +299,13 @@ class InventoryRequest:
 
     boards: dict[str, tuple[str, ...]]
     channels: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    file_areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "boards": {board_id: list(ids) for board_id, ids in self.boards.items()},
             "channels": {channel_id: list(ids) for channel_id, ids in self.channels.items()},
+            "file_areas": {area_id: list(ids) for area_id, ids in self.file_areas.items()},
         }
 
     @classmethod
@@ -306,9 +313,11 @@ class InventoryRequest:
         return cls(
             boards={board_id: tuple(ids) for board_id, ids in data["boards"].items()},
             # .get(..., {}) rather than a required key -- accepts a
-            # pre-issue-#87 request shape too, harmless since an absent
-            # "channels" key just means "nothing to ask about."
+            # pre-issue-#87/#93 request shape too, harmless since an
+            # absent "channels"/"file_areas" key just means "nothing to
+            # ask about."
             channels={channel_id: tuple(ids) for channel_id, ids in data.get("channels", {}).items()},
+            file_areas={area_id: tuple(ids) for area_id, ids in data.get("file_areas", {}).items()},
         )
 
 

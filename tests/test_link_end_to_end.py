@@ -810,6 +810,89 @@ def test_linked_board_multi_hop_catch_up_is_idempotent_across_repeated_inventory
         puller.close()
 
 
+def test_linked_file_area_multi_hop_catch_up_via_a_third_node_over_real_transport(tmp_path):
+    """The file-area-catalogue counterpart to the linked-board multi-hop
+    test above (design doc §11, issue #93): puller already carries
+    origin's file area (from an earlier direct sync) but misses a later
+    `file_descriptor` while never talking to origin again -- relay,
+    which stayed in contact with origin the whole time, is the only path
+    puller ever reaches that descriptor through. Origin's own server is
+    never started again for stage 2, so anything puller ends up with
+    genuinely came via relay's inventory response, not a disguised
+    direct push -- same proof shape the board version above already
+    establishes, extended to catalogue metadata. Chunk bytes are
+    deliberately out of scope here (design doc §11, issue #93's own
+    "out of scope: automatic content mirroring/prefetching"): this test
+    only proves the catalogue entry itself is recoverable, not that its
+    bytes get fetched automatically."""
+    origin_identity = bootstrap_node_identity("origin")
+    relay_identity = bootstrap_node_identity("relay")
+    puller_identity = bootstrap_node_identity("puller")
+    origin_node = LinkNode(identity=origin_identity)
+    relay_node = LinkNode(identity=relay_identity)
+    puller_node = LinkNode(identity=puller_identity)
+    origin = _NodeDb(tmp_path, "origin")
+    relay = _NodeDb(tmp_path, "relay")
+    puller = _NodeDb(tmp_path, "puller")
+
+    creator = create_user(origin.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(origin.db, "downloads", creator=creator)
+    link_file_area(origin.db, area, node_identity=origin_identity)
+    first_file = upload_file(origin.db, area, creator, "first.bin", b"first file bytes")
+    queue_file_descriptor_if_linked(origin.db, first_file, area, node_identity=origin_identity)
+
+    async def scenario():
+        # Stage 1: origin dials puller's server directly -- gives puller
+        # the area genesis and the first descriptor, and completes a
+        # real hello between the two.
+        puller_server = await _run_server(puller_node, puller.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{puller_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+        finally:
+            await puller_server.stop()
+
+        # Origin then catalogues a second file, while puller never talks
+        # to it again.
+        second_file = upload_file(origin.db, area, creator, "second.bin", b"second file bytes")
+        queue_file_descriptor_if_linked(origin.db, second_file, area, node_identity=origin_identity)
+
+        # Relay stays in contact with origin and ends up with
+        # everything -- kept running for stage 2 below too. Origin's own
+        # server is never started again at this point.
+        relay_server = await _run_server(relay_node, relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    origin_node, session, [f"http://127.0.0.1:{relay_server.port}"],
+                    lambda: _hello_for(origin_node), origin.lane,
+                )
+
+                # Stage 2: puller dials relay's server.
+                await _one_pass(
+                    puller_node, session, [f"http://127.0.0.1:{relay_server.port}"],
+                    lambda: _hello_for(puller_node), puller.lane,
+                )
+        finally:
+            await relay_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        carried_area = get_file_area_by_name(puller.db, "downloads")
+        remote_files = list_remote_files(puller.db, carried_area)
+        assert {rf.filename for rf in remote_files} == {"first.bin", "second.bin"}
+        # Recovered purely as catalogue metadata -- never auto-fetched.
+        assert all(rf.fetched_file_id is None for rf in remote_files)
+    finally:
+        origin.close()
+        relay.close()
+        puller.close()
+
+
 # -- linked channels: full vertical (design doc §9.6, issue #87) ------------
 
 

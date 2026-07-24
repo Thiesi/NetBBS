@@ -72,14 +72,18 @@ from netbbs.link.events import (
     build_board_post_edit,
     build_channel_genesis,
     build_channel_message,
+    build_file_area_genesis,
+    build_file_descriptor,
     build_link_message,
     build_link_message_accepted,
 )
+from netbbs.link.files import materialize_carried_file_area, materialize_carried_file_descriptor
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import (
     board_event_diff,
     channel_event_diff,
+    file_area_event_diff,
     load_link_node,
     purge_expired_key_transitions,
     save_event,
@@ -944,6 +948,60 @@ def test_a_node_converges_via_multi_hop_channel_inventory_when_the_origin_is_alr
     relayed_accepted = c_node.handle_events(b.fingerprint, events)
     assert set(relayed_accepted) == {genesis.content_id, message.content_id}
     assert c_node.channels["existing-local-channel-id"].content_id == genesis.content_id
+
+    a.close()
+    b.close()
+    c.close()
+
+
+def test_a_node_converges_via_multi_hop_file_area_inventory_when_the_origin_is_already_known(tmp_path, clock):
+    """Design doc §11, issue #93: the file-area-catalogue counterpart to
+    the board/channel multi-hop tests above, same shape exactly -- b
+    carries a's file area (direct sync) and stays caught up; c already
+    knows a (so it can verify a's signing key) but never receives a's
+    catalogue directly, only b's own inventory response."""
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    c = spawn_node(tmp_path, "c")
+    transport = ScriptedTransport()
+    for node in (a, b, c):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    c_node = LinkNode(identity=c.identity)
+
+    _exchange_hellos(transport, a, a_node, c, c_node, clock)
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+
+    genesis = build_file_area_genesis(
+        signing_identity=a.identity.signing_key, origin_fingerprint=a.fingerprint,
+        area_id="existing-local-area-id", name="Vintage Software", created_at=clock.now_iso(),
+    )
+    descriptor = build_file_descriptor(
+        signing_identity=a.identity.signing_key, area_id="existing-local-area-id",
+        file_id="existing-local-file-id", filename="game.bin", size_bytes=1000, sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+    payload = json.dumps([genesis.to_dict(), descriptor.to_dict()]).encode()
+    transport.send(a, b, payload)
+    transport.deliver_all()
+    [to_b] = [m for m in transport.inbox(b) if m.sender == a.label and m.payload == payload]
+    accepted = b_node.handle_events(a.fingerprint, json.loads(to_b.payload))
+    assert accepted == [genesis.content_id, descriptor.content_id]
+    materialize_carried_file_area(b.db, genesis, own_fingerprint=b.fingerprint)
+    materialize_carried_file_descriptor(b.db, descriptor, sender_fingerprint=a.fingerprint)
+
+    assert "existing-local-area-id" not in c_node.file_areas
+
+    _exchange_hellos(transport, b, b_node, c, c_node, clock)
+    events, more_available = file_area_event_diff(b.db, {"existing-local-area-id": []}, limit=200)
+    assert more_available is False
+    assert len(events) == 2
+
+    relayed_accepted = c_node.handle_events(b.fingerprint, events)
+    assert set(relayed_accepted) == {genesis.content_id, descriptor.content_id}
+    assert c_node.file_areas["existing-local-area-id"].content_id == genesis.content_id
 
     a.close()
     b.close()

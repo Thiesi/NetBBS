@@ -1492,6 +1492,44 @@ new `/remote` command had to be wired into *both* branches, not just the
 main loop, or it would silently be unreachable for exactly the areas most
 likely to have something worth fetching.
 
+**Extending inventory/pull catch-up to file-area catalogues (issue #93).**
+Adding a third scope to an existing generalized mechanism (`InventoryRequest.
+file_areas`, alongside `boards`/`channels`) surfaced two easy-to-miss spots
+that a mechanical "just mirror channels" pass would otherwise skip: first,
+`link_events.file_area_id` needed populating from *two* call sites, not
+one, because `file_area_genesis` and `file_descriptor` don't share a single
+insert path the way `board_genesis`/`channel_genesis` alone needed handling
+for `board_id`/`channel_id` — `file_descriptor` (like `board_post`/
+`channel_message` before it) skips `netbbs.link.store.save_event` entirely
+and does its own direct `link_events` insert in `netbbs.link.files.
+materialize_carried_file_descriptor`. Any future object type that both (a)
+needs a new scoping column and (b) has a sibling type that bypasses
+`save_event` must check both insert sites, not just extend `save_event`
+and assume that's the whole story.
+
+Second, `netbbs.link.sync`'s own inventory-response handling had never been
+threaded with `max_carried_file_areas`/`max_remote_files_per_area` at all
+(unlike `max_carried_boards`/`max_carried_channels`, threaded since issues
+#85/#87) — a real pre-existing gap, not a hypothetical one: `LinkServer`'s
+direct-push path already enforced both quotas (§13.9), but the inventory
+pull path silently didn't, simply because inventory had never asked about
+file areas before this issue existed for it to matter. Worth checking for
+on any future issue that adds a new carried-resource type to `netbbs.link.
+sync`'s inventory step: grep for where its sibling quotas are threaded
+through `_sync_one_seed`/`run_link_sync`/`__main__.py`, since a quota that
+already exists for the direct-push route is easy to assume is "already
+handled everywhere" when it was only ever wired for the routes that existed
+when it was added.
+
+No restart-reconstruction changes were needed for this issue at all —
+issue #89's own `load_link_node` work already rebuilt `node.file_areas`
+from both sources this issue's own diff query reads, and `file_descriptor`
+has no chain state to rebuild in the first place. Confirmed by tracing
+before writing any code, not assumed: the same "what does load_link_node
+and the inventory diff depend on" check issue #86's own worklog entry
+recommends doing before assuming a new event type's state is purgeable or
+already restart-safe.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required

@@ -623,6 +623,8 @@ async def run(
                         stop_event=link_sync_stop_event,
                         max_carried_boards=config.link.max_carried_boards,
                         max_carried_channels=config.link.max_carried_channels,
+                        max_carried_file_areas=config.link.max_carried_file_areas,
+                        max_remote_files_per_area=config.link.max_remote_files_per_area,
                     )
                 )
 

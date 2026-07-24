@@ -193,6 +193,8 @@ async def run_link_sync(
     stop_event: asyncio.Event | None = None,
     max_carried_boards: int | None = None,
     max_carried_channels: int | None = None,
+    max_carried_file_areas: int | None = None,
+    max_remote_files_per_area: int | None = None,
 ) -> None:
     """
     Runs until cancelled: each pass dials every seed in `seeds` (in
@@ -251,7 +253,16 @@ async def run_link_sync(
     (the default) preserves every existing caller/test, matching this
     function's own established convention for every other optional
     quota parameter. `max_carried_channels` (design doc §9.6, issue #87)
-    is the identical shape for linked channels.
+    is the identical shape for linked channels. `max_carried_file_areas`/
+    `max_remote_files_per_area` (design doc §11, issues #89/#93) are the
+    identical shape again for linked file-area catalogues -- an
+    inventory response can carry a wholly new `file_area_genesis` or a
+    `file_descriptor` for an area this node already carries, either of
+    which is otherwise unbounded without these. Before issue #93, this
+    function's own inventory-response step never asked about file areas
+    at all, so these two quotas had no effect here yet even though
+    `LinkServer`'s direct-push path already enforced them (§13.9) --
+    that gap is what this issue closes.
     """
     while stop_event is None or not stop_event.is_set():
         supplementary = await lane.run(get_cached_supplementary_seeds)
@@ -262,6 +273,8 @@ async def run_link_sync(
             succeeded = await _sync_one_seed(
                 node, session, seed_url, own_hello_provider, lane,
                 max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
+                max_carried_file_areas=max_carried_file_areas,
+                max_remote_files_per_area=max_remote_files_per_area,
             )
             reached_network = reached_network or succeeded
         if not reached_network:
@@ -313,6 +326,8 @@ async def _sync_one_seed(
     *,
     max_carried_boards: int | None = None,
     max_carried_channels: int | None = None,
+    max_carried_file_areas: int | None = None,
+    max_remote_files_per_area: int | None = None,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -346,18 +361,19 @@ async def _sync_one_seed(
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
-    # Design doc §8.8, issue #85 (§9.6, issue #87 for channels):
-    # pull-based catch-up, asked of every seed this pass already reached
-    # (not one arbitrary "best" peer) -- not every peer necessarily
-    # carries every board/channel this node does, and the push loop
-    # above already iterates all of them regardless. `handle_events` (not
-    # this function) is what actually verifies the response; a seed that
-    # carries none of the requested boards/channels simply returns an
-    # empty list, indistinguishable from -- and no more costly than --
-    # this loop's own existing per-seed push tolerance.
+    # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
+    # issue #93 for file-area catalogues): pull-based catch-up, asked of
+    # every seed this pass already reached (not one arbitrary "best"
+    # peer) -- not every peer necessarily carries every board/channel/
+    # file area this node does, and the push loop above already iterates
+    # all of them regardless. `handle_events` (not this function) is what
+    # actually verifies the response; a seed that carries none of the
+    # requested boards/channels/file areas simply returns an empty list,
+    # indistinguishable from -- and no more costly than -- this loop's
+    # own existing per-seed push tolerance.
     try:
         inventory_request = await lane.run(build_inventory_request)
-        if inventory_request.boards or inventory_request.channels:
+        if inventory_request.boards or inventory_request.channels or inventory_request.file_areas:
             events, _more_available = await request_inventory(node, session, seed_url, inventory_request)
             if events:
                 try:
@@ -371,6 +387,8 @@ async def _sync_one_seed(
                         lane, node, accepted,
                         sender_fingerprint=seed_peer.fingerprint, max_carried_boards=max_carried_boards,
                         max_carried_channels=max_carried_channels,
+                        max_carried_file_areas=max_carried_file_areas,
+                        max_remote_files_per_area=max_remote_files_per_area,
                     )
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request inventory from seed %s: %s", seed_url, exc)

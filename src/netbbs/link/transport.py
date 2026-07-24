@@ -138,6 +138,7 @@ from netbbs.link.relay_mailbox import (
 from netbbs.link.store import (
     board_event_diff,
     channel_event_diff,
+    file_area_event_diff,
     save_candidate_descriptor,
     save_event,
     save_peer,
@@ -582,6 +583,13 @@ class LinkServer:
         second independent cap -- run board first, then channels with
         whatever budget remains, so one combined request/response still
         obeys one combined bound.
+
+        Design doc §11, issue #93: `file_area_event_diff` extends the
+        same shared-budget chain a third step -- run after board and
+        channel, with whatever remains of the one overall bound. Only
+        catalogue metadata (`file_area_genesis`/`file_descriptor`) is
+        ever included; chunk bytes stay outside inventory entirely (see
+        `file_area_event_diff`'s own docstring).
         """
         try:
             body = await request.json(loads=strict_json_loads)
@@ -599,8 +607,15 @@ class LinkServer:
             )
         else:
             channel_events, channel_truncated = [], bool(inventory_request.channels)
-        events = board_events + channel_events
-        more_available = board_truncated or channel_truncated
+        remaining -= len(channel_events)
+        if remaining > 0 and inventory_request.file_areas:
+            file_area_events, file_area_truncated = await self._lane.run(
+                file_area_event_diff, inventory_request.file_areas, limit=remaining
+            )
+        else:
+            file_area_events, file_area_truncated = [], bool(inventory_request.file_areas)
+        events = board_events + channel_events + file_area_events
+        more_available = board_truncated or channel_truncated or file_area_truncated
         return web.json_response({"events": events, "more_available": more_available})
 
     async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:

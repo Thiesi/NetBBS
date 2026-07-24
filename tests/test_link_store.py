@@ -17,6 +17,8 @@ from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post, tombstone_post
+from netbbs.files.areas import create_file_area
+from netbbs.files.entries import upload_file
 from netbbs.link.boards import (
     close_board_if_linked,
     link_board,
@@ -30,8 +32,11 @@ from netbbs.link.events import (
     build_board_post,
     build_board_post_edit,
     build_endpoint_descriptor,
+    build_file_area_genesis,
+    build_file_descriptor,
     build_key_transition,
 )
+from netbbs.link.files import link_file_area, queue_file_descriptor_if_linked
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.store import load_link_node, load_peer_last_contact, save_candidate_descriptor, save_event, save_peer
@@ -1031,5 +1036,174 @@ def test_board_event_diff_is_genuinely_multi_hop_for_a_board_this_node_never_ori
 
     returned_ids = {_content_id_of(e) for e in events}
     assert {genesis.content_id, post.content_id} == returned_ids
+    db.close()
+
+
+# -- carried_file_area_ids/build_inventory_request/file_area_event_diff (design doc §11, issue #93) --
+
+
+def _remote_file_area_genesis_for_store_tests(remote_identity, *, area_id="remote-area-id"):
+    return build_file_area_genesis(
+        signing_identity=remote_identity.signing_key,
+        origin_fingerprint=remote_identity.fingerprint,
+        area_id=area_id,
+        name="Remote Downloads",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+
+def _remote_file_descriptor_for_store_tests(remote_identity, *, area_id="remote-area-id", **kwargs):
+    return build_file_descriptor(
+        signing_identity=remote_identity.signing_key,
+        area_id=area_id,
+        file_id=kwargs.pop("file_id", "remote-file-content-id"),
+        filename=kwargs.pop("filename", "game.bin"),
+        size_bytes=kwargs.pop("size_bytes", 1000),
+        sha256=kwargs.pop("sha256", "a" * 64),
+        created_at=kwargs.pop("created_at", "2026-01-01T00:00:00Z"),
+        **kwargs,
+    )
+
+
+def test_carried_file_area_ids_includes_both_self_originated_and_carried_areas(tmp_path):
+    from netbbs.link.files import materialize_carried_file_area
+    from netbbs.link.store import carried_file_area_ids
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    own_area = create_file_area(db, "downloads", creator=creator)
+    link_file_area(db, own_area, node_identity=own_identity)
+
+    remote_identity = bootstrap_node_identity("elsewhere")
+    materialize_carried_file_area(
+        db, _remote_file_area_genesis_for_store_tests(remote_identity, area_id="carried-area")
+    )
+
+    assert set(carried_file_area_ids(db)) == {own_area.area_id, "carried-area"}
+    db.close()
+
+
+def test_carried_file_area_ids_excludes_an_unlinked_area(tmp_path):
+    from netbbs.link.store import carried_file_area_ids
+
+    db = Database(tmp_path / "node.db")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    create_file_area(db, "not-linked", creator=creator)
+
+    assert carried_file_area_ids(db) == []
+    db.close()
+
+
+def test_build_inventory_request_includes_self_originated_file_area_genesis_and_descriptor(tmp_path):
+    from netbbs.link.store import build_inventory_request
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "downloads", creator=creator)
+    genesis = link_file_area(db, area, node_identity=own_identity)
+    file_entry = upload_file(db, area, creator, "game.bin", b"file bytes")
+    descriptor = queue_file_descriptor_if_linked(db, file_entry, area, node_identity=own_identity)
+
+    request = build_inventory_request(db)
+
+    assert area.area_id in request.file_areas
+    assert set(request.file_areas[area.area_id]) == {genesis.content_id, descriptor.content_id}
+    db.close()
+
+
+def test_build_inventory_request_includes_carried_file_area_content(tmp_path):
+    from netbbs.link.files import materialize_carried_file_area, materialize_carried_file_descriptor
+    from netbbs.link.store import build_inventory_request
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_file_area_genesis_for_store_tests(remote_identity)
+    materialize_carried_file_area(db, genesis)
+    descriptor = _remote_file_descriptor_for_store_tests(remote_identity)
+    materialize_carried_file_descriptor(db, descriptor, sender_fingerprint=remote_identity.fingerprint)
+
+    request = build_inventory_request(db)
+
+    assert set(request.file_areas["remote-area-id"]) == {genesis.content_id, descriptor.content_id}
+    db.close()
+
+
+def test_file_area_event_diff_returns_only_events_missing_from_the_requesters_known_ids(tmp_path):
+    from netbbs.link.files import materialize_carried_file_area, materialize_carried_file_descriptor
+    from netbbs.link.store import file_area_event_diff
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_file_area_genesis_for_store_tests(remote_identity)
+    materialize_carried_file_area(db, genesis)
+    descriptor = _remote_file_descriptor_for_store_tests(remote_identity)
+    materialize_carried_file_descriptor(db, descriptor, sender_fingerprint=remote_identity.fingerprint)
+
+    events, more_available = file_area_event_diff(db, {"remote-area-id": [genesis.content_id]}, limit=200)
+
+    returned_ids = {_content_id_of(e) for e in events}
+    assert descriptor.content_id in returned_ids
+    assert genesis.content_id not in returned_ids
+    assert more_available is False
+    db.close()
+
+
+def test_file_area_event_diff_silently_skips_an_area_id_this_node_does_not_carry(tmp_path):
+    from netbbs.link.store import file_area_event_diff
+
+    db = Database(tmp_path / "node.db")
+
+    events, more_available = file_area_event_diff(db, {"unknown-area-id": []}, limit=200)
+
+    assert events == []
+    assert more_available is False
+    db.close()
+
+
+def test_file_area_event_diff_respects_the_limit_and_reports_more_available(tmp_path):
+    from netbbs.link.files import materialize_carried_file_area, materialize_carried_file_descriptor
+    from netbbs.link.store import file_area_event_diff
+
+    db = Database(tmp_path / "node.db")
+    remote_identity = bootstrap_node_identity("elsewhere")
+    genesis = _remote_file_area_genesis_for_store_tests(remote_identity)
+    materialize_carried_file_area(db, genesis)
+    for i in range(3):
+        descriptor = _remote_file_descriptor_for_store_tests(
+            remote_identity, file_id=f"remote-file-{i}", filename=f"file-{i}.bin"
+        )
+        materialize_carried_file_descriptor(db, descriptor, sender_fingerprint=remote_identity.fingerprint)
+
+    events, more_available = file_area_event_diff(db, {"remote-area-id": []}, limit=2)
+
+    # 1 genesis + 3 descriptors = 4 total events on file; limit=2 must
+    # return exactly 2 and flag that more remain, never silently
+    # truncate without saying so.
+    assert len(events) == 2
+    assert more_available is True
+    db.close()
+
+
+def test_file_area_event_diff_is_genuinely_multi_hop_for_an_area_this_node_never_originated(tmp_path):
+    """The actual multi-hop proof at the store layer (design doc §11,
+    issue #93): a node that only *carries* file area X, never originated
+    it, must still be able to answer for it -- `file_area_event_diff`
+    reads what this node has on file, not who authored it."""
+    from netbbs.link.files import materialize_carried_file_area, materialize_carried_file_descriptor
+    from netbbs.link.store import file_area_event_diff
+
+    db = Database(tmp_path / "node.db")
+    origin_identity = bootstrap_node_identity("origin-node")
+    genesis = _remote_file_area_genesis_for_store_tests(origin_identity)
+    materialize_carried_file_area(db, genesis)
+    descriptor = _remote_file_descriptor_for_store_tests(origin_identity)
+    materialize_carried_file_descriptor(db, descriptor, sender_fingerprint=origin_identity.fingerprint)
+
+    events, _more_available = file_area_event_diff(db, {"remote-area-id": []}, limit=200)
+
+    returned_ids = {_content_id_of(e) for e in events}
+    assert {genesis.content_id, descriptor.content_id} == returned_ids
     db.close()
     db.close()

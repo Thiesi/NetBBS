@@ -2028,11 +2028,58 @@ abstraction bolted on top would only compete with that.
 
 **Explicitly out of scope for this issue** (mirroring §9.6's own precedent
 for channels): file-area origin succession (reused by reference, §9.4's
-model, if ever needed); inventory/pull catch-up (§8.8) extended to file
-areas — a peer that missed a `file_descriptor` while offline recovers it
-only via ordinary re-push on next sync, not a bounded diff request yet;
-write-back/uploading to a remote area (§11 itself: "remains owned and stored
-by its source node"); public/untrusted file discovery (Phase 4).
+model, if ever needed); write-back/uploading to a remote area (§11 itself:
+"remains owned and stored by its source node"); public/untrusted file
+discovery (Phase 4). Inventory/pull catch-up (§8.8) extended to file areas
+was left out of this issue too, but is no longer an open gap — see §11.4
+(issue #93).
+
+### 11.4 Inventory/pull-based catch-up for file-area catalogues (issue #93)
+
+§8.8's `InventoryRequest`/diff mechanism extends to file-area catalogues
+the identical way §9.6 already extended it to channels: a third key,
+`file_areas`, alongside `boards`/`channels`, keyed by every `area_id` this
+node currently carries (bounded by its own `max_carried_file_areas` quota,
+same "request size already bounded by an existing cap" reasoning §8.8
+states for boards) mapped to the full set of content IDs already known for
+it. The responder's diff (`netbbs.link.store.file_area_event_diff`) unions
+the same three sources §8.8/§9.6 already established for boards/channels:
+this node's own self-originated genesis (`file_areas.link_genesis_json`,
+never routed through `handle_events`), any `file_descriptor` a *local* user
+queued regardless of whether this node originated or merely carries the
+area (`files.link_event_json`, populated only by self-authorship, per
+`netbbs.link.files.queue_file_descriptor_if_linked`'s own scope), and every
+peer-received event this node has accepted (`link_events`, filtered by a
+new `file_area_id` column, the file-area-scoped counterpart to `board_id`/
+`channel_id`). `_handle_inventory` shares one overall `_MAX_EVENTS_PER_
+REQUEST` budget across all three diffs now — board, then channel, then
+file area, each with whatever remains — not three independent caps.
+
+Only catalogue metadata (`file_area_genesis`/`file_descriptor`) is ever
+recoverable this way — this section changes nothing about §11.3's chunk
+transfer, which stays a direct point-to-point pull the requester still
+must initiate explicitly against the file's own origin once it learns of
+a descriptor. A node that recovers a missed `file_descriptor` through an
+intermediary carrier therefore ends up with a real, browsable catalogue
+entry (`remote_files`, `fetched_file_id` still `NULL`), not fetched bytes
+— turning inventory into automatic content replication was explicitly out
+of scope for this issue, matching the acceptance criteria's own "recover
+metadata/catalogue divergence only" framing.
+
+`file_area_genesis` already went through `netbbs.link.store.save_event`'s
+generic dispatch (the same path `board_genesis`/`channel_genesis` use);
+`file_descriptor` does not (`materialize_carried_file_descriptor` inserts
+its own `link_events` row directly, same shape `materialize_carried_post`/
+`materialize_carried_channel_message` already established) — so populating
+the new `file_area_id` column needed two call sites, not one, unlike
+`channel_id` (only `channel_genesis` needed it, since `channel_message`
+does its own insert too, but happened to need no scoped column of its own
+until this issue). Restart reconstruction needed no new code: `node.
+file_areas` (via `FileAreaEventState`) was already rebuilt from both
+`file_areas.link_genesis_json` and `link_events` by issue #89's own
+`load_link_node` changes, and `file_descriptor` has no chain state beyond
+`known_event_ids`/`events` to rebuild in the first place — the same "no
+branch needed" reasoning issue #89 already documented for descriptors.
 
 ---
 
@@ -2998,17 +3045,19 @@ Implemented or substantially working:
   remain out of scope.
 - remote file area catalogue exchange and on-demand, resumable, deduplicated
   chunk transfer (§11, issue #89, closed); file-area origin succession
-  remains out of scope; inventory/pull catch-up extended to file areas is
-  tracked separately (issue #93).
+  remains out of scope.
 - linked-channel messages wired into the live interactive chat send path
   (issue #91, closed) — closes the gap issue #87 left open.
 - interactive browse/fetch UI for remote file catalogues: a `/remote`
   command reachable from file areas, both paginated and empty (§11,
   issue #92, closed) — closes the gap issue #89 left open.
+- inventory/pull catch-up extended to file-area catalogues (§11.4,
+  issue #93, closed) — closes the gap issue #89 left open; content
+  bytes still require an explicit fetch, only catalogue metadata is
+  recoverable this way.
 
 Still required for Phase 3 completeness:
 
-- inventory/pull catch-up extended to file-area catalogues (issue #93);
 - broader real-world multi-node deployment validation (issue #83).
 
 ### Phase 3 stabilization gate (issue #84)
@@ -3428,14 +3477,12 @@ work-item/DLQ abstraction, the same "not every retry-shaped mechanism fits"
 reasoning §13.7 already documents — it already has a natural resumable-by-
 construction terminal state.
 
-**Explicitly out of scope, matching issue #87's own precedent, tracked
-separately:** file-area origin succession (not tracked, no issue yet);
-inventory/pull catch-up (§8.8) extended to file areas — a peer that missed
-a `file_descriptor` while offline recovers only via ordinary re-push on the
-next sync pass (issue #93); and a live SysOp/user TUI action to browse a
-remote area's catalogue or trigger a fetch — `netbbs.link.files`/`netbbs.
-link.file_transfer`'s own functions are exercised end-to-end by `tests/
-test_link_end_to_end.py`, not yet by an interactive menu (issue #92).
+**Explicitly out of scope at the time, tracked separately and since
+closed:** file-area origin succession remains untracked (no issue yet);
+inventory/pull catch-up (§8.8) extended to file areas was deferred here and
+closed by issue #93 (§11.4); a live SysOp/user TUI action to browse a
+remote area's catalogue or trigger a fetch was deferred here and closed by
+issue #92.
 
 ### Issue #91 — wire linked-channel messages into the live chat send path — closed
 
@@ -3507,6 +3554,47 @@ the issue's own acceptance criterion; `tests/test_file_flow_remote.py`
 covers the UI-level edge cases that don't need a real second node (no
 catalogue entries, an already-fetched entry, a declined fetch, an
 unreachable origin).
+
+### Issue #93 — inventory/pull catch-up for linked file-area catalogues — closed
+
+§11.4 states the complete design and is now fully implemented: `Inventory
+Request` gains a third `file_areas` key alongside `boards`/`channels`, the
+identical shape issue #87 already added for channels; `netbbs.link.store.
+file_area_event_diff`/`_all_file_area_events` mirror `board_event_diff`/
+`channel_event_diff` exactly, unioning the same three sources (self-
+originated genesis, self-authored descriptors, peer-received `link_events`
+rows) those functions already established. `_handle_inventory` now shares
+one overall `_MAX_EVENTS_PER_REQUEST` budget across all three diffs in
+sequence (board, then channel, then file area) rather than three
+independent caps.
+
+`link_events` gains a nullable `file_area_id` column, populated at two
+call sites rather than one: `netbbs.link.store.save_event`'s generic
+dispatch (for `file_area_genesis`, mirroring how `channel_id` is populated
+for `channel_genesis`) and `netbbs.link.files.materialize_carried_file_
+descriptor`'s own direct insert (for `file_descriptor`, which — like
+`board_post`/`channel_message` before it — skips `save_event` entirely).
+`sync.py`'s inventory-response step also gained `max_carried_file_areas`/
+`max_remote_files_per_area` parameters, threaded through from `__main__.py`
+the same way `max_carried_boards`/`max_carried_channels` already are — a
+real pre-existing gap, not a cosmetic one: before this issue, an inventory
+response could carry an unbounded number of new file areas/descriptors
+even though `LinkServer`'s direct-push path already enforced these same
+two quotas (§13.9).
+
+No restart-reconstruction changes were needed: issue #89's own `load_link_
+node` work already rebuilt `node.file_areas` from both sources this
+issue's diff query also reads, and `file_descriptor` has no chain state
+beyond `known_event_ids`/`events` to begin with. Proven with the same two-
+layer test shape issues #85/#87 established: a deterministic three-node
+`ScriptedTransport` test (`tests/test_link_convergence.py`) proving the
+protocol-level multi-hop mechanism in isolation, and a real-transport test
+(`tests/test_link_end_to_end.py`) proving a node recovers a missed `file_
+descriptor` through an intermediary while the original origin's server is
+never started again for that stage — genuinely unavailable, not merely
+unqueried. Chunk bytes remain outside inventory entirely and unchanged by
+this issue, confirmed by both tests: a recovered catalogue entry lands
+with `fetched_file_id` still `NULL`.
 
 ### Issue #55 — trust and quarantine
 

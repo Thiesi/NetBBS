@@ -1914,4 +1914,35 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Issue #93: link_events gains a nullable file_area_id column, "
+            "the file-area-scoped counterpart to board_id/channel_id above "
+            "-- populated for the two file-area-scoped object types "
+            "(file_area_genesis, file_descriptor) that carry payload.area_id "
+            "directly. Unlike board_id (populated only by save_event, since "
+            "every board-scoped type that skips save_event's generic path "
+            "does its own link_events insert with its own board_id) and "
+            "channel_id (populated only for channel_genesis, since channel_"
+            "message also does its own insert), file_area_id needs both: "
+            "save_event still handles file_area_genesis generically, but "
+            "file_descriptor already skips save_event entirely (netbbs.link."
+            "files.materialize_carried_file_descriptor inserts its own "
+            "link_events row directly, same shape as board_post/channel_"
+            "message) -- that insert gains its own file_area_id column too. "
+            "Backfilled via json_extract against the already-stored "
+            "envelope for both types, then indexed the same way -- serves "
+            "the new file-area inventory/pull-catch-up diff query (design "
+            "doc §11, extending issue #85's own mechanism to file areas)."
+        ),
+        sql="""
+        ALTER TABLE link_events ADD COLUMN file_area_id TEXT;
+
+        UPDATE link_events
+        SET file_area_id = json_extract(envelope_json, '$.envelope.payload.area_id')
+        WHERE object_type IN ('file_area_genesis', 'file_descriptor');
+
+        CREATE INDEX idx_link_events_file_area_id ON link_events(file_area_id, object_type);
+        """,
+    ),
 ]
