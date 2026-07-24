@@ -366,15 +366,22 @@ def test_migration_backfills_board_id_for_a_pre_existing_link_events_row(tmp_pat
         created_at="2026-01-01T00:00:00Z",
     )
 
-    # Apply every migration except the last (this one), matching the
-    # schema shape a real pre-upgrade database would have on disk --
+    # Apply every migration before the one that added board_id, matching
+    # the schema shape a real pre-upgrade database would have on disk --
     # link_events exists, but with no board_id column yet. A carried
     # board's genesis also always lands on the boards row itself
     # (`materialize_carried_board`'s own real-world behavior) --
     # reproduced here with a raw INSERT so `board_event_diff` below
     # recognizes this board as carried the same way it would for a
     # database that actually went through that function.
-    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    #
+    # Found by description rather than MIGRATIONS[:-1] -- this migration
+    # is no longer guaranteed to be the last one in the list (issue #87's
+    # own migration was appended after it).
+    board_id_migration_index = next(
+        i for i, m in enumerate(MIGRATIONS) if "idx_link_events_board_id" in m.sql
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:board_id_migration_index])
     db = Database(db_path)
     db.connection.execute(
         "INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at) "

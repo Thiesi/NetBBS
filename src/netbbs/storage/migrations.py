@@ -1775,4 +1775,42 @@ MIGRATIONS = [
         CREATE INDEX idx_link_events_board_id ON link_events(board_id, object_type);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #87: linked channels. channels.link_genesis_json mirrors "
+            "boards.link_genesis_json exactly -- the restart-safe source for "
+            "a self-originated or carried channel_genesis (netbbs.link."
+            "channels.link_channel/materialize_carried_channel). channel_"
+            "messages.link_event_json mirrors posts.link_event_json -- a "
+            "self-authored message queued for push, read fresh each sync "
+            "pass. No link_lifecycle_json on channels -- origin succession "
+            "isn't implemented for channels in this issue (design doc §9.6: "
+            "reused by reference, not built), so there's nothing yet for it "
+            "to hold; add it alongside channel_origin_transfer_offer/"
+            "_accepted themselves if a future issue actually needs them. "
+            "link_events gains a nullable channel_id column, the exact "
+            "channel-scoped counterpart to board_id above, serving the same "
+            "inventory-diff query (design doc §8.8) extended to channels. "
+            "channel_messages.link_content_id is a *received* message's own "
+            "event content_id, stored redundantly for an indexed idempotency "
+            "lookup -- the same 'store the hash rather than recompute it' "
+            "reasoning link_mail_acknowledgements.link_event_content_id "
+            "already established, needed here because channel_messages.id "
+            "is a plain autoincrement (unlike posts.post_id, there is no "
+            "existing content-addressed column on this table to reuse for "
+            "dedup -- channel_messages.id must stay a plain autoincrement "
+            "since netbbs.chat.scrollback's own trim-to-limit ordering "
+            "depends on it)."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN link_genesis_json TEXT;
+        ALTER TABLE channel_messages ADD COLUMN link_event_json TEXT;
+        ALTER TABLE channel_messages ADD COLUMN link_content_id TEXT;
+        ALTER TABLE link_events ADD COLUMN channel_id TEXT;
+
+        CREATE UNIQUE INDEX idx_channel_messages_link_content_id
+            ON channel_messages(link_content_id) WHERE link_content_id IS NOT NULL;
+        CREATE INDEX idx_link_events_channel_id ON link_events(channel_id, object_type);
+        """,
+    ),
 ]

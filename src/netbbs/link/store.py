@@ -36,12 +36,15 @@ from netbbs.link.events import (
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
+    CHANNEL_GENESIS_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
     BoardGenesis,
     BoardOriginTransferAccepted,
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    ChannelGenesis,
+    ChannelMessage,
     EndpointDescriptor,
     KeyTransition,
 )
@@ -148,6 +151,12 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
         if row["object_type"] == BOARD_GENESIS_OBJECT_TYPE:
             genesis = BoardGenesis.from_dict(envelope)
             node.boards[genesis.payload["board_id"]] = genesis
+        elif row["object_type"] == CHANNEL_GENESIS_OBJECT_TYPE:
+            # Design doc §9.6, issue #87: same restart-forgets-state
+            # reasoning as BOARD_GENESIS_OBJECT_TYPE above, applied to
+            # a carried channel's genesis.
+            channel_genesis = ChannelGenesis.from_dict(envelope)
+            node.channels[channel_genesis.payload["channel_id"]] = channel_genesis
         elif row["object_type"] == BOARD_POST_EDIT_OBJECT_TYPE:
             edit = BoardPostEdit.from_dict(envelope)
             root_post_id = edit.payload["root_post_id"]
@@ -169,6 +178,15 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     ):
         genesis = BoardGenesis.from_dict(json.loads(row["link_genesis_json"]))
         node.boards[genesis.payload["board_id"]] = genesis
+
+    # Design doc §9.6, issue #87: same two-source shape as boards above,
+    # minus the board_post_edit-chain half -- channels have no edit
+    # chain to reconstruct.
+    for row in db.connection.execute(
+        "SELECT link_genesis_json FROM channels WHERE link_genesis_json IS NOT NULL"
+    ):
+        channel_genesis = ChannelGenesis.from_dict(json.loads(row["link_genesis_json"]))
+        node.channels[channel_genesis.payload["channel_id"]] = channel_genesis
 
     for row in db.connection.execute(
         "SELECT link_event_json FROM posts "
@@ -333,16 +351,32 @@ def save_event(db: Database, *, sender_fingerprint: str, content_id: str, object
     `posts` projection, and populate `board_id` themselves the same way).
     `None` for every other object type (`key_transition`, `link_message`
     and its acknowledgements), which don't belong to a board.
+
+    Issue #87: `channel_id` is populated the same way for `channel_
+    genesis`, the one channel-scoped type this function still handles --
+    `channel_message` never reaches here either, for the identical
+    reason (`netbbs.link.channels.materialize_carried_channel_message`
+    inserts its own row directly).
     """
+    # Conditional, not unconditional -- a malformed/tampered envelope for
+    # an object type that needs neither field (e.g. a resend attempt
+    # with a deliberately corrupted payload, see the ON CONFLICT test for
+    # this function) must never raise just from this lookup, since
+    # `envelope["envelope"]["payload"]` isn't guaranteed to exist at all
+    # once the row already conflicts and this insert is a no-op anyway.
     board_id = envelope["envelope"]["payload"].get("board_id") if object_type in _BOARD_SCOPED_OBJECT_TYPES else None
+    channel_id = (
+        envelope["envelope"]["payload"].get("channel_id") if object_type == CHANNEL_GENESIS_OBJECT_TYPE else None
+    )
     now = utc_now_iso()
     db.connection.execute(
         """
-        INSERT INTO link_events (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO link_events
+            (content_id, sender_fingerprint, object_type, envelope_json, received_at, board_id, channel_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(content_id) DO NOTHING
         """,
-        (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id),
+        (content_id, sender_fingerprint, object_type, json.dumps(envelope), now, board_id, channel_id),
     )
     db.connection.commit()
     if object_type == KEY_TRANSITION_OBJECT_TYPE:
@@ -464,19 +498,29 @@ def carried_board_ids(db: Database) -> list[str]:
     ]
 
 
+def carried_channel_ids(db: Database) -> list[str]:
+    """Every `channel_id` this node currently has *some* Linked copy of
+    -- mirrors `carried_board_ids` exactly (design doc §9.6, issue #87)."""
+    return [
+        row["channel_id"]
+        for row in db.connection.execute("SELECT channel_id FROM channels WHERE link_genesis_json IS NOT NULL")
+    ]
+
+
 def build_inventory_request(db: Database) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
-    §8.8, issue #85): every board it currently carries
-    (`carried_board_ids`), each mapped to the full set of content IDs it
-    already has for that board -- reusing `_all_board_events` for
+    §8.8, issue #85; §9.6, issue #87): every board/channel it currently
+    carries, each mapped to the full set of content IDs it already has
+    for it -- reusing `_all_board_events`/`_all_channel_events` for
     exactly the same "union self-authored, carried, and peer-received
-    sources" reasoning that function's own docstring already gives,
+    sources" reasoning those functions' own docstrings already give,
     since a requester's own gap-detection needs the identical complete
     picture a responder's diff needs, just read from the requester's own
     database instead of the responder's."""
     boards = {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
-    return InventoryRequest(boards=boards)
+    channels = {channel_id: tuple(_all_channel_events(db, channel_id)) for channel_id in carried_channel_ids(db)}
+    return InventoryRequest(boards=boards, channels=channels)
 
 
 def _all_board_events(db: Database, board_id: str) -> dict[str, dict]:
@@ -583,6 +627,82 @@ def board_event_diff(
             break
         known_ids = set(requested_boards[board_id])
         for content_id, envelope in _all_board_events(db, board_id).items():
+            if content_id in known_ids:
+                continue
+            if len(collected) >= limit:
+                truncated = True
+                break
+            collected.append(envelope)
+    return collected, truncated
+
+
+def _all_channel_events(db: Database, channel_id: str) -> dict[str, dict]:
+    """
+    Every channel-scoped event this node has on file for `channel_id`,
+    keyed by `content_id` -- mirrors `_all_board_events` exactly, minus
+    that function's own lifecycle-event source (no origin succession for
+    channels yet, design doc §9.6) and its board_post_edit branch (no
+    edit chain for channel messages):
+
+    1. `channels.link_genesis_json` for this channel's own row -- a
+       self-originated channel's genesis (never in `link_events`) or a
+       carried channel's genesis (redundant with `link_events` below,
+       harmless -- same `content_id`-keyed-dict reasoning).
+    2. `channel_messages.link_event_json` for every message on this
+       channel -- populated only for a locally-authored message
+       (`netbbs.link.channels.queue_channel_message_if_linked`),
+       regardless of whether this node originated or merely carries the
+       channel.
+    3. `link_events.channel_id = ?` -- peer-received content: a carried
+       channel's genesis (redundant with source 1) and every
+       `channel_message` this node accepted from a peer.
+    """
+    events: dict[str, dict] = {}
+
+    channel_row = db.connection.execute(
+        "SELECT id, link_genesis_json FROM channels WHERE channel_id = ?", (channel_id,)
+    ).fetchone()
+    if channel_row is None:
+        return events
+    if channel_row["link_genesis_json"] is not None:
+        raw = json.loads(channel_row["link_genesis_json"])
+        events[ChannelGenesis.from_dict(raw).content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT link_event_json FROM channel_messages WHERE channel_id = ? AND link_event_json IS NOT NULL",
+        (channel_row["id"],),
+    ):
+        raw = json.loads(row["link_event_json"])
+        events[ChannelMessage.from_dict(raw).content_id] = raw
+
+    for row in db.connection.execute(
+        "SELECT content_id, envelope_json FROM link_events WHERE channel_id = ? ORDER BY received_at ASC",
+        (channel_id,),
+    ):
+        events.setdefault(row["content_id"], json.loads(row["envelope_json"]))
+
+    return events
+
+
+def channel_event_diff(
+    db: Database, requested_channels: dict[str, list[str]], *, limit: int
+) -> tuple[list[dict], bool]:
+    """
+    The channel-side responder logic for one `InventoryRequest` --
+    mirrors `board_event_diff` exactly, using `_all_channel_events`
+    instead. Callers combining both board and channel results (`netbbs.
+    link.transport._handle_inventory`) are responsible for sharing one
+    overall `_MAX_EVENTS_PER_REQUEST` budget across both calls -- this
+    function's own `limit` is whatever budget remains after the board
+    half already ran, not a second independent cap.
+    """
+    collected: list[dict] = []
+    truncated = False
+    for channel_id in sorted(requested_channels):
+        if truncated:
+            break
+        known_ids = set(requested_channels[channel_id])
+        for content_id, envelope in _all_channel_events(db, channel_id).items():
             if content_id in known_ids:
                 continue
             if len(collected) >= limit:

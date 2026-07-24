@@ -45,7 +45,10 @@ import aiohttp
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import create_post, list_posts_page
+from netbbs.chat.channels import create_channel, get_channel_by_name
+from netbbs.chat.scrollback import get_scrollback, record_message
 from netbbs.link.boards import link_board, queue_board_post_if_linked
+from netbbs.link.channels import link_channel, queue_channel_message_if_linked
 from netbbs.link.mail import compose_link_message, expire_link_message_delivery, unexpire_link_message_delivery
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode
@@ -59,8 +62,8 @@ from netbbs.link.work_items import (
     replay_work_item,
 )
 from netbbs.mail import list_inbox, list_sent
-from netbbs.search import search_posts
-from netbbs.activity import board_read_cursor, record_board_seen, unread_post_count
+from netbbs.search import search_channel_messages, search_posts
+from netbbs.activity import board_read_cursor, record_board_seen, record_channel_seen, unread_channel_count, unread_post_count
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
@@ -793,3 +796,159 @@ def test_linked_board_multi_hop_catch_up_is_idempotent_across_repeated_inventory
         origin.close()
         relay.close()
         puller.close()
+
+
+# -- linked channels: full vertical (design doc §9.6, issue #87) ------------
+
+
+def test_linked_channel_message_full_vertical_materializes_and_is_visible_via_ordinary_read_paths(tmp_path):
+    """The channel-side counterpart to the linked-board full-vertical
+    test above, per §14.1's own rule that a new Link vertical slice
+    isn't complete without a scenario here: a channel_message reaches a
+    real peer over a real socket, materializes into a real `channel_
+    messages` row, and is genuinely visible through every ordinary
+    user-facing read path on the carrying node -- `get_scrollback`
+    (browsing), `netbbs.search.search_channel_messages` ([F]ind), and
+    `netbbs.activity.unread_channel_count` (New Scan)."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(dialer.db, "lobby", creator=creator)
+    link_channel(dialer.db, channel, node_identity=dialer_identity)
+    message = record_message(dialer.db, channel, kind="message", author_label="alice", body="hello there")
+    queue_channel_message_if_linked(dialer.db, message, channel, node_identity=dialer_identity)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        bob = create_user(seed.db, "bob", password="hunter2", user_level=10)
+        carried_channel = get_channel_by_name(seed.db, "lobby")
+
+        # Ordinary browsing.
+        scrollback = get_scrollback(seed.db, carried_channel)
+        assert [m.body for m in scrollback] == ["hello there"]
+        assert scrollback[0].author_label == f"alice@{dialer_identity.fingerprint}"
+
+        # [F]ind.
+        hits = search_channel_messages(seed.db, bob, "hello", visible_channels=[carried_channel])
+        assert [h.body for h in hits] == ["hello there"]
+
+        # New Scan: never visited yet, so unread is None, then 0 once seen.
+        assert unread_channel_count(seed.db, bob, carried_channel) is None
+        record_channel_seen(seed.db, bob, carried_channel, scrollback[0])
+        assert unread_channel_count(seed.db, bob, carried_channel) == 0
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_linked_channel_message_duplicate_delivery_over_real_transport_is_idempotent(tmp_path):
+    """The channel-side counterpart to the linked-board duplicate-
+    delivery test above."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(dialer.db, "lobby", creator=creator)
+    link_channel(dialer.db, channel, node_identity=dialer_identity)
+    message = record_message(dialer.db, channel, kind="message", author_label="alice", body="hello there")
+    queue_channel_message_if_linked(dialer.db, message, channel, node_identity=dialer_identity)
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                seed_url = f"http://127.0.0.1:{seed_server.port}"
+                await _one_pass(dialer_node, session, [seed_url], lambda: _hello_for(dialer_node), dialer.lane)
+                await _one_pass(dialer_node, session, [seed_url], lambda: _hello_for(dialer_node), dialer.lane)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        bob = create_user(seed.db, "bob", password="hunter2", user_level=10)
+        carried_channel = get_channel_by_name(seed.db, "lobby")
+        scrollback = get_scrollback(seed.db, carried_channel)
+        assert len(scrollback) == 1
+        record_channel_seen(seed.db, bob, carried_channel, scrollback[0])
+        assert unread_channel_count(seed.db, bob, carried_channel) == 0
+        assert len(search_channel_messages(seed.db, bob, "hello", visible_channels=[carried_channel])) == 1
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_linked_channel_state_survives_seed_restart_using_only_persisted_state(tmp_path):
+    """The channel-side counterpart to the linked-board restart test
+    above -- proves the second event materializes correctly against a
+    genuinely reloaded `ChannelEventState` (issue #87), not an in-memory
+    object that happened to survive."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    seed_node = LinkNode(identity=seed_identity)
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(dialer.db, "lobby", creator=creator)
+    link_channel(dialer.db, channel, node_identity=dialer_identity)
+
+    async def _push(port):
+        async with aiohttp.ClientSession() as session:
+            await _one_pass(dialer_node, session, [f"http://127.0.0.1:{port}"], lambda: _hello_for(dialer_node), dialer.lane)
+
+    async def _push_stage():
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            await _push(seed_server.port)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(_push_stage())
+
+        restarted_seed_node = load_link_node(seed.db, seed_identity)
+        assert restarted_seed_node is not seed_node
+        assert channel.channel_id in restarted_seed_node.channels
+
+        message = record_message(dialer.db, channel, kind="message", author_label="alice", body="hello there")
+        queue_channel_message_if_linked(dialer.db, message, channel, node_identity=dialer_identity)
+
+        async def _push_message_stage():
+            seed_server = LinkServer(
+                host="127.0.0.1", port=0, node=restarted_seed_node,
+                own_hello_provider=lambda: _hello_for(restarted_seed_node), lane=seed.lane,
+            )
+            await seed_server.start()
+            try:
+                await _push(seed_server.port)
+            finally:
+                await seed_server.stop()
+
+        asyncio.run(_push_message_stage())
+
+        carried_channel = get_channel_by_name(seed.db, "lobby")
+        scrollback = get_scrollback(seed.db, carried_channel)
+        assert [m.body for m in scrollback] == ["hello there"]
+    finally:
+        dialer.close()
+        seed.close()

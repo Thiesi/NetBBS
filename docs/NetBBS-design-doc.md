@@ -2686,13 +2686,14 @@ find it. `tests/test_link_end_to_end.py` is the named home for this
 class of test: a complete real-transport (real `LinkServer`, real
 SQLite, real node identities), real-domain-read-path (an ordinary
 inbox/board read, not a raw row or `known_event_ids` check) vertical
-slice per currently implemented Link product surface, each covering
+slice per currently implemented Link product surface — linked boards,
+Link mail, and (issue #87) linked channels — each covering
 restart-between-stages and duplicate-delivery. A future Link vertical
-slice (linked channels, remote files) is not complete until it adds or
-extends a scenario in that file, the same way it is not complete
-without unit tests for its own protocol logic. Tier-2 message routing
-is deliberately not in that list — see §10.6 for why it remains
-deferred rather than an active future slice.
+slice (remote files) is not complete until it adds or extends a
+scenario in that file, the same way it is not complete without unit
+tests for its own protocol logic. Tier-2 message routing is
+deliberately not in that list — see §10.6 for why it remains deferred
+rather than an active future slice.
 
 ### 14.2 Real boundaries
 
@@ -2801,10 +2802,13 @@ Implemented or substantially working:
 - correctness-preserving `key_transition` retention, and the chain-
   idempotency fix that made any retention provable (§8.9, issue #86,
   closed) — board-scoped types remain intentionally unbounded.
+- linked channels — genesis, promotion, materialization, and message
+  propagation (§9.6, issue #87, closed); origin succession reused by
+  reference only, not built, and moderator governance out of scope
+  (Phase 6).
 
 Still required for Phase 3 completeness:
 
-- linked channels and channel lifecycle (issue #87);
 - remaining linked-board governance, closure, moderator edits, and
   tombstones (issue #88);
 - remote file catalogue and on-demand chunks (issue #89);
@@ -3116,24 +3120,47 @@ self-authentication property §12 already relies on), but is deliberately
 deferred rather than scoped as active work — no architectural blocker,
 just not needed to unblock or validate current Phase 3 work.
 
-### Issue #87 — linked channels
+### Issue #87 — linked channels — closed
 
-§9.6 now states the complete design: `channel_genesis`/`channel_message`
-event types mirroring `board_genesis`/`board_post` minus the fields that
-don't apply (no edit chain — channel messages have no local edit concept
-at all; no `default_min_write_level`/`_moderated`/`_max_post_age_days`
-equivalents — `Channel` has none of those settings to recommend). Origin
-succession is reused by reference (§9.4's model applies unchanged, if ever
-needed) rather than a new `channel_origin_transfer_offer`/`_accepted` pair
-built in this issue — genesis, promotion, materialization, and message
-propagation are the actual scope. Carry/materialization follows §9.3's
-exact shape, with one real, stated consequence of reusing the existing
-bounded scrollback rather than inventing unbounded storage for channel
-content: a materialized linked message is subject to the same trim a
-local one already is, and a self-originated message trimmed before any
-sync pass pushes it is simply never propagated — bounded and honestly
-scoped, not a silent surprise, since the identical bound already governs
-every channel's own local history today.
+§9.6 states the complete design and is now fully implemented:
+`channel_genesis`/`channel_message` event types mirroring `board_genesis`/
+`board_post` minus the fields that don't apply (no edit chain — channel
+messages have no local edit concept at all; no `default_min_write_level`/
+`_moderated`/`_max_post_age_days` equivalents — `Channel` has none of those
+settings to recommend). Origin succession is reused by reference (§9.4's
+model applies unchanged, if ever needed) rather than a new
+`channel_origin_transfer_offer`/`_accepted` pair built in this issue —
+genesis, promotion, materialization, and message propagation are the
+actual scope, matching what actually shipped. `netbbs.link.channels`
+mirrors `netbbs.link.boards` closely; `ChannelEventState` (genesis only, no
+edit-chain half) mirrors `BoardEventState`; `handle_events` gained
+`channel_genesis`/`channel_message` branches with issue #85's multi-hop
+verification model from day one (never had the older restriction to begin
+with). Issue #85's inventory mechanism (`InventoryRequest.channels`,
+`channel_event_diff`) and issue #86's restart reconstruction both extend
+to channels the same way they already cover boards.
+
+Carry/materialization follows §9.3's exact shape, with one real, stated
+consequence of reusing the existing bounded scrollback rather than
+inventing unbounded storage for channel content: a materialized linked
+message is subject to the same trim a local one already is, and a
+self-originated message trimmed before any sync pass pushes it is simply
+never propagated — bounded and honestly scoped, not a silent surprise,
+since the identical bound already governs every channel's own local
+history today. `channel_messages.link_content_id` is a new column solving
+a real gap found while implementing: unlike `posts.post_id`,
+`channel_messages.id` is a plain autoincrement with no existing
+content-addressed column to key idempotent materialization off of.
+
+**Explicitly not done in this issue, stated rather than silently
+skipped:** wiring `queue_channel_message_if_linked` into `netbbs.net.
+chat_flow`'s live interactive send path (the function exists and is
+tested; the UI call site is not connected) — `chat_flow.py`'s message-send
+code is deeply nested with no existing `link_context` threading at all,
+unlike `login_flow.py`'s board-post path which already had it. A
+self-authored message on a linked channel is not yet actually pushed
+outbound through the live TUI as a result; received content still
+materializes correctly. Worth a small, mechanical follow-up.
 
 ### Issue #55 — trust and quarantine
 

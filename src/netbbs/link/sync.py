@@ -138,6 +138,7 @@ from typing import Awaitable, Callable
 from aiohttp import ClientSession
 
 from netbbs.link.boards import load_own_board_events
+from netbbs.link.channels import load_own_channel_events
 from netbbs.link.events import LINK_MESSAGE_OBJECT_TYPE, EndpointDescriptor, LinkMessage
 from netbbs.link.mail import (
     deliver_link_message,
@@ -190,6 +191,7 @@ async def run_link_sync(
     interval_seconds: float,
     stop_event: asyncio.Event | None = None,
     max_carried_boards: int | None = None,
+    max_carried_channels: int | None = None,
 ) -> None:
     """
     Runs until cancelled: each pass dials every seed in `seeds` (in
@@ -247,7 +249,8 @@ async def run_link_sync(
     regardless of which path a new genesis arrives through. `None`
     (the default) preserves every existing caller/test, matching this
     function's own established convention for every other optional
-    quota parameter.
+    quota parameter. `max_carried_channels` (design doc §9.6, issue #87)
+    is the identical shape for linked channels.
     """
     while stop_event is None or not stop_event.is_set():
         supplementary = await lane.run(get_cached_supplementary_seeds)
@@ -256,7 +259,8 @@ async def run_link_sync(
         reached_network = False
         for seed_url in pass_seeds:
             succeeded = await _sync_one_seed(
-                node, session, seed_url, own_hello_provider, lane, max_carried_boards=max_carried_boards
+                node, session, seed_url, own_hello_provider, lane,
+                max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
             )
             reached_network = reached_network or succeeded
         if not reached_network:
@@ -307,6 +311,7 @@ async def _sync_one_seed(
     lane: DatabaseLane,
     *,
     max_carried_boards: int | None = None,
+    max_carried_channels: int | None = None,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -320,8 +325,11 @@ async def _sync_one_seed(
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
 
-    own_events = list(node.identity.transitions) + await lane.run(
-        load_own_board_events, node.identity.fingerprint
+    own_events = (
+        list(node.identity.transitions)
+        + await lane.run(load_own_board_events, node.identity.fingerprint)
+        # Design doc §9.6, issue #87.
+        + await lane.run(load_own_channel_events, node.identity.fingerprint)
     )
     try:
         await push_events(node, session, seed_url, own_events)
@@ -335,17 +343,18 @@ async def _sync_one_seed(
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
-    # Design doc §8.8, issue #85: pull-based catch-up, asked of every
-    # seed this pass already reached (not one arbitrary "best" peer) --
-    # not every peer necessarily carries every board this node does,
-    # and the push loop above already iterates all of them regardless.
-    # `handle_events` (not this function) is what actually verifies the
-    # response; a seed that carries none of the requested boards simply
-    # returns an empty list, indistinguishable from -- and no more
-    # costly than -- this loop's own existing per-seed push tolerance.
+    # Design doc §8.8, issue #85 (§9.6, issue #87 for channels):
+    # pull-based catch-up, asked of every seed this pass already reached
+    # (not one arbitrary "best" peer) -- not every peer necessarily
+    # carries every board/channel this node does, and the push loop
+    # above already iterates all of them regardless. `handle_events` (not
+    # this function) is what actually verifies the response; a seed that
+    # carries none of the requested boards/channels simply returns an
+    # empty list, indistinguishable from -- and no more costly than --
+    # this loop's own existing per-seed push tolerance.
     try:
         inventory_request = await lane.run(build_inventory_request)
-        if inventory_request.boards:
+        if inventory_request.boards or inventory_request.channels:
             events, _more_available = await request_inventory(node, session, seed_url, inventory_request)
             if events:
                 try:
@@ -358,6 +367,7 @@ async def _sync_one_seed(
                     await persist_accepted_events(
                         lane, node, accepted,
                         sender_fingerprint=seed_peer.fingerprint, max_carried_boards=max_carried_boards,
+                        max_carried_channels=max_carried_channels,
                     )
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request inventory from seed %s: %s", seed_url, exc)

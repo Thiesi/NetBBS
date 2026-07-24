@@ -2,7 +2,8 @@
 Transport-agnostic NetBBS Link handshake and gossip protocol (design doc
 §11/§12/§13) — bootstrap first contact between two nodes (mutual
 endpoint-descriptor exchange, §12) plus event gossip across
-`key_transition`, `board_genesis`/`board_post`/`board_post_edit`, and
+`key_transition`, `board_genesis`/`board_post`/`board_post_edit`,
+`channel_genesis`/`channel_message` (design doc §9.6, issue #87), and
 `link_message`/`link_message_accepted` event types, all through the same
 `handle_events` dispatch. Reuses the key-lifecycle and event-envelope
 machinery (`netbbs.link.node_identity`/`netbbs.link.events`) for
@@ -30,22 +31,23 @@ response body happens to carry the reply promptly when the peer is
 online — that's an implementation detail this layer does not need to
 know about.
 
-**This protocol does not accept events from a stranger**
-(`handle_events` requires a completed `handle_hello` for that sender
-first) — real flood-fill gossip (an event arriving via relay from a
-peer you've never spoken to directly) is not implemented. `LinkNode`
-itself keeps its live peer table and seen-event set in memory only;
-on-disk persistence and restart reconstruction are `netbbs.link.
-store`'s responsibility, not this module's — see that module for how a
-restarted node rebuilds this same in-memory state. The same "only from
-a directly verified sender" boundary applies to every event type: a
-`board_genesis` is only accepted directly from its own claimed origin
-(`origin_fingerprint == sender_fingerprint`), and a `board_post` is
-only accepted for a `board_id` this node already holds a verified
-`board_genesis` for, directly from the post's own claimed author's home
-node (`home_node_fingerprint == sender_fingerprint`) — none of this
+**This protocol does not accept events from a genuine stranger**
+(`handle_events` requires the wire-level sender to already be a
+completed peer, and — issue #85 — the content's own claimed
+origin/author to *independently* also already be one, not necessarily
+the same peer). Board-scoped content can therefore be genuinely
+relayed through an already-known intermediary: a `board_genesis` is
+accepted once its claimed `origin_fingerprint` is a completed peer,
+verified against *that* peer's own signing key, regardless of who
+relayed the bytes; a `board_post` is accepted once its claimed
+author's home node is a completed peer, the same way. None of this
 speculatively stores anything waiting for a genesis or hello that
-might arrive later.
+might arrive later — the origin/author must already be known at
+acceptance time, not backfilled afterward. `LinkNode` itself keeps its
+live peer table and seen-event set in memory only; on-disk persistence
+and restart reconstruction are `netbbs.link.store`'s responsibility,
+not this module's — see that module for how a restarted node rebuilds
+this same in-memory state.
 """
 
 from __future__ import annotations
@@ -64,6 +66,8 @@ from netbbs.link.events import (
     BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
+    CHANNEL_GENESIS_OBJECT_TYPE,
+    CHANNEL_MESSAGE_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
@@ -74,6 +78,8 @@ from netbbs.link.events import (
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    ChannelGenesis,
+    ChannelMessage,
     EndpointDescriptor,
     KeyTransition,
     LinkMessage,
@@ -87,6 +93,8 @@ from netbbs.link.events import (
     verify_board_origin_transfer_offer,
     verify_board_post,
     verify_board_post_edit,
+    verify_channel_genesis,
+    verify_channel_message,
     verify_endpoint_descriptor,
     verify_link_message,
     verify_link_message_accepted,
@@ -240,21 +248,33 @@ class InventoryRequest:
     carries (bounded by its own `max_carried_boards` quota, §13.9 --
     this request's size is therefore already bounded by an existing
     cap, not a new one), mapped to that board's full known-`content_id`
-    list. The response is not a new message type either -- it reuses
-    `push_events`'s existing raw-event-list wire shape, verified and
-    applied through the exact same `LinkNode.handle_events` path a push
-    response already uses (see `netbbs.link.transport`'s `/inventory`
-    route and `request_inventory`).
+    list. `channels` (design doc §9.6, issue #87) is the identical shape,
+    bounded by `max_carried_channels`, for linked channels. The response
+    is not a new message type either -- it reuses `push_events`'s
+    existing raw-event-list wire shape, verified and applied through the
+    exact same `LinkNode.handle_events` path a push response already
+    uses (see `netbbs.link.transport`'s `/inventory` route and
+    `request_inventory`).
     """
 
     boards: dict[str, tuple[str, ...]]
+    channels: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {"boards": {board_id: list(ids) for board_id, ids in self.boards.items()}}
+        return {
+            "boards": {board_id: list(ids) for board_id, ids in self.boards.items()},
+            "channels": {channel_id: list(ids) for channel_id, ids in self.channels.items()},
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "InventoryRequest":
-        return cls(boards={board_id: tuple(ids) for board_id, ids in data["boards"].items()})
+        return cls(
+            boards={board_id: tuple(ids) for board_id, ids in data["boards"].items()},
+            # .get(..., {}) rather than a required key -- accepts a
+            # pre-issue-#87 request shape too, harmless since an absent
+            # "channels" key just means "nothing to ask about."
+            channels={channel_id: tuple(ids) for channel_id, ids in data.get("channels", {}).items()},
+        )
 
 
 @dataclass
@@ -363,6 +383,33 @@ class BoardEventState:
 
     def extend_edit_chain(self, root_post_id: str, edit: BoardPostEdit) -> None:
         self.post_edits[root_post_id] = self.edit_chain(root_post_id) + (edit,)
+
+
+@dataclass
+class ChannelEventState:
+    """Channel/event projection state (design doc §9.6, issue #87): the
+    channel-side counterpart to `BoardEventState`'s `boards` half only --
+    no edit-chain equivalent, since a `channel_message` has no local
+    edit concept at all (module docstring)."""
+
+    # channel_id -> the verified channel_genesis on file for it. A
+    # channel_message is only ever accepted for a channel_id already
+    # present here, the same boundary BoardEventState.boards already
+    # establishes for board_post.
+    channels: dict[str, ChannelGenesis] = field(default_factory=dict)
+
+    def genesis_for(self, channel_id: str) -> ChannelGenesis | None:
+        return self.channels.get(channel_id)
+
+    def has_conflicting_genesis(self, channel_id: str, content_id: str) -> bool:
+        """Whether a *different* genesis is already on file for
+        `channel_id` -- mirrors `BoardEventState.has_conflicting_genesis`
+        exactly."""
+        existing = self.channels.get(channel_id)
+        return existing is not None and existing.content_id != content_id
+
+    def record_genesis(self, genesis: ChannelGenesis) -> None:
+        self.channels[genesis.payload["channel_id"]] = genesis
 
 
 @dataclass
@@ -494,6 +541,8 @@ class LinkNode:
     board_events: BoardEventState = field(default_factory=BoardEventState)
     board_lifecycle: BoardLifecycleState = field(default_factory=BoardLifecycleState)
     relay_state: RelayState = field(default_factory=RelayState)
+    # Design doc §9.6, issue #87.
+    channel_events: ChannelEventState = field(default_factory=ChannelEventState)
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
@@ -506,6 +555,10 @@ class LinkNode:
     @property
     def boards(self) -> dict[str, BoardGenesis]:
         return self.board_events.boards
+
+    @property
+    def channels(self) -> dict[str, ChannelGenesis]:
+        return self.channel_events.channels
 
     @property
     def post_edits(self) -> dict[str, tuple[BoardPostEdit, ...]]:
@@ -1181,6 +1234,92 @@ class LinkNode:
                 self.known_event_ids.add(edit.content_id)
                 self.events[edit.content_id] = raw
                 accepted.append(edit.content_id)
+
+            elif object_type == CHANNEL_GENESIS_OBJECT_TYPE:
+                # Design doc §9.6, issue #87: mirrors BOARD_GENESIS_
+                # OBJECT_TYPE above exactly, including the issue #85
+                # multi-hop relaxation from day one -- channels never had
+                # the older "sender must equal origin" restriction to
+                # begin with.
+                channel_genesis = ChannelGenesis.from_dict(raw)
+                if channel_genesis.content_id in self.known_event_ids:
+                    continue
+
+                origin_fingerprint = channel_genesis.payload.get("origin_fingerprint")
+                origin_peer = self.peers.get(origin_fingerprint)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a channel_genesis originated by {origin_fingerprint}, which has "
+                        "no completed hello with this node -- refusing (no relay from a stranger)"
+                    )
+
+                channel_id = channel_genesis.payload["channel_id"]
+                if self.channel_events.has_conflicting_genesis(channel_id, channel_genesis.content_id):
+                    raise LinkProtocolError(
+                        f"received a conflicting channel_genesis for channel_id {channel_id!r} -- a "
+                        "different genesis is already on file for it"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    origin_peer, origin_fingerprint, "channel_genesis"
+                )
+                if not verify_channel_genesis(channel_genesis, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"channel_genesis from origin {origin_fingerprint} does not verify against "
+                        "its current signing key"
+                    )
+
+                self.channel_events.record_genesis(channel_genesis)
+                self.known_event_ids.add(channel_genesis.content_id)
+                self.events[channel_genesis.content_id] = raw
+                accepted.append(channel_genesis.content_id)
+
+            elif object_type == CHANNEL_MESSAGE_OBJECT_TYPE:
+                # Mirrors BOARD_POST_OBJECT_TYPE above minus the reply/
+                # parent_post_id structure boards have and channels don't.
+                channel_message = ChannelMessage.from_dict(raw)
+                if channel_message.content_id in self.known_event_ids:
+                    continue
+
+                channel_id = channel_message.payload.get("channel_id")
+                if self.channel_events.genesis_for(channel_id) is None:
+                    raise LinkProtocolError(
+                        f"received a channel_message for channel_id {channel_id!r}, which has no "
+                        "verified channel_genesis on file -- refusing (no relay from a stranger yet)"
+                    )
+                # channel_message's own payload has no "subject" key at
+                # all, so this shared helper's subject-length check is
+                # naturally a no-op here (payload.get("subject", "")
+                # falls back to "") -- no synthetic dict needed.
+                self._check_board_post_content_size(channel_message.payload, sender_fingerprint, "channel_message")
+
+                author = channel_message.payload.get("author", {})
+                author_kind = author.get("kind")
+                if author_kind != "node_vouched_user":
+                    raise LinkProtocolError(
+                        f"channel_message author kind {author_kind!r} is not yet supported "
+                        "(only node_vouched_user is built)"
+                    )
+                home_node_fingerprint = author.get("home_node_fingerprint")
+                author_peer = self.peers.get(home_node_fingerprint)
+                if author_peer is None:
+                    raise LinkProtocolError(
+                        f"received a channel_message vouched for by {home_node_fingerprint}, which "
+                        "has no completed hello with this node -- refusing (no relay from a stranger)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    author_peer, home_node_fingerprint, "channel_message"
+                )
+                if not verify_channel_message(channel_message, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"channel_message from home node {home_node_fingerprint} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.known_event_ids.add(channel_message.content_id)
+                self.events[channel_message.content_id] = raw
+                accepted.append(channel_message.content_id)
 
             elif object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
                 offer = BoardOriginTransferOffer.from_dict(raw)

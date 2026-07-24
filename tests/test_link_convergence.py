@@ -63,18 +63,28 @@ import json
 import pytest
 
 from netbbs.link.boards import materialize_carried_board, materialize_carried_post
+from netbbs.link.channels import materialize_carried_channel, materialize_carried_channel_message
 from netbbs.link.events import (
     build_board_genesis,
     build_board_origin_transfer_accepted,
     build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
+    build_channel_genesis,
+    build_channel_message,
     build_link_message,
     build_link_message_accepted,
 )
 from netbbs.link.node_identity import resolve_current_operational_key, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
-from netbbs.link.store import board_event_diff, load_link_node, purge_expired_key_transitions, save_event, save_peer
+from netbbs.link.store import (
+    board_event_diff,
+    channel_event_diff,
+    load_link_node,
+    purge_expired_key_transitions,
+    save_event,
+    save_peer,
+)
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
 
 
@@ -883,6 +893,57 @@ def test_a_node_converges_via_multi_hop_inventory_when_the_origin_is_already_kno
     relayed_accepted = c_node.handle_events(b.fingerprint, events)
     assert set(relayed_accepted) == {genesis.content_id, post.content_id}
     assert c_node.boards["existing-local-board-id"].content_id == genesis.content_id
+
+    a.close()
+    b.close()
+    c.close()
+
+
+def test_a_node_converges_via_multi_hop_channel_inventory_when_the_origin_is_already_known(tmp_path, clock):
+    """Design doc §9.6, issue #87: the channel-side counterpart to the
+    board multi-hop test above, same shape exactly."""
+    a = spawn_node(tmp_path, "a")
+    b = spawn_node(tmp_path, "b")
+    c = spawn_node(tmp_path, "c")
+    transport = ScriptedTransport()
+    for node in (a, b, c):
+        transport.register(node)
+
+    a_node = LinkNode(identity=a.identity)
+    b_node = LinkNode(identity=b.identity)
+    c_node = LinkNode(identity=c.identity)
+
+    _exchange_hellos(transport, a, a_node, c, c_node, clock)
+    _exchange_hellos(transport, a, a_node, b, b_node, clock)
+
+    genesis = build_channel_genesis(
+        signing_identity=a.identity.signing_key, origin_fingerprint=a.fingerprint,
+        channel_id="existing-local-channel-id", name="Vintage Computing Chat", created_at=clock.now_iso(),
+    )
+    message = build_channel_message(
+        signing_identity=a.identity.signing_key, home_node_fingerprint=a.fingerprint,
+        local_user_id="wanderer", channel_id="existing-local-channel-id", body="hello there",
+        created_at=clock.now_iso(),
+    )
+    payload = json.dumps([genesis.to_dict(), message.to_dict()]).encode()
+    transport.send(a, b, payload)
+    transport.deliver_all()
+    [to_b] = [m for m in transport.inbox(b) if m.sender == a.label and m.payload == payload]
+    accepted = b_node.handle_events(a.fingerprint, json.loads(to_b.payload))
+    assert accepted == [genesis.content_id, message.content_id]
+    materialize_carried_channel(b.db, genesis, own_fingerprint=b.fingerprint)
+    materialize_carried_channel_message(b.db, message, sender_fingerprint=a.fingerprint)
+
+    assert "existing-local-channel-id" not in c_node.channels
+
+    _exchange_hellos(transport, b, b_node, c, c_node, clock)
+    events, more_available = channel_event_diff(b.db, {"existing-local-channel-id": []}, limit=200)
+    assert more_available is False
+    assert len(events) == 2
+
+    relayed_accepted = c_node.handle_events(b.fingerprint, events)
+    assert set(relayed_accepted) == {genesis.content_id, message.content_id}
+    assert c_node.channels["existing-local-channel-id"].content_id == genesis.content_id
 
     a.close()
     b.close()

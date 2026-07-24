@@ -80,6 +80,10 @@ class LinkConfigSnapshot:
     # Design doc §13.9 (issue #60's third operational slice).
     max_peers: int
     max_carried_boards: int
+    # Design doc §9.6, issue #87: same "own default, real config value
+    # lives in netbbs.net.nodeconfig.LinkConfig" split as max_carried_
+    # boards above, the channel-side counterpart.
+    max_carried_channels: int
 
 
 @dataclass(frozen=True)

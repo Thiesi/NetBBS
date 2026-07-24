@@ -92,6 +92,15 @@ BOARD_POST_EDIT_OBJECT_TYPE = "board_post_edit"
 BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE = "board_origin_transfer_offer"
 BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE = "board_origin_transfer_accepted"
 
+# Design doc §9.6, issue #87: the channel-side counterpart to board_
+# genesis/board_post -- structurally identical minus what doesn't apply
+# (no edit chain; channel messages have no local edit concept at all).
+# No channel_origin_transfer_offer/_accepted pair yet -- origin succession
+# for channels is reused by reference (§9.4's model, unchanged) rather
+# than built in this issue; see ChannelGenesis's own docstring.
+CHANNEL_GENESIS_OBJECT_TYPE = "channel_genesis"
+CHANNEL_MESSAGE_OBJECT_TYPE = "channel_message"
+
 # Design doc: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
 # recipient's node sends back toward the sender's. `link_message_expired`
@@ -760,6 +769,181 @@ def verify_board_post_edit(edit: BoardPostEdit, signing_verify_key: nacl.signing
     events`), since it needs the root post's own payload, not just this
     edit's."""
     return verify_signature(signing_verify_key, canonical_bytes(edit.envelope), edit.signature)
+
+
+@dataclass(frozen=True)
+class ChannelGenesis:
+    """
+    One signed `channel_genesis` event (design doc §9.6, issue #87): the
+    channel-side counterpart to `BoardGenesis` -- the announcement that
+    puts an *existing* local channel into Link scope, not a separate
+    creation act. `payload["channel_id"]` is the channel's existing
+    local content-addressed ID (`netbbs.chat.channels.Channel.
+    channel_id`), never newly minted, same "promote an existing local
+    resource" rule `BoardGenesis` already establishes.
+
+    No `channel_origin_transfer_offer`/`_accepted` pair exists yet --
+    origin succession for channels reuses §9.4's model by reference
+    (unchanged) if a future issue ever needs it, rather than being
+    built here; this issue's own scope is genesis, promotion,
+    materialization, and message propagation only.
+
+    Always signed by the origin node's current *signing* operational
+    key, matching `BoardGenesis` exactly.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChannelGenesis":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_channel_genesis(
+    *,
+    signing_identity: Identity,
+    origin_fingerprint: str,
+    channel_id: str,
+    name: str,
+    created_at: str,
+    description: str | None = None,
+    default_min_level: int | None = None,
+    default_min_age: int | None = None,
+    default_name_requirement: str | None = None,
+) -> ChannelGenesis:
+    """
+    Build and sign one `channel_genesis` event, per design doc §9.6.
+
+    `channel_id` is the channel's *existing* local content-addressed ID
+    (see `ChannelGenesis`'s own docstring). The three `default_*` fields
+    are optional, non-binding cascading-scalar-default recommendations,
+    the channel-side subset of `build_board_genesis`'s own six -- no
+    `default_min_write_level`/`default_moderated`/
+    `default_max_post_age_days` equivalents, since `Channel` has none of
+    those settings to recommend a default for. Each is omitted entirely
+    when `None`, never stored as `null`; a carrying node's own local
+    value always wins regardless of what's recommended here, same rule
+    `build_board_genesis` already states.
+    """
+    if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
+        raise EventError(f"invalid default_name_requirement: {default_name_requirement!r}")
+
+    payload = {
+        "origin_fingerprint": origin_fingerprint,
+        "channel_id": channel_id,
+        "name": name,
+        "created_at": created_at,
+    }
+    if description is not None:
+        payload["description"] = description
+    if default_min_level is not None:
+        payload["default_min_level"] = default_min_level
+    if default_min_age is not None:
+        payload["default_min_age"] = default_min_age
+    if default_name_requirement is not None:
+        payload["default_name_requirement"] = default_name_requirement
+
+    envelope = build_envelope(CHANNEL_GENESIS_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return ChannelGenesis(envelope=envelope, signature=signature)
+
+
+def verify_channel_genesis(genesis: ChannelGenesis, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `genesis`'s signature against the claimed origin's
+    *current signing key* -- same division of responsibility as
+    `verify_board_genesis`."""
+    return verify_signature(signing_verify_key, canonical_bytes(genesis.envelope), genesis.signature)
+
+
+@dataclass(frozen=True)
+class ChannelMessage:
+    """
+    One signed `channel_message` event (design doc §9.6, issue #87): an
+    immutable, single-shot chat message, the channel-side counterpart to
+    `BoardPost` minus reply structure -- channel scrollback is flat and
+    chronological, never threaded, so there is no `parent_post_id`
+    equivalent. No `subject` either -- chat messages don't have one.
+
+    `payload["author"]` is the same tagged union `BoardPost` uses -- only
+    `node_vouched_user` has a real build/verify path, for the identical
+    reason (see `build_board_post`'s own docstring).
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ChannelMessage":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_channel_message(
+    *,
+    signing_identity: Identity,
+    home_node_fingerprint: str,
+    local_user_id: str,
+    channel_id: str,
+    body: str,
+    created_at: str,
+    nonce: str | None = None,
+) -> ChannelMessage:
+    """
+    Build and sign one `channel_message` event, per design doc §9.6.
+    Mirrors `build_board_post` minus `subject`/`parent_post_id` -- see
+    that function's own docstring for the author-tier and signing-key
+    reasoning, unchanged here.
+    """
+    payload = {
+        "channel_id": channel_id,
+        "author": {
+            "kind": _NODE_VOUCHED_USER_AUTHOR_KIND,
+            "home_node_fingerprint": home_node_fingerprint,
+            "local_user_id": local_user_id,
+        },
+        "body": body,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(CHANNEL_MESSAGE_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return ChannelMessage(envelope=envelope, signature=signature)
+
+
+def verify_channel_message(message: ChannelMessage, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `message`'s signature against the claimed home node's
+    *current signing key* -- same division of responsibility as
+    `verify_board_post`."""
+    return verify_signature(signing_verify_key, canonical_bytes(message.envelope), message.signature)
 
 
 @dataclass(frozen=True)

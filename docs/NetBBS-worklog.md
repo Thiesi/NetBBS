@@ -1318,6 +1318,29 @@ every accepted `key_transition` write -- the same "purge on write, same
 table" shape `LinkDiagnosticLogHandler.emit` already established for
 `link_diagnostic_log`, not a separate scheduled task.
 
+**Linked channels (design doc §9.6, issue #87).** `netbbs.link.channels`
+mirrors `netbbs.link.boards` closely -- two differences follow directly
+from how local channels already differ from local boards, not from
+anything Link-specific: no edit chain (channel messages have no local edit
+concept at all) and no origin-succession event types (reused by reference
+from §9.4's existing model, not built). `channel_messages.id` is a plain
+autoincrement with no existing content-addressed column the way
+`posts.post_id` already is one -- idempotent materialization needed a new
+`link_content_id` column to key off instead. Carried channel content is
+subject to the same bounded-scrollback trim local content already has;
+this is a deliberate consequence of treating a linked channel as genuinely
+the same kind of resource as a local one, not a data-loss surprise unique
+to Link. `queue_channel_message_if_linked` (the self-authored outbound
+path, mirroring `queue_board_post_if_linked`) exists and is tested but is
+**not wired into `netbbs.net.chat_flow`'s live interactive send path** --
+that file's message-send code has no existing `link_context` threading at
+all (unlike `netbbs.net.login_flow`'s board-post path), and adding it
+means threading a new parameter through several nested layers. A
+self-authored message on a linked channel does not yet actually leave the
+node through the live TUI as a result; received content still
+materializes and is browsable correctly. Worth a small, scoped follow-up
+issue rather than silently assuming this gap doesn't exist.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required

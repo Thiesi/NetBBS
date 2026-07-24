@@ -236,6 +236,7 @@ async def _start_servers(
                     max_relay_clients=config.link.max_relay_clients,
                     max_peers=config.link.max_peers,
                     max_carried_boards=config.link.max_carried_boards,
+                    max_carried_channels=config.link.max_carried_channels,
                     throttle=_build_link_throttle(config.link),
                 ),
             )
@@ -564,6 +565,7 @@ async def run(
                 max_relay_clients=config.link.max_relay_clients,
                 max_peers=config.link.max_peers,
                 max_carried_boards=config.link.max_carried_boards,
+                max_carried_channels=config.link.max_carried_channels,
             )
             if link_node is not None else None
         )
@@ -617,6 +619,7 @@ async def run(
                         interval_seconds=config.link.sync_interval_seconds,
                         stop_event=link_sync_stop_event,
                         max_carried_boards=config.link.max_carried_boards,
+                        max_carried_channels=config.link.max_carried_channels,
                     )
                 )
 

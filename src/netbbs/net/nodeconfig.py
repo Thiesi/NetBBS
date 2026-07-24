@@ -165,6 +165,9 @@ class LinkConfig:
     max_relay_clients: int = 20
     max_peers: int = 1000
     max_carried_boards: int = 500
+    # Design doc §9.6, issue #87: same shape as max_carried_boards above,
+    # the channel-side counterpart.
+    max_carried_channels: int = 500
     request_rate_capacity: float = 20.0
     request_rate_refill_per_minute: float = 60.0
     request_rate_max_tracked_sources: int = 10_000
@@ -278,6 +281,7 @@ class NodeConfig:
             _require_positive_link = {
                 "max_peers": self.link.max_peers,
                 "max_carried_boards": self.link.max_carried_boards,
+                "max_carried_channels": self.link.max_carried_channels,
                 "request_rate_capacity": self.link.request_rate_capacity,
                 "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
                 "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
@@ -437,6 +441,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--link-max-carried-boards", dest="link_max_carried_boards", type=int, default=None
     )
     parser.add_argument(
+        "--link-max-carried-channels", dest="link_max_carried_channels", type=int, default=None
+    )
+    parser.add_argument(
         "--link-request-rate-capacity", dest="link_request_rate_capacity", type=float, default=None
     )
     parser.add_argument(
@@ -535,6 +542,7 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         max_relay_clients=int(table.get("max_relay_clients", current.max_relay_clients)),
         max_peers=int(table.get("max_peers", current.max_peers)),
         max_carried_boards=int(table.get("max_carried_boards", current.max_carried_boards)),
+        max_carried_channels=int(table.get("max_carried_channels", current.max_carried_channels)),
         request_rate_capacity=float(table.get("request_rate_capacity", current.request_rate_capacity)),
         request_rate_refill_per_minute=float(
             table.get("request_rate_refill_per_minute", current.request_rate_refill_per_minute)
@@ -614,6 +622,7 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_max_relay_clients,
         args.link_max_peers,
         args.link_max_carried_boards,
+        args.link_max_carried_channels,
         args.link_request_rate_capacity,
         args.link_request_rate_refill_per_minute,
         args.link_request_rate_max_tracked_sources,
@@ -657,6 +666,11 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     link.max_carried_boards
                     if args.link_max_carried_boards is None
                     else args.link_max_carried_boards
+                ),
+                max_carried_channels=(
+                    link.max_carried_channels
+                    if args.link_max_carried_channels is None
+                    else args.link_max_carried_channels
                 ),
                 request_rate_capacity=(
                     link.request_rate_capacity

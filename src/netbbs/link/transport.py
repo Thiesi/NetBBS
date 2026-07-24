@@ -51,11 +51,18 @@ from netbbs.link.boards import (
     materialize_carried_post_edit,
     record_board_origin_change,
 )
+from netbbs.link.channels import (
+    ChannelCarryLimitError,
+    materialize_carried_channel,
+    materialize_carried_channel_message,
+)
 from netbbs.link.events import (
     BOARD_GENESIS_OBJECT_TYPE,
     BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE,
     BOARD_POST_EDIT_OBJECT_TYPE,
     BOARD_POST_OBJECT_TYPE,
+    CHANNEL_GENESIS_OBJECT_TYPE,
+    CHANNEL_MESSAGE_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
@@ -64,6 +71,8 @@ from netbbs.link.events import (
     BoardOriginTransferOffer,
     BoardPost,
     BoardPostEdit,
+    ChannelGenesis,
+    ChannelMessage,
     KeyTransition,
     LinkMessage,
     LinkMessageAccepted,
@@ -89,7 +98,14 @@ from netbbs.link.relay_mailbox import (
     deposit_relay_mailbox_envelope,
     pickup_relay_mailbox_envelopes,
 )
-from netbbs.link.store import board_event_diff, save_candidate_descriptor, save_event, save_peer, save_relay_consent
+from netbbs.link.store import (
+    board_event_diff,
+    channel_event_diff,
+    save_candidate_descriptor,
+    save_event,
+    save_peer,
+    save_relay_consent,
+)
 from netbbs.net.throttle import LinkRequestThrottle
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import utc_now_iso
@@ -117,6 +133,9 @@ _DEFAULT_MAX_RELAY_CLIENTS = 20
 # this slice that `LinkServer` itself now enforces.
 _DEFAULT_MAX_PEERS = 1000
 _DEFAULT_MAX_CARRIED_BOARDS = 500
+# Design doc §9.6, issue #87: same shape as _DEFAULT_MAX_CARRIED_BOARDS
+# above, the channel-side counterpart.
+_DEFAULT_MAX_CARRIED_CHANNELS = 500
 
 # Turns aiohttp's implicit 1 MiB `client_max_size` default into a
 # deliberate, documented value -- sized to comfortably fit `netbbs.link.
@@ -148,6 +167,7 @@ async def persist_accepted_events(
     *,
     sender_fingerprint: str,
     max_carried_boards: int | None,
+    max_carried_channels: int | None = None,
 ) -> None:
     """
     Persist and follow up on every content_id `LinkNode.handle_events`
@@ -189,6 +209,15 @@ async def persist_accepted_events(
         elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
             await lane.run(
                 materialize_carried_post_edit, BoardPostEdit.from_dict(envelope), sender_fingerprint=sender_fingerprint
+            )
+            continue
+        elif object_type == CHANNEL_MESSAGE_OBJECT_TYPE:
+            # Design doc §9.6, issue #87: same "skip the generic save_
+            # event dispatch, materialize does its own link_events
+            # insert in the same transaction" shape as board_post above.
+            await lane.run(
+                materialize_carried_channel_message, ChannelMessage.from_dict(envelope),
+                sender_fingerprint=sender_fingerprint,
             )
             continue
 
@@ -235,6 +264,19 @@ async def persist_accepted_events(
                 # logged rather than surfaced as a failed request
                 # (the peer that pushed it did nothing wrong; this
                 # node simply declined to carry one more board).
+                _logger.warning("Link sync: %s", exc)
+        elif object_type == CHANNEL_GENESIS_OBJECT_TYPE:
+            # Design doc §9.6, issue #87: mirrors BOARD_GENESIS_OBJECT_
+            # TYPE above exactly, including the same carry-limit
+            # tolerance.
+            try:
+                await lane.run(
+                    materialize_carried_channel,
+                    ChannelGenesis.from_dict(envelope),
+                    own_fingerprint=node.identity.fingerprint,
+                    max_carried_channels=max_carried_channels,
+                )
+            except ChannelCarryLimitError as exc:
                 _logger.warning("Link sync: %s", exc)
         elif object_type == BOARD_ORIGIN_TRANSFER_ACCEPTED_OBJECT_TYPE:
             transfer_accepted = BoardOriginTransferAccepted.from_dict(envelope)
@@ -306,6 +348,7 @@ class LinkServer:
         max_relay_clients: int = _DEFAULT_MAX_RELAY_CLIENTS,
         max_peers: int | None = _DEFAULT_MAX_PEERS,
         max_carried_boards: int | None = _DEFAULT_MAX_CARRIED_BOARDS,
+        max_carried_channels: int | None = _DEFAULT_MAX_CARRIED_CHANNELS,
         throttle: LinkRequestThrottle | None = None,
     ) -> None:
         self._host = host
@@ -317,6 +360,7 @@ class LinkServer:
         self._max_relay_clients = max_relay_clients
         self._max_peers = max_peers
         self._max_carried_boards = max_carried_boards
+        self._max_carried_channels = max_carried_channels
         self._throttle = throttle
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -381,6 +425,7 @@ class LinkServer:
         await persist_accepted_events(
             self._lane, self._node, accepted,
             sender_fingerprint=fingerprint, max_carried_boards=self._max_carried_boards,
+            max_carried_channels=self._max_carried_channels,
         )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
@@ -406,6 +451,12 @@ class LinkServer:
         Bounded the same way every other route here is: the rate-limit
         middleware and `client_max_size`, plus `board_event_diff`'s own
         `limit` argument capping the response itself.
+
+        Design doc §9.6, issue #87: `channel_event_diff` shares the same
+        overall `_MAX_EVENTS_PER_REQUEST` budget as the board half, not a
+        second independent cap -- run board first, then channels with
+        whatever budget remains, so one combined request/response still
+        obeys one combined bound.
         """
         try:
             body = await request.json(loads=strict_json_loads)
@@ -413,9 +464,18 @@ class LinkServer:
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed inventory request: {exc}"}, status=400)
 
-        events, more_available = await self._lane.run(
+        board_events, board_truncated = await self._lane.run(
             board_event_diff, inventory_request.boards, limit=_MAX_EVENTS_PER_REQUEST
         )
+        remaining = _MAX_EVENTS_PER_REQUEST - len(board_events)
+        if remaining > 0 and inventory_request.channels:
+            channel_events, channel_truncated = await self._lane.run(
+                channel_event_diff, inventory_request.channels, limit=remaining
+            )
+        else:
+            channel_events, channel_truncated = [], bool(inventory_request.channels)
+        events = board_events + channel_events
+        more_available = board_truncated or channel_truncated
         return web.json_response({"events": events, "more_available": more_available})
 
     async def _handle_peers(self, request: web.Request) -> web.Response:

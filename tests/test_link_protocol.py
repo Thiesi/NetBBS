@@ -18,6 +18,8 @@ from netbbs.link.events import (
     build_board_origin_transfer_offer,
     build_board_post,
     build_board_post_edit,
+    build_channel_genesis,
+    build_channel_message,
     build_endpoint_descriptor,
     build_key_transition,
     build_link_message,
@@ -532,6 +534,215 @@ def test_handle_events_accepts_a_board_post_relayed_by_a_different_known_peer(tm
     accepted = bob_node.handle_events(alice.fingerprint, [post.to_dict()])
 
     assert accepted == [post.content_id]
+
+    alice.close()
+    charlie.close()
+
+
+# -- issue #87: channel_genesis/channel_message (design doc §9.6) -----------
+
+
+def test_handle_events_accepts_a_valid_channel_genesis(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_channel_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="Vintage Computing Chat",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.channels["existing-local-channel-id"].content_id == genesis.content_id
+
+    alice.close()
+
+
+def test_handle_events_rejects_channel_genesis_from_an_origin_with_no_completed_hello(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")  # never says hello to bob_node
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    # charlie's own valid genesis, relayed as if it came from alice.
+    genesis = build_channel_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="Charlie's Chat",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    alice.close()
+    charlie.close()
+
+
+def test_handle_events_rejects_conflicting_channel_genesis_for_same_channel_id(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    first = build_channel_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="Vintage Computing Chat",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [first.to_dict()])
+
+    clock.advance(hours=1)
+    conflicting = build_channel_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="A Different Name",
+        created_at=clock.now_iso(),
+    )
+    assert conflicting.content_id != first.content_id
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [conflicting.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_channel_genesis_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_channel_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="Vintage Computing Chat",
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert first == [genesis.content_id]
+    assert second == []
+
+    alice.close()
+
+
+def test_handle_events_accepts_a_valid_channel_message(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_channel_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        channel_id="existing-local-channel-id",
+        name="Vintage Computing Chat",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    message = build_channel_message(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        channel_id="existing-local-channel-id",
+        body="hello there",
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    assert accepted == [message.content_id]
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_channel_message_for_an_unknown_channel(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    message = build_channel_message(
+        signing_identity=alice.identity.signing_key,
+        home_node_fingerprint=alice.fingerprint,
+        local_user_id="wanderer",
+        channel_id="never-linked-channel-id",
+        body="hello there",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_accepts_a_channel_genesis_relayed_by_a_different_known_peer(tmp_path, clock):
+    """The multi-hop proof for channels, mirroring the board_genesis one
+    above -- channels get issue #85's relaxation on day one, never had
+    the older restriction to begin with."""
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=charlie.identity), clock=clock))
+
+    genesis = build_channel_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        channel_id="charlies-channel",
+        name="Charlie's Chat",
+        created_at=clock.now_iso(),
+    )
+
+    # Relayed by alice, not charlie.
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.channels["charlies-channel"].content_id == genesis.content_id
+
+    alice.close()
+    charlie.close()
+
+
+def test_handle_events_accepts_a_channel_message_relayed_by_a_different_known_peer(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=charlie.identity), clock=clock))
+
+    genesis = build_channel_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        channel_id="charlies-channel",
+        name="Charlie's Chat",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(charlie.fingerprint, [genesis.to_dict()])
+
+    message = build_channel_message(
+        signing_identity=charlie.identity.signing_key,
+        home_node_fingerprint=charlie.fingerprint,
+        local_user_id="wanderer",
+        channel_id="charlies-channel",
+        body="hello there",
+        created_at=clock.now_iso(),
+    )
+
+    # Relayed by alice, not charlie.
+    accepted = bob_node.handle_events(alice.fingerprint, [message.to_dict()])
+
+    assert accepted == [message.content_id]
 
     alice.close()
     charlie.close()
