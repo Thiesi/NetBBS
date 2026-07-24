@@ -74,26 +74,44 @@ from netbbs.files.categories import (
     list_top_level_categories,
 )
 from netbbs.files.storage import new_incoming_temp_path
+from netbbs.link.boards import LinkContext
+from netbbs.link.files import RemoteFile, list_remote_files
+from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
+from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session
 from netbbs.permissions import meets_level
-from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, colored, menu_key, sanitize_text
+from netbbs.rendering import ACCENT_COLOR, HEADER_COLOR, MUTED_COLOR, colored, menu_key, sanitize_text
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences
 
 
 async def enter_file_area(
-    session: Session, lane: DatabaseLane, area: FileArea, user: User, *, initial_cursor: tuple[str, str] | None = None
+    session: Session,
+    lane: DatabaseLane,
+    area: FileArea,
+    user: User,
+    *,
+    initial_cursor: tuple[str, str] | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Enter `area` directly, bypassing the category picker entirely --
     public (unlike `_show_area`) so issue #56's `[N]ew scan` screen
     (`netbbs.net.login_flow`) can jump straight into a specific area
     with a starting cursor, the same reasoning `netbbs.net.chat_flow.
     browse_channels`'s own `initial_channel` parameter already has for
-    channels."""
-    await _show_area(session, lane, area, user, initial_cursor=initial_cursor)
+    channels.
+
+    `link_context` (design doc, issue #92), if given, is passed straight
+    through to `_show_area`, which offers a `/remote` command to browse
+    and fetch this area's carried-but-not-yet-fetched remote catalogue
+    when it's Linked -- `None` (Link disabled on this node, or a direct
+    test/CLI call site) simply hides that command, same degrade-
+    gracefully shape every other optional `link_context` parameter
+    already has."""
+    await _show_area(session, lane, area, user, initial_cursor=initial_cursor, link_context=link_context)
 
 
 async def browse_file_areas(
@@ -104,11 +122,13 @@ async def browse_file_areas(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """Entry point: browse from the top level (no category selected yet)."""
     await _browse_areas_in_category(
         session, lane, user, category_id=None,
         community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+        link_context=link_context,
     )
 
 
@@ -139,6 +159,7 @@ async def _browse_areas_in_category(
     community_id: int | None = None,
     community_scoped: bool = False,
     title_prefix: str | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Browse file areas within a category (or the top level), mirroring
@@ -202,7 +223,7 @@ async def _browse_areas_in_category(
             empty_message="No file areas are available to you yet.",
         )
         if area is not None:
-            await _show_area(session, lane, area, user)
+            await _show_area(session, lane, area, user, link_context=link_context)
         return
 
     mixed: list[FileAreaCategory | FileArea] = [*categories_here, *areas_here]
@@ -234,9 +255,10 @@ async def _browse_areas_in_category(
         await _browse_areas_in_category(
             session, lane, user, category_id=selected.id,
             community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+            link_context=link_context,
         )
     else:
-        await _show_area(session, lane, selected, user)
+        await _show_area(session, lane, selected, user, link_context=link_context)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -262,6 +284,7 @@ async def _render_area_page(
     *,
     can_write: bool,
     name_requirement: str | None,
+    show_remote_hint: bool = False,
 ) -> None:
     """Renders one page of files plus its navigation options and command
     hints — the unit that should be redrawn on an actual page change
@@ -280,6 +303,13 @@ async def _render_area_page(
     hints = [menu_key("/download <filename>", " — receive via Zmodem")]
     if can_write:
         hints.append(menu_key("/upload", " — send via Zmodem"))
+    # Design doc, issue #92: shown whenever this node has Link available
+    # at all, regardless of whether this specific area turns out to have
+    # any remote catalogue entries yet -- /remote itself reports "no
+    # remote files" rather than needing a second lane round trip here
+    # just to decide whether to print the hint.
+    if show_remote_hint:
+        hints.append(menu_key("/remote", " — browse/fetch this area's remote catalogue"))
     await session.write_line("  ".join(hints))
 
 
@@ -290,6 +320,7 @@ async def _show_area(
     user: User,
     *,
     initial_cursor: tuple[str, str] | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Show `area`, one bounded page of files at a time (design doc,
@@ -319,6 +350,18 @@ async def _show_area(
     displayed page — pagination bounds what's fetched for browsing, not
     what can be referenced by a name the user already knows (from an
     earlier page, or from outside this session entirely).
+
+    `link_context` (design doc, issue #92), if given, offers `/remote` —
+    browse this area's carried-but-not-yet-fetched remote catalogue and
+    fetch one on demand (`_browse_remote_files`). Reachable both from the
+    ordinary pagination loop and from the "has no files yet" fallback
+    prompt below it, since a Linked area can have remote catalogue
+    entries even with zero *local* uploads of its own. No extra
+    per-file access check is applied inside that sub-screen — entering
+    `_show_area` at all already required passing this area's own
+    effective read/age/name-requirement gate (enforced by whichever
+    picker offered it), and a remote catalogue entry carries no
+    additional moderation state of its own to re-check.
     """
     area_name = sanitize_text(area.name)
 
@@ -341,12 +384,15 @@ async def _show_area(
 
     page, effective_name_requirement, can_write = await lane.run(_load)
 
+    show_remote_hint = link_context is not None
+
     async def _render_and_advance_cursor(current_page: FileEntryPage) -> None:
         """The one place every render in this loop funnels through
         (issue #56) -- advances `user`'s file-area read cursor to
         whatever is now newest on screen."""
         await _render_area_page(
-            session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement
+            session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
+            show_remote_hint=show_remote_hint,
         )
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
@@ -383,24 +429,158 @@ async def _show_area(
                 filename = choice[len("/download ") :].strip()
                 await _handle_download(session, lane, area, filename, user)
                 return
+            elif choice.lower() == "/remote" and link_context is not None:
+                await _browse_remote_files(session, lane, area, user, link_context)
+                return
             else:
                 await session.write("\a")
         return
 
-    if not can_write:
+    if not can_write and not show_remote_hint:
         return
 
-    hints = [menu_key("/upload", " — send via Zmodem")]
+    hints = []
+    if can_write:
+        hints.append(menu_key("/upload", " — send via Zmodem"))
+    if show_remote_hint:
+        hints.append(menu_key("/remote", " — browse/fetch this area's remote catalogue"))
     await session.write_line(f"\r\n{'  '.join(hints)}")
     await session.write("Command (or press Enter to go back): ")
     command = (await session.read_line()).strip()
 
     if not command:
         return
-    elif command.lower() == "/upload":
+    elif command.lower() == "/upload" and can_write:
         await _handle_upload(session, lane, area, user)
+    elif command.lower() == "/remote" and link_context is not None:
+        await _browse_remote_files(session, lane, area, user, link_context)
     else:
         await session.write_line("Unknown command.")
+
+
+async def _browse_remote_files(
+    session: Session, lane: DatabaseLane, area: FileArea, user: User, link_context: LinkContext
+) -> None:
+    """
+    `/remote` (design doc, issue #92): list every catalogued file for
+    `area` -- both fetched and not -- and offer to fetch one that isn't
+    local yet. No per-file access check here beyond what already gated
+    entering `_show_area` itself (see that function's own docstring) --
+    a `RemoteFile` carries no independent moderation state of its own to
+    re-check.
+
+    Already-fetched entries are shown, not hidden, so a user can tell
+    "this exists in the catalogue and I already have it" from "this
+    exists and I don't" at a glance -- the acceptance criterion's own
+    "clearly distinguish remote-only content from content already
+    fetched/promoted locally."
+    """
+    remote_files = await lane.run(list_remote_files, area)
+    if not remote_files:
+        await session.write_line(
+            colored(f"\r\n[{sanitize_text(area.name)}] has no remote catalogue entries.", fg_color=MUTED_COLOR)
+        )
+        return
+
+    def render_description(remote_file: RemoteFile) -> str:
+        status = "already fetched" if remote_file.fetched_file_id is not None else "not yet fetched"
+        return f"{_format_size(remote_file.size_bytes)} — {status} — from {remote_file.origin_fingerprint[:12]}…"
+
+    selected = await pick_item(
+        session,
+        remote_files,
+        name_of=lambda rf: rf.filename,
+        stable_id_of=lambda rf: rf.id,
+        description_of=render_description,
+        title=f"Remote catalogue: {sanitize_text(area.name)}",
+        empty_message="No remote catalogue entries.",
+    )
+    if selected is None:
+        return
+
+    if selected.fetched_file_id is not None:
+        await session.write_line(
+            colored(
+                f"\r\n{sanitize_text(selected.filename)!r} is already available locally -- use "
+                "/download to receive it.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
+
+    await session.write_line(
+        f"\r\n{sanitize_text(selected.filename)!r} ({_format_size(selected.size_bytes)}), not yet fetched."
+    )
+    if not await prompt_yes_no(session, "Fetch it from its origin now?", default=False):
+        await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
+        return
+
+    await _fetch_remote_file(session, lane, selected, link_context)
+
+
+async def _fetch_remote_file(
+    session: Session, lane: DatabaseLane, remote_file: RemoteFile, link_context: LinkContext
+) -> None:
+    """
+    Drives `netbbs.link.transport.fetch_next_file_chunk` in a loop until
+    the transfer completes, fails, or its origin turns out to be
+    unreachable -- the actual bounded/resumable chunk-transfer path
+    (design doc §11.3), not a parallel implementation. Success promotes
+    the content into the ordinary local `files` table via that same
+    function's own existing verification path; a `files` row is never
+    created for content that didn't fully verify (`netbbs.link.file_
+    transfer._finalize_transfer`'s own behavior, unchanged by this UI).
+
+    Imports `aiohttp`/`netbbs.link.transport` lazily, inside this
+    function -- `netbbs.net.file_flow` is loaded unconditionally by every
+    node, including one with `aiohttp` not installed (`pip install
+    netbbs[web]`), so nothing at this module's own top level may import
+    either; `netbbs.__main__`'s own Link-server startup already
+    established this same lazy-import convention for the identical
+    reason.
+    """
+    import aiohttp
+
+    from netbbs.link.file_transfer import FileTransferError
+    from netbbs.link.transport import LinkTransportError, dialable_base_urls_for_peer, fetch_next_file_chunk
+
+    base_urls = dialable_base_urls_for_peer(link_context.link_node, remote_file.origin_fingerprint)
+    if not base_urls:
+        await session.write_line(
+            colored(
+                "\r\nThis file's origin is not currently reachable directly (chunk transfer is "
+                "never relayed) -- try again later.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return
+    base_url = base_urls[0]
+
+    await session.write_line(f"\r\nFetching {sanitize_text(remote_file.filename)!r}…")
+    transfer = None
+    try:
+        async with aiohttp.ClientSession() as http_session:
+            while True:
+                transfer = await fetch_next_file_chunk(
+                    link_context.link_node, http_session, base_url, lane, remote_file,
+                )
+                if transfer.status != "in_progress":
+                    break
+                await session.write_line(
+                    colored(f"  … {transfer.bytes_received}/{transfer.total_size} bytes", fg_color=MUTED_COLOR)
+                )
+    except (LinkProtocolError, LinkTransportError, FileTransferError) as exc:
+        await session.write_line(colored(f"Fetch failed: {exc}", fg_color=MUTED_COLOR))
+        return
+
+    if transfer.status == "completed":
+        await session.write_line(
+            f"{sanitize_text(remote_file.filename)!r} fetched and verified — available via /download now."
+        )
+    else:
+        await session.write_line(
+            colored(f"Fetch failed: transfer ended in status {transfer.status!r}.", fg_color=MUTED_COLOR)
+        )
 
 
 def _uploader_display_name(db: Database, entry, *, name_requirement: str | None) -> str:

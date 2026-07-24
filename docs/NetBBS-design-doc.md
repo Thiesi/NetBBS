@@ -3002,10 +3002,12 @@ Implemented or substantially working:
   tracked separately (issue #93).
 - linked-channel messages wired into the live interactive chat send path
   (issue #91, closed) — closes the gap issue #87 left open.
+- interactive browse/fetch UI for remote file catalogues: a `/remote`
+  command reachable from file areas, both paginated and empty (§11,
+  issue #92, closed) — closes the gap issue #89 left open.
 
 Still required for Phase 3 completeness:
 
-- interactive browse/fetch UI for remote file catalogues (issue #92);
 - inventory/pull catch-up extended to file-area catalogues (issue #93);
 - broader real-world multi-node deployment validation (issue #83).
 
@@ -3459,6 +3461,52 @@ through. A real two-node end-to-end test (`tests/test_link_end_to_end.py`)
 drives `_chat_loop` itself with a scripted `FakeSession`, not a direct
 `queue_channel_message_if_linked` call, proving the interactive send path
 specifically, per the issue's own acceptance criterion.
+
+### Issue #92 — interactive browse/fetch UI for remote file catalogues — closed
+
+Closes the UI gap issue #89 left open: `netbbs.net.file_flow._show_area`
+gains a `/remote` command (reachable from both the ordinary paginated file
+listing and the "has no files yet" fallback prompt, since a Linked area can
+have remote catalogue entries with zero *local* uploads of its own),
+offered whenever an optional `link_context` is given — threaded down from
+`enter_file_area`/`browse_file_areas` the same way `netbbs.net.login_flow`'s
+board/channel paths already thread it. `/remote` lists every catalogued
+`RemoteFile` for the area via `netbbs.link.files.list_remote_files`
+(fetched and not-yet-fetched alike, clearly labeled, so a user can tell
+"catalogued and I already have it" from "catalogued and I don't" at a
+glance — no separate hidden state); picking an already-fetched entry
+reports that and stops, never re-offering a redundant fetch. Picking a
+not-yet-fetched entry, after a yes/no confirmation, drives `netbbs.link.
+transport.fetch_next_file_chunk` in a loop until the transfer completes,
+fails, or the origin turns out unreachable (`dialable_base_urls_for_peer`,
+new — chunk transfer is never relayed, so an origin with no advertised
+direct address is reported clearly rather than attempted). Success is
+reported once the transfer's own existing verification/promotion path
+(unchanged by this issue) has already placed the content in the ordinary
+local `files` table; the file is then reachable through the pre-existing
+`/download` command like any other, no new download path introduced.
+
+No per-file access check inside `/remote` beyond what already gated
+entering `_show_area` in the first place (design doc's own "merely knowing
+a descriptor exists must not bypass local policy" acceptance criterion) —
+a `RemoteFile` carries no independent moderation state of its own the way
+a pending local upload does, so the area-level read/age/name-requirement
+gate already enforced by whichever picker offered the area is sufficient.
+
+`aiohttp`/`netbbs.link.transport` are imported lazily, inside the one
+function that actually dials out (`_fetch_remote_file`) — `netbbs.net.
+file_flow` is loaded unconditionally by every node, including one with
+`aiohttp` not installed, matching the same lazy-import convention
+`netbbs.__main__`'s own Link-server startup already established.
+
+A full interactive-flow regression test (`tests/test_link_end_to_end.py`)
+drives `_show_area` itself against a real second node — `/remote` command,
+`pick_item` selection, the fetch confirmation prompt — proving browse ->
+fetch -> verify/promote -> ordinary `/download` visibility end to end, per
+the issue's own acceptance criterion; `tests/test_file_flow_remote.py`
+covers the UI-level edge cases that don't need a real second node (no
+catalogue entries, an already-fetched entry, a declined fetch, an
+unreachable origin).
 
 ### Issue #55 — trust and quarantine
 

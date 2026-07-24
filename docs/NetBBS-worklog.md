@@ -1471,6 +1471,27 @@ than calling `queue_channel_message_if_linked` directly, since the point of
 the issue was proving the interactive path itself, not the already-tested
 domain function underneath it.
 
+**Interactive browse/fetch UI for remote file catalogues (issue #92).**
+`netbbs.net.file_flow` (and every other `netbbs.net.*` module) loads
+unconditionally on every node, including ones with no `aiohttp` installed
+(it is an optional extra, `pip install netbbs[web]`) — so `aiohttp` and
+`netbbs.link.transport` must never be imported at that module's top level.
+The existing convention (already used in `netbbs.__main__`'s own Link-
+server startup) is to import them lazily inside the one function that
+actually performs a transfer; `_fetch_remote_file` follows the same
+pattern rather than inventing a new one. A `RemoteFile` catalogue entry
+needed no additional per-file access check beyond what already gates
+reaching the containing area — the caller's own picker has already applied
+`meets_level`/`meets_age`/etc. before a user ever sees the area, so merely
+knowing a descriptor exists cannot bypass local policy. One UI-shape lesson
+worth keeping for any future "attach a command to an existing listing"
+work: `_show_area` had two separate display paths (the normal paginated
+loop and a separate fallback prompt for "no files yet"), and a Linked area
+can have remote catalogue entries while having zero local uploads — the
+new `/remote` command had to be wired into *both* branches, not just the
+main loop, or it would silently be unreachable for exactly the areas most
+likely to have something worth fetching.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required

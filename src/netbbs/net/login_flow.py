@@ -1123,7 +1123,7 @@ async def _new_scan_screen(
         )
     else:
         cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
-        await enter_file_area(session, lane, selected.file_area, user, initial_cursor=cursor)
+        await enter_file_area(session, lane, selected.file_area, user, initial_cursor=cursor, link_context=link_context)
 
 
 @dataclass(frozen=True)
@@ -1238,7 +1238,7 @@ async def _find_screen(
         await _show_board(session, db, selected.post.board, user, link_context=link_context, initial_cursor=cursor)
     elif selected.kind == "file":
         cursor = await lane.run(file_jump_cursor, selected.file.area.id, selected.file.file_id)
-        await enter_file_area(session, lane, selected.file.area, user, initial_cursor=cursor)
+        await enter_file_area(session, lane, selected.file.area, user, initial_cursor=cursor, link_context=link_context)
     else:
         await browse_channels(
             session, lane, hub, presence, mailbox, history, user,
@@ -1605,6 +1605,7 @@ async def _resource_type_menu(
                 await browse_file_areas(
                     session, lane, user,
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                    link_context=link_context,
                 )
             else:
                 await session.write_line(

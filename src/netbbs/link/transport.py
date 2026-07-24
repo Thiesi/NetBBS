@@ -1088,6 +1088,31 @@ async def fetch_next_file_chunk(
     )
 
 
+def dialable_base_urls_for_peer(node: LinkNode, fingerprint: str) -> list[str]:
+    """
+    Design doc §11.3/§12, issue #92: every advertised address on file for
+    `fingerprint`, as dialable base URLs, in the order the descriptor
+    itself lists them -- used by an interactive "fetch this remote file"
+    UI action (`netbbs.net.file_flow`) to find where to reach a file's
+    own origin directly. Chunk transfer is never relayed (`fetch_next_
+    file_chunk`'s own docstring), so an outgoing-only origin with no
+    advertised direct address is simply unreachable for this purpose --
+    an empty list, same as `netbbs.link.sync._dialable_addresses` already
+    returns for the identical case in its own (push-only) context.
+
+    Empty if `fingerprint` has no completed hello on file at all -- the
+    same "no relay from a stranger" precondition `fetch_next_file_chunk`
+    itself independently enforces.
+    """
+    peer = node.peers.get(fingerprint)
+    if peer is None:
+        return []
+    addresses = peer.descriptor.payload.get("addresses")
+    if not addresses:
+        return []
+    return [f"{a['protocol']}://{a['address']}:{a['port']}" for a in addresses]
+
+
 async def request_peer_list(
     node: LinkNode,
     session: ClientSession,

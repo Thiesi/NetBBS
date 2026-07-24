@@ -63,9 +63,10 @@ from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer, fetch_next_file_chunk, request_file_chunk
-from netbbs.net import chat_flow
+from netbbs.net import chat_flow, file_flow
 from netbbs.net.char_input import InputHistory
 from tests.test_chat_flow_moderation import FakeSession
+from tests.test_chat_flow_picker_authorization import FakeSession as PickerFakeSession
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     list_work_items,
@@ -1178,6 +1179,74 @@ def test_remote_file_duplicate_chunk_request_over_real_transport_is_idempotent(t
 
         fetched_entry = get_file(seed.db, entry.file_id)
         assert download_file(fetched_entry) == content  # not corrupted by the duplicate request
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_browse_and_fetch_via_the_live_interactive_ui_flow(tmp_path):
+    """Design doc, issue #92's own acceptance criterion: a full
+    interactive-flow regression test proving browse -> fetch -> verify/
+    promote -> ordinary download visibility, driven through the actual
+    `netbbs.net.file_flow._show_area` UI (`/remote` command, `pick_item`
+    selection, the fetch confirmation prompt), not a direct domain call."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    seed_node = LinkNode(identity=seed_identity)
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    content = os.urandom(50_000)
+    entry = upload_file(dialer.db, area, creator, "game.bin", content)
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    queue_file_descriptor_if_linked(dialer.db, entry, area, node_identity=dialer_identity)
+
+    ui_session = PickerFakeSession(["/remote", "0", "1", "y"])
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Push the catalogue -- the dialer's own hello advertises
+                # its real address, so the seed can dial it back directly
+                # for the chunk fetch below (chunk transfer is never
+                # relayed).
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _dialable_hello(dialer_node, dialer_server), dialer.lane,
+                )
+
+            bob = create_user(seed.db, "bob", password="hunter2", user_level=10)
+            carried_area = get_file_area_by_name(seed.db, "downloads")
+            link_context = LinkContext(node_identity=seed_identity, link_node=seed_node)
+
+            # Not yet fetched, before the interactive flow.
+            assert get_remote_file(seed.db, entry.file_id).fetched_file_id is None
+
+            # The dialer's own server must still be running here --
+            # chunk transfer is a direct pull against the file's origin,
+            # dialed fresh, not carried over from the push pass above.
+            await file_flow._show_area(ui_session, seed.lane, carried_area, bob, link_context=link_context)
+        finally:
+            await seed_server.stop()
+            await dialer_server.stop()
+
+    asyncio.run(scenario())
+
+    try:
+        output = "".join(ui_session.written)
+        assert "fetched and verified" in output
+
+        # Ordinary local read path -- not a raw row check.
+        fetched_remote = get_remote_file(seed.db, entry.file_id)
+        assert fetched_remote.fetched_file_id == entry.file_id
+        fetched_entry = get_file(seed.db, entry.file_id)
+        assert fetched_entry.filename == "game.bin"
+        assert download_file(fetched_entry) == content
     finally:
         dialer.close()
         seed.close()
