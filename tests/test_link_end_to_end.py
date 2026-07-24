@@ -47,10 +47,13 @@ from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import create_post, list_posts_page
 from netbbs.chat.channels import create_channel, get_channel_by_name
+from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback, record_message
 from netbbs.files.areas import create_file_area, get_file_area_by_name
 from netbbs.files.entries import download_file, get_file, upload_file
-from netbbs.link.boards import link_board, queue_board_post_if_linked
+from netbbs.link.boards import LinkContext, link_board, queue_board_post_if_linked
 from netbbs.link.channels import link_channel, queue_channel_message_if_linked
 from netbbs.link.file_transfer import apply_received_chunk, compute_transfer_id, get_transfer
 from netbbs.link.files import get_remote_file, link_file_area, list_remote_files, queue_file_descriptor_if_linked
@@ -60,6 +63,9 @@ from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer, fetch_next_file_chunk, request_file_chunk
+from netbbs.net import chat_flow
+from netbbs.net.char_input import InputHistory
+from tests.test_chat_flow_moderation import FakeSession
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     list_work_items,
@@ -954,6 +960,67 @@ def test_linked_channel_state_survives_seed_restart_using_only_persisted_state(t
         carried_channel = get_channel_by_name(seed.db, "lobby")
         scrollback = get_scrollback(seed.db, carried_channel)
         assert [m.body for m in scrollback] == ["hello there"]
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_linked_channel_message_sent_via_the_live_interactive_chat_path_reaches_a_real_peer(tmp_path):
+    """Design doc, issue #91: unlike the full-vertical test above (which
+    builds the outbound event directly via `queue_channel_message_if_
+    linked`), this one begins at the actual interactive send path --
+    `netbbs.net.chat_flow._chat_loop`, driven with a scripted `FakeSession`
+    exactly the way a real typed chat line would be -- and proves the
+    remote node still materializes/displays the message after an ordinary
+    sync pass. The dialer's own `_chat_loop` call is given a real
+    `link_context`, so a plain typed line queues its own `channel_message`
+    the same way `netbbs.net.login_flow._compose_new_post`'s board-post
+    path already does for boards."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_node = LinkNode(identity=bootstrap_node_identity("seed"))
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    channel = create_channel(dialer.db, "lobby", creator=creator)
+    link_channel(dialer.db, channel, node_identity=dialer_identity)
+    link_context = LinkContext(node_identity=dialer_identity, link_node=dialer_node)
+
+    async def scenario():
+        # Stage 1: the interactive send path, not a direct domain call --
+        # a scripted session types one line, then /quit.
+        chat_session = FakeSession(["hello there", "/quit"])
+        await asyncio.wait_for(
+            chat_flow._chat_loop(
+                chat_session, dialer.lane, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(),
+                channel, creator, link_context=link_context,
+            ),
+            timeout=2,
+        )
+
+        # Stage 2: an ordinary sync pass pushes whatever got queued.
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        bob = create_user(seed.db, "bob", password="hunter2", user_level=10)
+        carried_channel = get_channel_by_name(seed.db, "lobby")
+
+        scrollback = get_scrollback(seed.db, carried_channel)
+        assert [m.body for m in scrollback if m.kind == "message"] == ["hello there"]
+        assert unread_channel_count(seed.db, bob, carried_channel) is None
+        record_channel_seen(seed.db, bob, carried_channel, scrollback[-1])
+        assert unread_channel_count(seed.db, bob, carried_channel) == 0
     finally:
         dialer.close()
         seed.close()

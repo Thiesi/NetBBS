@@ -1118,7 +1118,8 @@ async def _new_scan_screen(
         await _show_board(session, db, selected.board, user, link_context=link_context, initial_cursor=cursor)
     elif selected.kind == "channel":
         await browse_channels(
-            session, lane, hub, presence, mailbox, history, user, initial_channel=selected.channel
+            session, lane, hub, presence, mailbox, history, user,
+            initial_channel=selected.channel, link_context=link_context,
         )
     else:
         cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
@@ -1240,7 +1241,8 @@ async def _find_screen(
         await enter_file_area(session, lane, selected.file.area, user, initial_cursor=cursor)
     else:
         await browse_channels(
-            session, lane, hub, presence, mailbox, history, user, initial_channel=selected.message.channel
+            session, lane, hub, presence, mailbox, history, user,
+            initial_channel=selected.message.channel, link_context=link_context,
         )
 
 
@@ -1587,6 +1589,7 @@ async def _resource_type_menu(
                 await browse_channels(
                     session, lane, hub, presence, mailbox, history, user, session_registry=session_registry,
                     community_id=community_id, community_scoped=community_scoped, title_prefix=title_prefix,
+                    link_context=link_context,
                 )
             else:
                 await session.write_line(

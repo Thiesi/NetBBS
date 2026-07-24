@@ -134,6 +134,8 @@ from netbbs.chat import (
 from netbbs.chat.categories import Category, list_subcategories, list_top_level_categories
 from netbbs.communities import get_effective_min_age, get_effective_name_requirement
 from netbbs.directory import VCard, get_vcard
+from netbbs.link.boards import LinkContext
+from netbbs.link.channels import queue_channel_message_if_linked
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer
 from netbbs.net.char_input import move_cursor as relative_move_cursor
@@ -182,6 +184,7 @@ async def browse_channels(
     community_scoped: bool = False,
     title_prefix: str | None = None,
     initial_channel: Channel | None = None,
+    link_context: LinkContext | None = None,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
@@ -236,6 +239,14 @@ async def browse_channels(
     scope the caller entered with; see
     `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
     the full reasoning, identical here.
+
+    `link_context` (design doc, issue #91), if given, is passed straight
+    through to `_chat_loop`, which queues a `channel_message` Link event
+    for a self-authored message sent in a Linked channel -- `None`
+    (Link disabled on this node, or a direct test/CLI call site) simply
+    means a message sent here never propagates over Link, the same
+    degrade-gracefully shape `netbbs.net.login_flow._show_board`'s own
+    `link_context` parameter already has for board posts.
     """
     channel = initial_channel or await _pick_channel(
         session, lane, hub, user, category_id=None,
@@ -252,7 +263,8 @@ async def browse_channels(
             continue
 
         action = await _chat_loop(
-            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user,
+            session_registry=session_registry, link_context=link_context,
         )
         if isinstance(action, _SwitchTo):
             channel = action.channel
@@ -2721,6 +2733,7 @@ async def _chat_loop(
     user: User,
     *,
     session_registry: ActiveSessionRegistry | None = None,
+    link_context: LinkContext | None = None,
 ) -> ChatAction:
     """
     Real-time chat within `channel`, until the user types /quit, /leave,
@@ -2773,6 +2786,19 @@ async def _chat_loop(
     "Joined" line, using whatever was persisted *before* this join —
     this join's own event is recorded immediately after, so it's part of
     the next person's replay, not this one's.
+
+    `link_context` (design doc, issue #91): after a self-authored message
+    is recorded (`send_loop`'s own `record_message` call), queues a
+    `channel_message` Link event for it via `netbbs.link.channels.
+    queue_channel_message_if_linked` when `channel` is Linked — mirrors
+    `netbbs.net.login_flow._compose_new_post`'s own `queue_board_post_
+    if_linked` call exactly: fire-and-forget, no separate success/failure
+    message shown to the user (the local send already got its own
+    confirmation), the actual outbound push/its own failure handling
+    living entirely in `netbbs.link.sync`'s existing background loop, not
+    here. `None` (Link disabled, or a caller that bypasses `netbbs.net.
+    login_flow.handle_session`'s real Link wiring) means a message sent
+    here simply never propagates over Link, same as before this issue.
 
     Checked once, here, before doing anything else (design doc §13):
     an unexpired ban means the user never enters
@@ -3156,6 +3182,17 @@ async def _chat_loop(
                             author_fingerprint=user.fingerprint,
                             body=line,
                         )
+                        # Design doc, issue #91: queues this self-authored
+                        # message for Link propagation when channel is
+                        # Linked -- see this function's own docstring for
+                        # why this is fire-and-forget, no separate user-
+                        # facing confirmation, mirroring queue_board_post_
+                        # if_linked's own call site exactly.
+                        if link_context is not None:
+                            await lane.run(
+                                queue_channel_message_if_linked,
+                                recorded_message, channel, node_identity=link_context.node_identity,
+                            )
                         rendered_self = await lane.run(
                             _render_channel_message, channel, user, recorded_message, self_message=True
                         )

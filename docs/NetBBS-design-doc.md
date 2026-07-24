@@ -2997,11 +2997,16 @@ Implemented or substantially working:
   (§9.5, issue #88, closed); linked-board moderator grants/revocations
   remain out of scope.
 - remote file area catalogue exchange and on-demand, resumable, deduplicated
-  chunk transfer (§11, issue #89, closed); file-area origin succession and
-  inventory/pull catch-up extended to file areas remain out of scope.
+  chunk transfer (§11, issue #89, closed); file-area origin succession
+  remains out of scope; inventory/pull catch-up extended to file areas is
+  tracked separately (issue #93).
+- linked-channel messages wired into the live interactive chat send path
+  (issue #91, closed) — closes the gap issue #87 left open.
 
 Still required for Phase 3 completeness:
 
+- interactive browse/fetch UI for remote file catalogues (issue #92);
+- inventory/pull catch-up extended to file-area catalogues (issue #93);
 - broader real-world multi-node deployment validation (issue #83).
 
 ### Phase 3 stabilization gate (issue #84)
@@ -3342,15 +3347,11 @@ a real gap found while implementing: unlike `posts.post_id`,
 `channel_messages.id` is a plain autoincrement with no existing
 content-addressed column to key idempotent materialization off of.
 
-**Explicitly not done in this issue, stated rather than silently
-skipped:** wiring `queue_channel_message_if_linked` into `netbbs.net.
-chat_flow`'s live interactive send path (the function exists and is
-tested; the UI call site is not connected) — `chat_flow.py`'s message-send
-code is deeply nested with no existing `link_context` threading at all,
-unlike `login_flow.py`'s board-post path which already had it. A
-self-authored message on a linked channel is not yet actually pushed
-outbound through the live TUI as a result; received content still
-materializes correctly. Worth a small, mechanical follow-up.
+**Not done in this issue, closed by issue #91:** wiring `queue_channel_
+message_if_linked` into `netbbs.net.chat_flow`'s live interactive send
+path was deferred here (`chat_flow.py`'s message-send code had no existing
+`link_context` threading at all, unlike `login_flow.py`'s board-post path)
+and completed separately — see issue #91's own §16 entry.
 
 ### Issue #88 — board closure, moderator edits, tombstones — closed
 
@@ -3425,16 +3426,39 @@ work-item/DLQ abstraction, the same "not every retry-shaped mechanism fits"
 reasoning §13.7 already documents — it already has a natural resumable-by-
 construction terminal state.
 
-**Explicitly out of scope, matching issue #87's own precedent:**
-file-area origin succession, and inventory/pull catch-up (§8.8) extended to
-file areas — a peer that missed a `file_descriptor` while offline recovers
-only via ordinary re-push on the next sync pass. No live SysOp/user TUI
-action to browse a remote area's catalogue or trigger a fetch was added in
-this issue either — `netbbs.link.files`/`netbbs.link.file_transfer`'s own
-functions are exercised end-to-end by `tests/test_link_end_to_end.py`, not
-by an interactive menu; a small, scoped follow-up if this becomes a real
-product gap someone notices, the same honest-gap precedent issue #87's own
-`chat_flow` wiring gap already set.
+**Explicitly out of scope, matching issue #87's own precedent, tracked
+separately:** file-area origin succession (not tracked, no issue yet);
+inventory/pull catch-up (§8.8) extended to file areas — a peer that missed
+a `file_descriptor` while offline recovers only via ordinary re-push on the
+next sync pass (issue #93); and a live SysOp/user TUI action to browse a
+remote area's catalogue or trigger a fetch — `netbbs.link.files`/`netbbs.
+link.file_transfer`'s own functions are exercised end-to-end by `tests/
+test_link_end_to_end.py`, not yet by an interactive menu (issue #92).
+
+### Issue #91 — wire linked-channel messages into the live chat send path — closed
+
+Closes the gap issue #87's own §16 entry named: `netbbs.net.chat_flow._chat_
+loop`'s message-send path now threads an optional `link_context` (mirroring
+`netbbs.net.login_flow._show_board`'s own parameter for board posts exactly)
+down from `browse_channels`, and calls `netbbs.link.channels.queue_channel_
+message_if_linked` right after a self-authored message is locally recorded,
+whenever `channel` is Linked. Fire-and-forget, no separate success/failure
+message shown to the sender — the same shape `queue_board_post_if_linked`'s
+own call site already established; the actual outbound push, and its own
+failure handling, lives entirely in `netbbs.link.sync`'s existing background
+loop, unchanged by this issue. An unlinked channel, or a session with no
+`link_context` at all (Link disabled, or a caller bypassing `netbbs.net.
+login_flow.handle_session`'s real wiring), behaves exactly as before —
+local chat stays fully usable and Link-unaware.
+
+Minimal threading, no broader `chat_flow` refactor: only `browse_channels`/
+`_chat_loop` gained the new parameter, and only the three existing `netbbs.
+net.login_flow` call sites (`[N]ew scan`, `[F]ind`, the main channel-browse
+menu) needed updating to pass their own already-in-scope `link_context`
+through. A real two-node end-to-end test (`tests/test_link_end_to_end.py`)
+drives `_chat_loop` itself with a scripted `FakeSession`, not a direct
+`queue_channel_message_if_linked` call, proving the interactive send path
+specifically, per the issue's own acceptance criterion.
 
 ### Issue #55 — trust and quarantine
 

@@ -1451,6 +1451,26 @@ remembering as a legitimate alternative to a DB-backed quota for any future
 bound whose only purpose is limiting concurrent *service*, not tracking
 durable state.
 
+**Wiring linked-channel messages into the live chat send path (issue
+#91).** A small, mechanical follow-up, not a new design: `netbbs.net.
+chat_flow._chat_loop`/`browse_channels` gained an optional `link_context`
+parameter, threaded down exactly the way `netbbs.net.login_flow._show_
+board`'s own parameter already works for board posts, and `netbbs.link.
+channels.queue_channel_message_if_linked` is called right after a
+self-authored message is recorded — fire-and-forget, no user-facing
+success/failure distinction at the queue step, matching `queue_board_post_
+if_linked`'s own call site precedent exactly (the real propagation/failure
+handling lives entirely in `netbbs.link.sync`'s background loop). Worth
+noting for any future "wire X into an existing interactive loop" issue: the
+loop itself (`_chat_loop`) needed no other change at all once the
+parameter existed — the actual queuing call is one `if link_context is not
+None: await lane.run(...)` block at the single message-persist call site,
+not a refactor. Testing it required driving the *real* `_chat_loop` with a
+scripted `FakeSession` (borrowed from `test_chat_flow_moderation.py`) rather
+than calling `queue_channel_message_if_linked` directly, since the point of
+the issue was proving the interactive path itself, not the already-tested
+domain function underneath it.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required
