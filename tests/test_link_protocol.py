@@ -24,6 +24,8 @@ from netbbs.link.events import (
     build_channel_genesis,
     build_channel_message,
     build_endpoint_descriptor,
+    build_file_area_genesis,
+    build_file_descriptor,
     build_key_transition,
     build_link_message,
     build_link_message_accepted,
@@ -1279,6 +1281,255 @@ def test_handle_events_rejects_an_unrecognized_object_type(tmp_path, clock):
         bob_node.handle_events(alice.fingerprint, [fake_event])
 
     alice.close()
+
+
+# -- events: gossiping file_area_genesis/file_descriptor (design doc §11, issue #89) --
+
+
+def test_handle_events_accepts_a_valid_file_area_genesis(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_file_area_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        area_id="existing-local-area-id",
+        name="Vintage Software",
+        created_at=clock.now_iso(),
+    )
+
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.file_areas["existing-local-area-id"].content_id == genesis.content_id
+
+    alice.close()
+
+
+def test_handle_events_rejects_file_area_genesis_from_an_origin_with_no_completed_hello(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")  # never says hello to bob_node
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_file_area_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        area_id="existing-local-area-id",
+        name="Charlie's Files",
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    alice.close()
+    charlie.close()
+
+
+def test_handle_events_rejects_conflicting_file_area_genesis_for_same_area_id(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    first = build_file_area_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        area_id="existing-local-area-id",
+        name="Vintage Software",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [first.to_dict()])
+
+    clock.advance(hours=1)
+    conflicting = build_file_area_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        area_id="existing-local-area-id",
+        name="A Different Name",
+        created_at=clock.now_iso(),
+    )
+    assert conflicting.content_id != first.content_id
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [conflicting.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_file_area_genesis_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    genesis = build_file_area_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        area_id="existing-local-area-id",
+        name="Vintage Software",
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert first == [genesis.content_id]
+    assert second == []
+
+    alice.close()
+
+
+def _linked_file_area(alice, bob_node, clock, *, area_id="existing-local-area-id"):
+    genesis = build_file_area_genesis(
+        signing_identity=alice.identity.signing_key,
+        origin_fingerprint=alice.fingerprint,
+        area_id=area_id,
+        name="Vintage Software",
+        created_at=clock.now_iso(),
+    )
+    bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+    return genesis
+
+
+def test_handle_events_accepts_a_valid_file_descriptor(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    _linked_file_area(alice, bob_node, clock)
+
+    descriptor = build_file_descriptor(
+        signing_identity=alice.identity.signing_key,
+        area_id="existing-local-area-id",
+        file_id="some-file-content-id",
+        filename="game.zip",
+        size_bytes=12345,
+        sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+    accepted = bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+
+    assert accepted == [descriptor.content_id]
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_file_descriptor_for_an_unknown_area(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+
+    descriptor = build_file_descriptor(
+        signing_identity=alice.identity.signing_key,
+        area_id="never-linked-area-id",
+        file_id="some-file-content-id",
+        filename="game.zip",
+        size_bytes=12345,
+        sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_file_descriptor_with_an_oversized_filename(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    _linked_file_area(alice, bob_node, clock)
+
+    descriptor = build_file_descriptor(
+        signing_identity=alice.identity.signing_key,
+        area_id="existing-local-area-id",
+        file_id="some-file-content-id",
+        filename="x" * 300,
+        size_bytes=12345,
+        sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_rejects_a_file_descriptor_claiming_an_absurd_size(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    _linked_file_area(alice, bob_node, clock)
+
+    descriptor = build_file_descriptor(
+        signing_identity=alice.identity.signing_key,
+        area_id="existing-local-area-id",
+        file_id="some-file-content-id",
+        filename="huge.bin",
+        size_bytes=10 * 1024 * 1024 * 1024 + 1,  # one byte over the accepted ceiling
+        sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+
+    with pytest.raises(LinkProtocolError):
+        bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+
+    alice.close()
+
+
+def test_handle_events_file_descriptor_is_idempotent_for_already_seen(tmp_path, clock):
+    alice = spawn_node(tmp_path, "alice")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    _linked_file_area(alice, bob_node, clock)
+
+    descriptor = build_file_descriptor(
+        signing_identity=alice.identity.signing_key,
+        area_id="existing-local-area-id",
+        file_id="some-file-content-id",
+        filename="game.zip",
+        size_bytes=12345,
+        sha256="a" * 64,
+        created_at=clock.now_iso(),
+    )
+
+    first = bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+    second = bob_node.handle_events(alice.fingerprint, [descriptor.to_dict()])
+
+    assert first == [descriptor.content_id]
+    assert second == []
+
+    alice.close()
+
+
+def test_handle_events_accepts_a_file_area_genesis_relayed_by_a_different_known_peer(tmp_path, clock):
+    """The multi-hop proof for file areas, mirroring the channel_genesis
+    one above -- file areas get issue #85's relaxation on day one, never
+    had the older restriction to begin with."""
+    alice = spawn_node(tmp_path, "alice")
+    charlie = spawn_node(tmp_path, "charlie")
+    bob_node = LinkNode(identity=spawn_node(tmp_path, "bob").identity)
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=alice.identity), clock=clock))
+    bob_node.handle_hello(_hello_bytes(LinkNode(identity=charlie.identity), clock=clock))
+
+    genesis = build_file_area_genesis(
+        signing_identity=charlie.identity.signing_key,
+        origin_fingerprint=charlie.fingerprint,
+        area_id="charlies-area",
+        name="Charlie's Files",
+        created_at=clock.now_iso(),
+    )
+
+    # Relayed by alice, not charlie.
+    accepted = bob_node.handle_events(alice.fingerprint, [genesis.to_dict()])
+
+    assert accepted == [genesis.content_id]
+    assert bob_node.file_areas["charlies-area"].content_id == genesis.content_id
+
+    alice.close()
+    charlie.close()
 
 
 # -- events: gossiping board_origin_transfer_offer/accepted (design doc §9.4/#53) --

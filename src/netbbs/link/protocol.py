@@ -5,10 +5,14 @@ endpoint-descriptor exchange, §12) plus event gossip across
 `key_transition`, `board_genesis`/`board_post`/`board_post_edit`/`board_
 post_moderator_edit`/`board_post_tombstone`/`board_closure` (design doc
 §9.5, issue #88), `channel_genesis`/`channel_message` (design doc §9.6,
-issue #87), and `link_message`/`link_message_accepted` event types, all
-through the same `handle_events` dispatch. Reuses the key-lifecycle and
-event-envelope machinery (`netbbs.link.node_identity`/`netbbs.link.
-events`) for verification rather than inventing a parallel path.
+issue #87), `file_area_genesis`/`file_descriptor` (design doc §11, issue
+#89 — catalogue metadata only; chunk transfer itself is a direct
+point-to-point pull, never gossiped through this dispatch, see `netbbs.
+link.file_transfer`), and `link_message`/`link_message_accepted` event
+types, all through the same `handle_events` dispatch. Reuses the
+key-lifecycle and event-envelope machinery (`netbbs.link.node_identity`/
+`netbbs.link.events`) for verification rather than inventing a parallel
+path.
 
 Deliberately has no idea how a message actually reaches its peer —
 `LinkNode.build_hello()`/`handle_hello()`/`handle_events()` operate on
@@ -72,6 +76,8 @@ from netbbs.link.events import (
     BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     CHANNEL_MESSAGE_OBJECT_TYPE,
+    FILE_AREA_GENESIS_OBJECT_TYPE,
+    FILE_DESCRIPTOR_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
@@ -88,6 +94,8 @@ from netbbs.link.events import (
     ChannelGenesis,
     ChannelMessage,
     EndpointDescriptor,
+    FileAreaGenesis,
+    FileDescriptor,
     KeyTransition,
     LinkMessage,
     LinkMessageAccepted,
@@ -106,6 +114,8 @@ from netbbs.link.events import (
     verify_channel_genesis,
     verify_channel_message,
     verify_endpoint_descriptor,
+    verify_file_area_genesis,
+    verify_file_descriptor,
     verify_link_message,
     verify_link_message_accepted,
     verify_link_message_bounced,
@@ -137,6 +147,21 @@ _MAX_EVENTS_PER_REQUEST = 200
 # imports, so this stays free of `netbbs.boards.posts`' actual
 # database/business-logic dependencies while still sharing one
 # definition instead of two that could silently drift apart.
+
+# Design doc §11.2, issue #89: `file_descriptor` has no existing local
+# precedent to import bounds from at all (unlike board_post above) --
+# local file uploads (`netbbs.files.entries`) have never had an
+# enforced max size or filename length. Defined fresh here, at the
+# protocol layer, for the same "a peer could otherwise push an
+# arbitrarily large/malformed claim and this node would accept it"
+# reasoning §13.9 already applies to board_post/board_post_edit.
+_MAX_FILE_DESCRIPTOR_FILENAME_BYTES = 255
+_MAX_FILE_DESCRIPTOR_DESCRIPTION_BYTES = 4096
+# A single catalogued file's claimed size, in bytes -- 10 GiB. Generous
+# enough for any real file-area use case, small enough that a forged
+# claim can't be used to make this node commit to an absurd multi-chunk
+# fetch before ever seeing a single byte.
+_MAX_CATALOGUED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024
 
 
 class LinkProtocolError(Exception):
@@ -284,6 +309,50 @@ class InventoryRequest:
             # pre-issue-#87 request shape too, harmless since an absent
             # "channels" key just means "nothing to ask about."
             channels={channel_id: tuple(ids) for channel_id, ids in data.get("channels", {}).items()},
+        )
+
+
+@dataclass
+class FileChunkRequest:
+    """
+    "Send me chunk N of this file" (design doc §11.3, issue #89) -- the
+    same kind of decision `InventoryRequest` already made: deliberately
+    **not** a canonical `netbbs.link.events` envelope. This is a
+    bookkeeping request about what the requester wants next, not durable
+    authored content -- there is nothing here for a signature to attest
+    to that the *response*'s signed `FileChunkDescriptor` doesn't already
+    cover. A malformed or bogus request costs the responder nothing
+    beyond one wasted lookup, rejected outright (unknown `file_id`, an
+    out-of-range `chunk_index`, or a `max_chunk_size` this node refuses).
+
+    `transfer_id` is deterministic (a content hash of `(file_id,
+    requester_fingerprint)`, computed once by the requester) so a
+    resumed or retried fetch naturally reuses the same id rather than
+    minting a new one -- the responder uses it to bound concurrent
+    transfers per requester (§13.5's bounded-remote-influence
+    principle), never to authorize anything by itself.
+    """
+
+    transfer_id: str
+    file_id: str
+    chunk_index: int
+    max_chunk_size: int
+
+    def to_dict(self) -> dict:
+        return {
+            "transfer_id": self.transfer_id,
+            "file_id": self.file_id,
+            "chunk_index": self.chunk_index,
+            "max_chunk_size": self.max_chunk_size,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileChunkRequest":
+        return cls(
+            transfer_id=data["transfer_id"],
+            file_id=data["file_id"],
+            chunk_index=int(data["chunk_index"]),
+            max_chunk_size=int(data["max_chunk_size"]),
         )
 
 
@@ -438,6 +507,34 @@ class ChannelEventState:
 
 
 @dataclass
+class FileAreaEventState:
+    """File-area/event projection state (design doc §11, issue #89): the
+    file-area-side counterpart to `BoardEventState`'s `boards` half only
+    -- no edit-chain equivalent, since a `file_descriptor` has no local
+    edit concept at all (a changed file is a new upload with its own
+    fresh file_id, module docstring)."""
+
+    # area_id -> the verified file_area_genesis on file for it. A
+    # file_descriptor is only ever accepted for an area_id already
+    # present here, the same boundary BoardEventState.boards already
+    # establishes for board_post.
+    areas: dict[str, FileAreaGenesis] = field(default_factory=dict)
+
+    def genesis_for(self, area_id: str) -> FileAreaGenesis | None:
+        return self.areas.get(area_id)
+
+    def has_conflicting_genesis(self, area_id: str, content_id: str) -> bool:
+        """Whether a *different* genesis is already on file for
+        `area_id` -- mirrors `BoardEventState.has_conflicting_genesis`
+        exactly."""
+        existing = self.areas.get(area_id)
+        return existing is not None and existing.content_id != content_id
+
+    def record_genesis(self, genesis: FileAreaGenesis) -> None:
+        self.areas[genesis.payload["area_id"]] = genesis
+
+
+@dataclass
 class BoardLifecycleState:
     """Board lifecycle/origin state (issue #78, issue #53): board-origin
     succession, tracked separately from the board/event projection
@@ -582,6 +679,8 @@ class LinkNode:
     relay_state: RelayState = field(default_factory=RelayState)
     # Design doc §9.6, issue #87.
     channel_events: ChannelEventState = field(default_factory=ChannelEventState)
+    # Design doc §11, issue #89.
+    file_area_events: FileAreaEventState = field(default_factory=FileAreaEventState)
 
     @property
     def peers(self) -> dict[str, "PeerRecord"]:
@@ -598,6 +697,10 @@ class LinkNode:
     @property
     def channels(self) -> dict[str, ChannelGenesis]:
         return self.channel_events.channels
+
+    @property
+    def file_areas(self) -> dict[str, FileAreaGenesis]:
+        return self.file_area_events.areas
 
     @property
     def post_edits(self) -> dict[str, tuple[BoardPostEdit, ...]]:
@@ -974,6 +1077,38 @@ class LinkNode:
                 f"the {_MAX_BOARD_POST_BODY_BYTES} bytes this node accepts -- refusing"
             )
 
+    def _check_file_descriptor_content_size(self, payload: dict, sender_fingerprint: str) -> None:
+        """Design doc §11.2, issue #89: `file_descriptor` has no local
+        precedent to validate against at all (see this module's own
+        `_MAX_FILE_DESCRIPTOR_*` constants' docstring) -- a peer could
+        otherwise push a `file_descriptor` naming an absurdly long
+        filename/description, or claiming an absurd `size_bytes`, and
+        this node would verify, accept, and persist it regardless."""
+        filename_bytes = len(payload.get("filename", "").encode("utf-8"))
+        if filename_bytes > _MAX_FILE_DESCRIPTOR_FILENAME_BYTES:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a file_descriptor with a {filename_bytes}-byte filename, "
+                f"more than the {_MAX_FILE_DESCRIPTOR_FILENAME_BYTES} bytes this node accepts -- refusing"
+            )
+        description_bytes = len(payload.get("description", "").encode("utf-8"))
+        if description_bytes > _MAX_FILE_DESCRIPTOR_DESCRIPTION_BYTES:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a file_descriptor with a {description_bytes}-byte "
+                f"description, more than the {_MAX_FILE_DESCRIPTOR_DESCRIPTION_BYTES} bytes this "
+                "node accepts -- refusing"
+            )
+        size_bytes = payload.get("size_bytes")
+        if not isinstance(size_bytes, int) or size_bytes < 0:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a file_descriptor with an invalid size_bytes "
+                f"({size_bytes!r}) -- refusing"
+            )
+        if size_bytes > _MAX_CATALOGUED_FILE_SIZE_BYTES:
+            raise LinkProtocolError(
+                f"{sender_fingerprint} sent a file_descriptor claiming {size_bytes} bytes, more "
+                f"than the {_MAX_CATALOGUED_FILE_SIZE_BYTES} bytes this node accepts -- refusing"
+            )
+
     def _resolve_own_link_message(self, message_content_id: str | None) -> LinkMessage:
         """Shared by the `link_message_accepted`/`link_message_bounced`
         branches below: an acknowledgement is only meaningful about a
@@ -1032,14 +1167,16 @@ class LinkNode:
         `board_post_tombstone` (design doc §9.5, issue #88); `board_
         origin_transfer_offer`/`board_origin_transfer_accepted`/`board_
         closure` (design doc §9.4/§9.5, issues #53/#88); `channel_
-        genesis`/`channel_message` (design doc §9.6, issue #87); and
-        `link_message`/`link_message_accepted`/`link_message_bounced`
-        (design doc §13). `board_genesis`/`board_post`/`channel_
-        genesis`/`channel_message` have no per-object chain to
-        self-heal against (immutable content, nothing to project beyond
-        "does it exist," or one-per-board/channel and never resent as a
-        candidate extension of anything) -- for these, `known_event_ids`
-        dedup alone is what's built so far, which is already correct.
+        genesis`/`channel_message` (design doc §9.6, issue #87);
+        `file_area_genesis`/`file_descriptor` (design doc §11, issue
+        #89); and `link_message`/`link_message_accepted`/`link_message_
+        bounced` (design doc §13). `board_genesis`/`board_post`/
+        `channel_genesis`/`channel_message`/`file_area_genesis`/`file_
+        descriptor` have no per-object chain to self-heal against
+        (immutable content, nothing to project beyond "does it exist,"
+        or one-per-board/channel/area and never resent as a candidate
+        extension of anything) -- for these, `known_event_ids` dedup
+        alone is what's built so far, which is already correct.
 
         `board_post_edit`/`board_post_moderator_edit`/`board_post_
         tombstone` all extend the *same* single linear per-root-post
@@ -1525,6 +1662,87 @@ class LinkNode:
                 self.known_event_ids.add(channel_message.content_id)
                 self.events[channel_message.content_id] = raw
                 accepted.append(channel_message.content_id)
+
+            elif object_type == FILE_AREA_GENESIS_OBJECT_TYPE:
+                # Design doc §11, issue #89: mirrors CHANNEL_GENESIS_
+                # OBJECT_TYPE above exactly.
+                file_area_genesis = FileAreaGenesis.from_dict(raw)
+                if file_area_genesis.content_id in self.known_event_ids:
+                    continue
+
+                origin_fingerprint = file_area_genesis.payload.get("origin_fingerprint")
+                origin_peer = self.peers.get(origin_fingerprint)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a file_area_genesis originated by {origin_fingerprint}, which "
+                        "has no completed hello with this node -- refusing (no relay from a "
+                        "stranger)"
+                    )
+
+                area_id = file_area_genesis.payload["area_id"]
+                if self.file_area_events.has_conflicting_genesis(area_id, file_area_genesis.content_id):
+                    raise LinkProtocolError(
+                        f"received a conflicting file_area_genesis for area_id {area_id!r} -- a "
+                        "different genesis is already on file for it"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    origin_peer, origin_fingerprint, "file_area_genesis"
+                )
+                if not verify_file_area_genesis(file_area_genesis, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"file_area_genesis from origin {origin_fingerprint} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.file_area_events.record_genesis(file_area_genesis)
+                self.known_event_ids.add(file_area_genesis.content_id)
+                self.events[file_area_genesis.content_id] = raw
+                accepted.append(file_area_genesis.content_id)
+
+            elif object_type == FILE_DESCRIPTOR_OBJECT_TYPE:
+                # Design doc §11.2, issue #89: mirrors CHANNEL_MESSAGE_
+                # OBJECT_TYPE above, minus the author tagged union -- a
+                # file_descriptor has none, verified against the area's
+                # own origin instead (no origin-succession built for file
+                # areas in this issue, so this is always the genesis's
+                # own claim, never a "current origin" resolution the way
+                # a board's is).
+                descriptor = FileDescriptor.from_dict(raw)
+                if descriptor.content_id in self.known_event_ids:
+                    continue
+
+                area_id = descriptor.payload.get("area_id")
+                genesis = self.file_area_events.genesis_for(area_id)
+                if genesis is None:
+                    raise LinkProtocolError(
+                        f"received a file_descriptor for area_id {area_id!r}, which has no "
+                        "verified file_area_genesis on file -- refusing (no relay from a "
+                        "stranger yet)"
+                    )
+                self._check_file_descriptor_content_size(descriptor.payload, sender_fingerprint)
+
+                origin_fingerprint = genesis.payload["origin_fingerprint"]
+                origin_peer = self.peers.get(origin_fingerprint)
+                if origin_peer is None:
+                    raise LinkProtocolError(
+                        f"received a file_descriptor for area_id {area_id!r} whose origin "
+                        f"({origin_fingerprint!r}) has no completed hello with this node -- "
+                        "refusing (no relay from a stranger)"
+                    )
+
+                signing_verify_key = self._resolve_sender_signing_key(
+                    origin_peer, origin_fingerprint, "file_descriptor"
+                )
+                if not verify_file_descriptor(descriptor, signing_verify_key):
+                    raise LinkProtocolError(
+                        f"file_descriptor from origin {origin_fingerprint} does not verify "
+                        "against its current signing key"
+                    )
+
+                self.known_event_ids.add(descriptor.content_id)
+                self.events[descriptor.content_id] = raw
+                accepted.append(descriptor.content_id)
 
             elif object_type == BOARD_ORIGIN_TRANSFER_OFFER_OBJECT_TYPE:
                 offer = BoardOriginTransferOffer.from_dict(raw)

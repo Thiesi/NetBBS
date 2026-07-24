@@ -139,6 +139,7 @@ from aiohttp import ClientSession
 
 from netbbs.link.boards import load_own_board_events
 from netbbs.link.channels import load_own_channel_events
+from netbbs.link.files import load_own_file_area_events
 from netbbs.link.events import LINK_MESSAGE_OBJECT_TYPE, EndpointDescriptor, LinkMessage
 from netbbs.link.mail import (
     deliver_link_message,
@@ -330,6 +331,8 @@ async def _sync_one_seed(
         + await lane.run(load_own_board_events, node.identity.fingerprint)
         # Design doc §9.6, issue #87.
         + await lane.run(load_own_channel_events, node.identity.fingerprint)
+        # Design doc §11, issue #89.
+        + await lane.run(load_own_file_area_events, node.identity.fingerprint)
     )
     try:
         await push_events(node, session, seed_url, own_events)

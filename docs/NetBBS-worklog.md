@@ -1400,6 +1400,57 @@ explicitly carry over *every* field that can legitimately differ on the
 latest revision, not just the ones the feature adding it happened to think
 of first.
 
+**Remote file catalogue and chunk transfer (design doc §11, issue #89).**
+The catalogue half (`file_area_genesis`/`file_descriptor`) mirrors boards/
+channels exactly and gossips through `handle_events` the same way; chunk
+transfer is structurally different from everything else in `netbbs.link`
+built so far and is worth remembering as its own category: a direct
+point-to-point pull against one specific peer (the file's own origin),
+never gossiped, never a candidate extension of a shared chain, and
+therefore never routed through `handle_events` at all. `netbbs.link.
+file_transfer` is deliberately `db`-first and I/O-free, the same
+`netbbs.link.boards`/`.channels` split; `netbbs.link.transport` is the only
+place holding the real `aiohttp` session, mirroring `request_inventory`'s own
+"I/O and parsing only, caller verifies" division of responsibility.
+
+A real bug, not caught until writing tests: `materialize_carried_file_
+descriptor` first keyed `remote_files.file_id` off `descriptor.content_id`
+(the signed *event's* envelope hash) instead of `descriptor.payload
+["file_id"]` (the file's own local content-addressed identity, computed by
+`netbbs.files.entries.upload_file` the same way it always has been) — two
+different hashes for the same conceptual object. This class of mistake is
+easy to make for any future event type that (unlike `BoardPost`, where the
+event's own `content_id` *is* the object's whole identity) carries an
+independently-computed local id in its payload specifically because the
+underlying local resource already had one before Link existed — always key
+local materialization off the payload's own declared id in that case, never
+the event's `content_id`, and add a test that actually exercises the
+materialized row's cross-reference back to the origin's own local table
+(this session's bug produced a `remote_files` row that looked correct in
+isolation but could never actually resolve a chunk request, since
+`build_chunk_for_serving` looks the id up against `files.file_id` on the
+origin, which never matches an event's own envelope hash).
+
+`remote_files` (catalogue metadata, possibly not yet fetched) is
+deliberately a separate table from `files`, never a row in it — `netbbs.
+files.entries`'s own stated invariant ("a file row is only ever created
+after its bytes are already safely written to storage") stays true
+unconditionally this way, rather than special-casing that table to tolerate
+a state it was never designed for. Once a chunk transfer completes and
+verifies, content is promoted into a genuine `files` row via the *existing*
+`netbbs.files.storage.move_temp_file_into_storage` content-addressed path
+— the same "reuse existing storage rather than parallel plumbing" choice
+made throughout this codebase.
+
+Bounding chunk transfer needed one new shape not used elsewhere yet:
+`LinkServer`'s per-peer concurrent-transfer counter
+(`_active_transfers_by_peer`) is in-memory only, deliberately never
+persisted, since serving one chunk is otherwise fully stateless and a
+restart harmlessly resets every peer back to zero in flight — worth
+remembering as a legitimate alternative to a DB-backed quota for any future
+bound whose only purpose is limiting concurrent *service*, not tracking
+durable state.
+
 ### Not every retry-shaped mechanism fits a generic work-item/DLQ model
 
 Designing issue #60's outbound-work-item abstraction (§13.7) required

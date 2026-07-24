@@ -39,6 +39,7 @@ duplicate the identical helpers between themselves).
 from __future__ import annotations
 
 import asyncio
+import os
 
 import aiohttp
 
@@ -47,14 +48,18 @@ from netbbs.boards.boards import create_board, get_board_by_name
 from netbbs.boards.posts import create_post, list_posts_page
 from netbbs.chat.channels import create_channel, get_channel_by_name
 from netbbs.chat.scrollback import get_scrollback, record_message
+from netbbs.files.areas import create_file_area, get_file_area_by_name
+from netbbs.files.entries import download_file, get_file, upload_file
 from netbbs.link.boards import link_board, queue_board_post_if_linked
 from netbbs.link.channels import link_channel, queue_channel_message_if_linked
+from netbbs.link.file_transfer import apply_received_chunk, compute_transfer_id, get_transfer
+from netbbs.link.files import get_remote_file, link_file_area, list_remote_files, queue_file_descriptor_if_linked
 from netbbs.link.mail import compose_link_message, expire_link_message_delivery, unexpire_link_message_delivery
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import FileChunkRequest, LinkNode
 from netbbs.link.store import load_link_node
 from netbbs.link.sync import run_link_sync
-from netbbs.link.transport import LinkServer
+from netbbs.link.transport import LinkServer, fetch_next_file_chunk, request_file_chunk
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_DELIVERY,
     list_work_items,
@@ -949,6 +954,163 @@ def test_linked_channel_state_survives_seed_restart_using_only_persisted_state(t
         carried_channel = get_channel_by_name(seed.db, "lobby")
         scrollback = get_scrollback(seed.db, carried_channel)
         assert [m.body for m in scrollback] == ["hello there"]
+    finally:
+        dialer.close()
+        seed.close()
+
+
+# -- remote file catalogue + chunk transfer (design doc §11, issue #89) --
+
+
+def test_remote_file_full_vertical_catalogue_then_chunked_fetch_over_real_transport(tmp_path):
+    """Design doc §11/§14.1's own vertical-slice rule, applied to the
+    genuinely new mechanism this issue adds: a file_area_genesis/file_
+    descriptor pair reaches a real peer over a real socket via the
+    ordinary push pass (catalogue discovery, no content fetched yet --
+    the acceptance criterion's own "list without fetching"), then the
+    seed pulls the actual bytes directly from the dialer's own server in
+    bounded chunks, verifies them, and the result is genuinely visible
+    through the ordinary local file-browsing read path (`get_file`/
+    `download_file`), not just a raw row check."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    seed_node = LinkNode(identity=seed_identity)
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    content = os.urandom(300_000)
+    entry = upload_file(dialer.db, area, creator, "game.bin", content)
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    queue_file_descriptor_if_linked(dialer.db, entry, area, node_identity=dialer_identity)
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Stage 1: ordinary push pass -- catalogue discovery only.
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+
+                # Confirm catalogue-only state before any fetch: listed,
+                # but not yet downloadable.
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                catalogued = list_remote_files(seed.db, carried_area)
+                assert len(catalogued) == 1
+                remote_file = catalogued[0]
+                assert remote_file.filename == "game.bin"
+                assert remote_file.size_bytes == len(content)
+                assert remote_file.fetched_file_id is None
+
+                # Stage 2: seed pulls the actual bytes directly from the
+                # dialer's own server, in small chunks (forcing several
+                # round trips rather than one).
+                dialer_base_url = f"http://127.0.0.1:{dialer_server.port}"
+                transfer = await fetch_next_file_chunk(
+                    seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                )
+                while transfer.status == "in_progress":
+                    transfer = await fetch_next_file_chunk(
+                        seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                    )
+                assert transfer.status == "completed"
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        # Ordinary local read path -- not a raw row check.
+        fetched_remote = get_remote_file(seed.db, entry.file_id)
+        assert fetched_remote.fetched_file_id == entry.file_id
+        fetched_entry = get_file(seed.db, entry.file_id)
+        assert fetched_entry.filename == "game.bin"
+        assert download_file(fetched_entry) == content
+    finally:
+        dialer.close()
+        seed.close()
+
+
+def test_remote_file_duplicate_chunk_request_over_real_transport_is_idempotent(tmp_path):
+    """The real-transport counterpart to test_link_file_transfer.py's
+    in-process duplicate-chunk-request proof -- re-requesting an already-
+    applied chunk over an actual socket must not corrupt the eventual
+    reassembly."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    seed_node = LinkNode(identity=seed_identity)
+    dialer_node = LinkNode(identity=dialer_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    creator = create_user(dialer.db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(dialer.db, "downloads", creator=creator)
+    content = os.urandom(250_000)
+    entry = upload_file(dialer.db, area, creator, "game.bin", content)
+    link_file_area(dialer.db, area, node_identity=dialer_identity)
+    queue_file_descriptor_if_linked(dialer.db, entry, area, node_identity=dialer_identity)
+
+    async def scenario():
+        dialer_server = await _run_server(dialer_node, dialer.lane)
+        seed_server = await _run_server(seed_node, seed.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await _one_pass(
+                    dialer_node, session, [f"http://127.0.0.1:{seed_server.port}"],
+                    lambda: _hello_for(dialer_node), dialer.lane,
+                )
+                carried_area = get_file_area_by_name(seed.db, "downloads")
+                remote_file = list_remote_files(seed.db, carried_area)[0]
+                dialer_base_url = f"http://127.0.0.1:{dialer_server.port}"
+
+                # Fetch the first chunk, then re-request that exact same
+                # chunk_index again over the real socket (a resent/
+                # duplicate request, e.g. a client-side retry after a
+                # dropped response) before continuing -- fetch_next_file_
+                # chunk always advances to the next index, so the repeat
+                # is built manually here via the lower-level request_file_
+                # chunk/apply_received_chunk pair it's built from.
+                first = await fetch_next_file_chunk(
+                    seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                )
+                assert first.status == "in_progress"
+
+                transfer_id = compute_transfer_id(remote_file.file_id, seed_identity.fingerprint)
+                repeat_request = FileChunkRequest(
+                    transfer_id=transfer_id, file_id=remote_file.file_id, chunk_index=0, max_chunk_size=100_000,
+                )
+                repeat_bytes, repeat_descriptor = await request_file_chunk(
+                    seed_node, session, dialer_base_url, repeat_request,
+                )
+                transfer_before = await seed.lane.run(get_transfer, transfer_id)
+                repeated = await seed.lane.run(
+                    apply_received_chunk, transfer_before, chunk_index=0, chunk_bytes=repeat_bytes,
+                    claimed_chunk_sha256=repeat_descriptor.payload["chunk_sha256"], is_last=False,
+                    remote_file=remote_file,
+                )
+                assert repeated.bytes_received == first.bytes_received  # unchanged, not double-counted
+
+                transfer = repeated
+                while transfer.status == "in_progress":
+                    transfer = await fetch_next_file_chunk(
+                        seed_node, session, dialer_base_url, seed.lane, remote_file, chunk_size=100_000,
+                    )
+                assert transfer.status == "completed"
+        finally:
+            await dialer_server.stop()
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+
+        fetched_entry = get_file(seed.db, entry.file_id)
+        assert download_file(fetched_entry) == content  # not corrupted by the duplicate request
     finally:
         dialer.close()
         seed.close()

@@ -611,6 +611,72 @@ def test_load_link_node_reconstructs_self_originated_board_closure(tmp_path):
     db.close()
 
 
+def test_load_link_node_reconstructs_self_originated_file_area_genesis(tmp_path):
+    """Design doc §11, issue #89: a self-originated file_area_genesis
+    lives only on file_areas.link_genesis_json -- mirrors the board_
+    genesis restart-reconstruction test above exactly."""
+    from netbbs.files.areas import create_file_area
+    from netbbs.link.files import link_file_area
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    creator = create_user(db, "alice", password="hunter2", user_level=10)
+    area = create_file_area(db, "files", creator=creator)
+    genesis = link_file_area(db, area, node_identity=own_identity)
+
+    node = load_link_node(db, own_identity)
+
+    assert area.area_id in node.file_areas
+    assert node.file_areas[area.area_id].content_id == genesis.content_id
+    db.close()
+
+
+def test_load_link_node_reconstructs_peer_received_file_area_genesis_and_file_descriptor(tmp_path):
+    """A peer-received file_area_genesis/file_descriptor both go through
+    the ordinary link_events restart path -- file_area_genesis needs its
+    own node.file_areas branch (no chain to reconstruct otherwise);
+    file_descriptor needs none beyond the generic known_event_ids/events
+    restoration every link_events row already gets."""
+    from netbbs.link.events import build_file_area_genesis, build_file_descriptor
+
+    db = Database(tmp_path / "node.db")
+    own_identity = bootstrap_node_identity("alice")
+    sender_identity = bootstrap_node_identity("bob")
+
+    genesis = build_file_area_genesis(
+        signing_identity=sender_identity.signing_key,
+        origin_fingerprint=sender_identity.fingerprint,
+        area_id="remote-area-id",
+        name="Remote Files",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    save_event(
+        db, sender_fingerprint=sender_identity.fingerprint, content_id=genesis.content_id,
+        object_type=genesis.envelope["object_type"], envelope=genesis.to_dict(),
+    )
+    descriptor = build_file_descriptor(
+        signing_identity=sender_identity.signing_key,
+        area_id="remote-area-id",
+        file_id="some-file-content-id",
+        filename="game.zip",
+        size_bytes=1000,
+        sha256="a" * 64,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    save_event(
+        db, sender_fingerprint=sender_identity.fingerprint, content_id=descriptor.content_id,
+        object_type=descriptor.envelope["object_type"], envelope=descriptor.to_dict(),
+    )
+
+    node = load_link_node(db, own_identity)
+
+    assert "remote-area-id" in node.file_areas
+    assert node.file_areas["remote-area-id"].content_id == genesis.content_id
+    assert descriptor.content_id in node.known_event_ids
+    assert descriptor.content_id in node.events
+    db.close()
+
+
 def test_load_link_node_reconstructs_self_originated_edit_chain_when_created_at_ties(tmp_path, monkeypatch):
     """Issue #11's "deterministic ordering when timestamps tie" question,
     applied to restart reconstruction: two real successive `edit_post`

@@ -168,6 +168,15 @@ class LinkConfig:
     # Design doc §9.6, issue #87: same shape as max_carried_boards above,
     # the channel-side counterpart.
     max_carried_channels: int = 500
+    # Design doc §11, issue #89: same shape, the file-area-side
+    # counterpart (carried areas) and its own further per-area
+    # catalogue-entry bound.
+    max_carried_file_areas: int = 500
+    max_remote_files_per_area: int = 5000
+    # Design doc §11.3, issue #89: how many concurrent chunk-transfer
+    # transfer_ids this node will serve for one requesting peer at a
+    # time (§13.5's bounded-remote-influence principle).
+    max_concurrent_file_transfers_per_peer: int = 4
     request_rate_capacity: float = 20.0
     request_rate_refill_per_minute: float = 60.0
     request_rate_max_tracked_sources: int = 10_000
@@ -282,6 +291,9 @@ class NodeConfig:
                 "max_peers": self.link.max_peers,
                 "max_carried_boards": self.link.max_carried_boards,
                 "max_carried_channels": self.link.max_carried_channels,
+                "max_carried_file_areas": self.link.max_carried_file_areas,
+                "max_remote_files_per_area": self.link.max_remote_files_per_area,
+                "max_concurrent_file_transfers_per_peer": self.link.max_concurrent_file_transfers_per_peer,
                 "request_rate_capacity": self.link.request_rate_capacity,
                 "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
                 "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
@@ -444,6 +456,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--link-max-carried-channels", dest="link_max_carried_channels", type=int, default=None
     )
     parser.add_argument(
+        "--link-max-carried-file-areas", dest="link_max_carried_file_areas", type=int, default=None
+    )
+    parser.add_argument(
+        "--link-max-remote-files-per-area", dest="link_max_remote_files_per_area", type=int, default=None
+    )
+    parser.add_argument(
+        "--link-max-concurrent-file-transfers-per-peer",
+        dest="link_max_concurrent_file_transfers_per_peer", type=int, default=None,
+    )
+    parser.add_argument(
         "--link-request-rate-capacity", dest="link_request_rate_capacity", type=float, default=None
     )
     parser.add_argument(
@@ -543,6 +565,15 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
         max_peers=int(table.get("max_peers", current.max_peers)),
         max_carried_boards=int(table.get("max_carried_boards", current.max_carried_boards)),
         max_carried_channels=int(table.get("max_carried_channels", current.max_carried_channels)),
+        max_carried_file_areas=int(table.get("max_carried_file_areas", current.max_carried_file_areas)),
+        max_remote_files_per_area=int(
+            table.get("max_remote_files_per_area", current.max_remote_files_per_area)
+        ),
+        max_concurrent_file_transfers_per_peer=int(
+            table.get(
+                "max_concurrent_file_transfers_per_peer", current.max_concurrent_file_transfers_per_peer
+            )
+        ),
         request_rate_capacity=float(table.get("request_rate_capacity", current.request_rate_capacity)),
         request_rate_refill_per_minute=float(
             table.get("request_rate_refill_per_minute", current.request_rate_refill_per_minute)
@@ -623,6 +654,9 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
         args.link_max_peers,
         args.link_max_carried_boards,
         args.link_max_carried_channels,
+        args.link_max_carried_file_areas,
+        args.link_max_remote_files_per_area,
+        args.link_max_concurrent_file_transfers_per_peer,
         args.link_request_rate_capacity,
         args.link_request_rate_refill_per_minute,
         args.link_request_rate_max_tracked_sources,
@@ -671,6 +705,21 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     link.max_carried_channels
                     if args.link_max_carried_channels is None
                     else args.link_max_carried_channels
+                ),
+                max_carried_file_areas=(
+                    link.max_carried_file_areas
+                    if args.link_max_carried_file_areas is None
+                    else args.link_max_carried_file_areas
+                ),
+                max_remote_files_per_area=(
+                    link.max_remote_files_per_area
+                    if args.link_max_remote_files_per_area is None
+                    else args.link_max_remote_files_per_area
+                ),
+                max_concurrent_file_transfers_per_peer=(
+                    link.max_concurrent_file_transfers_per_peer
+                    if args.link_max_concurrent_file_transfers_per_peer is None
+                    else args.link_max_concurrent_file_transfers_per_peer
                 ),
                 request_rate_capacity=(
                     link.request_rate_capacity

@@ -40,6 +40,7 @@ from netbbs.link.events import (
     BOARD_POST_MODERATOR_EDIT_OBJECT_TYPE,
     BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
+    FILE_AREA_GENESIS_OBJECT_TYPE,
     KEY_TRANSITION_OBJECT_TYPE,
     BoardClosure,
     BoardGenesis,
@@ -51,6 +52,7 @@ from netbbs.link.events import (
     ChannelGenesis,
     ChannelMessage,
     EndpointDescriptor,
+    FileAreaGenesis,
     KeyTransition,
     event_content_id,
 )
@@ -203,6 +205,15 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
             board_id = peer_closure.payload["board_id"]
             node.board_closures[board_id] = peer_closure
             node.board_lifecycle_head[board_id] = peer_closure.content_id
+        elif row["object_type"] == FILE_AREA_GENESIS_OBJECT_TYPE:
+            # Design doc §11, issue #89: same restart-forgets-state
+            # reasoning as CHANNEL_GENESIS_OBJECT_TYPE above, applied to
+            # a carried file area's genesis. file_descriptor rows need no
+            # branch here at all -- they have no further chain state to
+            # rebuild beyond known_event_ids/events, already populated
+            # unconditionally above for every row regardless of type.
+            file_area_genesis = FileAreaGenesis.from_dict(envelope)
+            node.file_areas[file_area_genesis.payload["area_id"]] = file_area_genesis
 
     for row in db.connection.execute(
         "SELECT link_genesis_json FROM boards WHERE link_genesis_json IS NOT NULL"
@@ -218,6 +229,15 @@ def load_link_node(db: Database, identity: NodeIdentity) -> LinkNode:
     ):
         channel_genesis = ChannelGenesis.from_dict(json.loads(row["link_genesis_json"]))
         node.channels[channel_genesis.payload["channel_id"]] = channel_genesis
+
+    # Design doc §11, issue #89: same two-source shape as boards/channels
+    # above -- file_descriptor has no per-object chain to reconstruct
+    # either (see the peer-received loop's own comment above).
+    for row in db.connection.execute(
+        "SELECT link_genesis_json FROM file_areas WHERE link_genesis_json IS NOT NULL"
+    ):
+        file_area_genesis = FileAreaGenesis.from_dict(json.loads(row["link_genesis_json"]))
+        node.file_areas[file_area_genesis.payload["area_id"]] = file_area_genesis
 
     for row in db.connection.execute(
         "SELECT link_event_json FROM posts "

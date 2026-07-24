@@ -39,9 +39,13 @@ lives here rather than inside `netbbs.link.protocol` itself.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 from typing import Callable
 
+import nacl.signing
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from netbbs.link.boards import (
@@ -69,6 +73,8 @@ from netbbs.link.events import (
     BOARD_POST_TOMBSTONE_OBJECT_TYPE,
     CHANNEL_GENESIS_OBJECT_TYPE,
     CHANNEL_MESSAGE_OBJECT_TYPE,
+    FILE_AREA_GENESIS_OBJECT_TYPE,
+    FILE_DESCRIPTOR_OBJECT_TYPE,
     LINK_MESSAGE_ACCEPTED_OBJECT_TYPE,
     LINK_MESSAGE_BOUNCED_OBJECT_TYPE,
     LINK_MESSAGE_OBJECT_TYPE,
@@ -82,19 +88,41 @@ from netbbs.link.events import (
     BoardPostTombstone,
     ChannelGenesis,
     ChannelMessage,
+    FileAreaGenesis,
+    FileChunkDescriptor,
+    FileDescriptor,
     KeyTransition,
     LinkMessage,
     LinkMessageAccepted,
     LinkMessageBounced,
     RelayConsentRequest,
     RelayConsentResponse,
+    build_file_chunk_descriptor,
     build_relay_consent_request,
     build_relay_consent_response,
     strict_json_loads,
+    verify_file_chunk_descriptor,
+)
+from netbbs.link.file_transfer import (
+    FileTransferError,
+    TransferState,
+    apply_received_chunk,
+    build_chunk_for_serving,
+    get_or_create_transfer,
+)
+from netbbs.link.files import (
+    FileAreaCarryLimitError,
+    RemoteFile,
+    RemoteFileCatalogueLimitError,
+    get_remote_file,
+    materialize_carried_file_area,
+    materialize_carried_file_descriptor,
 )
 from netbbs.link.mail import apply_link_message_accepted, apply_link_message_bounced, deliver_link_message
+from netbbs.link.node_identity import resolve_current_operational_key
 from netbbs.link.protocol import (
     _MAX_EVENTS_PER_REQUEST,
+    FileChunkRequest,
     HelloMessage,
     InventoryRequest,
     LinkNode,
@@ -145,11 +173,35 @@ _DEFAULT_MAX_CARRIED_BOARDS = 500
 # Design doc §9.6, issue #87: same shape as _DEFAULT_MAX_CARRIED_BOARDS
 # above, the channel-side counterpart.
 _DEFAULT_MAX_CARRIED_CHANNELS = 500
+# Design doc §11, issue #89: same shape, the file-area-side counterpart
+# (carried areas) and its own further per-area catalogue-entry bound
+# (§13.5's bounded-remote-influence principle, applied to a carrying
+# node's own remote_files rows rather than the carried-area count).
+_DEFAULT_MAX_CARRIED_FILE_AREAS = 500
+_DEFAULT_MAX_REMOTE_FILES_PER_AREA = 5000
+# Design doc §11.3, issue #89: how many concurrent chunk-transfer
+# `transfer_id`s this node will serve for one requesting peer at a time
+# -- bounded per §13.5, tracked in memory only (LinkServer._active_
+# transfers_by_peer), never persisted, since serving is otherwise
+# stateless per chunk request.
+_DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS_PER_PEER = 4
 
 # Turns aiohttp's implicit 1 MiB `client_max_size` default into a
 # deliberate, documented value -- sized to comfortably fit `netbbs.link.
 # protocol._MAX_EVENTS_PER_REQUEST` (200) worth of events.
 _LINK_CLIENT_MAX_SIZE_BYTES = 2 * 1024 * 1024
+
+# Design doc §11.3, issue #89: `file_transfer.build_chunk_for_serving`
+# already clamps to its own internal ceiling, but the server also refuses
+# a request naming an obviously abusive max_chunk_size outright, the same
+# "reject the whole request" idiom other malformed-input rejection in
+# this module already uses.
+_MAX_ALLOWED_CHUNK_SIZE_BYTES = 1024 * 1024
+# fetch_next_file_chunk's own default -- matches netbbs.link.file_
+# transfer's internal default exactly (kept as a separate constant
+# rather than importing that module's private one across module
+# boundaries).
+_DEFAULT_FILE_CHUNK_SIZE = 256 * 1024
 
 
 @web.middleware
@@ -177,6 +229,8 @@ async def persist_accepted_events(
     sender_fingerprint: str,
     max_carried_boards: int | None,
     max_carried_channels: int | None = None,
+    max_carried_file_areas: int | None = None,
+    max_remote_files_per_area: int | None = None,
 ) -> None:
     """
     Persist and follow up on every content_id `LinkNode.handle_events`
@@ -242,6 +296,20 @@ async def persist_accepted_events(
                 materialize_carried_channel_message, ChannelMessage.from_dict(envelope),
                 sender_fingerprint=sender_fingerprint,
             )
+            continue
+        elif object_type == FILE_DESCRIPTOR_OBJECT_TYPE:
+            # Design doc §11.2, issue #89: same shape -- catalogue
+            # metadata only, into remote_files, never the real files
+            # table (see materialize_carried_file_descriptor's own
+            # docstring for why).
+            try:
+                await lane.run(
+                    materialize_carried_file_descriptor,
+                    FileDescriptor.from_dict(envelope), sender_fingerprint=sender_fingerprint,
+                    max_remote_files_per_area=max_remote_files_per_area,
+                )
+            except RemoteFileCatalogueLimitError as exc:
+                _logger.warning("Link sync: %s", exc)
             continue
 
         await lane.run(
@@ -315,6 +383,18 @@ async def persist_accepted_events(
             # needs -- the closing origin's own case is handled directly
             # by close_board_if_linked itself.
             await lane.run(materialize_carried_board_closure, BoardClosure.from_dict(envelope))
+        elif object_type == FILE_AREA_GENESIS_OBJECT_TYPE:
+            # Design doc §11, issue #89: mirrors BOARD_GENESIS_OBJECT_TYPE
+            # above exactly, including the same carry-limit tolerance.
+            try:
+                await lane.run(
+                    materialize_carried_file_area,
+                    FileAreaGenesis.from_dict(envelope),
+                    own_fingerprint=node.identity.fingerprint,
+                    max_carried_file_areas=max_carried_file_areas,
+                )
+            except FileAreaCarryLimitError as exc:
+                _logger.warning("Link sync: %s", exc)
 
 
 class LinkTransportError(Exception):
@@ -379,6 +459,9 @@ class LinkServer:
         max_peers: int | None = _DEFAULT_MAX_PEERS,
         max_carried_boards: int | None = _DEFAULT_MAX_CARRIED_BOARDS,
         max_carried_channels: int | None = _DEFAULT_MAX_CARRIED_CHANNELS,
+        max_carried_file_areas: int | None = _DEFAULT_MAX_CARRIED_FILE_AREAS,
+        max_remote_files_per_area: int | None = _DEFAULT_MAX_REMOTE_FILES_PER_AREA,
+        max_concurrent_file_transfers_per_peer: int = _DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS_PER_PEER,
         throttle: LinkRequestThrottle | None = None,
     ) -> None:
         self._host = host
@@ -391,6 +474,15 @@ class LinkServer:
         self._max_peers = max_peers
         self._max_carried_boards = max_carried_boards
         self._max_carried_channels = max_carried_channels
+        self._max_carried_file_areas = max_carried_file_areas
+        self._max_remote_files_per_area = max_remote_files_per_area
+        self._max_concurrent_file_transfers_per_peer = max_concurrent_file_transfers_per_peer
+        # Design doc §11.3, issue #89: fingerprint -> the set of transfer_ids
+        # currently being served for it -- in-memory only, the bounded-
+        # concurrent-transfer counter _handle_file_chunk_request enforces.
+        # Never persisted (serving one chunk is otherwise fully stateless);
+        # a restart harmlessly resets every peer back to zero in flight.
+        self._active_transfers_by_peer: dict[str, set[str]] = {}
         self._throttle = throttle
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -413,6 +505,7 @@ class LinkServer:
         )
         app.router.add_post(f"{LINK_PATH_PREFIX}/relay-mailbox/pickup", self._handle_relay_mailbox_pickup)
         app.router.add_post(f"{LINK_PATH_PREFIX}/inventory/{{fingerprint}}", self._handle_inventory)
+        app.router.add_post(f"{LINK_PATH_PREFIX}/file-chunk/{{fingerprint}}", self._handle_file_chunk_request)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -456,6 +549,8 @@ class LinkServer:
             self._lane, self._node, accepted,
             sender_fingerprint=fingerprint, max_carried_boards=self._max_carried_boards,
             max_carried_channels=self._max_carried_channels,
+            max_carried_file_areas=self._max_carried_file_areas,
+            max_remote_files_per_area=self._max_remote_files_per_area,
         )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
@@ -507,6 +602,86 @@ class LinkServer:
         events = board_events + channel_events
         more_available = board_truncated or channel_truncated
         return web.json_response({"events": events, "more_available": more_available})
+
+    async def _handle_file_chunk_request(self, request: web.Request) -> web.Response:
+        """
+        Design doc §11.3, issue #89: the serving side of on-demand chunk
+        transfer -- unlike `/inventory`, this route serves raw content
+        bytes, a genuinely new resource exposure `_handle_inventory`'s
+        own "already gossiped, nothing new" reasoning doesn't cover, so
+        `fingerprint` is required to already be a completed peer (the
+        same "no relay from a stranger" precondition `_handle_events`
+        already enforces), and concurrent transfers per peer are bounded
+        in memory (`self._active_transfers_by_peer`) -- serving one
+        chunk is otherwise fully stateless, so this is the only place
+        left to bound.
+
+        The response carries the chunk's raw bytes as the literal body
+        (never base64-embedded) plus a signed `FileChunkDescriptor` in
+        the `X-NetBBS-Chunk-Envelope` header, base64-encoded JSON --
+        `request_file_chunk`'s own docstring covers the client side of
+        this same split.
+        """
+        fingerprint = request.match_info["fingerprint"]
+        peer = self._node.peers.get(fingerprint)
+        if peer is None:
+            return web.json_response(
+                {"error": f"{fingerprint} has no completed hello with this node -- refusing"}, status=403
+            )
+
+        try:
+            body = await request.json(loads=strict_json_loads)
+            chunk_request = FileChunkRequest.from_dict(body)
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": f"malformed file chunk request: {exc}"}, status=400)
+
+        if not (0 < chunk_request.max_chunk_size <= _MAX_ALLOWED_CHUNK_SIZE_BYTES):
+            return web.json_response(
+                {"error": f"max_chunk_size must be between 1 and {_MAX_ALLOWED_CHUNK_SIZE_BYTES}"}, status=400
+            )
+
+        active = self._active_transfers_by_peer.setdefault(fingerprint, set())
+        if chunk_request.transfer_id not in active:
+            if len(active) >= self._max_concurrent_file_transfers_per_peer:
+                return web.json_response(
+                    {
+                        "error": f"{fingerprint} already has {len(active)} concurrent file transfers "
+                        "with this node -- refusing a new one"
+                    },
+                    status=429,
+                )
+            active.add(chunk_request.transfer_id)
+
+        try:
+            chunk_bytes, chunk_size, total_size, is_last = await self._lane.run(
+                build_chunk_for_serving,
+                file_id=chunk_request.file_id, chunk_index=chunk_request.chunk_index,
+                max_chunk_size=chunk_request.max_chunk_size,
+            )
+        except FileTransferError as exc:
+            active.discard(chunk_request.transfer_id)
+            return web.json_response({"error": str(exc)}, status=400)
+
+        if is_last:
+            active.discard(chunk_request.transfer_id)
+
+        descriptor = build_file_chunk_descriptor(
+            signing_identity=self._node.identity.signing_key,
+            file_id=chunk_request.file_id,
+            chunk_index=chunk_request.chunk_index,
+            chunk_sha256=hashlib.sha256(chunk_bytes).hexdigest(),
+            chunk_size=chunk_size,
+            total_size=total_size,
+            is_last=is_last,
+            created_at=utc_now_iso(),
+        )
+        envelope_b64 = base64.b64encode(json.dumps(descriptor.to_dict()).encode("utf-8")).decode("ascii")
+        return web.Response(
+            body=chunk_bytes,
+            status=200,
+            headers={"X-NetBBS-Chunk-Envelope": envelope_b64},
+            content_type="application/octet-stream",
+        )
 
     async def _handle_peers(self, request: web.Request) -> web.Response:
         """
@@ -778,6 +953,139 @@ async def request_inventory(
         return body["events"], bool(body["more_available"])
     except (KeyError, TypeError) as exc:
         raise LinkTransportError(f"malformed inventory response from {url}: {exc}") from exc
+
+
+async def request_file_chunk(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    chunk_request: FileChunkRequest,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[bytes, FileChunkDescriptor]:
+    """
+    Design doc §11.3, issue #89: ask the peer at `base_url` (always the
+    requested file's own origin -- chunk transfer is never relayed) for
+    one chunk. Returns the raw bytes body exactly as received (never
+    base64-decoded here -- there was never any base64 to begin with) and
+    the signed `FileChunkDescriptor` parsed out of the `X-NetBBS-Chunk-
+    Envelope` response header. Deliberately returns the descriptor
+    unverified -- same division of responsibility `request_inventory`
+    already documents: this function only does I/O and parsing, the
+    caller (`fetch_next_file_chunk`) is the one holding `node`'s own peer
+    table to verify against.
+
+    Raises `LinkTransportError` for a transport-level failure or a
+    missing/malformed envelope header, matching every other client
+    function in this module.
+    """
+    url = f"{base_url}{LINK_PATH_PREFIX}/file-chunk/{node.identity.fingerprint}"
+    try:
+        async with session.post(
+            url, json=chunk_request.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise LinkTransportError(f"file chunk request to {url} failed: HTTP {response.status}: {text}")
+            chunk_bytes = await response.read()
+            envelope_header = response.headers.get("X-NetBBS-Chunk-Envelope")
+    except ClientError as exc:
+        raise LinkTransportError(f"could not reach {url}: {exc}") from exc
+
+    if envelope_header is None:
+        raise LinkTransportError(f"file chunk response from {url} carried no X-NetBBS-Chunk-Envelope header")
+    try:
+        descriptor = FileChunkDescriptor.from_dict(
+            strict_json_loads(base64.b64decode(envelope_header).decode("utf-8"))
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        raise LinkTransportError(f"malformed chunk envelope header from {url}: {exc}") from exc
+
+    return chunk_bytes, descriptor
+
+
+async def fetch_next_file_chunk(
+    node: LinkNode,
+    session: ClientSession,
+    base_url: str,
+    lane: DatabaseLane,
+    remote_file: RemoteFile,
+    *,
+    chunk_size: int = _DEFAULT_FILE_CHUNK_SIZE,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> TransferState:
+    """
+    Design doc §11.3, issue #89: fetch exactly one more chunk of
+    `remote_file` from `base_url` (its own origin) and apply it --
+    the top-level orchestration a caller (a future interactive "fetch
+    this file" action, or a background catch-up pass) calls repeatedly
+    until the returned `TransferState.status` is no longer
+    `'in_progress'`. Idempotent to call again after `'completed'` --
+    returns the already-completed state without another round trip.
+
+    Raises `LinkProtocolError` if `remote_file.origin_fingerprint` has no
+    completed hello with this node (chunk transfer is never relayed --
+    there is no "no relay from a stranger" exception for content bytes),
+    or if the response's signed `FileChunkDescriptor` doesn't verify
+    against the origin's *current* signing key, or doesn't actually
+    describe the chunk this node just asked for (`file_id`/`chunk_index`
+    cross-checked against the outgoing request, the same "the response
+    must match what was asked" discipline `request_relay_consent`
+    already applies to its own reply). `netbbs.link.file_transfer.
+    FileTransferError` propagates unwrapped for a content-integrity
+    failure (chunk bytes not matching their own claimed hash, or the
+    completed reassembly not matching the file's own catalogued hash).
+    """
+    origin_peer = node.peers.get(remote_file.origin_fingerprint)
+    if origin_peer is None:
+        raise LinkProtocolError(
+            f"file {remote_file.file_id!r}'s own origin ({remote_file.origin_fingerprint!r}) has no "
+            "completed hello with this node -- refusing (chunk transfer is never relayed)"
+        )
+
+    transfer = await lane.run(
+        get_or_create_transfer,
+        remote_file, requester_fingerprint=node.identity.fingerprint, chunk_size=chunk_size,
+    )
+    if transfer.status != "in_progress":
+        return transfer
+
+    chunk_index = transfer.next_chunk_index
+    chunk_request = FileChunkRequest(
+        transfer_id=transfer.transfer_id, file_id=remote_file.file_id,
+        chunk_index=chunk_index, max_chunk_size=transfer.chunk_size,
+    )
+    chunk_bytes, descriptor = await request_file_chunk(node, session, base_url, chunk_request, timeout=timeout)
+
+    if descriptor.payload.get("file_id") != remote_file.file_id or descriptor.payload.get("chunk_index") != chunk_index:
+        raise LinkProtocolError(
+            f"file chunk response from {base_url} describes a different file/chunk than requested -- refusing"
+        )
+
+    signing_key_b64 = resolve_current_operational_key(
+        origin_peer.transitions,
+        root_verify_key=origin_peer.root_verify_key,
+        subject_fingerprint=remote_file.origin_fingerprint,
+        purpose="signing",
+    )
+    if signing_key_b64 is None:
+        raise LinkProtocolError(
+            f"rejected file_chunk_descriptor from {remote_file.origin_fingerprint}: no currently-"
+            "authorized signing key"
+        )
+    signing_verify_key = nacl.signing.VerifyKey(base64.b64decode(signing_key_b64))
+    if not verify_file_chunk_descriptor(descriptor, signing_verify_key):
+        raise LinkProtocolError(
+            f"file_chunk_descriptor from origin {remote_file.origin_fingerprint} does not verify "
+            "against its current signing key"
+        )
+
+    return await lane.run(
+        apply_received_chunk,
+        transfer, chunk_index=chunk_index, chunk_bytes=chunk_bytes,
+        claimed_chunk_sha256=descriptor.payload["chunk_sha256"], is_last=descriptor.payload["is_last"],
+        remote_file=remote_file,
+    )
 
 
 async def request_peer_list(

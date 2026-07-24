@@ -1842,4 +1842,76 @@ MIGRATIONS = [
         ALTER TABLE posts ADD COLUMN tombstoned_at TEXT;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #89: remote file catalogue exchange and on-demand chunk "
+            "transfer. file_areas.link_genesis_json/link_origin_fingerprint "
+            "mirror boards' own pair exactly (file_areas.origin_node_"
+            "fingerprint is unrelated dead Phase-1/2 scaffolding, left "
+            "untouched, same precedent boards.origin_node_fingerprint "
+            "already set). files.link_event_json mirrors posts."
+            "link_event_json -- a self-originated file's queued file_"
+            "descriptor, read fresh each sync pass. "
+            "remote_files is new: a carried (non-origin) file's catalogue "
+            "entry, deliberately *not* a row in files -- that table's own "
+            "invariant ('a file row is only ever created after its bytes "
+            "are already safely written to storage') stays true "
+            "unconditionally, and a catalogued-but-not-yet-fetched file is "
+            "a genuinely different state files was never designed to "
+            "represent. fetched_file_id is set only once a chunk transfer "
+            "completes and verifies, at which point the content is "
+            "promoted into a real files row. link_file_transfers/"
+            "link_file_transfer_chunks track this node's own outbound "
+            "fetches only (never anything about serving one out -- the "
+            "serving side is stateless per chunk request, bounded by an "
+            "in-memory per-peer concurrent-transfer count, nothing to "
+            "persist); transfer_id is deterministic (content hash of "
+            "file_id + this node's own fingerprint) so a resumed fetch "
+            "naturally reuses the same row rather than restarting; "
+            "link_file_transfer_chunks' (transfer_id, chunk_index) primary "
+            "key is the exact-dedup mechanism a resent/duplicate chunk "
+            "request is checked against."
+        ),
+        sql="""
+        ALTER TABLE file_areas ADD COLUMN link_genesis_json TEXT;
+        ALTER TABLE file_areas ADD COLUMN link_origin_fingerprint TEXT;
+        ALTER TABLE files ADD COLUMN link_event_json TEXT;
+
+        CREATE TABLE remote_files (
+            id                  INTEGER PRIMARY KEY,
+            file_id             TEXT NOT NULL UNIQUE,
+            area_id             INTEGER NOT NULL REFERENCES file_areas(id),
+            origin_fingerprint  TEXT NOT NULL,
+            filename            TEXT NOT NULL,
+            description         TEXT,
+            size_bytes          INTEGER NOT NULL,
+            sha256              TEXT NOT NULL,
+            created_at          TEXT NOT NULL,
+            link_event_json     TEXT NOT NULL,
+            fetched_file_id     TEXT REFERENCES files(file_id)
+        );
+        CREATE INDEX idx_remote_files_area_id ON remote_files(area_id);
+
+        CREATE TABLE link_file_transfers (
+            id                   INTEGER PRIMARY KEY,
+            transfer_id          TEXT NOT NULL UNIQUE,
+            remote_file_id       TEXT NOT NULL REFERENCES remote_files(file_id),
+            total_size           INTEGER NOT NULL,
+            chunk_size           INTEGER NOT NULL,
+            bytes_received       INTEGER NOT NULL DEFAULT 0,
+            status               TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+            temp_path            TEXT,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        );
+
+        CREATE TABLE link_file_transfer_chunks (
+            transfer_id   TEXT NOT NULL REFERENCES link_file_transfers(transfer_id),
+            chunk_index   INTEGER NOT NULL,
+            chunk_id      TEXT NOT NULL,
+            received_at   TEXT NOT NULL,
+            PRIMARY KEY (transfer_id, chunk_index)
+        );
+        """,
+    ),
 ]

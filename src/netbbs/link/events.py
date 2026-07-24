@@ -121,6 +121,22 @@ BOARD_CLOSURE_OBJECT_TYPE = "board_closure"
 CHANNEL_GENESIS_OBJECT_TYPE = "channel_genesis"
 CHANNEL_MESSAGE_OBJECT_TYPE = "channel_message"
 
+# Design doc §11, issue #89: the catalogue half of remote file areas --
+# area identity/metadata, then a per-file hash/size descriptor with no
+# content at all. No edit chain (a changed file is a new upload with its
+# own fresh file_id, never a revision); no origin-succession pair yet,
+# same deliberate deferral §9.6 already applied to channels. See
+# FileAreaGenesis/FileDescriptor's own docstrings.
+FILE_AREA_GENESIS_OBJECT_TYPE = "file_area_genesis"
+FILE_DESCRIPTOR_OBJECT_TYPE = "file_descriptor"
+
+# Design doc §11.3, issue #89: the signed metadata accompanying one raw
+# chunk-transfer HTTP response body -- never gossiped, never passed
+# through handle_events (chunk transfer is a direct point-to-point pull,
+# not a candidate chain extension of anything). See FileChunkDescriptor's
+# own docstring.
+FILE_CHUNK_DESCRIPTOR_OBJECT_TYPE = "file_chunk_descriptor"
+
 # Design doc: Link's extension of local mail. A signed message
 # to one specific recipient node, and the two acknowledgement shapes the
 # recipient's node sends back toward the sender's. `link_message_expired`
@@ -1137,6 +1153,274 @@ def verify_channel_message(message: ChannelMessage, signing_verify_key: nacl.sig
     *current signing key* -- same division of responsibility as
     `verify_board_post`."""
     return verify_signature(signing_verify_key, canonical_bytes(message.envelope), message.signature)
+
+
+@dataclass(frozen=True)
+class FileAreaGenesis:
+    """
+    One signed `file_area_genesis` event (design doc §11, issue #89): the
+    file-area counterpart to `BoardGenesis` -- the announcement that puts
+    an *existing* local file area into Link scope, not a separate creation
+    act. `payload["area_id"]` is the area's existing local content-
+    addressed ID (`netbbs.files.areas.FileArea.area_id`), never newly
+    minted, same "promote an existing local resource" rule `BoardGenesis`
+    already establishes.
+
+    No `file_area_origin_transfer_offer`/`_accepted` pair exists yet --
+    origin succession for file areas reuses §9.4's model by reference,
+    unchanged, if a future issue ever needs it, the same deliberate
+    deferral `ChannelGenesis` already applied.
+
+    Always signed by the origin node's current *signing* operational key,
+    matching `BoardGenesis` exactly.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileAreaGenesis":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_file_area_genesis(
+    *,
+    signing_identity: Identity,
+    origin_fingerprint: str,
+    area_id: str,
+    name: str,
+    created_at: str,
+    description: str | None = None,
+    default_min_read_level: int | None = None,
+    default_min_write_level: int | None = None,
+    default_moderated: bool | None = None,
+    default_max_file_age_days: int | None = None,
+    default_min_age: int | None = None,
+    default_name_requirement: str | None = None,
+) -> FileAreaGenesis:
+    """
+    Build and sign one `file_area_genesis` event, per design doc §11.
+
+    `area_id` is the area's *existing* local content-addressed ID (see
+    `FileAreaGenesis`'s own docstring). The six `default_*` fields mirror
+    `build_board_genesis`'s own six exactly -- `FileArea` has the same
+    settable columns a `Board` does (design doc §16's file-area parity).
+    Each is omitted entirely when `None`, never stored as `null`; a
+    carrying node's own local value always wins, same rule
+    `build_board_genesis` already states.
+    """
+    if default_name_requirement is not None and default_name_requirement not in _VALID_NAME_REQUIREMENTS:
+        raise EventError(f"invalid default_name_requirement: {default_name_requirement!r}")
+
+    payload = {
+        "origin_fingerprint": origin_fingerprint,
+        "area_id": area_id,
+        "name": name,
+        "created_at": created_at,
+    }
+    if description is not None:
+        payload["description"] = description
+    if default_min_read_level is not None:
+        payload["default_min_read_level"] = default_min_read_level
+    if default_min_write_level is not None:
+        payload["default_min_write_level"] = default_min_write_level
+    if default_moderated is not None:
+        payload["default_moderated"] = default_moderated
+    if default_max_file_age_days is not None:
+        payload["default_max_file_age_days"] = default_max_file_age_days
+    if default_min_age is not None:
+        payload["default_min_age"] = default_min_age
+    if default_name_requirement is not None:
+        payload["default_name_requirement"] = default_name_requirement
+
+    envelope = build_envelope(FILE_AREA_GENESIS_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return FileAreaGenesis(envelope=envelope, signature=signature)
+
+
+def verify_file_area_genesis(genesis: FileAreaGenesis, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `genesis`'s signature against the claimed origin's *current
+    signing key* -- same division of responsibility as
+    `verify_board_genesis`."""
+    return verify_signature(signing_verify_key, canonical_bytes(genesis.envelope), genesis.signature)
+
+
+@dataclass(frozen=True)
+class FileDescriptor:
+    """
+    One signed `file_descriptor` event (design doc §11.2, issue #89): the
+    catalogue entry for one file -- metadata only, no content, no author
+    tagged union (attribution is a local admin-log concern, §18, not
+    something a peer deciding whether to fetch bytes needs). Immutable
+    and single-shot like `BoardPost`/`ChannelMessage` -- no edit chain; a
+    changed file is a new upload with its own fresh `file_id`, never a
+    revision of an old one.
+
+    `payload["file_id"]` is the same content-addressed id
+    `netbbs.files.entries.upload_file` already computes locally (folding
+    in the uploaded content's own sha256, per that module's docstring) --
+    never separately minted here.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileDescriptor":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_file_descriptor(
+    *,
+    signing_identity: Identity,
+    area_id: str,
+    file_id: str,
+    filename: str,
+    size_bytes: int,
+    sha256: str,
+    created_at: str,
+    description: str | None = None,
+    nonce: str | None = None,
+) -> FileDescriptor:
+    """
+    Build and sign one `file_descriptor` event, per design doc §11.2.
+    Always signed by `signing_identity` -- the file's own home node's
+    (the area's origin's) current signing key, matching `build_board_
+    post`'s own signing choice, minus that type's author tagged union.
+    """
+    payload = {
+        "area_id": area_id,
+        "file_id": file_id,
+        "filename": filename,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+    if description is not None:
+        payload["description"] = description
+
+    envelope = build_envelope(FILE_DESCRIPTOR_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return FileDescriptor(envelope=envelope, signature=signature)
+
+
+def verify_file_descriptor(descriptor: FileDescriptor, signing_verify_key: nacl.signing.VerifyKey) -> bool:
+    """Verify `descriptor`'s signature against the claimed home node's
+    *current signing key* -- same division of responsibility as
+    `verify_board_post`."""
+    return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)
+
+
+@dataclass(frozen=True)
+class FileChunkDescriptor:
+    """
+    One signed `file_chunk_descriptor` (design doc §11.3, issue #89): the
+    metadata accompanying one raw chunk-transfer HTTP response body --
+    delivered in a response header (`netbbs.link.transport`'s
+    `X-NetBBS-Chunk-Envelope`), never gossiped, never passed through
+    `handle_events` (chunk transfer is a direct point-to-point pull
+    against the file's own origin, not a candidate extension of any
+    shared chain -- there is nothing here for a "current origin" lookup
+    to resolve against beyond the same `file_descriptor`'s own claimed
+    origin).
+
+    `chunk_sha256` is the actual chunk bytes' own hash -- the requester
+    recomputes it against what it actually received and compares, the
+    same "objectively verifiable" standard every other piece of signed
+    Link content already meets, just checked against a raw HTTP body
+    instead of a JSON payload.
+    """
+
+    envelope: dict
+    signature: bytes
+
+    @property
+    def payload(self) -> dict:
+        return self.envelope["payload"]
+
+    @property
+    def content_id(self) -> str:
+        return event_content_id(self.envelope)
+
+    def to_dict(self) -> dict:
+        return {
+            "envelope": self.envelope,
+            "signature": base64.b64encode(self.signature).decode("ascii"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FileChunkDescriptor":
+        return cls(envelope=data["envelope"], signature=base64.b64decode(data["signature"]))
+
+
+def build_file_chunk_descriptor(
+    *,
+    signing_identity: Identity,
+    file_id: str,
+    chunk_index: int,
+    chunk_sha256: str,
+    chunk_size: int,
+    total_size: int,
+    is_last: bool,
+    created_at: str,
+    nonce: str | None = None,
+) -> FileChunkDescriptor:
+    """Build and sign one `file_chunk_descriptor`, per design doc §11.3.
+    Always signed by `signing_identity` -- the serving origin's current
+    signing key, the same key that signed this file's own
+    `file_descriptor`."""
+    payload = {
+        "file_id": file_id,
+        "chunk_index": chunk_index,
+        "chunk_sha256": chunk_sha256,
+        "chunk_size": chunk_size,
+        "total_size": total_size,
+        "is_last": is_last,
+        "created_at": created_at,
+        "nonce": nonce if nonce is not None else secrets.token_hex(16),
+    }
+
+    envelope = build_envelope(FILE_CHUNK_DESCRIPTOR_OBJECT_TYPE, payload)
+    signature = signing_identity.sign(canonical_bytes(envelope))
+    return FileChunkDescriptor(envelope=envelope, signature=signature)
+
+
+def verify_file_chunk_descriptor(
+    descriptor: FileChunkDescriptor, signing_verify_key: nacl.signing.VerifyKey
+) -> bool:
+    """Verify `descriptor`'s signature against the claimed origin's
+    *current signing key* -- same division of responsibility as
+    `verify_file_descriptor`."""
+    return verify_signature(signing_verify_key, canonical_bytes(descriptor.envelope), descriptor.signature)
 
 
 @dataclass(frozen=True)
