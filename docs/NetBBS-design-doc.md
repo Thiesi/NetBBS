@@ -1575,15 +1575,77 @@ whether to carry the original, the fork, both, or neither.
 Channel-side Link lifecycle will reuse these principles after linked channels
 exist; there is currently no channel genesis protocol.
 
-### 9.5 Remaining board governance
+### 9.5 Board closure and moderator-authorized post changes (issue #88)
+
+Three further origin-authorized event types complete the board-lifecycle and
+per-post governance surfaces left open by §9.4:
+
+**`board_closure`.** A terminal board-lifecycle event, extending the same
+`board_lifecycle_head` chain §9.4's transfer offer/acceptance already extend
+— signed by the board's *current* origin, referencing the chain's current
+head as `previous_event_id`. Once accepted, no further lifecycle event
+(another closure, or a fresh origin-transfer offer) is accepted for that
+board — closure is terminal, not reversible in this slice. Closure stops new
+posts (`board_post`) to the board; it does not restrict moderator edits or
+tombstones of existing content, since an archived board may still need
+cleanup. Materializes locally as a `boards.link_closed_at` timestamp,
+enforced by `netbbs.boards.posts.create_post` the same way any other
+board-level gate already is.
+
+**`board_post_moderator_edit`.** Structurally identical to `board_post_edit`
+(§9.2) — extends the same per-post `previous_event_id` chain — but signed by
+the board's *current origin* instead of the edited post's own author's home
+node, and carries no `author` field to cross-check against (the "self-authored
+only" rule `board_post_edit` enforces on receipt simply doesn't apply to this
+type). This is deliberately *not* a new cross-network moderator-grant
+primitive: `netbbs.boards.posts.edit_post` already allows any local user
+holding `BoardPermission.EDIT` to edit someone else's post (existing
+behavior, unchanged by this issue) — that local permission check happens
+once, on the origin node, before `netbbs.link.boards.queue_board_post_
+moderator_edit_if_linked` ever builds and signs the event. A carrying
+(non-origin) node's own local moderator action on a post it doesn't own
+stays purely local and is never propagated — it has no origin authority to
+assert an edit the rest of the network would recognize. Linked-board
+moderator *grants and revocations* (a network-visible delegation of that
+authority to non-origin nodes) remain out of scope, unchanged from this
+section's prior framing.
+
+**`board_post_tombstone`.** Also extends the per-post chain, as a terminal
+entry — no further `board_post_edit`/`board_post_moderator_edit`/a second
+tombstone is accepted once a post's chain head is already a tombstone. Same
+origin-signed authorization model as a moderator edit; carries its own
+placeholder `subject`/`body` (redaction content chosen once by
+`netbbs.boards.posts.tombstone_post`, not reconstructed by convention on each
+receiving node) plus an optional `reason`. Locally, a tombstone is a further
+content-addressed revision — never an in-place mutation, and never
+`netbbs.boards.posts.delete_post`'s hard delete, which stays reserved for a
+still-`'pending'` post's rejection and refuses outright if any row still
+references the target — so the edit chain, and any reply's `parent_post_id`,
+stay intact. `posts.tombstoned_at` (nullable, plain `ALTER TABLE`, no
+`CHECK`-widening table rebuild — `posts` is a live self-referencing FK parent,
+and an earlier migration already documents why rebuilding it is
+specifically unsafe) marks the terminal revision; `edit_post`/`tombstone_
+post` both refuse to extend a chain whose current head is already
+tombstoned. Requires `BoardPermission.DELETE`, no author bypass, matching
+`delete_post`'s existing rule exactly.
+
+All three share `board_origin_transfer_offer`'s verification shape: resolve
+the board's current origin (`current_board_origin`, not the genesis's
+original claim), confirm it's an independently-known peer, verify the
+signature against its current signing key. None invents a new authorization
+primitive — they reuse the origin's existing signing identity and, for the
+two post-scoped types, an already-existing local permission check.
 
 Still future or incomplete:
 
-- signed closure/archive projection where not already implemented;
-- linked-board moderator grants and revocations;
-- moderator edits and tombstones;
-- general relay/anti-entropy beyond direct peers;
-- Link-blanket governance surfaces and audit feeds.
+- linked-board moderator grants and revocations (delegating origin-recognized
+  moderator authority to a non-origin node, rather than only the origin
+  itself ever asserting a moderator edit/tombstone, as above);
+- general relay/anti-entropy beyond direct peers, in the fullest sense —
+  issue #85 covers bounded catch-up for content already carried, not
+  discovery of a wholly novel board through a relay with no direct genesis
+  ever received;
+- Link-blanket governance surfaces and audit feeds (Phase 6).
 
 ### 9.6 Linked channels (issue #87)
 
@@ -2806,11 +2868,12 @@ Implemented or substantially working:
   propagation (§9.6, issue #87, closed); origin succession reused by
   reference only, not built, and moderator governance out of scope
   (Phase 6).
+- board closure, origin-authorized moderator post edits, and tombstones
+  (§9.5, issue #88, closed); linked-board moderator grants/revocations
+  remain out of scope.
 
 Still required for Phase 3 completeness:
 
-- remaining linked-board governance, closure, moderator edits, and
-  tombstones (issue #88);
 - remote file catalogue and on-demand chunks (issue #89);
 - broader real-world multi-node deployment validation (issue #83).
 
@@ -3161,6 +3224,45 @@ unlike `login_flow.py`'s board-post path which already had it. A
 self-authored message on a linked channel is not yet actually pushed
 outbound through the live TUI as a result; received content still
 materializes correctly. Worth a small, mechanical follow-up.
+
+### Issue #88 — board closure, moderator edits, tombstones — closed
+
+§9.5 states the complete design and is now fully implemented: `board_closure`
+(extends §9.4's own `board_lifecycle_head` chain, terminal), `board_post_
+moderator_edit`/`board_post_tombstone` (both extend the same per-post chain
+`board_post_edit` already does, origin-signed rather than author-signed, the
+latter terminal too). No new authorization primitive — all three verify
+against the board's current origin's signing key exactly like `board_origin_
+transfer_offer` already does; the two post-scoped types rely on a local
+`BoardPermission.EDIT`/`DELETE` check already made on the origin node, before
+`netbbs.link.boards.queue_board_post_moderator_edit_if_linked`/`queue_board_
+post_tombstone_if_linked` ever builds the event — never a new gossiped grant.
+
+`posts.tombstoned_at` is a plain nullable `ALTER TABLE ADD COLUMN`, not a
+`CHECK`-widening rebuild: an earlier migration (post-`root_post_id`) already
+found and documented that `posts` cannot safely go through the usual
+drop/rebuild pattern, since it is a live *self-referencing* FK parent
+(`parent_post_id`/`root_post_id`/`edit_of_post_id` all reference `posts.
+post_id`) — the additive-column path sidesteps that risk entirely rather
+than re-testing it. `netbbs.boards.posts.tombstone_post` is a new local
+function, not a repurposed `delete_post`: it inserts a further
+content-addressed revision (placeholder subject/body, `tombstoned_at` set)
+rather than removing the row, so the edit chain and any reply's
+`parent_post_id` stay intact — `delete_post` itself is unchanged, still
+reserved for a still-`'pending'` post's rejection.
+
+**Live UI wiring, stated explicitly:** `board_closure` and `board_post_
+moderator_edit` reach real interactive call sites this issue — a `[C]lose`
+option on the board admin screen (`netbbs.net.admin_flow`, gated the same way
+`[T]ransfer origin` already is: origin only, board not already closed), and
+the existing `[E]dit` flow (`netbbs.net.login_flow._edit_existing_post`)
+building a moderator-edit event instead of a self-authored one whenever
+`edited_by` isn't the post's own author and this node is the board's origin.
+`board_post_tombstone` did not have any existing "delete an approved,
+already-published post" UI action to extend (the only existing `delete_post`
+call site handles pending-post rejection, which never reaches an already-
+`board_post`-queued row) — a new `[T]ombstone` option was added alongside
+`[E]dit` for exactly this reason, gated on `BoardPermission.DELETE`.
 
 ### Issue #55 — trust and quarantine
 
