@@ -190,6 +190,30 @@ def test_remote_quarantine_requires_two_full_weight_domains(db):
     assert state.explanation["counted_weight"] == 2.0
 
 
+def test_probationary_reporter_contributes_no_trust_weight(db):
+    subject = register_old_node(db)
+    configure_reporter(db, "probation-reporter", "domain-a")
+    configure_reporter(db, "established-reporter", "domain-b")
+    probation_reporter = TrustSubject.node("probation-reporter")
+    register_subject(
+        db, probation_reporter, first_accepted_at=stamp(NOW), now_iso=stamp(NOW)
+    )
+    add_signal(db, subject, "probation-reporter", 10)
+    add_signal(db, subject, "established-reporter", 11)
+    state = get_effective_trust_state(db, subject, TrustDimension.IDENTITY_INTEGRITY)
+    assert state.state == TrustState.PROBATIONARY
+
+    for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+        set_trust_override(
+            db, probation_reporter, dimension, TrustState.ESTABLISHED,
+            reason="reporter reviewed", now_iso=stamp(NOW),
+        )
+    recompute_all_trust_states(db, now_iso=stamp(NOW))
+    assert get_effective_trust_state(
+        db, subject, TrustDimension.IDENTITY_INTEGRITY
+    ).state == TrustState.QUARANTINED
+
+
 def test_colluding_domains_below_weight_threshold_do_not_quarantine(db):
     subject = register_old_node(db)
     for reporter, domain in (("reporter-a", "domain-a"), ("reporter-b", "domain-b")):

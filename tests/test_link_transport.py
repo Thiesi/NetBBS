@@ -28,14 +28,18 @@ import json
 import aiohttp
 import pytest
 from aiohttp import web
+import netbbs.link.transport as link_transport
 
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post
 from netbbs.link.boards import link_board, queue_board_post_if_linked
-from netbbs.link.events import KeyTransition, build_board_genesis, build_endpoint_descriptor, build_link_message
+from netbbs.link.events import (
+    KeyTransition, build_board_genesis, build_board_post,
+    build_endpoint_descriptor, build_link_message,
+)
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
-from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
+from netbbs.link.protocol import FileChunkRequest, HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.store import build_inventory_request, load_link_node
 from netbbs.link.transport import (
     LINK_PATH_PREFIX,
@@ -51,7 +55,10 @@ from netbbs.link.transport import (
     request_relay_consent,
     request_trust_objects,
 )
-from netbbs.link.trust import TrustDimension, TrustSubject, configure_trust_domain, configure_trusted_reporter
+from netbbs.link.trust import (
+    TrustDimension, TrustState, TrustSubject, configure_trust_domain,
+    configure_trusted_reporter, set_trust_override,
+)
 from netbbs.link.trust_wire import (
     SignedTrustObject,
     build_trust_pull_request,
@@ -77,11 +84,13 @@ async def _run_server(
     max_carried_boards: int | None = 500,
     max_peers: int | None = 1000,
     throttle=None,
+    enforce_trust_policy: bool = False,
 ) -> LinkServer:
     server = LinkServer(
         host="127.0.0.1", port=0, node=node, own_hello_provider=own_hello_provider, lane=lane,
         relay_serving_enabled=relay_serving_enabled, max_relay_clients=max_relay_clients,
         max_carried_boards=max_carried_boards, max_peers=max_peers, throttle=throttle,
+        enforce_trust_policy=enforce_trust_policy,
     )
     await server.start()
     return server
@@ -100,6 +109,131 @@ class _NodeDb:
     def close(self) -> None:
         self.lane.close()
         self.db.close()
+
+
+def test_real_transport_enforces_probation_quarantine_block_and_preserves_accepted_bytes(
+    tmp_path, monkeypatch,
+):
+    alice_identity = bootstrap_node_identity("policy-alice")
+    bob_identity = bootstrap_node_identity("policy-bob")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    alice = _NodeDb(tmp_path, "policy-alice")
+    bob = _NodeDb(tmp_path, "policy-bob")
+    authorization_shapes = []
+    original_build_inventory_request = link_transport.build_inventory_request
+
+    def recording_build_inventory_request(db, **kwargs):
+        authorization_shapes.append(kwargs.get("include_inventory", True))
+        return original_build_inventory_request(db, **kwargs)
+
+    monkeypatch.setattr(
+        link_transport, "build_inventory_request", recording_build_inventory_request
+    )
+
+    first = build_board_genesis(
+        signing_identity=alice_identity.signing_key,
+        origin_fingerprint=alice_identity.fingerprint,
+        board_id="policy-board-1", name="Policy Board", created_at="2026-08-14T12:00:00+00:00",
+    )
+    second = build_board_genesis(
+        signing_identity=alice_identity.signing_key,
+        origin_fingerprint=alice_identity.fingerprint,
+        board_id="policy-board-2", name="Blocked Board", created_at="2026-08-14T12:01:00+00:00",
+    )
+    probation_post = build_board_post(
+        signing_identity=alice_identity.signing_key,
+        home_node_fingerprint=alice_identity.fingerprint,
+        local_user_id="probation-user", board_id="policy-board-1",
+        subject="Needs approval", body="Probationary content",
+        created_at="2026-08-14T12:02:30+00:00",
+    )
+
+    async def scenario():
+        server = await _run_server(
+            bob_node, lambda: _hello_for(bob_node), bob.lane, enforce_trust_policy=True
+        )
+        base_url = f"http://127.0.0.1:{server.port}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(alice_node, session, base_url, _hello_for(alice_node), alice.lane)
+                with pytest.raises(LinkTransportError, match="link_policy_node_probationary_read_only"):
+                    await push_events(alice_node, session, base_url, [first])
+                with pytest.raises(LinkTransportError, match="link_policy_node_probationary_read_only"):
+                    await request_peer_list(
+                        alice_node, session, base_url, bob_identity.fingerprint, alice.lane
+                    )
+
+                subject = TrustSubject.node(alice_identity.fingerprint)
+                for dimension in (TrustDimension.IDENTITY_INTEGRITY, TrustDimension.RESOURCE_BEHAVIOR):
+                    set_trust_override(
+                        bob.db, subject, dimension, TrustState.ESTABLISHED,
+                        reason="known peer", now_iso="2026-08-14T12:02:00+00:00",
+                    )
+                chunk_url = (
+                    f"{base_url}{LINK_PATH_PREFIX}/file-chunk/{alice_identity.fingerprint}"
+                )
+                unsigned_chunk = FileChunkRequest(
+                    transfer_id="spoofable-transfer", file_id="missing-file",
+                    chunk_index=0, max_chunk_size=1024,
+                )
+                async with session.post(chunk_url, json=unsigned_chunk.to_dict()) as response:
+                    assert response.status == 403
+                    assert "authenticated file chunk authorization required" in await response.text()
+
+                authorization = await alice.lane.run(
+                    build_inventory_request,
+                    signing_identity=alice_identity.signing_key,
+                    requester_fingerprint=alice_identity.fingerprint,
+                    responder_fingerprint=bob_identity.fingerprint,
+                    include_inventory=False,
+                )
+                authenticated_chunk = FileChunkRequest(
+                    transfer_id="authenticated-transfer", file_id="missing-file",
+                    chunk_index=0, max_chunk_size=1024, authorization=authorization,
+                )
+                async with session.post(chunk_url, json=authenticated_chunk.to_dict()) as response:
+                    assert response.status == 400
+                    assert "missing-file" in await response.text()
+                assert await push_events(alice_node, session, base_url, [first]) == [first.content_id]
+                assert await push_events(
+                    alice_node, session, base_url, [probation_post]
+                ) == [probation_post.content_id]
+                assert await request_peer_list(
+                    alice_node, session, base_url, bob_identity.fingerprint, alice.lane
+                ) == []
+
+                set_trust_override(
+                    bob.db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.QUARANTINED,
+                    reason="resource trigger", now_iso="2026-08-14T12:03:00+00:00",
+                )
+                with pytest.raises(LinkTransportError, match="link_policy_node_quarantined"):
+                    await push_events(alice_node, session, base_url, [second])
+
+                set_trust_override(
+                    bob.db, subject, TrustDimension.IDENTITY_INTEGRITY, TrustState.BLOCKED,
+                    reason="manual block", now_iso="2026-08-14T12:04:00+00:00",
+                )
+                with pytest.raises(LinkTransportError, match="link_policy_manual_block"):
+                    await dial_hello(alice_node, session, base_url, _hello_for(alice_node), alice.lane)
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert bob.db.connection.execute(
+            "SELECT COUNT(*) FROM link_events WHERE content_id = ?", (first.content_id,)
+        ).fetchone()[0] == 1
+        assert bob.db.connection.execute(
+            "SELECT COUNT(*) FROM link_events WHERE content_id = ?", (second.content_id,)
+        ).fetchone()[0] == 0
+        assert bob.db.connection.execute(
+            "SELECT status FROM posts WHERE post_id = ?", (probation_post.content_id,)
+        ).fetchone()[0] == "pending"
+        assert authorization_shapes and all(shape is False for shape in authorization_shapes)
+    finally:
+        alice.close()
+        bob.close()
 
 
 def test_trust_evidence_fetch_is_bounded_and_same_origin():

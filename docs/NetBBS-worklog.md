@@ -1318,6 +1318,22 @@ matched its signed size/hash and category-specific code has independently
 reproduced the claim. A pending digest object can still be revoked, and that
 revocation prevents later activation.
 
+**Link trust enforcement is a pre-persistence, attribution-aware gate.** The
+real node runtime enables it explicitly on both the HTTP server and background
+sync; low-level transport/sync constructors retain an opt-out only for isolated
+legacy protocol harnesses. Manual block denies even verified hello containment;
+quarantine permits hello/key lifecycle and revocation-only trust pulls but no
+ordinary service; probation permits hello/key lifecycle and quarter-budget
+inventory. Stable public reason codes never include reporter configuration or
+evidence notes. Policy follows the independently verified author/home node, not
+the carrier diagnostic in `link_events.sender_fingerprint`, and browsing checks
+retained Link authorship dynamically so suppression and recovery never mutate
+accepted bytes. A probationary user's valid board content is persisted as
+`pending`; Link surfaces with no approval projection refuse it.
+Peer-list and file-chunk pull routes reuse a fresh signed empty inventory
+request for current-key attribution, responder binding, freshness, and replay
+protection; a URL fingerprint alone is never a policy identity.
+
 Trust projections are derived caches, recomputed at node startup before any
 listener binds. Input mutation and projection/audit transition share one SQLite
 transaction. Inactive signals, observations, and vouches are pruned after 365

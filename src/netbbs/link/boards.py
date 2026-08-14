@@ -367,7 +367,10 @@ def _post_from_row(row) -> Post:
     )
 
 
-def materialize_carried_post(db: Database, post: BoardPost, *, sender_fingerprint: str) -> Post | None:
+def materialize_carried_post(
+    db: Database, post: BoardPost, *, sender_fingerprint: str,
+    initial_status: str = "approved",
+) -> Post | None:
     """
     Turn a *received* `board_post` into a real, locally browsable
     `posts` row (design doc §9.3, issue #73) -- before this, an
@@ -451,11 +454,11 @@ def materialize_carried_post(db: Database, post: BoardPost, *, sender_fingerprin
         INSERT INTO posts
             (post_id, board_id, parent_post_id, author_user_id, author_label,
              author_fingerprint, subject, body, created_at, status, root_post_id)
-        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, 'approved', ?)
+        VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?)
         """,
         (
             post.content_id, board_local_id, parent_post_id, author_label,
-            payload["subject"], payload["body"], payload["created_at"], post.content_id,
+            payload["subject"], payload["body"], payload["created_at"], initial_status, post.content_id,
         ),
     )
     reindex_post(db, board_local_id, post.content_id)

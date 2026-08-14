@@ -104,6 +104,14 @@ from netbbs.link.events import (
     strict_json_loads,
     verify_file_chunk_descriptor,
 )
+from netbbs.link.enforcement import (
+    LinkPolicyAction,
+    LinkPolicyDecision,
+    decide_event_authorship,
+    decide_node_action,
+    ensure_event_author_subject,
+    ensure_node_subject,
+)
 from netbbs.link.file_transfer import (
     FileTransferError,
     TransferState,
@@ -139,6 +147,7 @@ from netbbs.link.relay_mailbox import (
 )
 from netbbs.link.store import (
     board_event_diff,
+    build_inventory_request,
     channel_event_diff,
     file_area_event_diff,
     save_candidate_descriptor,
@@ -241,6 +250,7 @@ async def persist_accepted_events(
     max_carried_channels: int | None = None,
     max_carried_file_areas: int | None = None,
     max_remote_files_per_area: int | None = None,
+    enforce_trust_policy: bool = False,
 ) -> None:
     """
     Persist and follow up on every content_id `LinkNode.handle_events`
@@ -266,6 +276,8 @@ async def persist_accepted_events(
     for content_id in accepted:
         envelope = node.events[content_id]
         object_type = envelope["envelope"]["object_type"]
+        if enforce_trust_policy:
+            await lane.run(ensure_event_author_subject, envelope)
         # Design doc §9.3/issue #73: board_post/board_post_edit skip
         # the generic save_event dispatch below entirely --
         # materialize_carried_post/_edit each persist the underlying
@@ -275,8 +287,17 @@ async def persist_accepted_events(
         # follow-up (materialize_carried_board's own docstring notes
         # this same gap, not fixed for genesis).
         if object_type == BOARD_POST_OBJECT_TYPE:
+            initial_status = "approved"
+            if enforce_trust_policy:
+                decision = await lane.run(
+                    decide_event_authorship, envelope,
+                    transport_peer_fingerprint=sender_fingerprint,
+                )
+                if decision.requires_approval:
+                    initial_status = "pending"
             await lane.run(
-                materialize_carried_post, BoardPost.from_dict(envelope), sender_fingerprint=sender_fingerprint
+                materialize_carried_post, BoardPost.from_dict(envelope),
+                sender_fingerprint=sender_fingerprint, initial_status=initial_status,
             )
             continue
         elif object_type == BOARD_POST_EDIT_OBJECT_TYPE:
@@ -473,6 +494,7 @@ class LinkServer:
         max_remote_files_per_area: int | None = _DEFAULT_MAX_REMOTE_FILES_PER_AREA,
         max_concurrent_file_transfers_per_peer: int = _DEFAULT_MAX_CONCURRENT_FILE_TRANSFERS_PER_PEER,
         throttle: LinkRequestThrottle | None = None,
+        enforce_trust_policy: bool = False,
     ) -> None:
         self._host = host
         self._port = port
@@ -494,6 +516,7 @@ class LinkServer:
         # a restart harmlessly resets every peer back to zero in flight.
         self._active_transfers_by_peer: dict[str, set[str]] = {}
         self._throttle = throttle
+        self._enforce_trust_policy = enforce_trust_policy
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -508,7 +531,12 @@ class LinkServer:
         app[_LINK_THROTTLE_APP_KEY] = self._throttle
         app.router.add_post(f"{LINK_PATH_PREFIX}/hello", self._handle_hello)
         app.router.add_post(f"{LINK_PATH_PREFIX}/events/{{fingerprint}}", self._handle_events)
-        app.router.add_get(f"{LINK_PATH_PREFIX}/peers", self._handle_peers)
+        app.router.add_post(f"{LINK_PATH_PREFIX}/peers/{{fingerprint}}", self._handle_peers)
+        if not self._enforce_trust_policy:
+            # Compatibility-only route for synthetic/legacy harnesses. The
+            # real runtime enables policy and therefore exposes only the
+            # authenticated POST route above.
+            app.router.add_get(f"{LINK_PATH_PREFIX}/peers", self._handle_peers)
         app.router.add_post(f"{LINK_PATH_PREFIX}/relay-consent/{{fingerprint}}", self._handle_relay_consent)
         app.router.add_post(
             f"{LINK_PATH_PREFIX}/relay-mailbox/{{fingerprint}}/deposit", self._handle_relay_mailbox_deposit
@@ -527,6 +555,18 @@ class LinkServer:
         if self._runner is not None:
             await self._runner.cleanup()
 
+    @staticmethod
+    def _policy_rejection(decision: LinkPolicyDecision) -> web.Response:
+        return web.json_response(
+            {"error": "Link policy rejected this request", "reason_code": decision.reason_code},
+            status=403,
+        )
+
+    async def _decide(self, fingerprint: str, action: LinkPolicyAction) -> LinkPolicyDecision | None:
+        if not self._enforce_trust_policy:
+            return None
+        return await self._lane.run(decide_node_action, fingerprint, action)
+
     async def _handle_hello(self, request: web.Request) -> web.Response:
         try:
             body = await request.json(loads=strict_json_loads)
@@ -539,6 +579,12 @@ class LinkServer:
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
 
+        decision = await self._decide(peer.fingerprint, LinkPolicyAction.HELLO)
+        if decision is not None and not decision.allowed:
+            self._node.peers.pop(peer.fingerprint, None)
+            return self._policy_rejection(decision)
+        if self._enforce_trust_policy:
+            await self._lane.run(ensure_node_subject, peer.fingerprint)
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
 
@@ -548,6 +594,27 @@ class LinkServer:
             raw_events = await request.json(loads=strict_json_loads)
         except ValueError as exc:
             return web.json_response({"error": f"malformed events: {exc}"}, status=400)
+
+        if self._enforce_trust_policy:
+            object_types = {
+                item.get("envelope", {}).get("object_type") for item in raw_events
+                if isinstance(item, dict)
+            }
+            action = (
+                LinkPolicyAction.KEY_LIFECYCLE
+                if object_types and object_types <= {"key_transition"}
+                else LinkPolicyAction.EVENTS
+            )
+            decision = await self._lane.run(decide_node_action, fingerprint, action)
+            if not decision.allowed:
+                return self._policy_rejection(decision)
+            if action != LinkPolicyAction.KEY_LIFECYCLE:
+                for raw in raw_events:
+                    author_decision = await self._lane.run(
+                        decide_event_authorship, raw, transport_peer_fingerprint=fingerprint
+                    )
+                    if not author_decision.allowed:
+                        return self._policy_rejection(author_decision)
 
         try:
             accepted = self._node.handle_events(fingerprint, raw_events)
@@ -562,6 +629,7 @@ class LinkServer:
             max_carried_channels=self._max_carried_channels,
             max_carried_file_areas=self._max_carried_file_areas,
             max_remote_files_per_area=self._max_remote_files_per_area,
+            enforce_trust_policy=self._enforce_trust_policy,
         )
         if accepted:
             # sender.transitions grew -- one updated write, not one per
@@ -623,6 +691,11 @@ class LinkServer:
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=403)
 
+        decision = await self._decide(fingerprint, LinkPolicyAction.INVENTORY)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
+        response_limit = _MAX_EVENTS_PER_REQUEST // (decision.budget_divisor if decision else 1)
+
         # Issue #94: each `*_event_diff` call runs unconditionally, not
         # just when the *request* mentions boards/channels/file areas --
         # each now also returns anything *this* node carries that's
@@ -633,9 +706,9 @@ class LinkServer:
         # Still gated on `remaining > 0`: that's the shared response-size
         # budget, unrelated to whether the request itself was empty.
         board_events, board_truncated = await self._lane.run(
-            board_event_diff, inventory_request.boards, limit=_MAX_EVENTS_PER_REQUEST
+            board_event_diff, inventory_request.boards, limit=response_limit
         )
-        remaining = _MAX_EVENTS_PER_REQUEST - len(board_events)
+        remaining = response_limit - len(board_events)
         if remaining > 0:
             channel_events, channel_truncated = await self._lane.run(
                 channel_event_diff, inventory_request.channels, limit=remaining
@@ -660,11 +733,15 @@ class LinkServer:
             body = await request.json(loads=strict_json_loads)
             pull = TrustPullRequest.from_dict(body)
             self._node.handle_trust_pull_request(fingerprint, pull)
+            decision = await self._decide(fingerprint, LinkPolicyAction.TRUST)
+            if decision is not None and not decision.allowed:
+                return self._policy_rejection(decision)
             objects, more = await self._lane.run(
                 load_trust_object_page,
                 issuer_fingerprint=pull.issuer_fingerprint,
                 after_content_id=pull.after_content_id,
                 limit=pull.limit,
+                revocations_only=pull.revocations_only,
             )
         except (KeyError, TypeError, ValueError, TrustWireError) as exc:
             return web.json_response({"error": f"malformed trust pull: {exc}"}, status=400)
@@ -698,11 +775,33 @@ class LinkServer:
                 {"error": f"{fingerprint} has no completed hello with this node -- refusing"}, status=403
             )
 
+        decision = await self._decide(fingerprint, LinkPolicyAction.FILE)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
+
         try:
             body = await request.json(loads=strict_json_loads)
             chunk_request = FileChunkRequest.from_dict(body)
         except (KeyError, ValueError, TypeError) as exc:
             return web.json_response({"error": f"malformed file chunk request: {exc}"}, status=400)
+
+        if self._enforce_trust_policy:
+            if chunk_request.authorization is None:
+                return web.json_response(
+                    {"error": "authenticated file chunk authorization required"}, status=403
+                )
+            try:
+                self._node.handle_inventory_request(fingerprint, chunk_request.authorization)
+            except LinkProtocolError as exc:
+                return web.json_response({"error": str(exc)}, status=403)
+            if any((
+                chunk_request.authorization.boards,
+                chunk_request.authorization.channels,
+                chunk_request.authorization.file_areas,
+            )):
+                return web.json_response(
+                    {"error": "file chunk authorization must carry an empty inventory"}, status=400
+                )
 
         if not (0 < chunk_request.max_chunk_size <= _MAX_ALLOWED_CHUNK_SIZE_BYTES):
             return web.json_response(
@@ -764,6 +863,19 @@ class LinkServer:
         there is nothing here to verify even if this endpoint wanted to
         gate on it.
         """
+        if self._enforce_trust_policy:
+            fingerprint = request.match_info["fingerprint"]
+            try:
+                body = await request.json(loads=strict_json_loads)
+                signed_request = InventoryRequest.from_dict(body)
+                if signed_request.boards or signed_request.channels or signed_request.file_areas:
+                    raise ValueError("peer-list authorization request must have an empty inventory")
+                self._node.handle_inventory_request(fingerprint, signed_request)
+            except (KeyError, TypeError, ValueError, LinkProtocolError) as exc:
+                return web.json_response({"error": f"invalid peer-list request: {exc}"}, status=403)
+            decision = await self._decide(fingerprint, LinkPolicyAction.PEER_LIST)
+            if decision is not None and not decision.allowed:
+                return self._policy_rejection(decision)
         return web.json_response(self._node.build_peer_list().to_dict())
 
     async def _handle_relay_consent(self, request: web.Request) -> web.Response:
@@ -795,6 +907,10 @@ class LinkServer:
             self._node.handle_relay_consent_request(fingerprint, consent_request)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
+
+        decision = await self._decide(fingerprint, LinkPolicyAction.RELAY)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
 
         accepted = self._relay_serving_enabled and len(self._node.relaying_for) < self._max_relay_clients
         decided_at = utc_now_iso()
@@ -850,6 +966,17 @@ class LinkServer:
                 {"error": f"this node is not currently relaying for {recipient_fingerprint}"}, status=404
             )
 
+        recipient_decision = await self._decide(recipient_fingerprint, LinkPolicyAction.RELAY)
+        if recipient_decision is not None and not recipient_decision.allowed:
+            return self._policy_rejection(recipient_decision)
+        if self._enforce_trust_policy:
+            author_decision = await self._lane.run(
+                decide_event_authorship, message.to_dict(),
+                transport_peer_fingerprint=recipient_fingerprint,
+            )
+            if not author_decision.allowed:
+                return self._policy_rejection(author_decision)
+
         try:
             await self._lane.run(deposit_relay_mailbox_envelope, recipient_fingerprint, message)
         except RelayMailboxFullError as exc:
@@ -883,6 +1010,9 @@ class LinkServer:
             peer = self._node.handle_hello(hello, max_peers=self._max_peers)
         except LinkProtocolError as exc:
             return web.json_response({"error": str(exc)}, status=400)
+        decision = await self._decide(peer.fingerprint, LinkPolicyAction.RELAY)
+        if decision is not None and not decision.allowed:
+            return self._policy_rejection(decision)
         await self._lane.run(save_peer, peer)
 
         envelopes = await self._lane.run(pickup_relay_mailbox_envelopes, peer.fingerprint)
@@ -1198,9 +1328,17 @@ async def fetch_next_file_chunk(
         return transfer
 
     chunk_index = transfer.next_chunk_index
+    authorization = await lane.run(
+        build_inventory_request,
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        responder_fingerprint=remote_file.origin_fingerprint,
+        include_inventory=False,
+    )
     chunk_request = FileChunkRequest(
         transfer_id=transfer.transfer_id, file_id=remote_file.file_id,
         chunk_index=chunk_index, max_chunk_size=transfer.chunk_size,
+        authorization=authorization,
     )
     chunk_bytes, descriptor = await request_file_chunk(node, session, base_url, chunk_request, timeout=timeout)
 
@@ -1285,9 +1423,18 @@ async def request_peer_list(
     be a completed peer after all — same division of responsibility
     `dial_hello`'s own `node.handle_hello` call already has.
     """
-    url = f"{base_url}{LINK_PATH_PREFIX}/peers"
+    url = f"{base_url}{LINK_PATH_PREFIX}/peers/{node.identity.fingerprint}"
+    authorization = await lane.run(
+        build_inventory_request,
+        signing_identity=node.identity.signing_key,
+        requester_fingerprint=node.identity.fingerprint,
+        responder_fingerprint=peer_fingerprint,
+        include_inventory=False,
+    )
     try:
-        async with session.get(url, timeout=ClientTimeout(total=timeout)) as response:
+        async with session.post(
+            url, json=authorization.to_dict(), timeout=ClientTimeout(total=timeout)
+        ) as response:
             if response.status != 200:
                 text = await response.text()
                 raise LinkTransportError(f"peer list request to {url} failed: HTTP {response.status}: {text}")

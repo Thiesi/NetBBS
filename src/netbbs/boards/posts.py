@@ -26,6 +26,7 @@ from netbbs.boards.boards import Board
 from netbbs.boards.content_id import compute_content_id
 from netbbs.boards.limits import MAX_BODY_BYTES, MAX_SUBJECT_BYTES
 from netbbs.config import get_expiry_grace_period_days
+from netbbs.link.enforcement import link_content_visible
 from netbbs.moderation import BoardPermission, has_permission, record_action
 from netbbs.permissions import require_level
 from netbbs.search import reindex_post
@@ -535,7 +536,11 @@ def list_posts_page(
         ).fetchall()
         roots = list(reversed(rows))
 
-    posts = [_resolve_current_version(db, row) for row in roots]
+    posts = [
+        _resolve_current_version(db, row)
+        for row in roots
+        if link_content_visible(db, row["post_id"])
+    ]
 
     if not posts:
         return PostPage(posts=[], has_older=False, has_newer=False)

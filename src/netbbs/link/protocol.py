@@ -394,15 +394,12 @@ class FileChunkRequest:
     same kind of decision `InventoryRequest` also makes: a bookkeeping
     request about what the requester wants next, not durable authored
     content, so it needs no content-addressing or chain semantics of its
-    own. Unlike `InventoryRequest` (issue #106), this one still carries
-    no signature of its own -- there is nothing here for a signature to
-    attest to that the *response*'s signed `FileChunkDescriptor` doesn't
-    already cover, and (unlike an empty inventory request) a chunk
-    request always names a specific already-known `file_id`/`chunk_
-    index`, never "give me everything." A malformed or bogus request
-    costs the responder nothing beyond one wasted lookup, rejected
-    outright (unknown `file_id`, an out-of-range `chunk_index`, or a
-    `max_chunk_size` this node refuses).
+    own. Phase-4 enforcement attaches a fresh signed, empty
+    `InventoryRequest` as authorization. Reusing that request's
+    current-key, responder-binding, freshness, and replay checks means
+    the path fingerprint cannot be spoofed to borrow another peer's
+    policy. The field remains optional in the wire model only for
+    legacy non-enforcing harnesses; production servers require it.
 
     `transfer_id` is deterministic (a content hash of `(file_id,
     requester_fingerprint)`, computed once by the requester) so a
@@ -416,14 +413,18 @@ class FileChunkRequest:
     file_id: str
     chunk_index: int
     max_chunk_size: int
+    authorization: InventoryRequest | None = None
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "transfer_id": self.transfer_id,
             "file_id": self.file_id,
             "chunk_index": self.chunk_index,
             "max_chunk_size": self.max_chunk_size,
         }
+        if self.authorization is not None:
+            result["authorization"] = self.authorization.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> "FileChunkRequest":
@@ -432,6 +433,10 @@ class FileChunkRequest:
             file_id=data["file_id"],
             chunk_index=int(data["chunk_index"]),
             max_chunk_size=int(data["max_chunk_size"]),
+            authorization=(
+                InventoryRequest.from_dict(data["authorization"])
+                if data.get("authorization") is not None else None
+            ),
         )
 
 

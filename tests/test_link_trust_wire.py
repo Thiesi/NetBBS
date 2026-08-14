@@ -232,3 +232,20 @@ def test_pull_pagination_uses_a_stable_content_cursor(db, reporter):
         db, issuer_fingerprint=reporter.fingerprint, after_content_id=cursor, limit=2
     )
     assert len(second) == 1 and not more
+
+
+def test_containment_pull_returns_only_revocations(db, reporter):
+    configure_reporter(db, reporter.fingerprint)
+    original = signal(reporter)
+    ingest_trust_objects(db, [original], now_iso=stamp(NOW))
+    revocation = build_trust_revocation(
+        signing_identity=reporter, issuer_fingerprint=reporter.fingerprint,
+        revocation_id="containment-revocation", revoked_content_id=original.content_id,
+        issued_at=stamp(NOW),
+    )
+    ingest_trust_objects(db, [revocation], now_iso=stamp(NOW))
+    page, more = load_trust_object_page(
+        db, issuer_fingerprint=reporter.fingerprint, revocations_only=True
+    )
+    assert page == [revocation.to_dict()]
+    assert not more

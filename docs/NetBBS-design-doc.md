@@ -2372,7 +2372,8 @@ and ignores unconfigured issuers.
 
 The pull is an authenticated Link request rather than durable content. It
 binds requester, responder, requested issuer, optional last-content-ID cursor,
-page limit, creation time, and a 128-bit nonce under the requester's current
+page limit, creation time, a 128-bit nonce, and a `revocations_only` containment
+flag under the requester's current
 operational signing key. The responder requires a completed hello, matching
 requester/responder identities, a valid signature, a five-minute freshness
 window, and a bounded nonce replay cache. Responses contain only unchanged
@@ -2380,6 +2381,10 @@ stored objects for the requested issuer, ordered by receipt time and content
 ID, plus `more_available`. A carrier therefore gains no authority: the request
 is addressed to the carrier, while every returned object's independent issuer
 signature and local reporter configuration still control admission.
+When a configured reporter is quarantined, ordinary subscription sync stops;
+the receiver may use only `revocations_only=true`, which serves unchanged
+signal/vouch revocation objects and never advances the ordinary subscription
+cursor. A manually blocked reporter receives no containment exchange.
 
 Distinct fingerprints do not prove independence. Automatic policy counts
 locally assigned trust domains:
@@ -2423,6 +2428,26 @@ Manual block is harder: it denies even containment until removed. Existing
 bytes still are not deleted. Rejections and suppression use stable reason codes
 for protocol, diagnostics, and SysOp UI while keeping private reporters, notes,
 and policy configuration undisclosed.
+
+The Link HTTP enforcement point runs only after enough cryptographic parsing to
+attribute a request, but before remotely influenced persistence or service work.
+The normal runtime enables this gate for hello, events, inventory, trust pulls,
+file chunks, relay consent/mailboxes, and peer introduction. Peer-list exchange
+and file-chunk pulls use authenticated POSTs from completed peers; Link v1
+reuses an empty, signed inventory-request authorization envelope so requester,
+responder, freshness, nonce replay protection, and current operational-key
+verification have one existing definition rather than a second near-identical
+request type. The URL fingerprint is routing information, never attribution.
+Probationary inventory responses use one quarter of the established event
+budget. Valid board posts from probationary users enter the local pending
+approval queue; services without an approval projection, including Link mail,
+refuse them with a stable reason code.
+
+Enforcement attributes independently signed content to its author/home node,
+not to a carrier recorded in `link_events.sender_fingerprint`. Current display
+suppression is evaluated from retained signed authorship at read time; changing
+or clearing local policy therefore hides or restores projections without
+rewriting or deleting the accepted event bytes.
 
 ### 12.9 Recovery, partitions, and explainability
 

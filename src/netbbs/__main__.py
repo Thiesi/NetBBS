@@ -280,6 +280,7 @@ async def _start_servers(
                     max_carried_channels=config.link.max_carried_channels,
                     max_carried_file_areas=config.link.max_carried_file_areas,
                     max_remote_files_per_area=config.link.max_remote_files_per_area,
+                    enforce_trust_policy=True,
                     max_concurrent_file_transfers_per_peer=config.link.max_concurrent_file_transfers_per_peer,
                     throttle=_build_link_throttle(config.link),
                 ),
@@ -699,6 +700,7 @@ async def run(
                         max_carried_channels=config.link.max_carried_channels,
                         max_carried_file_areas=config.link.max_carried_file_areas,
                         max_remote_files_per_area=config.link.max_remote_files_per_area,
+                        enforce_trust_policy=True,
                     )
                 )
 

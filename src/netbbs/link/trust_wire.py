@@ -95,6 +95,7 @@ class TrustPullRequest:
     limit: int
     created_at: str
     nonce: str
+    revocations_only: bool
     signature: bytes
 
     @property
@@ -107,6 +108,7 @@ class TrustPullRequest:
             "limit": self.limit,
             "created_at": self.created_at,
             "nonce": self.nonce,
+            "revocations_only": self.revocations_only,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +119,7 @@ class TrustPullRequest:
         keys = {
             "requester_fingerprint", "responder_fingerprint", "issuer_fingerprint",
             "after_content_id", "limit", "created_at", "nonce", "signature",
+            "revocations_only",
         }
         if not isinstance(data, dict) or set(data) != keys:
             raise TrustWireError("invalid trust pull request fields")
@@ -136,6 +139,8 @@ class TrustPullRequest:
             raise TrustWireError("invalid trust pull cursor")
         if not isinstance(request.limit, int) or isinstance(request.limit, bool) or not 1 <= request.limit <= 100:
             raise TrustWireError("trust pull limit must be between 1 and 100")
+        if not isinstance(request.revocations_only, bool):
+            raise TrustWireError("revocations_only must be boolean")
         _timestamp(request.created_at, "created_at")
         if len(request.nonce) != 32:
             raise TrustWireError("trust pull nonce must contain 128 bits of hexadecimal data")
@@ -155,6 +160,7 @@ def build_trust_pull_request(
     responder_fingerprint: str, issuer_fingerprint: str,
     after_content_id: str | None = None, limit: int = MAX_TRUST_OBJECTS_PER_RESPONSE,
     created_at: str | None = None, nonce: str | None = None,
+    revocations_only: bool = False,
 ) -> TrustPullRequest:
     unsigned = TrustPullRequest(
         requester_fingerprint=requester_fingerprint,
@@ -164,6 +170,7 @@ def build_trust_pull_request(
         limit=limit,
         created_at=created_at or utc_now_iso(),
         nonce=nonce or secrets.token_hex(16),
+        revocations_only=revocations_only,
         signature=b"",
     )
     # Reuse from_dict's complete structural validation before signing.
@@ -535,6 +542,7 @@ def ingest_trust_objects(
 def load_trust_object_page(
     db: Database, *, issuer_fingerprint: str, after_content_id: str | None = None,
     limit: int = MAX_TRUST_OBJECTS_PER_RESPONSE,
+    revocations_only: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Return one stable, byte-bounded issuer page suitable for direct or carrier pull."""
     limit = max(1, min(limit, MAX_TRUST_OBJECTS_PER_RESPONSE))
@@ -547,11 +555,16 @@ def load_trust_object_page(
         if row is None:
             raise TrustWireError("unknown trust pull cursor")
         after_received = row[0]
+    type_filter = (
+        "AND object_type IN ('trust_revocation', 'trust_vouch_revocation')"
+        if revocations_only else ""
+    )
     rows = db.connection.execute(
         """SELECT content_id, envelope_json, signature_b64 FROM link_trust_wire_objects
            WHERE issuer_fingerprint = ?
+             {type_filter}
              AND (? IS NULL OR received_at > ? OR (received_at = ? AND content_id > ?))
-           ORDER BY received_at, content_id LIMIT ?""",
+           ORDER BY received_at, content_id LIMIT ?""".format(type_filter=type_filter),
         (issuer_fingerprint, after_content_id, after_received, after_received, after_content_id, limit + 1),
     ).fetchall()
     more = len(rows) > limit

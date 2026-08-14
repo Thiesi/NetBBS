@@ -602,6 +602,7 @@ def build_inventory_request(
     signing_identity: Identity,
     requester_fingerprint: str,
     responder_fingerprint: str,
+    include_inventory: bool = True,
 ) -> InventoryRequest:
     """
     This node's own `InventoryRequest` to send as requester (design doc
@@ -622,12 +623,21 @@ def build_inventory_request(
     for why a responder now requires this instead of answering anyone.
     `responder_fingerprint`, a fresh timestamp, and a random nonce bind
     the signed request to one peer and one short-lived attempt.
+    `include_inventory=False` builds the same authenticated envelope
+    with empty resource maps for another pull route's authorization.
     """
-    boards = {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
-    channels = {channel_id: tuple(_all_channel_events(db, channel_id)) for channel_id in carried_channel_ids(db)}
-    file_areas = {
-        area_id: tuple(_all_file_area_events(db, area_id)) for area_id in carried_file_area_ids(db)
-    }
+    boards = (
+        {board_id: tuple(_all_board_events(db, board_id)) for board_id in carried_board_ids(db)}
+        if include_inventory else {}
+    )
+    channels = (
+        {channel_id: tuple(_all_channel_events(db, channel_id)) for channel_id in carried_channel_ids(db)}
+        if include_inventory else {}
+    )
+    file_areas = (
+        {area_id: tuple(_all_file_area_events(db, area_id)) for area_id in carried_file_area_ids(db)}
+        if include_inventory else {}
+    )
     created_at = utc_now_iso()
     nonce = secrets.token_hex(16)
     signature = sign_inventory_request(

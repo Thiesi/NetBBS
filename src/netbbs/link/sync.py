@@ -144,6 +144,13 @@ from netbbs.link.events import (
     LINK_MESSAGE_OBJECT_TYPE,
     EndpointDescriptor,
 )
+from netbbs.link.enforcement import (
+    decide_event_authorship,
+    decide_node_action,
+    ensure_node_subject,
+    node_transport_state,
+    LinkPolicyAction,
+)
 from netbbs.link.mail import (
     expire_link_message_delivery,
     get_link_mail_acknowledgement,
@@ -176,6 +183,7 @@ from netbbs.link.trust_wire import (
     load_trust_pull_cursor,
     save_trust_pull_cursor,
 )
+from netbbs.link.trust import TrustState
 from netbbs.link.work_items import (
     KIND_LINK_MAIL_ACK,
     KIND_LINK_MAIL_DELIVERY,
@@ -209,6 +217,7 @@ async def run_link_sync(
     max_carried_channels: int | None = None,
     max_carried_file_areas: int | None = None,
     max_remote_files_per_area: int | None = None,
+    enforce_trust_policy: bool = False,
 ) -> None:
     """
     Runs until cancelled: each pass dials every seed in `seeds` (in
@@ -289,6 +298,7 @@ async def run_link_sync(
                 max_carried_boards=max_carried_boards, max_carried_channels=max_carried_channels,
                 max_carried_file_areas=max_carried_file_areas,
                 max_remote_files_per_area=max_remote_files_per_area,
+                enforce_trust_policy=enforce_trust_policy,
             )
             reached_network = reached_network or succeeded
         if not reached_network:
@@ -299,8 +309,13 @@ async def run_link_sync(
             # again. Never a first resort: an operator's explicit seed
             # configuration and a genuinely live supplementary list
             # always take priority when either actually works.
-            await _try_candidate_fallback(node, session, own_hello_provider, lane)
-        await _pull_trust_subscriptions(node, session, lane)
+            await _try_candidate_fallback(
+                node, session, own_hello_provider, lane,
+                enforce_trust_policy=enforce_trust_policy,
+            )
+        await _pull_trust_subscriptions(
+            node, session, lane, enforce_trust_policy=enforce_trust_policy
+        )
         # Issue #58: relay selection/pickup only makes sense
         # for an outgoing-only node -- a full peer is directly dialable
         # by definition, so it has nothing to gain from seeking relays
@@ -316,9 +331,17 @@ async def run_link_sync(
             # only just became deliverable via a freshly-selected relay
             # still gets its own send-via-relay attempt in the same
             # pass, not one whole interval later.
-            await _maintain_relay_selection(node, session, own_hello_provider, lane)
-            await _pickup_relay_mail(node, session, own_hello_provider, lane)
-        await _push_pending_link_mail(node, session, lane)
+            await _maintain_relay_selection(
+                node, session, own_hello_provider, lane,
+                enforce_trust_policy=enforce_trust_policy,
+            )
+            await _pickup_relay_mail(
+                node, session, own_hello_provider, lane,
+                enforce_trust_policy=enforce_trust_policy,
+            )
+        await _push_pending_link_mail(
+            node, session, lane, enforce_trust_policy=enforce_trust_policy
+        )
         if stop_event is None:
             await asyncio.sleep(interval_seconds)
         else:
@@ -343,6 +366,7 @@ async def _sync_one_seed(
     max_carried_channels: int | None = None,
     max_carried_file_areas: int | None = None,
     max_remote_files_per_area: int | None = None,
+    enforce_trust_policy: bool = False,
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -356,6 +380,22 @@ async def _sync_one_seed(
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
 
+    if enforce_trust_policy:
+        await lane.run(ensure_node_subject, seed_peer.fingerprint)
+    peer_state = (
+        await lane.run(node_transport_state, seed_peer.fingerprint)
+        if enforce_trust_policy else TrustState.ESTABLISHED
+    )
+    if peer_state in {TrustState.BLOCKED, TrustState.QUARANTINED}:
+        node.candidate_descriptors.pop(seed_peer.fingerprint, None)
+        node.relays_serving_me.pop(seed_peer.fingerprint, None)
+        node.relaying_for.pop(seed_peer.fingerprint, None)
+        _logger.warning(
+            "Link sync: peer %s is %s; hello containment completed but ordinary sync was skipped",
+            seed_peer.fingerprint, peer_state.value,
+        )
+        return True
+
     own_events = (
         list(node.identity.transitions)
         + await lane.run(load_own_board_events, node.identity.fingerprint)
@@ -364,17 +404,19 @@ async def _sync_one_seed(
         # Design doc §11, issue #89.
         + await lane.run(load_own_file_area_events, node.identity.fingerprint)
     )
-    try:
-        await push_events(node, session, seed_url, own_events)
-    except LinkTransportError as exc:
-        _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
+    if peer_state == TrustState.ESTABLISHED:
+        try:
+            await push_events(node, session, seed_url, own_events)
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not push events to seed %s: %s", seed_url, exc)
 
     # Also ask this seed who else it knows -- feeds the
     # candidate pool `_try_candidate_fallback` (below) draws from.
-    try:
-        await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
-    except LinkTransportError as exc:
-        _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
+    if peer_state == TrustState.ESTABLISHED:
+        try:
+            await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
+        except LinkTransportError as exc:
+            _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 
     # Design doc §8.8, issue #85 (§9.6, issue #87 for channels; §11,
     # issue #93 for file-area catalogues): pull-based catch-up, asked of
@@ -403,8 +445,22 @@ async def _sync_one_seed(
         )
         events, _more_available = await request_inventory(node, session, seed_url, inventory_request)
         if events:
+            allowed_events = []
+            for event in events:
+                if enforce_trust_policy:
+                    decision = await lane.run(
+                        decide_event_authorship, event,
+                        transport_peer_fingerprint=seed_peer.fingerprint,
+                    )
+                    if not decision.allowed:
+                        _logger.warning(
+                            "Link sync: rejected inventory event with reason_code=%s",
+                            decision.reason_code,
+                        )
+                        continue
+                allowed_events.append(event)
             try:
-                accepted = node.handle_events(seed_peer.fingerprint, events)
+                accepted = node.handle_events(seed_peer.fingerprint, allowed_events)
             except LinkProtocolError as exc:
                 _logger.warning(
                     "Link sync: rejected an inventory response from seed %s: %s", seed_url, exc
@@ -416,12 +472,13 @@ async def _sync_one_seed(
                     max_carried_channels=max_carried_channels,
                     max_carried_file_areas=max_carried_file_areas,
                     max_remote_files_per_area=max_remote_files_per_area,
+                    enforce_trust_policy=enforce_trust_policy,
                 )
     except LinkTransportError as exc:
         _logger.warning("Link sync: could not request inventory from seed %s: %s", seed_url, exc)
 
     configured_reporters = await lane.run(list_trusted_reporter_fingerprints)
-    if seed_peer.fingerprint in configured_reporters:
+    if peer_state == TrustState.ESTABLISHED and seed_peer.fingerprint in configured_reporters:
         await _pull_one_trust_reporter(
             node, session, lane, seed_peer.fingerprint, [seed_url]
         )
@@ -430,11 +487,15 @@ async def _sync_one_seed(
 
 
 async def _pull_trust_subscriptions(
-    node: LinkNode, session: ClientSession, lane: DatabaseLane
+    node: LinkNode, session: ClientSession, lane: DatabaseLane,
+    *, enforce_trust_policy: bool = False,
 ) -> None:
     """Pull configured reporters explicitly; trust objects are never flood-gossiped."""
     reporters = await lane.run(list_trusted_reporter_fingerprints)
     for issuer in reporters:
+        state = await lane.run(node_transport_state, issuer) if enforce_trust_policy else TrustState.ESTABLISHED
+        if state == TrustState.BLOCKED or state == TrustState.PROBATIONARY:
+            continue
         peer = node.peers.get(issuer)
         if peer is None:
             _logger.warning("Link trust pull: configured reporter %s has no completed hello", issuer)
@@ -443,7 +504,10 @@ async def _pull_trust_subscriptions(
         if not addresses:
             _logger.warning("Link trust pull: configured reporter %s has no dialable address", issuer)
             continue
-        await _pull_one_trust_reporter(node, session, lane, issuer, addresses)
+        await _pull_one_trust_reporter(
+            node, session, lane, issuer, addresses,
+            revocations_only=state == TrustState.QUARANTINED,
+        )
 
 
 async def _pull_one_trust_reporter(
@@ -453,12 +517,13 @@ async def _pull_one_trust_reporter(
     issuer: str,
     addresses: list[str],
     responder_fingerprint: str | None = None,
+    revocations_only: bool = False,
 ) -> None:
     responder = responder_fingerprint or issuer
     verify_key = node.resolve_peer_signing_key(issuer, "trust object")
     completed = False
     for base_url in addresses:
-        cursor = await lane.run(load_trust_pull_cursor, responder, issuer)
+        cursor = None if revocations_only else await lane.run(load_trust_pull_cursor, responder, issuer)
         try:
             for _page_number in range(_MAX_TRUST_PULL_PAGES_PER_PASS):
                 pull = build_trust_pull_request(
@@ -467,6 +532,7 @@ async def _pull_one_trust_reporter(
                     responder_fingerprint=responder,
                     issuer_fingerprint=issuer,
                     after_content_id=cursor,
+                    revocations_only=revocations_only,
                 )
                 raw_objects, more = await request_trust_objects(node, session, base_url, pull)
                 parsed = [
@@ -478,7 +544,8 @@ async def _pull_one_trust_reporter(
                 if parsed:
                     await lane.run(ingest_trust_objects, parsed)
                     cursor = parsed[-1].content_id
-                    await lane.run(save_trust_pull_cursor, responder, issuer, cursor)
+                    if not revocations_only:
+                        await lane.run(save_trust_pull_cursor, responder, issuer, cursor)
                 if not more:
                     completed = True
                     break
@@ -594,6 +661,7 @@ async def _try_candidate_fallback(
     session: ClientSession,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
+    *, enforce_trust_policy: bool = False,
 ) -> None:
     """
     Resilience path, closing the gap named elsewhere in this module's
@@ -649,7 +717,10 @@ async def _try_candidate_fallback(
             continue
         attempted += 1
         succeeded = await _try_addresses_via(
-            base_urls, lambda url: _sync_one_seed(node, session, url, own_hello_provider, lane)
+            base_urls, lambda url: _sync_one_seed(
+                node, session, url, own_hello_provider, lane,
+                enforce_trust_policy=enforce_trust_policy,
+            )
         )
         await lane.run(record_dial_outcome, fingerprint, succeeded=succeeded)
         if succeeded:
@@ -668,6 +739,8 @@ async def _request_one_relay_consent(
     relay_fingerprint: str,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
+    *,
+    enforce_trust_policy: bool = False,
 ) -> bool:
     """One relay-consent attempt against a single `base_url`, collapsed
     to a bool for `_try_addresses_via`'s own contract. A completed hello
@@ -684,6 +757,18 @@ async def _request_one_relay_consent(
     rest of this pass."""
     try:
         await dial_hello(node, session, base_url, own_hello_provider(), lane)
+        if enforce_trust_policy:
+            await lane.run(ensure_node_subject, relay_fingerprint)
+            decision = await lane.run(
+                decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
+            )
+            if not decision.allowed:
+                _logger.info(
+                    "Link sync: relay candidate %s rejected by policy (%s)",
+                    relay_fingerprint,
+                    decision.reason_code,
+                )
+                return False
         response = await request_relay_consent(node, session, base_url, relay_fingerprint, lane)
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning(
@@ -698,6 +783,7 @@ async def _maintain_relay_selection(
     session: ClientSession,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
+    *, enforce_trust_policy: bool = False,
 ) -> None:
     """
     Issue #58's automatic relay selection. `run_link_sync`
@@ -740,7 +826,13 @@ async def _maintain_relay_selection(
         await _try_addresses_via(
             base_urls,
             lambda url: _request_one_relay_consent(
-                node, session, url, candidate_fingerprint, own_hello_provider, lane
+                node,
+                session,
+                url,
+                candidate_fingerprint,
+                own_hello_provider,
+                lane,
+                enforce_trust_policy=enforce_trust_policy,
             ),
         )
 
@@ -766,6 +858,7 @@ async def _pickup_relay_mail(
     session: ClientSession,
     own_hello_provider: Callable[[], HelloMessage],
     lane: DatabaseLane,
+    *, enforce_trust_policy: bool = False,
 ) -> None:
     """
     Issue #58 (widened by issue #94 to the full `link_message`-family
@@ -804,6 +897,10 @@ async def _pickup_relay_mail(
     from this caller.
     """
     for relay_fingerprint in list(node.relays_serving_me):
+        if enforce_trust_policy and not (await lane.run(
+            decide_node_action, relay_fingerprint, LinkPolicyAction.RELAY
+        )).allowed:
+            continue
         base_urls = _candidate_dialable_addresses(node, relay_fingerprint)
         if not base_urls:
             continue
@@ -835,6 +932,7 @@ async def _pickup_relay_mail(
                     lane, node, accepted, sender_fingerprint=claimed_sender,
                     max_carried_boards=None, max_carried_channels=None,
                     max_carried_file_areas=None, max_remote_files_per_area=None,
+                    enforce_trust_policy=enforce_trust_policy,
                 )
                 await lane.run(save_peer, node.peers[claimed_sender])
 
@@ -869,7 +967,10 @@ async def _push_one(node: LinkNode, session: ClientSession, base_url: str, event
         return False
 
 
-async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: DatabaseLane) -> None:
+async def _push_pending_link_mail(
+    node: LinkNode, session: ClientSession, lane: DatabaseLane,
+    *, enforce_trust_policy: bool = False,
+) -> None:
     """
     Attempts every currently-due `link_mail_delivery`/`link_mail_ack`
     work item (design doc §13.7, issue #60's second operational slice)
@@ -917,6 +1018,11 @@ async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: 
             )
 
         target_fingerprint = work_item.target_fingerprint
+        if enforce_trust_policy and not (await lane.run(
+            decide_node_action, target_fingerprint, LinkPolicyAction.LINK_MAIL
+        )).allowed:
+            await lane.run(record_failure, work_item, error="link policy refused target")
+            continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
         if base_urls:
@@ -952,6 +1058,11 @@ async def _push_pending_link_mail(node: LinkNode, session: ClientSession, lane: 
             continue
 
         target_fingerprint = work_item.target_fingerprint
+        if enforce_trust_policy and not (await lane.run(
+            decide_node_action, target_fingerprint, LinkPolicyAction.LINK_MAIL
+        )).allowed:
+            await lane.run(record_failure, work_item, error="link policy refused target")
+            continue
         base_urls = _dialable_addresses_for_peer(node, target_fingerprint)
         delivered = False
         if base_urls:

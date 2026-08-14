@@ -385,8 +385,19 @@ def _active_evidence(
               ON rs.reporter_fingerprint = r.fingerprint
              AND rs.dimension = s.dimension AND rs.category = s.category
             JOIN link_trust_domains AS d ON d.domain_id = r.domain_id
+            LEFT JOIN link_trust_subjects AS reporter_subject
+              ON reporter_subject.subject_kind = 'node'
+             AND reporter_subject.node_fingerprint = r.fingerprint
             WHERE s.subject_id = ? AND s.dimension = ?
               AND s.revoked_at IS NULL AND s.effective_expires_at > ?
+              AND (
+                reporter_subject.subject_id IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM link_trust_effective_states AS reporter_state
+                  WHERE reporter_state.subject_id = reporter_subject.subject_id
+                    AND reporter_state.dimension IN ('identity_integrity', 'resource_behavior')
+                    AND reporter_state.state != 'established'
+                )
+              )
             """,
             (subject_id, dimension.value, now_value),
         ).fetchall()
@@ -404,8 +415,19 @@ def _vouch_domains(
         FROM link_trust_vouches AS v
         JOIN link_trust_reporters AS r ON r.fingerprint = v.issuer_fingerprint
         JOIN link_trust_domains AS d ON d.domain_id = r.domain_id
+        LEFT JOIN link_trust_subjects AS reporter_subject
+          ON reporter_subject.subject_kind = 'node'
+         AND reporter_subject.node_fingerprint = r.fingerprint
         WHERE v.subject_id = ? AND v.revoked_at IS NULL
           AND v.effective_expires_at > ? AND r.{permission} = 1
+          AND (
+            reporter_subject.subject_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM link_trust_effective_states AS reporter_state
+              WHERE reporter_state.subject_id = reporter_subject.subject_id
+                AND reporter_state.dimension IN ('identity_integrity', 'resource_behavior')
+                AND reporter_state.state != 'established'
+            )
+          )
         """,
         (subject.subject_id, now_value),
     ).fetchall()
@@ -444,8 +466,19 @@ def _ordinary_state(
         JOIN link_trust_reporter_scopes AS rs
           ON rs.reporter_fingerprint = r.fingerprint
          AND rs.dimension = s.dimension AND rs.category = s.category
+        LEFT JOIN link_trust_subjects AS reporter_subject
+          ON reporter_subject.subject_kind = 'node'
+         AND reporter_subject.node_fingerprint = r.fingerprint
         WHERE s.subject_id = ? AND s.revoked_at IS NULL
           AND s.effective_expires_at > ?
+          AND (
+            reporter_subject.subject_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM link_trust_effective_states AS reporter_state
+              WHERE reporter_state.subject_id = reporter_subject.subject_id
+                AND reporter_state.dimension IN ('identity_integrity', 'resource_behavior')
+                AND reporter_state.state != 'established'
+            )
+          )
         """,
         (subject.subject_id, now_value),
     ).fetchall()
