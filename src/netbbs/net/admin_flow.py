@@ -731,12 +731,12 @@ async def _draw_admin_menu(
 
     pending_total = state["pending_users"] + state["pending_posts"] + state["pending_files"]
     health.append(colored("ATTENTION", fg_color=LABEL_COLOR, bold=True))
-    if pending_total > 0:
-        att_gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
-        health.append(f"  {counts_row([('Moderation', pending_total)])} pending")
-        health.append(f"  {att_gauge}")
-    else:
-        health.append("  " + counts_row([("Moderation", pending_total)]) + " pending")
+    # No gauge here: there's no real moderation-queue capacity to measure
+    # against (same reasoning as the active-session count above) -- a
+    # `max(10, pending_total)` denominator would just make the bar
+    # permanently "full" past 10 pending items, same bug as the session
+    # gauge this file already dropped for.
+    health.append("  " + counts_row([("Moderation", pending_total)]) + " pending")
     health.extend(
         _wrap_counts_panel(
             "    ",
@@ -6816,12 +6816,15 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
                 )
             )
             if pending_total > 0:
-                gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
+                # No gauge here: there's no real moderation-queue capacity
+                # to measure against -- a `max(10, pending_total)`
+                # denominator would just make the bar permanently "full"
+                # past 10 pending items, the same fake-capacity bug this
+                # file already dropped for the active-session gauge.
                 panel.append(
                     colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True)
                     + counts_row([("Pending review", pending_total)])
                 )
-                panel.append(f"  {gauge}")
             else:
                 gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="capacity")
                 panel.append(
@@ -6844,8 +6847,8 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
                 colored("MODERATION QUEUE", fg_color=LABEL_COLOR, bold=True),
             ]
             if pending_total > 0:
-                gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
-                panel.append("  " + counts_row([("Pending review", pending_total)]) + f"  {gauge}")
+                # No gauge here -- see the compact branch above for why.
+                panel.append("  " + counts_row([("Pending review", pending_total)]))
                 panel.append("    " + counts_row([("Posts", stats["pending_posts"]), ("Files", stats["pending_files"])]))
             else:
                 gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="capacity")

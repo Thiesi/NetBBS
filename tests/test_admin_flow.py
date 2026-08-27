@@ -5905,3 +5905,44 @@ def test_operations_menu_reloads_after_outbox_action(db, lane, sysop, monkeypatc
     )
 
     assert len(calls) == 3
+
+
+# -- follow-up: the moderation-queue gauges had the same fake-capacity
+# bug as the active-session gauge (PR #197 review, finding #2) -- a
+# `max(10, pending_total)` denominator meant the bar was permanently
+# "full" past 10 pending items. Fixed by dropping the gauge for a
+# non-empty queue, same as the session count; the empty-queue gauge
+# (already covered by test_empty_moderation_queue_gauge_reads_as_
+# healthy_not_error) is unaffected since its denominator was never
+# derived from the current value.
+
+
+def _pending_post(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True)
+    return create_post(db, board, alice, "Hello", "Body text")
+
+
+def test_landing_page_attention_panel_has_no_fake_capacity_gauge_when_pending(db, lane, sysop):
+    post = _pending_post(db, sysop)
+    assert post.status == "pending"
+
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Moderation: 1 pending" in text
+    assert "█" not in text and "░" not in text and "#" not in text
+
+
+def test_content_menu_moderation_queue_has_no_fake_capacity_gauge_when_pending(db, lane, sysop):
+    post = _pending_post(db, sysop)
+    assert post.status == "pending"
+
+    session = FakeSession(["c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Pending review: 1" in text
+    assert "█" not in text and "░" not in text and "#" not in text
