@@ -392,6 +392,7 @@ from netbbs.rendering import (
     telemetry_gauge,
     truncate,
     visible_width,
+    wrap_to_width,
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -409,16 +410,37 @@ from netbbs.timeutil import (
 _logger = logging.getLogger(__name__)
 
 
-def _menu_row(entries: list[MenuEntry], description_level: str, *, width: int, height: int) -> str:
+def _menu_row(
+    entries: list[MenuEntry], description_level: str, *, width: int, height: int, degraded: bool = False
+) -> str:
     """Shared off/on branch for every hotkey-row menu in this module
     (issue #160's rollout, commit 1b1da33's own established pattern):
     `menu_grid` always renders one entry per line, even with
     descriptions off, so it isn't a byte-for-byte substitute for
     `action_bar`'s packed row at that level -- keep `action_bar` there
     so no screen's height changes for a caller who hasn't opted into
-    descriptions, and only switch to `menu_grid` once they have."""
+    descriptions, and only switch to `menu_grid` once they have.
+
+    `degraded=True` means the caller (`_degrade_description_level`)
+    already forced `description_level` to `"off"` before it ever reached
+    here, because its own telemetry panel ate into the available height
+    -- a real degrade of the SysOp's actual preference, not the level
+    they asked for. `menu_grid` has its own notice for exactly this
+    situation (`descriptions_collapsed`), but only when *it* detects the
+    squeeze; since `description_level == "off"` takes the `action_bar`
+    branch instead and never reaches `menu_grid` at all, that notice is
+    unreachable here and the degrade would otherwise happen silently
+    (PR #197 review). Append the equivalent notice ourselves, styled the
+    same way `menu_grid` styles its own."""
     if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
+        result = action_bar([e.label for e in entries], width=width)
+        if degraded:
+            notice_lines = [
+                colored(wrapped, fg_color=MUTED_COLOR)
+                for wrapped in wrap_to_width("Descriptions hidden -- terminal too short to show them.", width)
+            ]
+            result = f"{result}\r\n\r\n" + "\r\n".join(notice_lines)
+        return result
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
 
 
@@ -473,6 +495,26 @@ def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: i
     return lines
 
 
+def _wrap_panel_sentence(text: str, *, prefix: str, width: int, unicode_style: bool) -> list[str]:
+    """Word-wrap a plain-text panel sentence (not a `counts_row` pair --
+    see `_wrap_counts_panel` for those, and `_fit` above for the one
+    case -- an arbitrary-length backup/update-check message -- where a
+    hard cut is the right call instead) across as many lines as a boxed
+    panel's real `width` can hold, `prefix` (e.g. two leading spaces)
+    budgeted on every line so a multi-line sentence stays indented
+    consistently with its own first line. Wrapping, not cutting,
+    because these are short, fixed, known-in-advance phrases -- chopping
+    one off mid-word to fit a 40-column terminal would lose real
+    information for no reason a cut on unpredictable external text
+    doesn't have. An unboxed ASCII-fallback panel has no width
+    constraint to wrap against, so `text` passes through as a single
+    line unchanged there."""
+    if not unicode_style:
+        return [text]
+    budget = max(1, width - visible_width(prefix))
+    return wrap_to_width(text, budget) or [text]
+
+
 async def _write_panel(
     session: Session, panel: list[str], *, unicode_style: bool, header_color: int | tuple[int, int, int]
 ) -> None:
@@ -499,25 +541,31 @@ def _degrade_description_level(
     entry_count: int,
     terminal_width: int,
     terminal_height: int,
-) -> tuple[str, int]:
+) -> tuple[str, int, bool]:
     """Shrink a sub-console's description verbosity -- never its listed
     entries -- when a framed telemetry panel above the menu would
     otherwise push it past the terminal's visible height. Identical
     height-reservation math the three telemetry-panel sub-consoles
     (Users/Operations/Content) each need; factored out so a future fix
     to it lands in one place instead of three. Returns `(effective_
-    description_level, available_menu_height)`."""
+    description_level, available_menu_height, degraded)` -- `degraded`
+    is True only when a non-"off" request was forced to "off" here, so
+    `_menu_row` can still show the caller a "Descriptions hidden" notice
+    even though this degrade happens before `menu_grid`'s own equivalent
+    check ever runs (PR #197 review)."""
     panel_height = (len(panel) + 2) if (panel and unicode_style) else len(panel)
     reserved = panel_height + 4
     available_menu_height = max(1, terminal_height - reserved)
 
     effective_desc_level = description_level
+    degraded = False
     if effective_desc_level != "off":
         columns = 2 if terminal_width >= 72 else 1
         needed_rows = -(-entry_count // columns) * 2
         if needed_rows > available_menu_height:
             effective_desc_level = "off"
-    return effective_desc_level, available_menu_height
+            degraded = True
+    return effective_desc_level, available_menu_height, degraded
 
 
 async def admin_menu(
@@ -697,7 +745,11 @@ async def _draw_admin_menu(
         # has no natural gauge; show the number alone.
         health.append(f"  {counts_row([('Active sessions', active_sessions)])}")
     else:
-        health.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+        standalone_lines = _wrap_panel_sentence(
+            "Live node controls unavailable in standalone mode.",
+            prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+        )
+        health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
 
     if link_context is None:
         health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
@@ -957,6 +1009,17 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
                 + colored("Active ratio: ", fg_color=METADATA_COLOR)
                 + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health")
             )
+            if stats["pending"] > 0:
+                # The non-compact branch below already warns on pending
+                # registrations -- compact mode silently dropped the same
+                # signal entirely (PR #197 review), not just the glyph
+                # (that was finding #9, fixed separately).
+                warning_prefix = "⚠ " if unicode_style else "! "
+                warning_lines = _wrap_panel_sentence(
+                    f"{warning_prefix}{stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
+                    prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                )
+                panel.extend("  " + colored(line, fg_color=WARNING_COLOR, bold=True) for line in warning_lines)
         else:
             panel = [
                 colored("ACCOUNTS", fg_color=LABEL_COLOR, bold=True),
@@ -997,7 +1060,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
         MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
-    effective_desc_level, available_menu_height = _degrade_description_level(
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
         panel=panel, unicode_style=unicode_style, description_level=description_level,
         entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
     )
@@ -1008,6 +1071,7 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
             effective_desc_level,
             width=session.terminal_width,
             height=available_menu_height,
+            degraded=desc_degraded,
         )
     )
     await session.write("Choice: ")
@@ -1095,7 +1159,11 @@ async def _operations_menu(
                     )
                 else:
                     panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge)
-                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+                    standalone_lines = _wrap_panel_sentence(
+                        "Live node controls unavailable in standalone mode.",
+                        prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                    )
+                    panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
 
                 if link_context is None:
                     panel.append(colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
@@ -1164,13 +1232,16 @@ async def _operations_menu(
             ])
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
 
-        effective_desc_level, available_menu_height = _degrade_description_level(
+        effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
             panel=panel, unicode_style=unicode_style, description_level=description_level,
             entry_count=len(options), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
         )
 
         await session.write_line(
-            _menu_row(options, effective_desc_level, width=session.terminal_width, height=available_menu_height)
+            _menu_row(
+                options, effective_desc_level, width=session.terminal_width,
+                height=available_menu_height, degraded=desc_degraded,
+            )
         )
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
@@ -6867,7 +6938,7 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
         MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
     ]
-    effective_desc_level, available_menu_height = _degrade_description_level(
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
         panel=panel, unicode_style=unicode_style, description_level=description_level,
         entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
     )
@@ -6878,6 +6949,7 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
             effective_desc_level,
             width=session.terminal_width,
             height=available_menu_height,
+            degraded=desc_degraded,
         )
     )
     await session.write("Choice: ")

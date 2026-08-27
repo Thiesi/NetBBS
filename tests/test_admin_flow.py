@@ -5792,13 +5792,64 @@ def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
     in standalone mode" explanation the non-compact layout already
     shows when `node_controls` is `None` (PR #197 review, finding #6) --
     it used to render only the bare NODE HEALTH badge with no
-    explanation at a narrow terminal."""
+    explanation at a narrow terminal. At this width the full sentence no
+    longer fits one boxed line, so it's word-wrapped across two (a
+    follow-up Codex finding on top of #6 itself: the first fix restored
+    the message but let it overflow its own frame) -- check both halves
+    landed and the box border still fits, rather than the old one-line
+    substring check."""
     session = FakeSession(["o", "b", "b"])
     session.terminal_width = 40
     session.terminal_height = 24
-    _run(session, lane, sysop)  # _run passes no node_controls
+    _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "Live node controls unavailable in standalone mode." in text
+    assert "Live node controls unavailable in" in text
+    assert "standalone mode." in text
+    _assert_double_frame_rows_match_border(text, "operations_compact_standalone_warning")
+
+
+def test_users_compact_panel_surfaces_pending_registration_warning(db, lane, sysop):
+    """Compact mode dropped the pending-registration warning outright --
+    not just its `⚠` glyph (finding #9, a separate fix) -- since the
+    `if stats["pending"] > 0:` block that builds it lived only inside
+    the non-compact panel branch. A SysOp on the classic 80x24 terminal
+    (still `compact` here, since compact triggers below height 28) or
+    the 40x24 floor never saw the signal at all (Codex follow-up on top
+    of the PR #197 review's original 10 findings)."""
+    create_user(db, "pending-one", password="hunter2", pending_approval=True)
+
+    session = FakeSession(["u", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "registration" in text and "awaiting review" in text
+    _assert_double_frame_rows_match_border(text, "users_compact_pending_warning")
+
+
+def test_menu_shows_notice_when_a_telemetry_panel_forces_descriptions_off(db, lane, sysop):
+    """`_degrade_description_level` can force `description_level` to
+    `"off"` on its own (a telemetry panel's height budget leaving no
+    room for descriptions) before `menu_grid` -- which has its own,
+    separate "Descriptions hidden" notice -- ever runs; `_menu_row`
+    takes the `action_bar` branch once the level is already `"off"`, so
+    `menu_grid`'s notice logic was unreachable and a SysOp who asked for
+    descriptions saw them silently vanish with no explanation (Codex
+    follow-up on top of the PR #197 review's original 10 findings)."""
+    from netbbs.net.menu_description_preference import set_menu_description_level
+    set_menu_description_level(db, sysop, "detailed")
+
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    # Word-wrapped at this width, same as menu_grid's own equivalent
+    # notice would be -- check both halves landed rather than the full
+    # sentence as one unbroken substring.
+    assert "Descriptions hidden --" in text
+    assert "terminal too" in text
+    assert "short to show them." in text
 
 
 def test_empty_moderation_queue_gauge_reads_as_healthy_not_error(db, lane, sysop):
