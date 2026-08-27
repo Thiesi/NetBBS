@@ -3067,3 +3067,42 @@ from a `Path` -- now or later -- needs `.as_posix()`, never `str()`.
 This is a real latent trap for a SysOp manually typing a Windows path
 into this field too, not just this call site, but that's out of scope
 of what prefilling could fix and is unchanged here.
+
+A one-shot status message (a validation error, a "not applied"/"loaded
+and enabled" confirmation) that a screen prints and then falls straight
+through to its caller's own redraw is invisible whenever the current
+session has `redraw_in_place` on (`netbbs.net.redraw_preference`,
+default for every account created since issue #160's follow-up): the
+very next redraw's `screen_title(..., clear=True)` wipes the terminal
+before the message can be read, so the feature *looks* broken even
+though the underlying logic ran correctly (dogfood report against
+`netbbs.net.admin_flow`'s welcome-banner/masthead "From disk" pickers --
+their empty-directory and reject-and-loop-back messages had exactly this
+bug, `_preview_welcome_banner_screen` had already independently
+discovered and fixed the same class of bug for its own preview output).
+Any code path that prints a message and then returns/continues into a
+redraw -- not just an explicit `return` to the caller, but also a
+`continue` back into `pick_item`'s own next `_render()` -- needs its own
+`colored("Press any key to continue...", ...)` + `session.read_key()`
+pause first. `FakeSession`-based tests don't catch this on their own
+(they only assert substrings landed in the accumulated output, with no
+concept of "cleared" or "still on screen"); a test exercising a newly-
+paused path needs an extra scripted keystroke (this codebase's own
+convention is a trailing `"x"`) to dismiss the pause, or it will consume
+whatever key was meant for the next real action instead.
+
+`netbbs.net.help_overlay.show_help`'s `unicode_style` boxed-frame mode
+drew full-width top/bottom borders (`╭──...─╮` / `╰───╯`) but never
+closed its content rows with a matching right-hand `│` -- `inner_width`
+only ever reserved columns for the left margin, none for a closing
+border, so every boxed help screen was open on that side (dogfood
+report). Fixed by reserving one more column (`width - 4` instead of
+`width - 3`) and appending the border after each (padded) line. Kept
+that reservation to exactly one column, not two: the natural "mirror the
+left margin's two spaces" fix (`width - 5`, space-then-border) shifts
+existing callers' already-tuned wrap points further than necessary and
+broke an existing test whose expected help text happened to wrap right
+at the old boundary (`test_create_channel_ctrl_h_shows_real_help_text_
+for_every_field`) -- any future change to this box's margins should
+re-run the full suite, not just this module's own tests, since wrapped
+text elsewhere may be relying on the current exact `inner_width`.

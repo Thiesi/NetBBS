@@ -60,16 +60,23 @@ async def show_help(
         await session.read_key()
         return
     width = min(getattr(session, "terminal_width", 80), 78)
-    inner_width = max(1, width - 3)
+    # Dogfood report: content rows never closed with their own right-
+    # hand "│", leaving every boxed help screen open on that side --
+    # `inner_width` used to reserve room only for the left margin ("│  ",
+    # 3 columns), none at all for a closing border. Reserve one more
+    # column for it so every row actually totals `width` columns,
+    # matching the top/bottom rule -- no padding space in front of the
+    # closing "│" (unlike the left margin's own two spaces) to keep this
+    # one column narrower, minimizing how many already-tuned wrap points
+    # in existing callers' help text this shifts.
+    inner_width = max(1, width - 4)
     rule_len = max(0, width - len(title) - 6)
     hdr = colored(f"╭── {title} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
     await session.write_line(f"\r\n{hdr}")
     for line in lines:
-        if visible_width(line) <= inner_width:
-            await session.write_line(f"│  {line}")
-        else:
-            for wrapped in wrap_to_width(line, inner_width):
-                await session.write_line(f"│  {wrapped}")
+        for wrapped in ([line] if visible_width(line) <= inner_width else wrap_to_width(line, inner_width)):
+            pad = " " * max(0, inner_width - visible_width(wrapped))
+            await session.write_line(f"│  {wrapped}{pad}│")
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
     await session.write_line(footer)
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))

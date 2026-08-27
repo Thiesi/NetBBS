@@ -4871,6 +4871,7 @@ async def _draw_banners_and_mastheads_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -4913,6 +4914,14 @@ async def _welcome_banner_menu(session: Session, lane: DatabaseLane, actor: User
         elif choice == "f":
             await session.write_line("")
             await _welcome_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            header_color = await lane.run(effective_header_color_256)
+            await _banner_help_screen(
+                session, path=await lane.run(banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_welcome_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -4957,6 +4966,7 @@ async def _draw_welcome_banner_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5126,6 +5136,12 @@ async def _welcome_banner_gallery_screen(
 
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the welcome banner now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            # Dogfood report: without this pause, redraw_in_place (the
+            # default for new accounts) clears this message the instant
+            # the loop re-enters pick_item's own next redraw -- same fix
+            # `_preview_welcome_banner_screen` already established.
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5137,6 +5153,8 @@ async def _welcome_banner_gallery_screen(
 
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
 
@@ -5148,6 +5166,41 @@ def _browsable_ans_files(directory: Path, *, exclude: Path) -> list[Path]:
     caller-typed path, so there's nothing for a `..`-style escape to
     reach in the first place (issue #170's own locked design)."""
     return sorted(p for p in directory.glob("*.ans") if p.is_file() and p != exclude)
+
+
+async def _banner_help_screen(
+    session: Session, *, path: Path, has_gallery: bool,
+    header_color: int | tuple[int, int, int], unicode_style: bool,
+) -> None:
+    """Ctrl-H's own content for every banner/masthead customization menu
+    in this section (dogfood feature request) -- one shared listing
+    rather than a per-screen copy, matching `netbbs.net.picker.
+    _show_picker_help`'s own precedent for reusable on-demand help
+    within a single module.
+
+    A SysOp with shell/SFTP access had no way to discover *where* a
+    hand-authored `.ans` file actually has to go: this screen's own
+    status line shows the current target path, but never the "why", and
+    [F]rom disk (where it exists) only ever lists files already sitting
+    in that same directory -- easy to try once, find nothing, and
+    conclude the feature is broken (a real dogfood report) rather than
+    realizing the file just isn't in the right place yet."""
+    lines = [
+        colored("Placing your own .ans file", fg_color=header_color, bold=True),
+        "  Upload or save it (e.g. via SFTP/SCP) as exactly this path, then [E]nable:",
+        f"  {path}",
+        "  Or save it under any other name in that same directory and pick it up "
+        "with [F]rom disk instead of overwriting this one directly.",
+    ]
+    if has_gallery:
+        lines += [
+            "",
+            colored("Gallery vs. From disk", fg_color=header_color, bold=True),
+            "  [G]allery applies one of NetBBS's own bundled sample designs -- no "
+            "filesystem access to this node needed. [F]rom disk loads a file you've "
+            "already placed here yourself.",
+        ]
+    await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
 
 
 async def _welcome_banner_filesystem_screen(
@@ -5189,6 +5242,14 @@ async def _welcome_banner_filesystem_screen(
             f"\r\nNo other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
+        # Dogfood report: this message used to fall straight through to
+        # the menu's own immediate redraw, which -- with redraw_in_place
+        # on (the default for new accounts) -- cleared it before it could
+        # actually be read, making the whole screen look like a no-op.
+        # Same present-then-wait fix `_preview_welcome_banner_screen`
+        # already established for the identical reason.
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
     last_stable_id: int | None = None
@@ -5217,6 +5278,11 @@ async def _welcome_banner_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_BANNER_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
+            # Same present-then-wait fix as the empty-list message above --
+            # otherwise `pick_item`'s own next redraw clears this before
+            # it can be read.
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         data = path.read_bytes()
@@ -5225,6 +5291,8 @@ async def _welcome_banner_filesystem_screen(
 
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the welcome banner now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5236,6 +5304,8 @@ async def _welcome_banner_filesystem_screen(
 
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
 
@@ -5279,6 +5349,14 @@ async def _main_menu_banner_menu(session: Session, lane: DatabaseLane, actor: Us
         elif choice == "f":
             await session.write_line("")
             await _main_menu_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            header_color = await lane.run(effective_header_color_256)
+            await _banner_help_screen(
+                session, path=await lane.run(main_menu_banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_main_menu_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -5330,6 +5408,7 @@ async def _draw_main_menu_banner_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5467,6 +5546,8 @@ async def _main_menu_banner_gallery_screen(
 
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the masthead now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5478,6 +5559,8 @@ async def _main_menu_banner_gallery_screen(
 
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
 
@@ -5500,6 +5583,8 @@ async def _main_menu_banner_filesystem_screen(
             f"\r\nNo other .ans files found in {directory}. Place one there "
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
     last_stable_id: int | None = None
@@ -5528,6 +5613,8 @@ async def _main_menu_banner_filesystem_screen(
                 f"{path.name} is {size} bytes, over the {MAX_MASTHEAD_SIZE_BYTES} byte "
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         data = path.read_bytes()
@@ -5536,6 +5623,8 @@ async def _main_menu_banner_filesystem_screen(
 
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the masthead now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5547,6 +5636,8 @@ async def _main_menu_banner_filesystem_screen(
 
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
         return
 
 
@@ -5555,11 +5646,14 @@ async def _main_menu_banner_filesystem_screen(
 # Welcome banner plus the three session-point banners added by issue
 # #177 (logoff, new-account before/after), all four independent
 # singletons on the same mechanism (colocated .ans file, node_config
-# enabled flag, size cap, silent fallback). No [G]allery/[F]rom disk for
-# the three #177 banners -- those depend on a curated preset library
-# (issue #169's bundled samples) that doesn't exist for these yet;
-# preview/enable/disable/edit alone already covers their own acceptance
-# criteria.
+# enabled flag, size cap, silent fallback). The three #177 banners
+# originally shipped with no [G]allery/[F]rom disk -- issue #169's own
+# curated preset library didn't extend to them yet, so preview/enable/
+# disable/edit alone covered their acceptance criteria. Dogfood follow-
+# up: closed that gap by reusing `MAIN_MENU_BANNER_PRESETS` for these
+# three too, rather than standing up a third dedicated library -- the
+# samples are already generic compact banner strips, not anything
+# main-menu-specific.
 
 
 async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -5624,6 +5718,7 @@ async def _draw_banners_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5658,6 +5753,21 @@ async def _logoff_banner_menu(session: Session, lane: DatabaseLane, actor: User)
         elif choice == "i":
             await session.write_line("")
             await _edit_logoff_banner_screen(session, lane, actor)
+            await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _logoff_banner_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _logoff_banner_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(logoff_banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_logoff_banner_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -5694,6 +5804,8 @@ async def _draw_logoff_banner_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -5701,6 +5813,7 @@ async def _draw_logoff_banner_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5778,6 +5891,136 @@ async def _edit_logoff_banner_screen(session: Session, lane: DatabaseLane, actor
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _logoff_banner_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Dogfood follow-up to issue #177: this banner used to ship with
+    only Preview/Enable/Disable/Edit -- unlike the welcome banner/
+    main-menu masthead, it had no curated preset library of its own to
+    draw a Gallery from at the time. Reusing `MAIN_MENU_BANNER_PRESETS`
+    now closes that gap without inventing a third library: these are
+    already generic compact banner strips, just as suited to a logoff
+    moment as to the main menu."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="Logoff banner gallery",
+            empty_message="No bundled banner samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the logoff banner now?", default=False):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = logoff_banner_path(db)
+            path.write_bytes(data)
+            set_logoff_banner_enabled(db, True)
+            record_action(db, actor=actor, action="apply_logoff_banner_preset", detail=f"{preset.key} -> {path}")
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _logoff_banner_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `logoff_banner_path` instead."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = logoff_banner_path(db).parent
+        return _browsable_ans_files(directory, exclude=logoff_banner_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="Logoff banner -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_LOGOFF_BANNER_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_LOGOFF_BANNER_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the logoff banner now?", default=False):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = logoff_banner_path(db)
+            target.write_bytes(data)
+            set_logoff_banner_enabled(db, True)
+            record_action(db, actor=actor, action="load_logoff_banner_from_file", detail=f"{path} -> {target}")
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
 # -- new-account banner (before signup) ------------------------------------
 
 
@@ -5809,6 +6052,21 @@ async def _new_account_banner_before_menu(session: Session, lane: DatabaseLane, 
         elif choice == "i":
             await session.write_line("")
             await _edit_new_account_banner_before_screen(session, lane, actor)
+            await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _new_account_banner_before_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _new_account_banner_before_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(new_account_banner_before_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_new_account_banner_before_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -5848,6 +6106,8 @@ async def _draw_new_account_banner_before_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -5936,6 +6196,138 @@ async def _edit_new_account_banner_before_screen(session: Session, lane: Databas
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _new_account_banner_before_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same reasoning as `_logoff_banner_gallery_screen` -- dogfood
+    follow-up to issue #177, reusing `MAIN_MENU_BANNER_PRESETS` rather
+    than a bespoke library for this screen."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="New-account (before) banner gallery",
+            empty_message="No bundled banner samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(
+            session, f"\r\nApply {preset.name!r} as the new-account (before) banner now?", default=False
+        ):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = new_account_banner_before_path(db)
+            path.write_bytes(data)
+            set_new_account_banner_before_enabled(db, True)
+            record_action(
+                db, actor=actor, action="apply_new_account_banner_before_preset", detail=f"{preset.key} -> {path}"
+            )
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _new_account_banner_before_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `new_account_banner_before_path` instead."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = new_account_banner_before_path(db).parent
+        return _browsable_ans_files(directory, exclude=new_account_banner_before_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="New-account (before) banner -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (before) banner now?", default=False):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = new_account_banner_before_path(db)
+            target.write_bytes(data)
+            set_new_account_banner_before_enabled(db, True)
+            record_action(
+                db, actor=actor, action="load_new_account_banner_before_from_file", detail=f"{path} -> {target}"
+            )
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
 # -- new-account banner (after signup) -------------------------------------
 
 
@@ -5967,6 +6359,21 @@ async def _new_account_banner_after_menu(session: Session, lane: DatabaseLane, a
         elif choice == "i":
             await session.write_line("")
             await _edit_new_account_banner_after_screen(session, lane, actor)
+            await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _new_account_banner_after_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _new_account_banner_after_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(new_account_banner_after_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_new_account_banner_after_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -6006,6 +6413,8 @@ async def _draw_new_account_banner_after_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
@@ -6013,6 +6422,7 @@ async def _draw_new_account_banner_after_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -6094,6 +6504,138 @@ async def _edit_new_account_banner_after_screen(session: Session, lane: Database
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _new_account_banner_after_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same reasoning as `_logoff_banner_gallery_screen` -- dogfood
+    follow-up to issue #177, reusing `MAIN_MENU_BANNER_PRESETS` rather
+    than a bespoke library for this screen."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="New-account (after) banner gallery",
+            empty_message="No bundled banner samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(
+            session, f"\r\nApply {preset.name!r} as the new-account (after) banner now?", default=False
+        ):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = new_account_banner_after_path(db)
+            path.write_bytes(data)
+            set_new_account_banner_after_enabled(db, True)
+            record_action(
+                db, actor=actor, action="apply_new_account_banner_after_preset", detail=f"{preset.key} -> {path}"
+            )
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _new_account_banner_after_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `new_account_banner_after_path` instead."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = new_account_banner_after_path(db).parent
+        return _browsable_ans_files(directory, exclude=new_account_banner_after_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="New-account (after) banner -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (after) banner now?", default=False):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = new_account_banner_after_path(db)
+            target.write_bytes(data)
+            set_new_account_banner_after_enabled(db, True)
+            record_action(
+                db, actor=actor, action="load_new_account_banner_after_from_file", detail=f"{path} -> {target}"
+            )
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
 # -- mastheads (issue #178) -----------------------------------------------
 #
 # Main-menu masthead (issue #161) plus the three section mastheads added
@@ -6165,6 +6707,7 @@ async def _draw_mastheads_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -6199,6 +6742,21 @@ async def _board_list_masthead_menu(session: Session, lane: DatabaseLane, actor:
         elif choice == "i":
             await session.write_line("")
             await _edit_board_list_masthead_screen(session, lane, actor)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _board_list_masthead_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _board_list_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(board_list_banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_board_list_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -6235,6 +6793,8 @@ async def _draw_board_list_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -6242,6 +6802,7 @@ async def _draw_board_list_masthead_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -6317,6 +6878,140 @@ async def _edit_board_list_masthead_screen(session: Session, lane: DatabaseLane,
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _board_list_masthead_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Dogfood follow-up to issue #176: this masthead used to ship with
+    only Preview/Enable/Disable/Edit, unlike the welcome banner/main-menu
+    masthead's own Gallery+From-disk pair (issue #169/#170) -- reusing
+    `MAIN_MENU_BANNER_PRESETS` rather than a bespoke library for this
+    screen, since these are already generic compact masthead strips (not
+    anything main-menu-specific), and a second curated set of samples
+    just for this one screen would be pure duplication for no visible
+    difference. Same decline/apply/re-highlight shape as
+    `_main_menu_banner_gallery_screen`."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="Board list masthead gallery",
+            empty_message="No bundled masthead samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the board list masthead now?", default=False):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = board_list_banner_path(db)
+            path.write_bytes(data)
+            set_board_list_banner_enabled(db, True)
+            record_action(db, actor=actor, action="apply_board_list_banner_preset", detail=f"{preset.key} -> {path}")
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _board_list_masthead_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `board_list_banner_path` instead -- see that
+    function's own docstring for the locked design (browsable root,
+    copy-not-reference load semantics, validate-before-copy)."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = board_list_banner_path(db).parent
+        return _browsable_ans_files(directory, exclude=board_list_banner_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="Board list masthead -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_BOARD_LIST_BANNER_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_BOARD_LIST_BANNER_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the board list masthead now?", default=False):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = board_list_banner_path(db)
+            target.write_bytes(data)
+            set_board_list_banner_enabled(db, True)
+            record_action(db, actor=actor, action="load_board_list_banner_from_file", detail=f"{path} -> {target}")
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
 # -- file area masthead ----------------------------------------------------
 
 
@@ -6348,6 +7043,21 @@ async def _file_area_masthead_menu(session: Session, lane: DatabaseLane, actor: 
         elif choice == "i":
             await session.write_line("")
             await _edit_file_area_masthead_screen(session, lane, actor)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _file_area_masthead_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _file_area_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(file_area_banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_file_area_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -6384,6 +7094,8 @@ async def _draw_file_area_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -6466,6 +7178,132 @@ async def _edit_file_area_masthead_screen(session: Session, lane: DatabaseLane, 
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _file_area_masthead_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same reasoning as `_board_list_masthead_gallery_screen` -- dogfood
+    follow-up to issue #176, reusing `MAIN_MENU_BANNER_PRESETS` rather
+    than a bespoke library for this screen."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="File area masthead gallery",
+            empty_message="No bundled masthead samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the file area masthead now?", default=False):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = file_area_banner_path(db)
+            path.write_bytes(data)
+            set_file_area_banner_enabled(db, True)
+            record_action(db, actor=actor, action="apply_file_area_banner_preset", detail=f"{preset.key} -> {path}")
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _file_area_masthead_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `file_area_banner_path` instead."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = file_area_banner_path(db).parent
+        return _browsable_ans_files(directory, exclude=file_area_banner_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="File area masthead -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_FILE_AREA_BANNER_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_FILE_AREA_BANNER_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the file area masthead now?", default=False):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = file_area_banner_path(db)
+            target.write_bytes(data)
+            set_file_area_banner_enabled(db, True)
+            record_action(db, actor=actor, action="load_file_area_banner_from_file", detail=f"{path} -> {target}")
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
 # -- chat channel picker masthead -------------------------------------------
 
 
@@ -6497,6 +7335,21 @@ async def _chat_channel_picker_masthead_menu(session: Session, lane: DatabaseLan
         elif choice == "i":
             await session.write_line("")
             await _edit_chat_channel_picker_masthead_screen(session, lane, actor)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "g":
+            await session.write_line("")
+            await _chat_channel_picker_masthead_gallery_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "f":
+            await session.write_line("")
+            await _chat_channel_picker_masthead_filesystem_screen(session, lane, actor, description_level, redraw_in_place, unicode_style, collapsed)
+            await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_help_screen(
+                session, path=await lane.run(chat_channel_picker_banner_path), has_gallery=True,
+                header_color=header_color, unicode_style=unicode_style,
+            )
             await _draw_chat_channel_picker_masthead_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -6533,6 +7386,8 @@ async def _draw_chat_channel_picker_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
+                MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
+                MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
@@ -6617,6 +7472,140 @@ async def _edit_chat_channel_picker_masthead_screen(session: Session, lane: Data
     path.write_bytes(result)
     await lane.run(record_action, actor=actor, action="edit_chat_channel_picker_banner", detail=str(path))
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
+
+
+async def _chat_channel_picker_masthead_gallery_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same reasoning as `_board_list_masthead_gallery_screen` -- dogfood
+    follow-up to issue #176, reusing `MAIN_MENU_BANNER_PRESETS` rather
+    than a bespoke library for this screen."""
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(MAIN_MENU_BANNER_PRESETS, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            description_of=lambda pair: f"{pair[1].depth} -- {pair[1].description}",
+            title="Chat channel picker masthead gallery",
+            empty_message="No bundled masthead samples.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        preset = selection[1]
+        data = load_main_menu_banner_preset(preset)
+        await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(
+            session, f"\r\nApply {preset.name!r} as the chat channel picker masthead now?", default=False
+        ):
+            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            path = chat_channel_picker_banner_path(db)
+            path.write_bytes(data)
+            set_chat_channel_picker_banner_enabled(db, True)
+            record_action(
+                db, actor=actor, action="apply_chat_channel_picker_banner_preset", detail=f"{preset.key} -> {path}"
+            )
+            return path
+
+        path = await lane.run(_apply)
+        await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+
+async def _chat_channel_picker_masthead_filesystem_screen(
+    session: Session, lane: DatabaseLane, actor: User, description_level: str,
+    redraw_in_place: bool, unicode_style: bool, collapsed: bool,
+) -> None:
+    """Same load-from-disk screen as `_main_menu_banner_filesystem_screen`
+    (issue #170), against `chat_channel_picker_banner_path` instead."""
+
+    def _list(db: Database) -> tuple[list[Path], Path]:
+        directory = chat_channel_picker_banner_path(db).parent
+        return _browsable_ans_files(directory, exclude=chat_channel_picker_banner_path(db)), directory
+
+    files, directory = await lane.run(_list)
+    if not files:
+        await session.write_line(colored(
+            f"\r\nNo other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
+        ))
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
+
+    last_stable_id: int | None = None
+    while True:
+        selection = await pick_item(
+            session,
+            list(enumerate(files, start=1)),
+            name_of=lambda pair: pair[1].name,
+            stable_id_of=lambda pair: pair[0],
+            title="Chat channel picker masthead -- load from disk",
+            empty_message="No other .ans files found.",
+            description_level=description_level,
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            start_stable_id=last_stable_id,
+        )
+        if selection is None:
+            return
+        last_stable_id = selection[0]
+        path = selection[1]
+
+        size = path.stat().st_size
+        if size > MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES:
+            await session.write_line(colored(
+                f"{path.name} is {size} bytes, over the {MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES} byte "
+                f"limit -- not loading.", fg_color=MUTED_COLOR,
+            ))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        data = path.read_bytes()
+        await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
+        await session.write_line(decode_ansi_bytes(data) + RESET)
+
+        if not await prompt_yes_no(
+            session, f"\r\nLoad {path.name!r} as the chat channel picker masthead now?", default=False
+        ):
+            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_key()
+            continue
+
+        def _apply(db: Database) -> Path:
+            target = chat_channel_picker_banner_path(db)
+            target.write_bytes(data)
+            set_chat_channel_picker_banner_enabled(db, True)
+            record_action(
+                db, actor=actor, action="load_chat_channel_picker_banner_from_file", detail=f"{path} -> {target}"
+            )
+            return target
+
+        target = await lane.run(_apply)
+        await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
+        await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        await session.read_key()
+        return
 
 
 # -- node colors (issue #162) ------------------------------------------

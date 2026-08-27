@@ -143,33 +143,35 @@ def _default_welcome_banner(db: Database, *, truecolor: bool) -> str:
     # the rainbow theme, but the "║" bars down each side of every row in
     # between stayed flat HEADER_COLOR (cyan) -- a single box-drawing
     # character has no internal width for gradient_text's own per-
-    # character gradient to run across, so instead of leaving it flat,
-    # each row's own pair of bars takes one color from the *same*
-    # "rainbow" gradient positioned by how far down the banner that row
-    # sits (row 0 of 3 at the top, row 3 at the bottom) -- a vertical
-    # continuation of the same rainbow the horizontal borders already
-    # use, always on regardless of a SysOp's own header-color override,
+    # character gradient to run across. Dogfood follow-up correction: an
+    # earlier version of this fix swept the bar color top-to-bottom by
+    # row instead, which wasn't what was actually being asked for -- the
+    # visible effect callers actually see is the *horizontal* rainbow
+    # culminating in red on the left edge and purple on the right, so
+    # each side's own bar takes that same edge's endpoint color (t=0.0
+    # for the left column, t=1.0 for the right) and holds it for every
+    # row, rather than varying per row -- a vertical continuation of
+    # each side's own corner, not an independent top-to-bottom sweep.
+    # Always on regardless of a SysOp's own header-color override,
     # matching the border/wordmark's own established "always rainbow"
     # precedent right next to it (the flat `header` color below still
     # governs everything else on these rows -- the padding and text,
     # never the borders themselves).
-    _last_bar_row = 3
-
-    def _bar(row: int) -> str:
-        return colored("║", fg_color=gradient_color("rainbow", row / _last_bar_row, truecolor=True), bold=True)
+    left_bar = colored("║", fg_color=gradient_color("rainbow", 0.0, truecolor=True), bold=True)
+    right_bar = colored("║", fg_color=gradient_color("rainbow", 1.0, truecolor=True), bold=True)
 
     welcome_line = (
-        _bar(1) + colored("                      ", fg_color=header, bold=True)
+        left_bar + colored("                      ", fg_color=header, bold=True)
         + wordmark
-        + colored("                     ", fg_color=header, bold=True) + _bar(1)
+        + colored("                     ", fg_color=header, bold=True) + right_bar
     )
-    blank_top = _bar(0) + colored(" " * 54, fg_color=header, bold=True) + _bar(0)
+    blank_top = left_bar + colored(" " * 54, fg_color=header, bold=True) + right_bar
     tagline = (
-        _bar(2)
+        left_bar
         + colored("        conversations across independent nodes        ", fg_color=header, bold=True)
-        + _bar(2)
+        + right_bar
     )
-    blank_bottom = _bar(3) + colored(" " * 54, fg_color=header, bold=True) + _bar(3)
+    blank_bottom = left_bar + colored(" " * 54, fg_color=header, bold=True) + right_bar
     subtitle = (
         colored("  NetBBS Link", fg_color=accent_override or _DEFAULT_ACCENT_RGB, bold=True)
         + colored("  ›  private experimental federation", fg_color=header, bold=True)

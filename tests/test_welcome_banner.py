@@ -140,19 +140,28 @@ def test_truecolor_variant_still_ends_with_reset(db):
 def test_truecolor_variant_colors_the_vertical_bars_not_just_the_borders(db):
     """Dogfood report: the top/bottom borders and wordmark already
     carried the rainbow gradient, but the "|" bars down each side of
-    every row in between stayed flat HEADER_COLOR cyan. Each of the
-    four bar rows must now show a genuinely different color -- a
-    vertical continuation of the same rainbow, not a second flat color
-    replacing the first."""
+    every row in between stayed flat HEADER_COLOR cyan.
+
+    Dogfood follow-up correction: an earlier fix swept the bar color
+    top-to-bottom by row instead of what was actually asked for -- each
+    side's bar should pick up that same side's own endpoint color from
+    the *horizontal* rainbow the borders already use (red on the left,
+    purple on the right), held constant down every row, not varied row
+    by row. So every row's left bar must match every other row's left
+    bar, every row's right bar must match every other row's right bar,
+    and the two sides must differ from each other."""
+    from netbbs.rendering import colored
+    from netbbs.rendering.gradient import gradient_color
+
     result = load_welcome_banner(db, truecolor=True)
     bar_rows = [line for line in result.split("\r\n") if "║" in line]  # "|" box-drawing char
     assert len(bar_rows) == 4
-    first_colors = []
+    left_bar = colored("║", fg_color=gradient_color("rainbow", 0.0, truecolor=True), bold=True)
+    right_bar = colored("║", fg_color=gradient_color("rainbow", 1.0, truecolor=True), bold=True)
+    assert left_bar != right_bar
     for line in bar_rows:
-        match = re.match(r"(\x1b\[1m\x1b\[38;2;\d+;\d+;\d+m)", line)
-        assert match is not None
-        first_colors.append(match.group(1))
-    assert len(set(first_colors)) == 4  # all four rows genuinely distinct
+        assert line.startswith(left_bar)
+        assert line.endswith(right_bar)
 
 
 def test_truecolor_has_no_effect_on_a_custom_ans_banner(db):

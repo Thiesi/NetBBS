@@ -183,6 +183,8 @@ from netbbs.rendering import (
     set_scroll_region,
     status_badge,
     truncate,
+    visible_width,
+    wrap_to_width,
 )
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
@@ -1325,9 +1327,27 @@ async def _handle_help(ctx: ChatCommandContext, args: str) -> None:
 
     await ctx.session.write_line(colored("Available commands:", fg_color=MUTED_COLOR, bold=True))
     visible_names = await ctx.lane.run(_visible_names)
+    width = getattr(ctx.session, "terminal_width", 80)
     for name in visible_names:
         syntax, description = _COMMAND_INFO[name]
-        await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
+        # Dogfood report: with ~29 commands, several `syntax - description`
+        # lines run past an 80-column terminal and wrap raggedly client-
+        # side. Word-wrap the plain composite text ourselves instead --
+        # `wrap_to_width` isn't ANSI-safe (`netbbs.net.help_overlay`'s own
+        # documented constraint), so wrapping happens on the plain string
+        # first, and only the syntax prefix on the first physical line (the
+        # one case guaranteed to still start with it) gets colored back in.
+        plain = f"{syntax} - {description}"
+        if visible_width(plain) <= width:
+            await ctx.session.write_line(f"{colored(syntax, fg_color=MUTED_COLOR, bold=True)} - {description}")
+            continue
+        for i, wrapped in enumerate(wrap_to_width(plain, width)):
+            if i == 0 and wrapped.startswith(syntax):
+                await ctx.session.write_line(
+                    colored(syntax, fg_color=MUTED_COLOR, bold=True) + wrapped[len(syntax):]
+                )
+            else:
+                await ctx.session.write_line(wrapped)
 
 
 async def _dispatch_command(ctx: ChatCommandContext, line: str) -> ChatAction | None:
