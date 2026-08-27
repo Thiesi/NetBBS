@@ -912,6 +912,53 @@ async def read_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> s
         return char
 
 
+async def read_any_key(source: ByteSource, write: WriteFunc, echo: bool = True) -> str:
+    """
+    Wait for literally one keystroke -- Enter included -- and return.
+
+    Dogfood report: every "Press any key to continue..." pause in this
+    codebase (`netbbs.net.help_overlay.show_help` and its many
+    `admin_flow` siblings) calls `read_key` above to wait for the
+    dismissal. `read_key`'s own CR/LF-skip is exactly correct for a
+    hotkey menu -- Enter alone has no meaning as a choice there -- but
+    that same skip means Enter silently does *nothing* at a "press any
+    key" pause, arguably the single most natural key to reach for. This
+    function is `read_key`'s sibling for that different context: no key
+    is treated as meaningless here, and the return value carries no
+    reliable meaning of its own (every real caller discards it) -- it
+    exists only so this can share `read_key`'s call shape.
+
+    Still drains a full escape sequence after ESC and an optional paired
+    LF/NUL after a bare CR (the same helpers `read_key`/`read_editor_key`
+    already rely on for this), so an arrow-key press or a CRLF pair
+    doesn't leak a stray byte into whatever this screen redraws into
+    next.
+    """
+    while True:
+        b = await _read_byte(source)
+        if b is None:
+            continue  # pure transport-level action, no data produced
+
+        if b == _CR:
+            await _consume_optional_lf_or_nul(source)
+            return "\r"
+        if b == _ESC:
+            await _read_escape_sequence(source)
+            return "\x1b"
+        if b < 0x20 or b == _DEL:
+            return chr(b)
+
+        if b < 0x80:
+            char = chr(b)
+        else:
+            char = await _read_utf8_continuation(source, b)
+            if char is None:
+                continue  # malformed/interrupted multi-byte sequence -- keep waiting for a real key
+
+        await write(char if echo else "*")
+        return char
+
+
 class EditorKeyKind(Enum):
     """Design doc -- welcome banner: the structured key-event
     vocabulary a full-screen editor (`netbbs.net.ansi_editor`) needs,

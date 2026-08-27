@@ -34,6 +34,9 @@ class FakeSession:
         except StopIteration as exc:
             raise AssertionError("ran out of scripted keys") from exc
 
+    async def read_any_key(self, **kwargs) -> str:
+        return await self.read_key(**kwargs)
+
 
 def _text(session: FakeSession) -> str:
     return "".join(session.written)

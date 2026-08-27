@@ -5021,7 +5021,7 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
     # present-then-wait shape `netbbs.net.help_overlay.show_help`
     # already uses for the identical reason.
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -5141,7 +5141,7 @@ async def _welcome_banner_gallery_screen(
             # the loop re-enters pick_item's own next redraw -- same fix
             # `_preview_welcome_banner_screen` already established.
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5154,7 +5154,7 @@ async def _welcome_banner_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -5249,7 +5249,7 @@ async def _welcome_banner_filesystem_screen(
         # Same present-then-wait fix `_preview_welcome_banner_screen`
         # already established for the identical reason.
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -5282,7 +5282,7 @@ async def _welcome_banner_filesystem_screen(
             # otherwise `pick_item`'s own next redraw clears this before
             # it can be read.
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -5292,7 +5292,7 @@ async def _welcome_banner_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the welcome banner now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5305,7 +5305,7 @@ async def _welcome_banner_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -5445,7 +5445,7 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
     # wait exists -- without it, redraw_in_place clears this preview
     # before it can actually be read.
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -5547,7 +5547,7 @@ async def _main_menu_banner_gallery_screen(
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the masthead now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5560,7 +5560,7 @@ async def _main_menu_banner_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -5584,7 +5584,7 @@ async def _main_menu_banner_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -5614,7 +5614,7 @@ async def _main_menu_banner_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -5624,7 +5624,7 @@ async def _main_menu_banner_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the masthead now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5637,7 +5637,7 @@ async def _main_menu_banner_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -5829,7 +5829,7 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
             )
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -5929,7 +5929,7 @@ async def _logoff_banner_gallery_screen(
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the logoff banner now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -5942,7 +5942,7 @@ async def _logoff_banner_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -5964,7 +5964,7 @@ async def _logoff_banner_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -5994,7 +5994,7 @@ async def _logoff_banner_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -6004,7 +6004,7 @@ async def _logoff_banner_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the logoff banner now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6017,7 +6017,7 @@ async def _logoff_banner_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6134,7 +6134,7 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
             )
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -6232,7 +6232,7 @@ async def _new_account_banner_before_gallery_screen(
         ):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6247,7 +6247,7 @@ async def _new_account_banner_before_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6269,7 +6269,7 @@ async def _new_account_banner_before_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -6299,7 +6299,7 @@ async def _new_account_banner_before_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -6309,7 +6309,7 @@ async def _new_account_banner_before_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (before) banner now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6324,7 +6324,7 @@ async def _new_account_banner_before_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6442,7 +6442,7 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
             )
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -6540,7 +6540,7 @@ async def _new_account_banner_after_gallery_screen(
         ):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6555,7 +6555,7 @@ async def _new_account_banner_after_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6577,7 +6577,7 @@ async def _new_account_banner_after_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -6607,7 +6607,7 @@ async def _new_account_banner_after_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -6617,7 +6617,7 @@ async def _new_account_banner_after_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (after) banner now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6632,7 +6632,7 @@ async def _new_account_banner_after_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6816,7 +6816,7 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -6918,7 +6918,7 @@ async def _board_list_masthead_gallery_screen(
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the board list masthead now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -6931,7 +6931,7 @@ async def _board_list_masthead_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -6955,7 +6955,7 @@ async def _board_list_masthead_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -6985,7 +6985,7 @@ async def _board_list_masthead_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -6995,7 +6995,7 @@ async def _board_list_masthead_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the board list masthead now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -7008,7 +7008,7 @@ async def _board_list_masthead_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -7116,7 +7116,7 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -7212,7 +7212,7 @@ async def _file_area_masthead_gallery_screen(
         if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the file area masthead now?", default=False):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -7225,7 +7225,7 @@ async def _file_area_masthead_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -7247,7 +7247,7 @@ async def _file_area_masthead_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -7277,7 +7277,7 @@ async def _file_area_masthead_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -7287,7 +7287,7 @@ async def _file_area_masthead_filesystem_screen(
         if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the file area masthead now?", default=False):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -7300,7 +7300,7 @@ async def _file_area_masthead_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -7412,7 +7412,7 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
             colored(f"(no masthead -- enabled={status.enabled}, file exists={status.exists})", fg_color=MUTED_COLOR)
         )
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
 
 
 async def _enable_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
@@ -7510,7 +7510,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         ):
             await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -7525,7 +7525,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         path = await lane.run(_apply)
         await session.write_line(f"Applied and enabled. Saved to {path}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 
@@ -7547,7 +7547,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
             f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
         ))
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
     last_stable_id: int | None = None
@@ -7577,7 +7577,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
                 f"limit -- not loading.", fg_color=MUTED_COLOR,
             ))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         data = path.read_bytes()
@@ -7589,7 +7589,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
         ):
             await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
             await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_key()
+            await session.read_any_key()
             continue
 
         def _apply(db: Database) -> Path:
@@ -7604,7 +7604,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
         target = await lane.run(_apply)
         await session.write_line(f"Loaded and enabled. Saved to {target}. Use [P]review to verify it looks right.")
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
 
 

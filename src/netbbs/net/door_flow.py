@@ -130,5 +130,5 @@ async def _report_door_result(session: Session, door: Door, result: DoorRunResul
         message = f"Left {door.name}."
     await session.write_line(colored(f"\r\n{message}", fg_color=MUTED_COLOR))
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()
     return True

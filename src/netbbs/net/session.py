@@ -242,6 +242,23 @@ class Session(ABC):
         after that.
         """
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        """
+        Wait for literally one keystroke — Enter included — to dismiss a
+        "Press any key to continue..." pause (dogfood report: `read_key`
+        deliberately treats CR/LF as meaningless noise, correct for a
+        hotkey menu but not for this different context, where Enter is
+        arguably the single most natural key to reach for).
+
+        Concrete, not abstract, with a `read_key`-delegating default —
+        every existing `Session` subclass (every real transport's own
+        test double included) keeps working unchanged; a transport
+        overrides this only where it actually implements character-mode
+        input itself (see `netbbs.net.telnet`'s own override, which
+        routes to `netbbs.net.char_input.read_any_key`).
+        """
+        return await self.read_key(echo=echo)
+
     @abstractmethod
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
         """

@@ -3106,3 +3106,33 @@ at the old boundary (`test_create_channel_ctrl_h_shows_real_help_text_
 for_every_field`) -- any future change to this box's margins should
 re-run the full suite, not just this module's own tests, since wrapped
 text elsewhere may be relying on the current exact `inner_width`.
+
+`netbbs.net.char_input.read_key` (and every real transport's
+`Session.read_key`) deliberately treats CR/LF as meaningless noise and
+keeps reading past it -- correct for its actual purpose, a hotkey menu
+where Enter alone selects nothing -- but every "Press any key to
+continue..." pause in the codebase (`netbbs.net.help_overlay.show_help`
+and ~60 `admin_flow`/`chat_flow`/`login_flow`/`door_flow` siblings) was
+also calling `read_key` for its dismissal read, meaning Enter -- probably
+the single most reached-for key -- silently did nothing there (dogfood
+report). `FakeSession`-based tests could never have caught this: every
+test double's own `read_key` just pops the next scripted string
+unconditionally, with no concept of CR/LF being special, so this class
+of bug is invisible to the whole existing test suite by construction.
+Fixed with a sibling primitive, `read_any_key` (`char_input.py`,
+`Session.read_any_key`, overridden per-transport in `telnet.py`/
+`ssh.py`/`web.py`), that treats every byte including CR/LF/Backspace/
+Delete as a valid, immediately-returned dismissal -- `read_key` itself
+is completely unchanged, so no existing hotkey-menu behavior is at risk.
+`Session.read_any_key` has a *concrete*, non-abstract default that
+delegates to `self.read_key(...)` -- this is why the fix needed zero
+changes in ~51 of the ~53 `FakeSession`-shaped test doubles across the
+suite (anything subclassing the real `Session` ABC inherits the
+default automatically); the two exceptions
+(`tests/test_last_sessions_screen.py`, `tests/test_composition.py`)
+don't subclass `Session` at all and needed the same two-line delegating
+override added by hand. Any *new* freestanding `Session`-shaped test
+double (not subclassing `Session`) will need the same one-line
+addition if it ever exercises a "press any key" pause -- check for this
+specifically if a similar `AttributeError: ... has no attribute
+'read_any_key'` shows up after adding one.

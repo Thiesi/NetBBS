@@ -57,7 +57,7 @@ async def show_help(
         for line in lines:
             await session.write_line(line)
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-        await session.read_key()
+        await session.read_any_key()
         return
     width = min(getattr(session, "terminal_width", 80), 78)
     # Dogfood report: content rows never closed with their own right-
@@ -80,4 +80,4 @@ async def show_help(
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
     await session.write_line(footer)
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+    await session.read_any_key()

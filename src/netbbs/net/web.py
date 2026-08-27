@@ -556,6 +556,28 @@ class WebSession(Session):
             await self.write(char if echo else "*")
             return char
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        """See the `Session.read_any_key` docstring: unlike `read_key`
+        above, Enter/Backspace/Delete/any other control byte dismiss
+        immediately here instead of being skipped -- a "press any key to
+        continue" pause needs literally any key, not just a hotkey-menu
+        selection. Consumes a paired LF after a bare CR the same way
+        `discard_buffered_enter` below does, so xterm.js's own
+        single-event `"Y\\r"`-style delivery doesn't leak a trailing LF
+        into whatever redraws next."""
+        char = await self._read_char()
+        if char == _CR:
+            try:
+                continuation = await asyncio.wait_for(self._read_item(), timeout=0.05)
+            except asyncio.TimeoutError:
+                return char
+            if not (isinstance(continuation, str) and continuation == _LF):
+                self._pushed_back_item = continuation
+            return char
+        if ord(char) >= 0x20 and char != _DEL:
+            await self.write(char if echo else "*")
+        return char
+
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> EditorKey:
         """
         See the `Session.read_editor_key` docstring. Built directly on

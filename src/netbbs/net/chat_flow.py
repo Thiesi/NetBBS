@@ -3723,7 +3723,7 @@ async def _chat_loop(
                 await session.write(
                     reset_scroll_region() + "\r\n" + colored("Press any key to continue...", fg_color=MUTED_COLOR)
                 )
-                await session.read_key()
+                await session.read_any_key()
             except SessionClosedError:
                 pass
         return outcome or _Quit()
@@ -4125,7 +4125,7 @@ async def run_direct_chat_loop(
                 await session.write(
                     reset_scroll_region() + "\r\n" + colored("Press any key to continue...", fg_color=MUTED_COLOR)
                 )
-                await session.read_key()
+                await session.read_any_key()
             except SessionClosedError:
                 pass
     finally:

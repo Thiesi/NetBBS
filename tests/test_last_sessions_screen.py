@@ -60,6 +60,9 @@ class FakeSession:
             raise AssertionError("FakeSession ran out of scripted input (read_key)")
         return self._inputs.pop(0)
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        return await self.read_key(echo=echo)
+
 
 def _written_text(session: FakeSession) -> str:
     return "".join(session.written)

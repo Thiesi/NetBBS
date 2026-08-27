@@ -250,6 +250,11 @@ class TelnetSession(Session):
         """
         return await char_input.read_key(self, self.write, echo)
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        """See the `Session.read_any_key` docstring — the actual logic
+        lives in `netbbs.net.char_input.read_any_key`."""
+        return await char_input.read_any_key(self, self.write, echo)
+
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> char_input.EditorKey:
         """See the `Session.read_editor_key` docstring — the actual
         logic lives in `netbbs.net.char_input.read_editor_key`."""

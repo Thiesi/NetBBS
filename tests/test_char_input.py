@@ -26,6 +26,7 @@ from netbbs.net.char_input import (
     EditorKeyKind,
     discard_buffered_enter,
     discard_buffered_input,
+    read_any_key,
     read_editor_key,
     read_key,
     read_line,
@@ -386,6 +387,96 @@ def test_read_line_still_discards_ctrl_c_with_no_special_meaning():
 
     line = asyncio.run(scenario())
     assert line == "abc"
+
+
+# -- read_any_key: "press any key to continue" needs Enter to count too --
+# -- (dogfood report: read_key's own CR/LF-skip above, correct for a -----
+# -- hotkey menu, silently ate Enter at every "Press any key to ----------
+# -- continue..." pause in the codebase too) ------------------------------
+
+
+def test_read_any_key_returns_immediately_on_bare_cr():
+    async def scenario():
+        source = FakeByteSource(b"\r")
+        writer = Writer()
+        return await read_any_key(source, writer)
+
+    key = asyncio.run(scenario())
+    assert key == "\r"
+
+
+def test_read_any_key_returns_immediately_on_bare_lf():
+    async def scenario():
+        source = FakeByteSource(b"\n")
+        writer = Writer()
+        return await read_any_key(source, writer)
+
+    key = asyncio.run(scenario())
+    assert key == "\n"
+
+
+def test_read_any_key_consumes_a_paired_lf_after_cr_without_leaking_it():
+    """A real Enter keypress often arrives as CRLF -- this must consume
+    both bytes, not just the CR, or the leftover LF would silently get
+    skipped by whatever `read_key` call comes next anyway (harmless) but
+    could confuse a caller using `read_any_key` again immediately."""
+    async def scenario():
+        source = FakeByteSource(b"\r\nz")
+        writer = Writer()
+        first = await read_any_key(source, writer)
+        second = await read_any_key(source, writer)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == "\r"
+    assert second == "z"
+
+
+def test_read_any_key_does_not_skip_backspace_or_delete():
+    async def scenario():
+        source = FakeByteSource(b"\x08")
+        writer = Writer()
+        return await read_any_key(source, writer)
+
+    key = asyncio.run(scenario())
+    assert key == "\x08"
+
+
+def test_read_any_key_returns_an_ordinary_key_and_echoes_it():
+    async def scenario():
+        source = FakeByteSource(b"q")
+        writer = Writer()
+        key = await read_any_key(source, writer)
+        return key, writer.joined
+
+    key, echoed = asyncio.run(scenario())
+    assert key == "q"
+    assert echoed == "q"
+
+
+def test_read_any_key_echo_false_masks_with_asterisk():
+    async def scenario():
+        source = FakeByteSource(b"x")
+        writer = Writer()
+        await read_any_key(source, writer, echo=False)
+        return writer.joined
+
+    assert asyncio.run(scenario()) == "*"
+
+
+def test_read_any_key_drains_a_full_escape_sequence_without_leaking_bytes():
+    """An arrow-key press (CSI sequence) must dismiss without leaking its
+    trailing bytes into whatever this screen redraws into next."""
+    async def scenario():
+        source = FakeByteSource(b"\x1b[Az")
+        writer = Writer()
+        first = await read_any_key(source, writer)
+        second = await read_any_key(source, writer)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == "\x1b"
+    assert second == "z"
 
 
 # -- reject_unhandled_key: real dogfood-reported bug fix -----------------
