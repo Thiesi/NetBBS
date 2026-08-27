@@ -172,7 +172,14 @@ def test_sysop_lands_on_an_operations_overview(db, lane, sysop):
     # live state indicator drops its brackets for a colored "●" dot by
     # default -- "[LOCAL ADMIN]"/"[DISABLED]" are the pre-spec form.
     assert "● LOCAL ADMIN" in text
-    assert "● DISABLED" in text
+    # Standalone mode (no `node_controls`) can't observe whether the
+    # live node actually has Link configured, so it must not claim
+    # "DISABLED" -- that would assert a real, observed config state
+    # this session has no way to know (Codex follow-up, PR #197
+    # review). See test_link_shows_disabled_badge_only_when_actually_
+    # observed_in_bbs for the in-BBS case where "DISABLED" is correct.
+    assert "● UNAVAILABLE" in text
+    assert "● DISABLED" not in text
     assert "Moderation: 0 pending" in text
     assert "Backup: " in text and "never" in text
     assert "CONSOLE" in text
@@ -5997,3 +6004,41 @@ def test_content_menu_moderation_queue_has_no_fake_capacity_gauge_when_pending(d
     text = _visible(_written_text(session))
     assert "Pending review: 1" in text
     assert "█" not in text and "░" not in text and "#" not in text
+
+
+def test_link_shows_disabled_badge_only_when_actually_observed_in_bbs(db, lane, sysop):
+    """"DISABLED" is only accurate for the in-BBS SysOp session, which
+    has real `node_controls` for the live node process it's running
+    inside -- see test_sysop_lands_on_an_operations_overview for the
+    standalone-CLI case, which cannot observe this and must not claim
+    it either way (Codex follow-up, PR #197 review)."""
+    node_controls = _node_controls()
+    session = FakeSession(["b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _visible(_written_text(session))
+    assert "● DISABLED" in text
+    assert "● UNAVAILABLE" not in text
+
+
+def test_operations_compact_panel_fits_a_real_backup_timestamp(db, lane, sysop):
+    """`backup_at` is a full ISO timestamp (~27 columns) once a backup
+    has actually run -- `_wrap_counts_panel` only ever wraps/omits its
+    `pairs`, never its own label, so this alone (before Link's own
+    `Recent errors`/`warnings` pairs are even added) was wide enough to
+    overflow the 36-column-inner compact frame at the 40-column floor,
+    worst of all when `backup_pairs` is empty (no Link context) and
+    `_wrap_counts_panel` has nothing to test the label's width against
+    at all (Codex follow-up, PR #197 review)."""
+    from netbbs.backup import create_backup
+
+    identity_dir = db.path.parent / "netbbs_identity"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
+
+    node_controls = _node_controls()
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _visible(_written_text(session))
+    assert "Backup:" in text
+    _assert_double_frame_rows_match_border(text, "operations_compact_backup_timestamp")

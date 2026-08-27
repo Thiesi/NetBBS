@@ -752,7 +752,17 @@ async def _draw_admin_menu(
         health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
 
     if link_context is None:
-        health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+        # `node_controls is None` is this module's own established signal
+        # for "running through the standalone admin CLI, which opens its
+        # own DB handle and never observes the live node process" (see
+        # the identical check just above, for `active_sessions`) -- a
+        # standalone session genuinely cannot tell whether the live node
+        # actually has Link configured or not, so labeling it "DISABLED"
+        # the same as a real, observed disabled config would mislead a
+        # SysOp into diagnosing a configuration problem that may not
+        # exist (Codex follow-up).
+        link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+        health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
     else:
         node = link_context.link_node
         link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
@@ -1166,7 +1176,11 @@ async def _operations_menu(
                     panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
 
                 if link_context is None:
-                    panel.append(colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+                    # See `_draw_admin_menu`'s identical check for why
+                    # `node_controls is None` -- not `link_context` alone
+                    # -- decides the label here (Codex follow-up).
+                    link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+                    panel.append(colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
                 else:
                     node = link_context.link_node
                     link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
@@ -1188,7 +1202,30 @@ async def _operations_menu(
                     # happened, exactly like the non-compact branch below
                     # already avoids by omitting the counts entirely.
                     backup_pairs = [("Recent errors", state["recent_errors"]), ("warnings", state["recent_warnings"])]
-                panel.extend(_wrap_counts_panel("  Backup: " + backup_str + "  ", backup_pairs, width=box_inner_width))
+                # `_wrap_counts_panel` only ever wraps/omits its `pairs`,
+                # never its own `label` -- fine for every other label
+                # here (a short, fixed heading), but `backup_at` is a
+                # full ISO timestamp (~27 columns) once a backup has
+                # actually run, wide enough on its own to overflow this
+                # frame regardless of `backup_pairs` (worse still with
+                # none, the `link_context is None` case, where
+                # `_wrap_counts_panel` has nothing to test the label's
+                # width against at all and returns it completely as-is).
+                # Cut the plain timestamp first, then color -- same
+                # order `_fit` above already established for this exact
+                # value on the landing page.
+                backup_label_prefix, backup_label_suffix = "  Backup: ", "  "
+                if backup_at and unicode_style:
+                    backup_budget = box_inner_width - visible_width(backup_label_prefix) - visible_width(backup_label_suffix)
+                    compact_backup_str = sanitize_text(cut_to_width(backup_at, backup_budget))
+                else:
+                    compact_backup_str = backup_str
+                panel.extend(
+                    _wrap_counts_panel(
+                        backup_label_prefix + compact_backup_str + backup_label_suffix,
+                        backup_pairs, width=box_inner_width,
+                    )
+                )
             else:
                 panel = [colored("NODE HEALTH  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
                 if active_sessions is not None:
@@ -1197,7 +1234,8 @@ async def _operations_menu(
                     panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
 
                 if link_context is None:
-                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+                    link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
                 else:
                     node = link_context.link_node
                     link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
