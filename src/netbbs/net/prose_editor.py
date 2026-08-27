@@ -84,6 +84,7 @@ async def edit_prose(
     draft_path: Path,
     max_bytes: int,
     autosave_interval_seconds: float = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
+    unicode_style: bool = False,
 ) -> str | None:
     """
     Run a fullscreen prose editing session against `session`, returning
@@ -181,6 +182,7 @@ async def edit_prose(
                         "somewhere this draft can come back (e.g. next time you visit the",
                         "board it belongs to).",
                     ],
+                    unicode_style=unicode_style,
                 )
                 previous = await _full_redraw()
                 continue

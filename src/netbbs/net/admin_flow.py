@@ -2508,7 +2508,9 @@ _USER_DETAIL_HELP: dict[str, tuple[str, str]] = {
 }
 
 
-async def _show_user_detail_help(session: Session, lane: DatabaseLane, *, selected: str | None) -> None:
+async def _show_user_detail_help(
+    session: Session, lane: DatabaseLane, *, selected: str | None, unicode_style: bool = False
+) -> None:
     """Same "narrow to the highlighted field if one is selected, else
     list everything" shape `netbbs.net.resource_editor._show_field_help`
     already establishes for `edit_resource_draft`'s own Ctrl-H."""
@@ -2517,7 +2519,7 @@ async def _show_user_detail_help(session: Session, lane: DatabaseLane, *, select
         label, help_text = _USER_DETAIL_HELP[selected]
         await show_help(
             session, "Field help", [colored(label, fg_color=header_color, bold=True), f"  {help_text}"],
-            header_color=header_color,
+            header_color=header_color, unicode_style=unicode_style,
         )
         return
     lines: list[str] = []
@@ -2525,7 +2527,7 @@ async def _show_user_detail_help(session: Session, lane: DatabaseLane, *, select
         lines.append(colored(label, fg_color=header_color, bold=True))
         lines.append(f"  {help_text}")
         lines.append("")
-    await show_help(session, "Field help", lines[:-1], header_color=header_color)
+    await show_help(session, "Field help", lines[:-1], header_color=header_color, unicode_style=unicode_style)
 
 
 async def _user_detail_screen(
@@ -2586,7 +2588,7 @@ async def _user_detail_screen(
             await session.write("\a")
             continue
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
-            await _show_user_detail_help(session, lane, selected=selected)
+            await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected
             )
@@ -2603,7 +2605,7 @@ async def _user_detail_screen(
                 # to plain `read_key()`) delivers Ctrl-H as an ordinary
                 # character, never as `EditorKeyKind.CTRL` -- same dual
                 # path `edit_resource_draft` itself handles.
-                await _show_user_detail_help(session, lane, selected=selected)
+                await _show_user_detail_help(session, lane, selected=selected, unicode_style=unicode_style)
                 blocked = await _draw_user_detail(
                     session, lane, target, description_level, redraw_in_place, unicode_style, collapsed,
                     selected=selected,

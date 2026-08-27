@@ -568,7 +568,8 @@ async def _compose_mail_body(
     """
     if await lane.run(fullscreen_editor_enabled, user):
         return await edit_prose(
-            session, initial_text=initial_text, draft_path=_mail_draft_path(lane, user), max_bytes=MAX_MAIL_BODY_BYTES
+            session, initial_text=initial_text, draft_path=_mail_draft_path(lane, user), max_bytes=MAX_MAIL_BODY_BYTES,
+            unicode_style=await lane.run(unicode_style_enabled, user),
         )
     return await edit_line_body(
         session,

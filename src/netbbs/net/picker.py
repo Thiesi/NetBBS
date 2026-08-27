@@ -371,7 +371,7 @@ async def pick_item(
             id_padding = " " * (max_id_width - len(id_str))
 
             if is_highlighted:
-                key_color = lambda txt: colored(txt, fg_color=220, bold=True)
+                key_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 item_name_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
                 desc_color = 252
             else:
@@ -458,7 +458,8 @@ async def pick_item(
 
         if key.kind == EditorKeyKind.CTRL and key.char == "h":
             await _show_picker_help(
-                session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color
+                session, on_sort=on_sort, has_refresh=refresh is not None, header_color=header_color,
+                unicode_style=unicode_style,
             )
             page_items = await _render()
             continue
@@ -741,6 +742,7 @@ async def _read_navigable_key(session: Session, *, distinguish_ctrl_h: bool = Fa
 async def _show_picker_help(
     session: Session, *, on_sort: Callable | None, has_refresh: bool,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    unicode_style: bool = False,
 ) -> None:
     """Ctrl-H's own content for this screen (dogfood feature request --
     the shared picker had no on-demand help at all, only the terse
@@ -785,7 +787,7 @@ async def _show_picker_help(
             "", colored("Ctrl-R", fg_color=header_color, bold=True),
             "  Re-fetches the list from scratch and clears any active search.",
         ]
-    await show_help(session, "Navigation help", lines, header_color=header_color)
+    await show_help(session, "Navigation help", lines, header_color=header_color, unicode_style=unicode_style)
 
 
 def _search_completer(candidates: Sequence[str]) -> Completer:

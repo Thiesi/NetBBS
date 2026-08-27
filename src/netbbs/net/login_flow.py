@@ -3495,7 +3495,8 @@ async def _compose_body(
     post itself."""
     if fullscreen_editor_enabled(db, user):
         return await edit_prose(
-            session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES
+            session, initial_text=initial_text, draft_path=draft_path, max_bytes=MAX_BODY_BYTES,
+            unicode_style=unicode_style_enabled(db, user),
         )
     return await edit_line_body(
         session,
@@ -4499,7 +4500,8 @@ async def _edit_bio(session: Session, lane: DatabaseLane, user: User) -> None:
     if await lane.run(fullscreen_editor_enabled, user):
         current = await lane.run(get_bio, user) or ""
         result = await edit_prose(
-            session, initial_text=current, draft_path=await lane.run(_bio_draft_path, user), max_bytes=MAX_BIO_BYTES
+            session, initial_text=current, draft_path=await lane.run(_bio_draft_path, user), max_bytes=MAX_BIO_BYTES,
+            unicode_style=await lane.run(unicode_style_enabled, user),
         )
         if result is None:
             return
@@ -4550,6 +4552,7 @@ async def _edit_signature(session: Session, lane: DatabaseLane, user: User) -> N
         result = await edit_prose(
             session, initial_text=current, draft_path=await lane.run(_signature_draft_path, user),
             max_bytes=MAX_SIGNATURE_BYTES,
+            unicode_style=await lane.run(unicode_style_enabled, user),
         )
         if result is None:
             return
