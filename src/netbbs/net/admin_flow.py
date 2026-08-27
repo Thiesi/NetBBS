@@ -6715,12 +6715,12 @@ async def _draw_mastheads_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Mastheads",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banneers"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
         colored(
-            "Optional mastheads shown above the main menu, board list, file-area list, and "
+            "Optional mastheads shown above the main menu, message-board list, file-area list, and "
             "chat channel picker -- at every level of browsing (top level, a category, a "
             "Community) where applicable.",
             fg_color=MUTED_COLOR,
@@ -6730,7 +6730,7 @@ async def _draw_mastheads_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("M", "ain menu"), brief="Custom art above the main menu"),
-                MenuEntry(label=menu_key("o", "ard list", prefix="B"), brief="Above every board-list view"),
+                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above every message-board-list view"),
                 MenuEntry(label=menu_key("F", "ile areas"), brief="Above every file-area-list view"),
                 MenuEntry(label=menu_key("C", "hat channels"), brief="Above the channel picker"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners & Mastheads"),
