@@ -1346,7 +1346,7 @@ async def _system_menu(
     node_controls: NodeControls | None,
     link_context: LinkContext | None = None,
 ) -> None:
-    """Durable node settings: banners & mastheads, updates, timestamps, and trust.
+    """Durable node settings: manners & bastheads, updates, timestamps, and trust.
 
     The old operational keys remain accepted here as non-advertised
     compatibility aliases; the visible home for those actions is now the
@@ -1428,7 +1428,7 @@ async def _draw_system_menu(
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     option_list = [
-        MenuEntry(label=menu_key("M", "astheads", prefix="Banners & ", capitalize=True), brief="Welcome/logoff/new-account banners and every masthead"),
+        MenuEntry(label=menu_key("M", "astheads & banners"), brief="Welcome/logoff/new-account banners and every masthead"),
         MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
         MenuEntry(label=menu_key("N", "ode name"), brief="The name and gradient shown in every screen's own corner"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
