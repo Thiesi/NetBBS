@@ -167,8 +167,19 @@ real-time multi-hop relay (issue #168, a real distributed-systems/crypto
 design fork, not sized for casual pickup), and trusted scrollback-on-join
 (issue #194, scoped but not yet implemented).
 
+Phase 7's first vertical (issue #172, closed — supersedes #63/#167, both
+closed) shipped in v5.4.0: a native door-game execution model (subprocess
+isolation under the same OS user, `resource.setrlimit` CPU/memory/
+process-count ceilings, an async wall-time watchdog, and unconditional
+reap on every exit path) behind a deliberately minimal, drop-file-shaped
+v1 API, plus two real bundled doors proving the pipeline end to end —
+Retro Trivia and Voidrunner, the latter a full persistent space-trading
+game after several post-launch expansion and hardening rounds. DOSBox/
+legacy-DOS-door compatibility and multiplayer/persistent-state doors are
+explicitly deferred, not part of this vertical.
+
 It does **not** yet imply public federation, Phase 4's public-readiness gate
-being closed, Phase 5 complete beyond its first vertical, or any Phase 6
-(advanced governance/Link Communities) or Phase 7 (doors) work. Check the
-design document and open issues for the current roadmap rather than
-extending this summary.
+being closed, Phase 5 complete beyond its first vertical, Phase 6 (advanced
+governance/Link Communities) work, or DOS-door/legacy compatibility within
+Phase 7. Check the design document and open issues for the current roadmap
+rather than extending this summary.

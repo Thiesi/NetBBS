@@ -4139,14 +4139,76 @@ No public/untrusted federation claim precedes this phase.
 - Link Communities and signed Community membership/carry changes;
 - curated governance audit board and live activity feed.
 
-### Phase 7 — Doors and legacy compatibility
+### Phase 7 — Doors and legacy compatibility — first vertical complete
 
-- design and prove the native door sandbox and versioned capability API;
-- UI-only threading refinements;
-- classic DOS door compatibility through the same constrained capability
-  boundary.
+Implemented (issue #172, closed — supersedes #63 and #167, both closed;
+full design record on those two issues' own comment threads, summarized
+here since #172 is self-contained):
 
-Issue #63 must be resolved before door implementation begins.
+- subprocess isolation under the same OS user as the main NetBBS process
+  — no dedicated door-runner user, no privilege-drop helper, no root
+  requirement (deliberately chosen: operational frictionlessness for a
+  SysOp outweighs the defense-in-depth a dedicated-user model would buy);
+  `resource.setrlimit()` (CPU, memory, process count) set before exec,
+  plus an async wall-time watchdog and unconditional reap via the owning
+  async task on every exit path (crash/timeout/normal exit/disconnect),
+  matching this codebase's standing "creator cancels, gathers, retrieves
+  failures" convention;
+- a versioned, deliberately minimal v1 API, drop-file-shaped rather than
+  a live protocol: static session metadata (handle, stable numeric user
+  ID, terminal width/height, color-depth capability, node name) written
+  before spawn; stdio is pure raw passthrough for the session's
+  duration, with no framing or control messages interleaved; no live
+  terminal-resize propagation (matches every classic door's own static
+  80x24-era assumption); exit code is the only completion signal;
+- door output (stdout) is trusted and relayed unmodified, like a SysOp's
+  own welcome-banner file, not run through the chat/post sanitizer —
+  NetBBS provides the interface and best-effort abuse prevention within
+  its own infrastructure, but the SysOp who chooses to run a given door
+  is the one vouching for it, the same posture Phase 4 identity
+  attestation already takes;
+- SysOp registration (path, name, description) and attachment to a
+  board/community, reusing the existing file-area-style permission-level
+  gating; caller-facing launch and interactive play across Telnet, SSH,
+  and web; door-session start/end audit-logged through the existing
+  moderation/audit-log mechanism — no new subsystem;
+- two real bundled doors ship as installed package data
+  (`netbbs.doors.bundled`, not loose example files), proving the
+  pipeline end to end: Retro Trivia, a small demo, and Voidrunner, a
+  persistent Elite/Trade-Wars-style space-trading and exploration game
+  that grew substantially past its own proof-of-concept scope across
+  several post-launch feature and hardening rounds (economy, missions,
+  combat, a futures exchange, crew, faction reputation, notoriety/patrol
+  encounters, ship progression, retirement/New Game+, and a systemic
+  fix for a box-alignment overflow bug that turned out to affect nearly
+  every screen in its tactical HUD — v5.4.0 release notes carry the full
+  list, not repeated here).
+
+Explicitly out of scope for this vertical, not implemented:
+
+- DOSBox/dosemu compatibility — a later adapter on top of this same
+  capability set, deferred by #172's own scope boundary, not merely
+  unscheduled;
+- multiplayer or persistent cross-session door state — single-player,
+  session-scoped only, matching issue #63's own recommendation;
+- any door capability beyond the raw-terminal-I/O metadata handshake
+  above — deliberately minimal by design, add only what a real door
+  actually needs;
+- UI-only conversation/message-threading refinements — an item from
+  this phase's original planning stub, never folded into #172's own
+  scope and not otherwise picked up; still open, unscoped.
+
+`RLIMIT_CPU`/`RLIMIT_AS`/`RLIMIT_NPROC` are all set in the forked child
+before exec (`src/netbbs/doors/runtime.py`), matching the locked design's
+CPU/memory/process-count ceilings; the wall-time watchdog, crash
+reporting, and cleanup-on-disconnect each have a real regression test
+(`tests/test_doors_runtime.py`). Not yet independently verified: a
+dedicated adversarial test that actually exercises a door hitting the
+CPU/memory/process-count ceilings themselves (as opposed to the
+watchdog's own wall-time path) — those three `setrlimit` calls are
+implemented but currently rely on the OS enforcing them correctly, not
+on a test proving it. This design explicitly does not attempt
+filesystem/network isolation regardless.
 
 ---
 
