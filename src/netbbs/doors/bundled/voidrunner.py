@@ -275,13 +275,13 @@ UPGRADES: dict[str, dict] = {
     "cargo": {"label": "Cargo Bay Expansion", "max_tier": 5, "cost": lambda t: 800 + t * 600,
               "effect": "+8 cargo capacity"},
     "engine": {"label": "Engine Tuning", "max_tier": 3, "cost": lambda t: 1200 + t * 1000,
-               "effect": "+8 fuel, safer jumps"},
+               "effect": "+8 fuel, +evasion"},
     "weapon": {"label": "Weapon Systems", "max_tier": 4, "cost": lambda t: 1000 + t * 900,
                "effect": "+combat damage"},
     "shield": {"label": "Deflector Shields", "max_tier": 3, "cost": lambda t: 1100 + t * 950,
                "effect": "-incoming damage"},
     "scanner": {"label": "Long-Range Scanner", "max_tier": 2, "cost": lambda t: 900 + t * 700,
-                "effect": "+scan range/quality"},
+                "effect": "+scan range"},
     "hull": {"label": "Hull Reinforcement", "max_tier": 4, "cost": lambda t: 700 + t * 550,
              "effect": "+35 max hull"},
 }
@@ -2064,12 +2064,12 @@ def screen_shipyard(p: Palette, world: World) -> None:
             bar = _gauge_bar(tier, max_t, 5, p)
             if tier >= max_t:
                 status_str = f"MAXED {bar}"
-                cost_str = "    --  "
+                cost_str = f"{'--':>6}   "
             else:
                 cost = u["cost"](tier)
                 status_str = f"Tier {tier}->{tier + 1} {bar}"
                 cost_str = f"{cost:>6} cr"
-            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {u['label']:<20} {status_str:<18} {cost_str}  {p.muted}({u['effect']}){RESET}"
+            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {u['label']:<20} {_pad(status_str, 18)} {cost_str}  {p.muted}({u['effect']}){RESET}"
             pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
@@ -2269,7 +2269,7 @@ def screen_missions(p: Palette, world: World) -> None:
             m_desc = m.description
             if _vis_len(m_desc) > 44:
                 m_desc = m_desc[:41] + "..."
-            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {badge_str} {m_desc:<44} {reward_str:>10}"
+            row_str = f"  {p.gold}[{LETTERS[i]}]{RESET}  {badge_str} {m_desc:<44} {_pad(reward_str, 10, 'right')}"
             pad_len = max(0, 77 - _vis_len(row_str))
             out_line(f"{p.accent}│{RESET}{row_str}{' ' * pad_len}{p.accent}│{RESET}")
 
@@ -2456,7 +2456,7 @@ def screen_chart(p: Palette, world: World) -> str | None:
                     f"{p.correct}Safe (0){RESET}" if dest.danger == 0
                     else (f"{p.gold}Danger {dest.danger}{RESET}" if dest.danger == 1 else f"{p.wrong}Danger {dest.danger}{RESET}")
                 )
-                row_str = f"  {p.gold}[{letter}]{RESET}  {dest.name:<17} {sector_for(dest):<15} {dest.economy:<13} {danger_str:<17} {fuel_label}"
+                row_str = f"  {p.gold}[{letter}]{RESET}  {dest.name:<17} {sector_for(dest):<15} {dest.economy:<13} {_pad(danger_str, 9)} {_pad(fuel_label, 12)}"
             else:
                 row_str = (
                     f"  {p.gold}[{letter}]{RESET}  {p.muted}??? (Uncharted Bearing)  "

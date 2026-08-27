@@ -3074,3 +3074,74 @@ def test_screen_customs_rows_fit_the_box_for_a_large_contraband_stash(monkeypatc
     with contextlib.redirect_stdout(buf):
         vr.screen_customs(vr.Palette(truecolor=False), world)
     _assert_box_rows_match_border(buf.getvalue(), "screen_customs")
+
+
+# The box-border checks above only pin the *right edge* of each row -- they
+# can't catch a column that starts or ends in a different place from row to
+# row, because a naive `f"{ansi_colored_value:<N}"` format spec counts the
+# invisible escape bytes as part of N. Since every colored value in this
+# module (`_gauge_bar`'s output, the market/chart/shipyard status strings)
+# happens to share the same fixed-length ANSI overhead across rows, the
+# resulting under-padding is *constant* and the box border still lands in
+# the right place -- but the column itself silently drifts out of alignment
+# with its neighbors. These tests pin the actual column position of the
+# text immediately after each fixed-width colored field.
+
+
+def test_screen_shipyard_effect_column_aligns_between_tiered_and_maxed_rows(monkeypatch):
+    world = _world_with_seed(309)
+    world.save.pilot.credits = 100_000
+    for key in vr.UPGRADES:
+        setattr(world.save.ship, f"{key}_tier", 0)
+    world.save.ship.engine_tier = vr.UPGRADES["engine"]["max_tier"]
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_shipyard(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_shipyard@mixed-tiers")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    effect_columns = {line.index("(") for line in stripped if "Tier" in line or "MAXED" in line}
+    assert len(effect_columns) == 1, f"effect column drifted between rows: {effect_columns}"
+
+
+def test_screen_missions_reward_column_aligns_across_reward_digit_widths(monkeypatch):
+    world = _world_with_seed(310)
+    world.save.pilot.credits = 5_000
+    monkeypatch.setattr(
+        vr, "generate_mission_board",
+        lambda world: [
+            vr.Mission(id=1, kind="bounty", description="Short", reward=5,
+                       origin_system=0, target_system=1, pirate_tier=1, deadline_turn=None),
+            vr.Mission(id=2, kind="cargo", description="Also short", reward=123_456,
+                       origin_system=0, target_system=2, pirate_tier=0, deadline_turn=None),
+        ],
+    )
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_missions(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_missions@mixed-rewards")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    reward_ends = {line.index("cr") for line in stripped if "cr" in line and "[" in line}
+    assert len(reward_ends) == 1, f"reward column drifted between rows: {reward_ends}"
+
+
+def test_screen_chart_danger_and_fuel_columns_align_between_safe_and_danger_rows(monkeypatch):
+    world = _world_with_seed(311)
+    here = world.here
+    # Force at least one safe (danger 0) and one dangerous connected system
+    # so both branches of `danger_str` render in the same screen.
+    assert len(here.connections) >= 2, "seed 311's start system needs 2+ connections for this test"
+    safe_id, danger_id = here.connections[0], here.connections[1]
+    world.by_id[safe_id].danger = 0
+    world.by_id[danger_id].danger = 3
+    for sid in (safe_id, danger_id):
+        world.by_id[sid].discovered = True
+    monkeypatch.setattr(vr, "read_key", lambda: "Q")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        vr.screen_chart(vr.Palette(truecolor=False), world)
+    _assert_box_rows_match_border(buf.getvalue(), "screen_chart@safe-and-danger")
+    stripped = [vr._ANSI_RE.sub("", line) for line in buf.getvalue().split("\r\n")]
+    fuel_columns = {line.index("fuel") for line in stripped if "fuel" in line and "[" in line}
+    assert len(fuel_columns) == 1, f"fuel-cost column drifted between rows: {fuel_columns}"
