@@ -842,33 +842,55 @@ async def _draw_users_menu(
         )
     )
 
-    if stats is not None:
-        panel: list[str] = [
-            colored("ACCOUNTS", fg_color=LABEL_COLOR, bold=True),
-            "  "
-            + counts_row(
-                [
-                    ("Total users", stats["total"]),
-                    ("Active", stats["active"]),
-                    ("Pending", stats["pending"]),
-                    ("Disabled", stats["disabled"]),
-                ]
-            ),
-            "  "
-            + counts_row([("SysOps", stats["sysops"])])
-            + "    "
-            + colored("Active ratio: ", fg_color=METADATA_COLOR)
-            + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health"),
-        ]
-        if stats["pending"] > 0:
+    panel: list[str] = []
+    if stats is not None and session.terminal_height >= 18:
+        compact = session.terminal_height < 28 or session.terminal_width < 72
+        if compact:
             panel.append(
-                "  "
-                + colored(
-                    f"⚠ {stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
-                    fg_color=WARNING_COLOR,
-                    bold=True,
+                colored("ACCOUNTS: ", fg_color=LABEL_COLOR, bold=True)
+                + counts_row(
+                    [
+                        ("Total users", stats["total"]),
+                        ("Active", stats["active"]),
+                        ("Pending", stats["pending"]),
+                        ("Disabled", stats["disabled"]),
+                    ]
                 )
             )
+            panel.append(
+                "  "
+                + counts_row([("SysOps", stats["sysops"])])
+                + "  "
+                + colored("Active ratio: ", fg_color=METADATA_COLOR)
+                + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health")
+            )
+        else:
+            panel = [
+                colored("ACCOUNTS", fg_color=LABEL_COLOR, bold=True),
+                "  "
+                + counts_row(
+                    [
+                        ("Total users", stats["total"]),
+                        ("Active", stats["active"]),
+                        ("Pending", stats["pending"]),
+                        ("Disabled", stats["disabled"]),
+                    ]
+                ),
+                "  "
+                + counts_row([("SysOps", stats["sysops"])])
+                + "    "
+                + colored("Active ratio: ", fg_color=METADATA_COLOR)
+                + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health"),
+            ]
+            if stats["pending"] > 0:
+                panel.append(
+                    "  "
+                    + colored(
+                        f"⚠ {stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
+                        fg_color=WARNING_COLOR,
+                        bold=True,
+                    )
+                )
 
         if unicode_style:
             await session.write_line(
@@ -878,20 +900,32 @@ async def _draw_users_menu(
             for line in panel:
                 await session.write_line(line)
 
+    entries = [
+        MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
+        MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
+        MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
+        MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
+        MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
+        MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+    ]
+    panel_height = (len(panel) + 2) if (panel and unicode_style) else len(panel)
+    reserved = panel_height + 4
+    available_menu_height = max(1, session.terminal_height - reserved)
+
+    effective_desc_level = description_level
+    if effective_desc_level != "off":
+        columns = 2 if session.terminal_width >= 72 else 1
+        needed_rows = -(-len(entries) // columns) * 2
+        if needed_rows > available_menu_height:
+            effective_desc_level = "off"
+
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
-                MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
-                MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
-                MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
-                MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
-                MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-            ],
-            description_level,
+            entries,
+            effective_desc_level,
             width=session.terminal_width,
-            height=session.terminal_height,
+            height=available_menu_height,
         )
     )
     await session.write("Choice: ")
@@ -955,42 +989,65 @@ async def _operations_menu(
             unicode_style=unicode_style,
         ) if node_controls is not None else status_badge("LOCAL ADMIN", tone="neutral", unicode_style=unicode_style)
 
-        panel: list[str] = [colored("NODE HEALTH  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
-        if active_sessions is not None:
-            sessions_gauge = telemetry_gauge(active_sessions, max(10, active_sessions), unicode_style=unicode_style)
-            panel.append(f"  {counts_row([('Active sessions', active_sessions)])}  {sessions_gauge}")
-        else:
-            panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+        panel: list[str] = []
+        if session.terminal_height >= 18:
+            compact = session.terminal_height < 28 or session.terminal_width < 72
+            backup_at, _backup_path = state["backup"]
+            backup_str = sanitize_text(backup_at) if backup_at else colored("never", fg_color=WARNING_COLOR)
 
-        if link_context is None:
-            panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
-        else:
-            node = link_context.link_node
-            link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
-            link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
-            panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
-            panel.append(
-                "  " + counts_row(
-                    [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+            if compact:
+                sessions_str = ""
+                if active_sessions is not None:
+                    sessions_gauge = telemetry_gauge(active_sessions, max(10, active_sessions), unicode_style=unicode_style)
+                    sessions_str = f"  {counts_row([('Active sessions', active_sessions)])} {sessions_gauge}"
+                panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge + sessions_str)
+
+                if link_context is None:
+                    panel.append(colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+                else:
+                    node = link_context.link_node
+                    link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+                    link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
+                    panel.append(
+                        colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True)
+                        + status_badge(link_label, tone=link_tone, unicode_style=unicode_style)
+                        + "  "
+                        + counts_row([("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])])
+                    )
+                panel.append("  Backup: " + backup_str + "  " + counts_row([("Recent errors", state["recent_errors"]), ("warnings", state["recent_warnings"])]))
+            else:
+                panel = [colored("NODE HEALTH  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
+                if active_sessions is not None:
+                    sessions_gauge = telemetry_gauge(active_sessions, max(10, active_sessions), unicode_style=unicode_style)
+                    panel.append(f"  {counts_row([('Active sessions', active_sessions)])}  {sessions_gauge}")
+                else:
+                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+
+                if link_context is None:
+                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+                else:
+                    node = link_context.link_node
+                    link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+                    link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
+                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
+                    panel.append(
+                        "  " + counts_row(
+                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+                        )
+                    )
+                    panel.append(
+                        "  " + counts_row([("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])])
+                    )
+                panel.append("  Backup: " + backup_str)
+
+            if unicode_style:
+                await session.write_line(
+                    double_frame(panel, width=min(session.terminal_width, 78), header_color=header_color)
                 )
-            )
-            panel.append(
-                "  " + counts_row([("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])])
-            )
+            else:
+                for line in panel:
+                    await session.write_line(line)
 
-        backup_at, _backup_path = state["backup"]
-        panel.append(
-            "  Backup: "
-            + (sanitize_text(backup_at) if backup_at else colored("never", fg_color=WARNING_COLOR))
-        )
-
-        if unicode_style:
-            await session.write_line(
-                double_frame(panel, width=min(session.terminal_width, 78), header_color=header_color)
-            )
-        else:
-            for line in panel:
-                await session.write_line(line)
         options = [
             MenuEntry(label=menu_key("K", "up status", prefix="Bac"), brief="Last backup status and history"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
@@ -1007,8 +1064,20 @@ async def _operations_menu(
                 MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts"),
             ])
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+
+        panel_height = (len(panel) + 2) if (panel and unicode_style) else len(panel)
+        reserved = panel_height + 4
+        available_menu_height = max(1, session.terminal_height - reserved)
+
+        effective_desc_level = description_level
+        if effective_desc_level != "off":
+            columns = 2 if session.terminal_width >= 72 else 1
+            needed_rows = -(-len(options) // columns) * 2
+            if needed_rows > available_menu_height:
+                effective_desc_level = "off"
+
         await session.write_line(
-            _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+            _menu_row(options, effective_desc_level, width=session.terminal_width, height=available_menu_height)
         )
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
@@ -6641,25 +6710,56 @@ async def _draw_content_menu(
         )
     )
 
-    if stats is not None:
-        panel = [
-            colored("CONTENT REPOSITORY", fg_color=LABEL_COLOR, bold=True),
-            "  "
-            + counts_row([("Message boards", stats["total_boards"]), ("Posts", stats["total_posts"])]),
-            "  "
-            + counts_row([("File areas", stats["total_areas"]), ("Files", stats["total_files"])]),
-            "  "
-            + counts_row([("Chat channels", stats["total_channels"]), ("Doors", stats["total_doors"]), ("Communities", stats["total_communities"])]),
-            colored("MODERATION QUEUE", fg_color=LABEL_COLOR, bold=True),
-        ]
+    panel: list[str] = []
+    if stats is not None and session.terminal_height >= 18:
+        compact = session.terminal_height < 28 or session.terminal_width < 72
         pending_total = stats["pending_posts"] + stats["pending_files"]
-        if pending_total > 0:
-            gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
-            panel.append("  " + counts_row([("Pending review", pending_total)]) + f"  {gauge}")
-            panel.append("    " + counts_row([("Posts", stats["pending_posts"]), ("Files", stats["pending_files"])]))
+        if compact:
+            panel.append(
+                colored("CONTENT: ", fg_color=LABEL_COLOR, bold=True)
+                + counts_row(
+                    [
+                        ("Message boards", stats["total_boards"]),
+                        ("Posts", stats["total_posts"]),
+                        ("File areas", stats["total_areas"]),
+                        ("Files", stats["total_files"]),
+                        ("Channels", stats["total_channels"]),
+                    ]
+                )
+            )
+            if pending_total > 0:
+                gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
+                panel.append(
+                    colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True)
+                    + counts_row([("Pending review", pending_total)])
+                    + f"  {gauge}"
+                )
+            else:
+                gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="health")
+                panel.append(
+                    colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True)
+                    + counts_row([("Pending review", 0)])
+                    + f"  {gauge}  "
+                    + colored("All clear", fg_color=SUCCESS_COLOR)
+                )
         else:
-            gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="health")
-            panel.append(f"  {counts_row([('Pending review', 0)])}  {gauge}  " + colored("All clear", fg_color=SUCCESS_COLOR))
+            panel = [
+                colored("CONTENT REPOSITORY", fg_color=LABEL_COLOR, bold=True),
+                "  "
+                + counts_row([("Message boards", stats["total_boards"]), ("Posts", stats["total_posts"])]),
+                "  "
+                + counts_row([("File areas", stats["total_areas"]), ("Files", stats["total_files"])]),
+                "  "
+                + counts_row([("Chat channels", stats["total_channels"]), ("Doors", stats["total_doors"]), ("Communities", stats["total_communities"])]),
+                colored("MODERATION QUEUE", fg_color=LABEL_COLOR, bold=True),
+            ]
+            if pending_total > 0:
+                gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
+                panel.append("  " + counts_row([("Pending review", pending_total)]) + f"  {gauge}")
+                panel.append("    " + counts_row([("Posts", stats["pending_posts"]), ("Files", stats["pending_files"])]))
+            else:
+                gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="health")
+                panel.append(f"  {counts_row([('Pending review', 0)])}  {gauge}  " + colored("All clear", fg_color=SUCCESS_COLOR))
 
         if unicode_style:
             await session.write_line(
@@ -6669,22 +6769,34 @@ async def _draw_content_menu(
             for line in panel:
                 await session.write_line(line)
 
+    entries = [
+        MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
+        MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
+        MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
+        MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
+        MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
+        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
+        MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
+        MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+    ]
+    panel_height = (len(panel) + 2) if (panel and unicode_style) else len(panel)
+    reserved = panel_height + 4
+    available_menu_height = max(1, session.terminal_height - reserved)
+
+    effective_desc_level = description_level
+    if effective_desc_level != "off":
+        columns = 2 if session.terminal_width >= 72 else 1
+        needed_rows = -(-len(entries) // columns) * 2
+        if needed_rows > available_menu_height:
+            effective_desc_level = "off"
+
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
-                MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
-                MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
-                MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-                MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
-                MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
-                MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
-                MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-            ],
-            description_level,
+            entries,
+            effective_desc_level,
             width=session.terminal_width,
-            height=session.terminal_height,
+            height=available_menu_height,
         )
     )
     await session.write("Choice: ")

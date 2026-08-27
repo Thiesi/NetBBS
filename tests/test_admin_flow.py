@@ -5596,7 +5596,7 @@ def test_content_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, s
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "╔" in text and "╚" in text
-    assert "CONTENT REPOSITORY" in text
+    assert "CONTENT" in text
     assert "Message boards:" in text
     assert "MODERATION QUEUE" in text
     assert "Pending review: 0" in text
@@ -5631,3 +5631,47 @@ def test_sysop_subconsoles_ascii_fallback(db, lane, sysop):
     assert "ACCOUNTS" in text
     assert "Total users:" in text
     assert "[##" in text or "[.." in text
+
+
+def test_subconsoles_adapt_to_40x24_terminal(db, lane, sysop):
+    """On a 40x24 terminal, sub-consoles compact telemetry panels and collapse descriptions (PR #197 review)."""
+    # Content sub-console
+    content_session = FakeSession(["c", "b", "b"])
+    content_session.terminal_width = 40
+    content_session.terminal_height = 24
+    _run(content_session, lane, sysop)
+    content_text = _visible(_written_text(content_session))
+    assert "CONTENT:" in content_text
+    assert "MODERATION QUEUE:" in content_text
+    assert "Choice: " in content_text
+
+    # Operations sub-console with full Link context and node controls
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    node = LinkNode(identity=identity)
+    link_context = LinkContext(node_identity=identity, link_node=node)
+    node_controls = _node_controls()
+
+    ops_session = FakeSession(["o", "b", "b"])
+    ops_session.terminal_width = 40
+    ops_session.terminal_height = 24
+    asyncio.run(
+        admin_menu(ops_session, lane, sysop, node_controls=node_controls, link_context=link_context)
+    )
+    ops_text = _visible(_written_text(ops_session))
+    assert "NODE HEALTH:" in ops_text
+    assert "LINK OPERATIONS:" in ops_text
+    assert "Choice: " in ops_text
+
+
+def test_very_short_terminal_omits_dashboard_panel(db, lane, sysop):
+    """When terminal height is < 18, dashboard panel is suppressed so menus still fit."""
+    session = FakeSession(["c", "b", "b"])
+    session.terminal_height = 14
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "MODERATION QUEUE" not in text
+    assert "Choice: " in text
