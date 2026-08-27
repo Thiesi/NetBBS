@@ -144,6 +144,7 @@ from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
 from netbbs.net.char_input import move_cursor as relative_move_cursor
 from netbbs.net.chat_channel_picker_banner import load_chat_channel_picker_banner
+from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
@@ -1814,7 +1815,7 @@ async def _handle_clear(ctx: ChatCommandContext, args: str) -> None:
     """
     height = ctx.session.terminal_height
     if ctx.pinned_ui_enabled:
-        await ctx.session.write(clear_screen() + set_scroll_region(1, height - 2))
+        await ctx.session.write(clear_screen() + set_scroll_region(1, height - _PINNED_ROWS))
     else:
         await ctx.session.write(clear_screen())
 
@@ -2426,20 +2427,25 @@ async def _build_completer(
 # Below this, both pinned rows are skipped entirely and chat behaves
 # exactly as it did before either feature existed: plain, unconfined
 # scrolling, no pinned input either. One combined gate, not two
-# independent minimums -- there's no sensible state where one pinned
-# row exists without the other (design doc). A client can
-# report an arbitrarily small height (`netbbs.net.session.
-# clamp_terminal_size`'s own floor is 1, not a sane minimum), so this
-# has to be a real runtime check, not an assumption.
-_PINNED_UI_MIN_HEIGHT = 3
+# Pinned rows: shelf divider row (height - 2), status bar row (height - 1),
+# and live input row (height). At least one scrolling content row is required,
+# so the minimum height is 4.
+_PINNED_ROWS = 3
+_PINNED_UI_MIN_HEIGHT = 4
 
-# Design doc: shown before the pinned input row's in-progress
-# text, now that a full redraw happens on every update anyway -- makes
-# it immediately clear "this row is for typing," distinct from the
-# scrolling chat content above it. There was no equivalent before the
-# input row was pinned (a bare cursor wherever output last left it was
-# enough when input and output shared one stream).
+# Issue #183: styled input prompt with accent coloring and Unicode/ASCII fallback.
 _INPUT_PROMPT = "> "
+
+
+def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False) -> str:
+    glyph = "❯ " if unicode_style else "> "
+    return colored(glyph, fg_color=accent_color, bold=True)
+
+
+def _shelf_divider(width: int, *, unicode_style: bool = False, truecolor: bool = False) -> str:
+    rule_char = "─" if unicode_style else "-"
+    color = 238 if truecolor else MUTED_COLOR
+    return colored(rule_char * width, fg_color=color)
 
 
 def _own_channel_privileges(db: Database, channel: Channel, user: User) -> str | None:
@@ -2737,66 +2743,26 @@ def _compose_status_line(groups: list[_StatusGroup], width: int, *, active: bool
 
 
 async def _repaint_status_line(
-    session: Session, lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User
+    session: Session, lane: DatabaseLane, hub: ChatHub, presence: PresenceRegistry, channel: Channel, user: User,
+    *, unicode_style: bool = False, truecolor: bool = False,
 ) -> None:
     """
     Redraws the pinned status row in place, leaving the user's own
-    in-progress input line untouched (design doc).
-
-    Re-reads `session.terminal_height` and re-issues `set_scroll_region`
-    on every call, not just once at entry -- the cheapest way to stay
-    correct across a mid-session resize (Telnet NAWS/SSH PTY-resize/web
-    `resize` all update `terminal_height` live, but passively, with no
-    event this function could otherwise hook) without a dedicated
-    resize-notification mechanism, which doesn't exist anywhere in this
-    codebase yet. Re-sending an unchanged region is harmless. Falls
-    back to doing nothing if the terminal is too short for the pinned
-    UI to make sense (`_PINNED_UI_MIN_HEIGHT`) -- matches whatever
-    `_chat_loop` itself decided at entry, recomputed fresh here in case
-    a resize crossed that threshold mid-session.
-
-    `save_cursor`/`restore_cursor`, not a remembered logical position:
-    the user's own terminal already knows exactly where its cursor is
-    mid-line-edit (including any client-side echo/cursor movement this
-    server-side code has no visibility into) — asking the terminal
-    itself to remember and restore it is the only way to guarantee this
-    doesn't disturb in-progress typing, regardless of what transport or
-    client is on the other end. Every call site (design doc)
-    already holds `_chat_loop`'s shared write lock before calling this
-    -- this function doesn't acquire it itself, the same way it never
-    needed to before that lock existed, since `save_cursor`/
-    `restore_cursor` alone was already sufficient in isolation; the
-    lock's job is only to stop this call's own sequence of writes from
-    interleaving with some *other* concurrent write, not to protect
-    this function against itself.
-
-    `lane`, not `db` (per Thiesi's explicit choice to
-    migrate this hot, cosmetic, repainted-after-nearly-every-message
-    path fully rather than leave it on direct `db` access): one
-    `lane.run` call renders the whole line's fields on the worker
-    thread (`_render_chat_status_line`), then composing/coloring/
-    truncating and the actual terminal write stay plain, synchronous,
-    non-`db`-touching code here, same split as `_resolve_target`/
-    `_write_vcard_detail`.
-
-    Gives the row its solid background band by default, dropping it when
-    `user` is currently away (`presence.is_away`) instead of rendering a
-    separate `[away]` tag inline -- read directly off `presence` here, a
-    plain in-memory lookup, rather than threading it through the
-    `lane.run` call, since it's not a `db` read at all. Tied specifically
-    to the viewer's own away state, the same as every other "own state"
-    field `_render_chat_status_line` already renders -- other
-    participants' away state only ever shows up folded into the online/
-    away counts.
+    in-progress input line untouched (design doc). Also paints the
+    shelf divider directly above it (GitHub issue #183).
     """
     height = session.terminal_height
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     groups = await lane.run(_render_chat_status_line, hub, presence, channel, user)
     line = _compose_status_line(groups, session.terminal_width, active=not presence.is_away(user.username))
+    shelf = _shelf_divider(session.terminal_width, unicode_style=unicode_style, truecolor=truecolor)
     await session.write(
         save_cursor()
-        + set_scroll_region(1, height - 2)
+        + set_scroll_region(1, height - _PINNED_ROWS)
+        + move_cursor(height - 2, 1)
+        + clear_line()
+        + shelf
         + move_cursor(height - 1, 1)
         + clear_line()
         + line
@@ -2804,132 +2770,72 @@ async def _repaint_status_line(
     )
 
 
-async def _repaint_input_row(session: Session, live_buffer: LiveInputBuffer, height: int) -> None:
+async def _repaint_input_row(
+    session: Session, live_buffer: LiveInputBuffer, height: int,
+    *, accent_color: int = ACCENT_COLOR, unicode_style: bool = False,
+) -> None:
     """
     Redraws the pinned input row in place from `live_buffer`'s current
-    text/cursor (design doc). Unlike `_repaint_status_line`
-    (which jumps away and back via save/restore-cursor), this leaves
-    the cursor sitting exactly here afterward -- the input row *is*
-    its destination, not somewhere to return from, so there's nothing
-    to restore. The next keystroke's own relative-movement echo
-    (`netbbs.net.char_input`) builds on exactly this resting position.
-
-    Re-issues `set_scroll_region` on every call, matching
-    `_repaint_status_line`'s own resize-robustness reasoning. Caller is
-    responsible for holding `_chat_loop`'s shared write lock, same as
-    every other pinned-row write in this module (see
-    `_repaint_status_line`'s own docstring).
-
-    A very long in-progress line is truncated (not horizontally
-    scrolled) to fit the terminal width -- an accepted simplification
-    for what's expected to be a rare case (design doc); the
-    cursor is left at the end of the truncated view rather than at its
-    true, possibly-invisible position when that happens.
-
-    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
-    #46) -- a defensive backstop against constructing an impossible
-    (`height - 2 <= 0`) scroll region, on top of `_chat_loop`'s own
-    `_PinnedUIState` already refusing to reach this call at all once a
-    resize crosses that threshold.
+    text/cursor (design doc). Shows styled input prompt (GitHub issue #183).
     """
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    scroll_bottom = height - 2
+    scroll_bottom = height - _PINNED_ROWS
     input_row = height
-    full_text = _INPUT_PROMPT + live_buffer.text
-    displayed = truncate(full_text, session.terminal_width)
+    prompt_str = _input_prompt(accent_color=accent_color, unicode_style=unicode_style)
+    prompt_width = 2
+    avail = max(0, session.terminal_width - prompt_width)
+    displayed_body = truncate(live_buffer.text, avail)
+    displayed = prompt_str + displayed_body
     await session.write(
         set_scroll_region(1, scroll_bottom) + move_cursor(input_row, 1) + clear_line() + displayed
     )
-    if displayed == full_text:
+    if len(live_buffer.text) <= avail:
         trailing = len(live_buffer.text) - live_buffer.cursor
         if trailing > 0:
             await session.write(relative_move_cursor(trailing, forward=False))
 
 
 async def _print_and_redraw_input(
-    session: Session, text: str, live_buffer: LiveInputBuffer, height: int
+    session: Session, text: str, live_buffer: LiveInputBuffer, height: int,
+    *, accent_color: int = ACCENT_COLOR, unicode_style: bool = False,
 ) -> None:
     """
     Print `text` as a new line into the scrolling content region, then
     redraw the pinned input row immediately below it (design doc).
-    Used by every write that happens while a pinned input row
-    exists: an incoming broadcast (`receive_loop`'s `deliver` closure),
-    and this session's own command/message output (`send_loop`, via
-    `_enter_content_region` beforehand, right after each `read_line()`
-    call returns). Caller is responsible for holding `_chat_loop`'s
-    shared write lock.
-
-    Positioning is unconditional -- always jump to the scroll region's
-    bottom row before printing, rather than tracking incrementally how
-    "full" the region currently is (no such tracking exists anywhere
-    else in this codebase either, and none is needed: DECSTBM's own
-    auto-scroll-at-the-bottom-margin behavior handles it). This
-    produces newest-content-adjacent-to-the-input-box behavior, which
-    is what's actually expected once the input row is a fixed anchor
-    (design doc's own note on why this isn't a regression from
-    the old grows-from-the-top behavior, just a different, arguably
-    more correct one now that there's a fixed anchor to grow from).
-
-    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
-    #46) -- same defensive backstop as `_repaint_input_row`.
     """
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    scroll_bottom = height - 2
+    scroll_bottom = height - _PINNED_ROWS
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) + text + "\r\n")
-    await _repaint_input_row(session, live_buffer, height)
+    await _repaint_input_row(
+        session, live_buffer, height, accent_color=accent_color, unicode_style=unicode_style
+    )
 
 
 async def _print_candidates_and_redraw_input(
     session: Session, live_buffer: LiveInputBuffer, height: int,
     candidates: Sequence[str], line_text: str, cursor: int,
+    *, accent_color: int = ACCENT_COLOR, unicode_style: bool = False,
 ) -> None:
     """
     `apply_tab_completion`'s `list_candidates` hook (design doc)
-    for chat's pinned input row: prints the Tab-completion candidate
-    list through the exact same "new line in the scrolling content
-    region, then redraw the pinned input row" shape as everything else
-    that prints while the pinned rows are active (`_print_and_redraw_
-    input`, reused directly here), instead of `apply_tab_completion`'s
-    own default fallback -- an unconditional `"\\r\\n"` that has no idea
-    the terminal's cursor sits on the pinned input row, outside the
-    scroll region, and would print the candidate list wherever that
-    unconstrained newline happens to land instead of scrolling normally
-    within the content region above.
-
-    `live_buffer` is updated with the completion's own already-applied
-    result *before* `_print_and_redraw_input` reads it to redraw the
-    input row -- `_read_line_editable`'s own per-keystroke update to
-    `live_buffer` only happens once this whole Tab keypress finishes
-    handling, after this hook has already returned, so without this the
-    redraw would show the in-progress text from *before* the completion
-    ran.
+    for chat's pinned input row.
     """
     live_buffer.update(list(line_text), cursor)
-    await _print_and_redraw_input(session, "  ".join(candidates), live_buffer, height)
+    await _print_and_redraw_input(
+        session, "  ".join(candidates), live_buffer, height,
+        accent_color=accent_color, unicode_style=unicode_style,
+    )
 
 
 async def _enter_content_region(session: Session, height: int) -> None:
     """
-    Repositions the cursor into the scrolling content region's bottom
-    row, ready for ordinary `write_line` calls (every existing chat
-    command handler's own output) to print and
-    auto-scroll correctly (design doc). Needed because the
-    cursor is otherwise sitting on the pinned input row -- outside the
-    scroll region -- immediately after `read_line()` returns; without
-    this, the first line a command handler writes would land in the
-    wrong place (potentially right on top of the pinned input or status
-    row, since the *cursor's* position, not the scroll region alone,
-    is what an ordinary newline-driven write respects). Caller is
-    responsible for holding `_chat_loop`'s shared write lock.
-
-    A no-op if `height` is below `_PINNED_UI_MIN_HEIGHT` (GitHub issue
-    #46) -- same defensive backstop as `_repaint_input_row`.
+    Repositions the cursor into the scrolling content region's bottom row.
     """
     if height < _PINNED_UI_MIN_HEIGHT:
         return
-    scroll_bottom = height - 2
+    scroll_bottom = height - _PINNED_ROWS
     await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1))
 
 
@@ -2983,6 +2889,9 @@ class _PinnedUIState:
 
     active: bool
     last_height: int | None = None
+    accent_color: int = ACCENT_COLOR
+    unicode_style: bool = False
+    truecolor: bool = False
 
     async def sync(
         self,
@@ -3000,10 +2909,16 @@ class _PinnedUIState:
         if now_active != self.active or resized_in_place:
             if now_active:
                 await session.write(
-                    clear_screen() + set_scroll_region(1, height - 2)
+                    clear_screen() + set_scroll_region(1, height - _PINNED_ROWS)
                 )
-                await _repaint_status_line(session, lane, hub, presence, channel, user)
-                await _repaint_input_row(session, live_buffer, height)
+                await _repaint_status_line(
+                    session, lane, hub, presence, channel, user,
+                    unicode_style=self.unicode_style, truecolor=self.truecolor,
+                )
+                await _repaint_input_row(
+                    session, live_buffer, height,
+                    accent_color=self.accent_color, unicode_style=self.unicode_style,
+                )
             else:
                 await session.write(reset_scroll_region() + clear_screen())
             self.active = now_active
@@ -3034,40 +2949,22 @@ async def _clock_loop(
     user: User,
     lock: asyncio.Lock,
     *,
+    unicode_style: bool = False,
+    truecolor: bool = False,
     now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """
     Repaints the pinned status row once a minute, aligned to the real
-    wall-clock minute boundary -- without this, the status line's own
-    clock (and everything else in it) only ever updates as a side
-    effect of some other event happening (a message, a command), so an
-    otherwise-idle session could sit showing a minute-stale clock
-    indefinitely. Sleeping a flat 60s from whichever moment this task
-    happened to start would drift against the real boundary and could
-    show a stale minute for up to 59 seconds after it actually ticked
-    over; `_seconds_until_next_minute` keeps every wakeup landing right
-    on it instead.
-
-    `now`/`sleep` are injectable so a test can drive this without a real
-    wait -- the same dependency-injection shape `run_daybreak_announcer`
-    already uses, for the identical reason.
-
-    Runs as `_chat_loop`'s own third task (`clock_task`), deliberately
-    not folded into `receive_loop`/`send_loop` -- neither of those ever
-    runs unconditionally on a timer, and layering a sleep-based tick
-    into either would mean it only fires between other work rather than
-    on a true schedule. Also deliberately excluded from `_chat_loop`'s
-    `asyncio.wait(..., return_when=FIRST_COMPLETED)`: this loop never
-    finishes on its own, so it must never be mistaken for "the user
-    quit" or "the connection dropped" the way `receive_task`/`send_task`
-    completing does -- `_chat_loop` cancels it alongside them on every
-    exit path instead, same as any other owned background task.
+    wall-clock minute boundary.
     """
     while True:
         await sleep(_seconds_until_next_minute(now()))
         async with lock:
-            await _repaint_status_line(session, lane, hub, presence, channel, user)
+            await _repaint_status_line(
+                session, lane, hub, presence, channel, user,
+                unicode_style=unicode_style, truecolor=truecolor,
+            )
 
 
 async def _chat_loop(
@@ -3210,28 +3107,28 @@ async def _chat_loop(
     # task creation cross real lane.run() round trips, so a
     # cancellation landing in that window needs the same finally-block
     # hub.leave() cleanup as one landing in the wait() below (that
-    # window is not zero-width: real await points exist there, not just
-    # synchronous db calls).
+    pinned_ui: _PinnedUIState | None = None
     try:
         pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
         live_buffer = LiveInputBuffer()
         lock = asyncio.Lock()
-        # GitHub issue #46: `pinned_ui` tracks this dynamically for the rest
-        # of the session (see `_PinnedUIState`) -- constructed directly from
-        # the boolean just computed, not via `sync()`, since entry's own
-        # setup immediately below already does the equivalent one-time
-        # activation work itself (and repainting the status/input rows here
-        # would be premature -- scrollback and the join notice haven't been
-        # written yet).
-        pinned_ui = _PinnedUIState(active=pinned_ui_enabled, last_height=session.terminal_height)
+        unicode_style = await lane.run(unicode_style_enabled, user)
+        truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+        accent_color = await lane.run(effective_accent_color_256)
+        pinned_ui = _PinnedUIState(
+            active=pinned_ui_enabled,
+            last_height=session.terminal_height,
+            accent_color=accent_color,
+            unicode_style=unicode_style,
+            truecolor=truecolor,
+        )
         if pinned_ui_enabled:
-            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
+            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - _PINNED_ROWS))
 
         safe_channel_name = sanitize_text(channel.name)
-        channel_label = colored(f"#{safe_channel_name}", fg_color=await lane.run(effective_accent_color_256), bold=True)
+        channel_label = colored(f"#{safe_channel_name}", fg_color=accent_color, bold=True)
         quit_hint = menu_key("/quit", " to leave")
 
-        unicode_style = await lane.run(unicode_style_enabled, user)
         collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
         heading = screen_title(
             f"#{safe_channel_name}",
@@ -3260,6 +3157,11 @@ async def _chat_loop(
                     fg_color=MUTED_COLOR,
                 )
             )
+            rule_char = "─" if unicode_style else "-"
+            divider_color = 238 if truecolor else MUTED_COLOR
+            await session.write_line(
+                colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
+            )
             # Issue #56: viewing this channel's scrollback advances
             # user's read cursor to whatever is now newest on screen --
             # scrollback is oldest-first (get_scrollback's own contract),
@@ -3267,14 +3169,6 @@ async def _chat_loop(
             await lane.run(record_channel_seen, user, channel, scrollback[-1])
 
         await session.write_line(f"\r\n{status_badge('LIVE', tone='success', unicode_style=unicode_style)} Joined {channel_label}. Type {quit_hint}.")
-        # author_label is stored raw here (user.username, not a sanitized/
-        # alias-aware label) -- sanitize on output, not on storage, per
-        # sanitize_text's docstring; only the rendered copy each recipient's
-        # receive_loop produces is actually shown to a terminal (GitHub
-        # issue #64) -- the recorded ChannelMessage itself is
-        # broadcast, not a pre-rendered string, so live and scrollback
-        # replay always agree on how to render it (see
-        # _render_channel_message).
         recorded_join = await lane.run(
             record_message, channel, kind="join", author_label=user.username, author_fingerprint=user.fingerprint
         )
@@ -3284,45 +3178,36 @@ async def _chat_loop(
                 channel, change="join", username=user.username
             )
         if pinned_ui_enabled:
-            await _repaint_status_line(session, lane, hub, presence, channel, user)
+            await _repaint_status_line(
+                session, lane, hub, presence, channel, user,
+                unicode_style=unicode_style, truecolor=truecolor,
+            )
             # Neither task is running yet (both are created below, after
             # this initial setup completes) -- no concurrent writer exists
             # at this exact point, so this first paint needs no lock.
-            await _repaint_input_row(session, live_buffer, session.terminal_height)
+            await _repaint_input_row(
+                session, live_buffer, session.terminal_height,
+                accent_color=accent_color, unicode_style=unicode_style,
+            )
 
         async def deliver(text: str, *, repaint_status: bool = False) -> None:
             """
             Routes through the pinned-row-aware print-and-redraw path
-            when the pinned UI is active (under `lock`, so this can
-            never interleave with `send_loop` mid-keystroke or
-            mid-dispatch -- see `_repaint_status_line`'s docstring), or
-            falls straight back to a plain `write_line` when it isn't (a
-            too-short terminal, exactly the old, unconfined-scrolling
-            behavior).
-
-            Always acquires `lock` first, then re-derives whether the
-            pinned UI is *currently* active via `pinned_ui.sync()`
-            (GitHub issue #46) -- a resize can flip this at any moment
-            between two deliveries, and `sync()` itself needs the lock
-            held to perform a threshold-crossing transition atomically
-            with respect to `send_loop`.
-
-            Used two ways: `receive_loop`'s own writes below (design doc),
-            and installed as `session.pinned_notice_hook` so
-            an out-of-band system notice (a node-shutdown broadcast,
-            `netbbs.net.session_registry.ActiveSessionRegistry.
-            broadcast_to_all`) reaches this session through the same
-            safe path instead of a raw write that assumes a plain
-            scrolling prompt -- see `Session.pinned_notice_hook`'s own
-            docstring.
+            when the pinned UI is active.
             """
             async with lock:
                 if not await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
                     await session.write_line(text)
                     return
-                await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
+                await _print_and_redraw_input(
+                    session, text, live_buffer, session.terminal_height,
+                    accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
+                )
                 if repaint_status:
-                    await _repaint_status_line(session, lane, hub, presence, channel, user)
+                    await _repaint_status_line(
+                        session, lane, hub, presence, channel, user,
+                        unicode_style=pinned_ui.unicode_style, truecolor=pinned_ui.truecolor,
+                    )
 
         session.pinned_notice_hook = deliver
 
@@ -3390,7 +3275,8 @@ async def _chat_loop(
 
             async def list_candidates(candidates: Sequence[str], line_text: str, cursor: int) -> None:
                 await _print_candidates_and_redraw_input(
-                    session, live_buffer, session.terminal_height, candidates, line_text, cursor
+                    session, live_buffer, session.terminal_height, candidates, line_text, cursor,
+                    accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
                 )
 
             while True:
@@ -3599,7 +3485,10 @@ async def _chat_loop(
                                 colored("(You are still marked away.)", fg_color=MUTED_COLOR)
                             )
                         if pinned_ui_enabled:
-                            await _repaint_status_line(session, lane, hub, presence, channel, user)
+                            await _repaint_status_line(
+                                session, lane, hub, presence, channel, user,
+                                unicode_style=pinned_ui.unicode_style, truecolor=pinned_ui.truecolor,
+                            )
                 finally:
                     # Re-synced once more here, not just trusted from the
                     # top of this same iteration (GitHub issue #46) -- a
@@ -3610,7 +3499,10 @@ async def _chat_loop(
                     # is even valid to attempt.
                     async with lock:
                         if await pinned_ui.sync(session, lane, hub, presence, channel, user, live_buffer):
-                            await _repaint_input_row(session, live_buffer, session.terminal_height)
+                            await _repaint_input_row(
+                                session, live_buffer, session.terminal_height,
+                                accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
+                            )
 
         # Design doc §8.10.2, issue #148: best-effort live subscribe to
         # this channel's origin node, if it's Linked and this node isn't
@@ -3689,7 +3581,12 @@ async def _chat_loop(
 
         receive_task = asyncio.create_task(receive_loop())
         send_task = asyncio.create_task(send_loop())
-        clock_task = asyncio.create_task(_clock_loop(session, lane, hub, presence, channel, user, lock))
+        clock_task = asyncio.create_task(
+            _clock_loop(
+                session, lane, hub, presence, channel, user, lock,
+                unicode_style=unicode_style, truecolor=truecolor,
+            )
+        )
 
         try:
             done, pending = await asyncio.wait(
@@ -3787,7 +3684,7 @@ async def _chat_loop(
         # `pinned_ui_enabled` is local to that nested function, not
         # visible in this outer scope (`pinned_ui` is the one object
         # both closures actually share and keep in sync).
-        if pinned_ui.active:
+        if pinned_ui is not None and pinned_ui.active:
             # Best-effort: a session that's already gone (the common
             # reason this whole function is unwinding in the first
             # place) makes this write raise SessionClosedError, which
@@ -3933,7 +3830,8 @@ def _render_direct_chat_message(label: str, body: str, *, self_message: bool, ac
 
 
 async def _repaint_direct_chat_status_line(
-    session: Session, user: User, other_user: User, presence: PresenceRegistry, *, accent: int = ACCENT_COLOR
+    session: Session, user: User, other_user: User, presence: PresenceRegistry,
+    *, accent: int = ACCENT_COLOR, unicode_style: bool = False, truecolor: bool = False,
 ) -> None:
     """Direct-chat sibling of `_repaint_status_line` -- no `lane.run`
     round trip at all, since nothing here needs a database read (see
@@ -3950,9 +3848,13 @@ async def _repaint_direct_chat_status_line(
         return
     groups = _render_direct_chat_status_line(other_user, presence, accent=accent)
     line = _compose_status_line(groups, session.terminal_width, active=not presence.is_away(user.username))
+    shelf = _shelf_divider(session.terminal_width, unicode_style=unicode_style, truecolor=truecolor)
     await session.write(
         save_cursor()
-        + set_scroll_region(1, height - 2)
+        + set_scroll_region(1, height - _PINNED_ROWS)
+        + move_cursor(height - 2, 1)
+        + clear_line()
+        + shelf
         + move_cursor(height - 1, 1)
         + clear_line()
         + line
@@ -3962,18 +3864,13 @@ async def _repaint_direct_chat_status_line(
 
 @dataclass
 class _DirectChatPinnedUIState:
-    """Direct-chat sibling of `_PinnedUIState` (GitHub issue #46) -- same
-    resize-tracking shape (including `last_height`'s own in-range-resize
-    fix, a dogfood report), calling this module's own DM status-line
-    repaint instead of the channel one. Kept as its own small class
-    rather than generalizing `_PinnedUIState` itself: the two would
-    otherwise need an injectable repaint callback for one caller, and
-    touching that already-proven, heavily-exercised channel-chat class
-    isn't worth the risk for what a dozen-line sibling already covers."""
+    """Direct-chat sibling of `_PinnedUIState` (GitHub issue #46)."""
 
     active: bool
     last_height: int | None = None
     accent_color: int = ACCENT_COLOR
+    unicode_style: bool = False
+    truecolor: bool = False
 
     async def sync(
         self, session: Session, user: User, other_user: User, presence: PresenceRegistry, live_buffer: LiveInputBuffer
@@ -3983,9 +3880,18 @@ class _DirectChatPinnedUIState:
         resized_in_place = now_active and self.active and height != self.last_height
         if now_active != self.active or resized_in_place:
             if now_active:
-                await session.write(clear_screen() + set_scroll_region(1, height - 2))
-                await _repaint_direct_chat_status_line(session, user, other_user, presence, accent=self.accent_color)
-                await _repaint_input_row(session, live_buffer, height)
+                await session.write(clear_screen() + set_scroll_region(1, height - _PINNED_ROWS))
+                await _repaint_direct_chat_status_line(
+                    session, user, other_user, presence,
+                    accent=self.accent_color,
+                    unicode_style=self.unicode_style,
+                    truecolor=self.truecolor,
+                )
+                await _repaint_input_row(
+                    session, live_buffer, height,
+                    accent_color=self.accent_color,
+                    unicode_style=self.unicode_style,
+                )
             else:
                 await session.write(reset_scroll_region() + clear_screen())
             self.active = now_active
@@ -4006,66 +3912,30 @@ async def run_direct_chat_loop(
     collapsed: bool = False,
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    truecolor: bool | None = None,
 ) -> None:
     """
     Real-time 1:1 direct chat, until either side types `/close`, the
-    connection drops, or the other side leaves first -- design doc
-    §6.3's mutual invite/accept direct chat. Entered only once both sides
-    have already agreed via `netbbs.chat.direct_invites.
-    DirectChatInvites` (`netbbs.net.login_flow._handle_incoming_invite`
-    and `run_direct_chat_invite_flow` below both call this directly once
-    accepted) -- there is nothing left to negotiate by the time this
-    function starts, and nothing here knows or cares how the invite was
-    delivered (live interrupt or queued until the next checkpoint).
-
-    A deliberately smaller sibling of `_chat_loop`: no channel, no
-    persistence/scrollback (design doc: direct chat is fully ephemeral,
-    the same "chat is inherently ephemeral" stance `netbbs.chat.hub`'s
-    own module docstring already takes for channels), no moderation/
-    mute/ban (no such concept for exactly two already-consenting
-    participants), and no command surface beyond `/close` -- reuses the
-    same pinned-status-row/pinned-input-row VT100 scroll-region
-    machinery `_chat_loop` already established (`_repaint_input_row`/
-    `_print_and_redraw_input`/`_print_candidates_and_redraw_input`/
-    `_enter_content_region`, `netbbs.rendering`'s scroll-region helpers)
-    rather than duplicating it, with its own much smaller status-line
-    renderer (`_render_direct_chat_status_line`) in place of the
-    channel-specific one, and no command-dispatch table at all (`/close`
-    is recognized directly in `send_loop`, not routed through
-    `ChatCommandContext`/`_dispatch_command`, both of which require a
-    real persisted `Channel` this ephemeral room deliberately has none
-    of).
-
-    No account-revocation re-check at this boundary, unlike `_chat_loop`'s
-    own send_loop -- `netbbs.net.login_flow._watch_for_account_
-    revocation`'s background watcher (started once, for the whole
-    authenticated session, regardless of which screen is currently
-    active) already enforces this everywhere a session might be,
-    including here; `_chat_loop`'s own explicit check is a *tighter*
-    bound at its own particular checkpoint, not the only enforcement, so
-    skipping it here doesn't reopen any gap.
-
-    `room_token` (from the `DirectChatInvite` both sides already share a
-    reference to -- see that class's own docstring) names a synthetic
-    `ChatHub` channel scoped to exactly this one pair for exactly this
-    one conversation's lifetime. `ParticipantId.session_key=id(session)`
-    matches `_chat_loop`'s own single existing call site's convention --
-    unlike the Who picker's own `(#N)` reference (issue #113), nothing
-    here ever displays this value to a user, so there is no stability/
-    opacity concern to fix.
+    connection drops, or the other side leaves first.
     """
+    effective_tc = getattr(session, "supports_truecolor", False) if truecolor is None else truecolor
     room = f"{_DM_CHANNEL_PREFIX}{room_token}"
     participant_id = ParticipantId(username=user.username, session_key=id(session))
     queue = hub.join(room, participant_id)
+    pinned_ui: _DirectChatPinnedUIState | None = None
     try:
         pinned_ui_enabled = session.terminal_height >= _PINNED_UI_MIN_HEIGHT
         live_buffer = LiveInputBuffer()
         lock = asyncio.Lock()
         pinned_ui = _DirectChatPinnedUIState(
-            active=pinned_ui_enabled, last_height=session.terminal_height, accent_color=accent_color
+            active=pinned_ui_enabled,
+            last_height=session.terminal_height,
+            accent_color=accent_color,
+            unicode_style=unicode_style,
+            truecolor=effective_tc,
         )
         if pinned_ui_enabled:
-            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - 2))
+            await session.write(clear_screen() + set_scroll_region(1, session.terminal_height - _PINNED_ROWS))
 
         close_hint = menu_key("/close", " to leave")
         heading = screen_title(
@@ -4080,24 +3950,32 @@ async def run_direct_chat_loop(
         await session.write_line(f"\r\n{heading}")
         await session.write_line(f"Type {close_hint}.")
         if pinned_ui_enabled:
-            await _repaint_direct_chat_status_line(session, user, other_user, presence, accent=accent_color)
+            await _repaint_direct_chat_status_line(
+                session, user, other_user, presence,
+                accent=accent_color,
+                unicode_style=unicode_style,
+                truecolor=effective_tc,
+            )
             # Neither task is running yet (both are created below) -- no
             # concurrent writer exists at this exact point, so this first
             # paint needs no lock, matching _chat_loop's own entry.
-            await _repaint_input_row(session, live_buffer, session.terminal_height)
+            await _repaint_input_row(
+                session, live_buffer, session.terminal_height,
+                accent_color=accent_color,
+                unicode_style=unicode_style,
+            )
 
         async def deliver(text: str) -> None:
-            """Same shape as `_chat_loop`'s own `deliver` closure --
-            installed as `session.pinned_notice_hook` for the identical
-            reason (an out-of-band system notice, e.g. a node-shutdown
-            broadcast, must reach this session through the pinned-row-
-            aware path too, not a raw write that assumes a plain
-            scrolling prompt)."""
+            """Same shape as `_chat_loop`'s own `deliver` closure."""
             async with lock:
                 if not await pinned_ui.sync(session, user, other_user, presence, live_buffer):
                     await session.write_line(text)
                     return
-                await _print_and_redraw_input(session, text, live_buffer, session.terminal_height)
+                await _print_and_redraw_input(
+                    session, text, live_buffer, session.terminal_height,
+                    accent_color=pinned_ui.accent_color,
+                    unicode_style=pinned_ui.unicode_style,
+                )
 
         session.pinned_notice_hook = deliver
 
@@ -4141,7 +4019,10 @@ async def run_direct_chat_loop(
                         # before the committed line is rendered in the
                         # content region, otherwise the old input remains
                         # visible below an identical `you:` line.
-                        await _repaint_input_row(session, live_buffer, session.terminal_height)
+                        await _repaint_input_row(
+                            session, live_buffer, session.terminal_height,
+                            accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
+                        )
                         await _enter_content_region(session, session.terminal_height)
 
                     if not line:
@@ -4191,7 +4072,7 @@ async def run_direct_chat_loop(
                 pass
     finally:
         session.pinned_notice_hook = None
-        if pinned_ui.active:
+        if pinned_ui is not None and pinned_ui.active:
             try:
                 await session.write(reset_scroll_region() + clear_screen())
             except SessionClosedError:
