@@ -80,6 +80,8 @@ from netbbs.link.boards import LinkContext
 from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
+from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.file_area_banner import load_file_area_banner
 from netbbs.net.node_theme import effective_accent_color_256, effective_header_color_256
@@ -93,18 +95,24 @@ from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.rendering import (
     ERROR_COLOR,
+    HEADER_COLOR,
+    MENU_KEY_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
     SUCCESS_COLOR,
+    VALUE_COLOR,
     MenuEntry,
     action_bar,
     badge,
     colored,
+    colored_truncate,
+    cut_to_width,
     empty_state,
     menu_grid,
     menu_key,
     sanitize_text,
     screen_title,
+    visible_width,
 )
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
@@ -385,6 +393,22 @@ def _format_size(size_bytes: int) -> str:
         size /= 1024
 
 
+def _file_column_widths(terminal_width: int) -> tuple[int, int, int, int, int]:
+    """Returns (idx_w, name_w, size_w, date_w, uploader_w) for columnar file listing."""
+    idx_w = 4
+    size_w = 9
+    date_w = 16
+    if terminal_width < 80:
+        uploader_w = 16
+        fixed = idx_w + 1 + size_w + 1 + date_w + 1 + uploader_w
+        name_w = max(12, terminal_width - fixed - 1)
+    else:
+        extra = terminal_width - 80
+        name_w = 18 + min(10, extra // 2)
+        uploader_w = 28 + min(10, extra // 4)
+    return idx_w, name_w, size_w, date_w, uploader_w
+
+
 async def _render_area_page(
     session: Session,
     lane: DatabaseLane,
@@ -398,6 +422,8 @@ async def _render_area_page(
     redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
+    truecolor: bool = False,
+    highlighted: int | None = None,
 ) -> None:
     """Renders one page of files plus its navigation options and command
     hints — the unit that should be redrawn on an actual page change
@@ -405,7 +431,7 @@ async def _render_area_page(
     regardless of whether anything changed."""
     await _render_file_page(
         session, lane, area_name, page, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
-        unicode_style=unicode_style, collapsed=collapsed,
+        unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
     )
     options = []
     if page.has_older:
@@ -418,24 +444,96 @@ async def _render_area_page(
         f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
 
-    # These command hints already carry their own inline explanation
-    # (the `rest` text after each), unlike a bare hotkey label -- so no
-    # separate `brief` is authored per entry, it would just repeat what
-    # is already on screen. Still routed through `_menu_row` so the
-    # "off" case stays byte-for-byte the old packed `action_bar` row.
-    hints = [MenuEntry(label=menu_key("/download <filename>", " — receive via Zmodem"))]
+    n_files = len(page.entries)
+    if n_files > 0:
+        num_label = f"1-{n_files}" if n_files > 1 else "1"
+        hints = [MenuEntry(label=menu_key(num_label, " or /download <name|#> — receive via Zmodem"))]
+    else:
+        hints = [MenuEntry(label=menu_key("/download <filename>", " — receive via Zmodem"))]
     if can_write:
         hints.append(MenuEntry(label=menu_key("/upload", " — send via Zmodem")))
-    # Design doc, issue #92: shown whenever this node has Link available
-    # at all, regardless of whether this specific area turns out to have
-    # any remote catalogue entries yet -- /remote itself reports "no
-    # remote files" rather than needing a second lane round trip here
-    # just to decide whether to print the hint.
     if show_remote_hint:
         hints.append(MenuEntry(label=menu_key("/remote", " — browse/fetch this file area's remote catalogue")))
     await session.write_line(
         _menu_row(hints, width=session.terminal_width, height=session.terminal_height, description_level=description_level)
     )
+
+
+async def _read_file_choice(
+    session: Session,
+    page: FileEntryPage,
+    highlighted: int | None,
+) -> tuple[str, str | None, int | None]:
+    """Read a command, file number shortcut, or arrow navigation.
+
+    Returns:
+      ('nav', action, None) - navigation command ('b', 'o', 'n', 'r')
+      ('download', filename, None) - direct file download
+      ('highlight', None, new_index) - arrow key highlight change
+      ('command', full_cmd, None) - multi-character command line
+      ('none', None, highlighted) - no-op / rejected key
+    """
+    await session.write("Choice or command: ")
+
+    read_editor_key = getattr(session, "read_editor_key", None)
+    if read_editor_key is not None:
+        try:
+            key = await read_editor_key()
+            if key.kind == EditorKeyKind.DOWN:
+                if not page.entries:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+                if highlighted is None:
+                    return ("highlight", None, 0)
+                elif highlighted < len(page.entries) - 1:
+                    return ("highlight", None, highlighted + 1)
+                else:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+            elif key.kind == EditorKeyKind.UP:
+                if not page.entries:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+                if highlighted is None:
+                    return ("highlight", None, len(page.entries) - 1)
+                elif highlighted > 0:
+                    return ("highlight", None, highlighted - 1)
+                else:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+            elif key.kind == EditorKeyKind.ENTER:
+                if highlighted is not None and 0 <= highlighted < len(page.entries):
+                    await session.write_line("")
+                    return ("download", page.entries[highlighted].filename, highlighted)
+                else:
+                    await session.write("\a")
+                    return ("none", None, highlighted)
+            elif key.kind == EditorKeyKind.ESCAPE:
+                if highlighted is not None:
+                    return ("highlight", None, None)
+                await session.write("\a")
+                return ("none", None, highlighted)
+            elif key.kind == EditorKeyKind.CHAR and key.char:
+                char = key.char
+                if char.isdigit():
+                    idx = int(char)
+                    if 1 <= idx <= len(page.entries):
+                        await session.write_line(char)
+                        return ("download", page.entries[idx - 1].filename, None)
+                if char.lower() in ("b", "o", "n", "r"):
+                    await session.write_line(char)
+                    return ("nav", char.lower(), None)
+                await session.write(char)
+                rest = await session.read_line()
+                return ("command", (char + rest).strip(), highlighted)
+            else:
+                await session.write("\a")
+                return ("none", None, highlighted)
+        except (NotImplementedError, AttributeError):
+            pass
+
+    line = (await session.read_line()).strip()
+    return ("command", line, highlighted)
 
 
 async def _show_area(
@@ -494,7 +592,7 @@ async def _show_area(
     """
     area_name = sanitize_text(area.name)
 
-    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool, str]:
+    def _load(db: Database) -> tuple[FileEntryPage, str | None, bool, bool, str, bool, bool, bool, bool]:
         # Bundled into one lane call: the page, the effective
         # name_requirement, the can_write gate, whether this area is
         # actually Linked, and the menu-description preference all come
@@ -514,22 +612,23 @@ async def _show_area(
             page, effective_name_requirement, can_write, is_area_linked(db, area),
             menu_description_level(db, user), redraw_in_place_enabled(db, user),
             unicode_style_enabled(db, user), breadcrumb_collapsed_enabled(db, user),
+            effective_truecolor(session, db, user),
         )
 
-    page, effective_name_requirement, can_write, area_linked, description_level, redraw_in_place, unicode_style, collapsed = (
+    page, effective_name_requirement, can_write, area_linked, description_level, redraw_in_place, unicode_style, collapsed, truecolor = (
         await lane.run(_load)
     )
 
     show_remote_hint = link_context is not None and area_linked
 
-    async def _render_and_advance_cursor(current_page: FileEntryPage) -> None:
+    async def _render_and_advance_cursor(current_page: FileEntryPage, highlighted: int | None = None) -> None:
         """The one place every render in this loop funnels through
         (issue #56) -- advances `user`'s file-area read cursor to
         whatever is now newest on screen."""
         await _render_area_page(
             session, lane, area_name, current_page, can_write=can_write, name_requirement=effective_name_requirement,
             show_remote_hint=show_remote_hint, description_level=description_level, redraw_in_place=redraw_in_place,
-            unicode_style=unicode_style, collapsed=collapsed,
+            unicode_style=unicode_style, collapsed=collapsed, truecolor=truecolor, highlighted=highlighted,
         )
         if current_page.entries:
             await lane.run(record_file_area_seen, user, area, current_page.entries[-1])
@@ -549,40 +648,113 @@ async def _show_area(
         )
         await session.write_line(f"\r\n{state}")
     else:
-        await _render_and_advance_cursor(page)
+        highlighted: int | None = None
+        await _render_and_advance_cursor(page, highlighted=highlighted)
         while True:
-            await session.write("Choice or command: ")
-            choice = (await session.read_line()).strip()
+            kind, target, new_h = await _read_file_choice(session, page, highlighted)
 
-            if choice.lower() == "b":
-                break
-            elif choice.lower() == "o" and page.has_older:
-                oldest = page.entries[0]
-                page = await lane.run(
-                    list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
-                )
-                await _render_and_advance_cursor(page)
-            elif choice.lower() == "n" and page.has_newer:
-                newest = page.entries[-1]
-                page = await lane.run(
-                    list_files_page, area, user, after=(newest.created_at, newest.file_id)
-                )
-                await _render_and_advance_cursor(page)
-            elif choice.lower() == "r" and page.has_newer:
-                page = await lane.run(list_files_page, area, user)
-                await _render_and_advance_cursor(page)
-            elif choice.lower() == "/upload" and can_write:
-                await _handle_upload(session, lane, area, user)
-                return
-            elif choice.lower().startswith("/download "):
-                filename = choice[len("/download ") :].strip()
-                await _handle_download(session, lane, area, filename, user)
-                return
-            elif choice.lower() == "/remote" and show_remote_hint:
-                await _browse_remote_files(session, lane, area, user, link_context)
-                return
-            else:
-                await session.write("\a")
+            if kind == "highlight":
+                highlighted = new_h
+                await _render_and_advance_cursor(page, highlighted=highlighted)
+                continue
+            elif kind == "none":
+                continue
+            elif kind == "download":
+                if target is not None:
+                    await _handle_download(session, lane, area, target, user)
+                    return
+            elif kind == "nav":
+                if target == "b":
+                    break
+                elif target == "o" and page.has_older:
+                    oldest = page.entries[0]
+                    page = await lane.run(
+                        list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
+                    )
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif target == "n" and page.has_newer:
+                    newest = page.entries[-1]
+                    page = await lane.run(
+                        list_files_page, area, user, after=(newest.created_at, newest.file_id)
+                    )
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif target == "r" and page.has_newer:
+                    page = await lane.run(list_files_page, area, user)
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                else:
+                    await session.write("\a")
+                continue
+            elif kind == "command":
+                choice = target or ""
+                if choice.lower() == "b":
+                    break
+                elif choice.lower() == "o" and page.has_older:
+                    oldest = page.entries[0]
+                    page = await lane.run(
+                        list_files_page, area, user, before=(oldest.created_at, oldest.file_id)
+                    )
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif choice.lower() == "n" and page.has_newer:
+                    newest = page.entries[-1]
+                    page = await lane.run(
+                        list_files_page, area, user, after=(newest.created_at, newest.file_id)
+                    )
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif choice.lower() == "r" and page.has_newer:
+                    page = await lane.run(list_files_page, area, user)
+                    highlighted = None
+                    await _render_and_advance_cursor(page, highlighted=highlighted)
+                elif choice.lower() == "/upload" and can_write:
+                    await _handle_upload(session, lane, area, user)
+                    return
+                elif choice.lower() == "/remote" and show_remote_hint:
+                    await _browse_remote_files(session, lane, area, user, link_context)
+                    return
+                elif choice.isdigit() and 1 <= int(choice) <= len(page.entries):
+                    target_file = page.entries[int(choice) - 1].filename
+                    await _handle_download(session, lane, area, target_file, user)
+                    return
+                elif choice.startswith("#") and choice[1:].isdigit() and 1 <= int(choice[1:]) <= len(page.entries):
+                    target_file = page.entries[int(choice[1:]) - 1].filename
+                    await _handle_download(session, lane, area, target_file, user)
+                    return
+                elif choice.lower().startswith("/download ") or choice.lower().startswith("d ") or choice.lower().startswith("dl "):
+                    arg = choice.split(maxsplit=1)[1].strip()
+                    if arg.isdigit() and 1 <= int(arg) <= len(page.entries):
+                        exact = next((e.filename for e in page.entries if e.filename == arg), None)
+                        target_file = exact if exact is not None else page.entries[int(arg) - 1].filename
+                    else:
+                        target_file = arg
+                    await _handle_download(session, lane, area, target_file, user)
+                    return
+                elif choice.lower() in ("/download", "d", "dl"):
+                    if highlighted is not None and 0 <= highlighted < len(page.entries):
+                        target_file = page.entries[highlighted].filename
+                        await _handle_download(session, lane, area, target_file, user)
+                        return
+                    elif len(page.entries) == 1:
+                        target_file = page.entries[0].filename
+                        await _handle_download(session, lane, area, target_file, user)
+                        return
+                    else:
+                        await session.write("File number or name to download: ")
+                        sub_choice = (await session.read_line()).strip()
+                        if not sub_choice:
+                            continue
+                        if sub_choice.isdigit() and 1 <= int(sub_choice) <= len(page.entries):
+                            exact = next((e.filename for e in page.entries if e.filename == sub_choice), None)
+                            target_file = exact if exact is not None else page.entries[int(sub_choice) - 1].filename
+                        else:
+                            target_file = sub_choice
+                        await _handle_download(session, lane, area, target_file, user)
+                        return
+                else:
+                    await session.write("\a")
         return
 
     if not can_write and not show_remote_hint:
@@ -807,7 +979,10 @@ async def _render_file_page(
     redraw_in_place: bool = False,
     unicode_style: bool = False,
     collapsed: bool = False,
+    truecolor: bool = False,
+    highlighted: int | None = None,
 ) -> None:
+    header_color = await lane.run(effective_header_color_256)
     header = screen_title(
         area_name,
         breadcrumb=(session.node_display_name, "Files"),
@@ -815,24 +990,81 @@ async def _render_file_page(
         width=session.terminal_width,
         clear=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed,
-        header_color=await lane.run(effective_header_color_256),
-    node_name_gradient=session.node_name_gradient)
+        header_color=header_color,
+        node_name_gradient=session.node_name_gradient,
+    )
     await session.write_line(f"\r\n{header}")
+    if not page.entries:
+        return
+
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     accent = await lane.run(effective_accent_color_256)
-    for entry in page.entries:
+    divider_color = 238 if truecolor else MUTED_COLOR
+    rule_char = "─" if unicode_style else "-"
+
+    idx_w, name_w, size_w, date_w, uploader_w = _file_column_widths(session.terminal_width)
+
+    header_cols = [
+        f"{'#':^4}",
+        f"{'Filename':<{name_w}}",
+        f"{'Size':>{size_w}}",
+        f"{'Date':<{date_w}}",
+        f"{'Uploader':<{uploader_w}}",
+    ]
+    divider_cols = [
+        rule_char * 4,
+        rule_char * name_w,
+        rule_char * size_w,
+        rule_char * date_w,
+        rule_char * uploader_w,
+    ]
+
+    await session.write_line(f"\r\n{colored(' '.join(header_cols), fg_color=header_color, bold=True)}")
+    await session.write_line(colored(" ".join(divider_cols), fg_color=divider_color))
+
+    for position, entry in enumerate(page.entries, start=1):
+        is_highlighted = highlighted == (position - 1)
+        marker = ">" if is_highlighted else " "
+        idx_label = f"{marker}[{position:2d}]"
+        if is_highlighted:
+            idx_cell = colored(idx_label, fg_color=accent, bold=True)
+        else:
+            idx_cell = colored(idx_label, fg_color=MENU_KEY_COLOR)
+
+        name_clean = sanitize_text(entry.filename)
+        name_cut = cut_to_width(name_clean, name_w)
+        if visible_width(name_cut) < name_w:
+            name_padded = name_cut + " " * (name_w - visible_width(name_cut))
+        else:
+            name_padded = name_cut
+        name_cell = colored(name_padded, fg_color=accent, bold=is_highlighted)
+
+        size_str = _format_size(entry.size_bytes)
+        size_padded = f"{size_str:>{size_w}}"
+        if is_highlighted:
+            size_cell = colored(size_padded, fg_color=accent, bold=True)
+        else:
+            size_cell = colored(size_padded, fg_color=VALUE_COLOR)
+
         when = format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
-        size = _format_size(entry.size_bytes)
-        name_line = colored(f"{sanitize_text(entry.filename)} ", fg_color=accent, bold=True) + badge(size)
-        await session.write_line(f"\r\n{name_line}")
+        date_cut = cut_to_width(when, date_w)
+        if visible_width(date_cut) < date_w:
+            date_padded = date_cut + " " * (date_w - visible_width(date_cut))
+        else:
+            date_padded = date_cut
+        date_cell = colored(date_padded, fg_color=METADATA_COLOR)
+
         uploader_display = await lane.run(_uploader_display_name, entry, name_requirement=name_requirement)
-        await session.write_line(
-            colored("  uploaded by ", fg_color=METADATA_COLOR)
-            + uploader_display
-            + colored(f" ({when})", fg_color=METADATA_COLOR)
-        )
+        vis_u = visible_width(uploader_display)
+        if vis_u <= uploader_w:
+            uploader_cell = uploader_display + " " * (uploader_w - vis_u)
+        else:
+            uploader_cell = colored_truncate([(uploader_display, None)], uploader_w)
+
+        row_cells = [idx_cell, name_cell, size_cell, date_cell, uploader_cell]
+        await session.write_line(" ".join(row_cells))
         if entry.description:
-            await session.write_line(f"  {sanitize_text(entry.description)}")
+            await session.write_line(f"      {colored(sanitize_text(entry.description), fg_color=MUTED_COLOR)}")
 
 
 async def _handle_upload(session: Session, lane: DatabaseLane, area: FileArea, user: User) -> None:
