@@ -4882,7 +4882,7 @@ async def _draw_banners_and_mastheads_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
-    await session.write_line("\r\n" + screen_title("Banners & Mastheads",
+    await session.write_line("\r\n" + screen_title("Mastheads & banners",
             breadcrumb=(session.node_display_name, "System"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
@@ -4980,7 +4980,7 @@ async def _draw_welcome_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Welcome banner",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     await session.write_line(detail)
     await session.write_line(
