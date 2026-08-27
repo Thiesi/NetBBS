@@ -3532,27 +3532,36 @@ def _author_display_name(db: Database, post: Post, *, name_requirement: str | No
 
 def _render_quoted_body(body: str, width: int) -> str:
     """Reflow `body`, coloring `>`-quoted lines in `MUTED_COLOR` (issue
-    #181). Runs `reflow()` per same-quotedness run of raw lines, not once
-    over the whole body: `reflow()` only paragraph-breaks on a *blank*
-    line, and otherwise collapses single line breaks and rewraps -- so a
-    quote immediately followed by a reply (no blank line between them,
-    the common case) would get merged into one rewrapped line, and a
-    multi-line quote's own wrapped continuation lines would lose their
-    leading `>` and go uncolored. Each quote run has its `>` prefix
-    stripped, gets reflowed as its own paragraph, and has `>` reapplied
-    to every wrapped line, so multi-line quotes wrap and color correctly
-    too."""
-    runs: list[tuple[bool, list[str]]] = []
+    #181). Runs `reflow()` per same-kind run of raw lines, not once over
+    the whole body: `reflow()` only paragraph-breaks on a *blank* line,
+    and otherwise collapses single line breaks and rewraps -- so a quote
+    immediately followed by a reply (no blank line between them, the
+    common case) would get merged into one rewrapped line, and a multi-
+    line quote's own wrapped continuation lines would lose their leading
+    `>` and go uncolored. Each quote run has its `>` prefix stripped,
+    gets reflowed as its own paragraph, and has `>` reapplied to every
+    wrapped line, so multi-line quotes wrap and color correctly too.
+
+    A blank line is its own third run kind, output verbatim, never
+    folded into an adjacent quote/text run's own `reflow()` call --
+    a blank separator at a quote/text boundary (`"> quoted\\n\\nreply"`)
+    would otherwise join a run's raw lines with a single `\\n`, one
+    short of the `\\n\\n` `reflow()` needs to even recognize a paragraph
+    break, silently dropping the authored blank line."""
+    runs: list[tuple[str, list[str]]] = []
     for raw_line in body.split("\n"):
-        is_quote = raw_line.strip().startswith(">")
-        if runs and runs[-1][0] == is_quote:
+        stripped_line = raw_line.strip()
+        kind = "blank" if not stripped_line else "quote" if stripped_line.startswith(">") else "text"
+        if runs and runs[-1][0] == kind:
             runs[-1][1].append(raw_line)
         else:
-            runs.append((is_quote, [raw_line]))
+            runs.append((kind, [raw_line]))
 
     rendered: list[str] = []
-    for is_quote, raw_lines in runs:
-        if is_quote:
+    for kind, raw_lines in runs:
+        if kind == "blank":
+            rendered.extend(raw_lines)
+        elif kind == "quote":
             stripped = [line.split(">", 1)[1].lstrip(" ") for line in raw_lines]
             for wrapped_line in reflow("\n".join(stripped), width=max(1, width - 2)).splitlines():
                 rendered.append(colored(f"> {wrapped_line}", fg_color=MUTED_COLOR))
