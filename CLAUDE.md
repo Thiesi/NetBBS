@@ -6,7 +6,8 @@ public-readiness) is implemented; its public-readiness gate (issue #131)
 stays open pending human/operational validation, not further code-level
 work. Phase 5 (real-time Link chat) is active: Noise XX transport
 authentication and the first real-time linked-channel chat vertical
-(issue #148) are shipped, released as v5.0.0.
+(issue #148) are shipped, released as v5.0.0. Node-wide presence and
+per-message trust-filtered scrollback (issue #164) shipped in v5.3.0.
 
 ## Start here
 
@@ -157,12 +158,14 @@ work, not further code-level validation.
 
 Phase 5 (real-time Link chat) is active. Shipped: Noise XX transport
 authentication and the first real-time linked-channel chat vertical (issue
-#148) — direct sessions and one linked channel, live. Not yet built:
+#148) — direct sessions and one linked channel, live; node-wide presence and
+per-message trust-filtered scrollback (issue #164, v5.3.0). Not yet built:
 multiple simultaneous channel memberships with background/unread delivery
 (investigated and deliberately deferred — no observable benefit over the
-existing durable unread-count model), Link-wide presence/discovery, Link-wide
-live private chat, and whether/how trusted scrollback is offered to joining
-nodes.
+existing durable unread-count model), Link-wide live private chat and
+real-time multi-hop relay (issue #168, a real distributed-systems/crypto
+design fork, not sized for casual pickup), and trusted scrollback-on-join
+(issue #194, scoped but not yet implemented).
 
 It does **not** yet imply public federation, Phase 4's public-readiness gate
 being closed, Phase 5 complete beyond its first vertical, or any Phase 6
