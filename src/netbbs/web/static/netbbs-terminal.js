@@ -16,7 +16,17 @@
   var term = new Terminal({
     cursorBlink: true,
     scrollback: 2000,
-    theme: { background: "#000000" },
+    fontFamily: '"Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", "Courier New", monospace',
+    fontSize: 15,
+    letterSpacing: 0,
+    lineHeight: 1.15,
+    theme: {
+      background: "#0c0d10",
+      foreground: "#e2e8f0",
+      cursor: "#f6ad55",
+      cursorAccent: "#000000",
+      selectionBackground: "#4a5568",
+    },
   });
   var fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);

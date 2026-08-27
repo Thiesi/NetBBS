@@ -411,7 +411,12 @@ async def review_composition(
             else colored("  Body", fg_color=MUTED_COLOR, bold=True)
         )
         await session.write_line(body_prefix)
+        rule_char = "─" if unicode_style else "-"
+        divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else MUTED_COLOR
+        preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
+        await session.write_line(preview_rule)
         await session.write_line(_preview_body(body, session.terminal_width))
+        await session.write_line(preview_rule)
 
         options = [MenuEntry(label=menu_key(commit_key.upper(), commit_label), brief=commit_brief)]
         if recipient is not None:

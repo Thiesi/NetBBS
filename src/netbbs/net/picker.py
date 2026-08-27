@@ -365,16 +365,27 @@ async def pick_item(
             # cursor -- `highlighted` is `None` (marker never shown)
             # until the first arrow press, see this function's own
             # docstring.
-            marker = "> " if highlighted == position - 1 else "  "
+            is_highlighted = highlighted == position - 1
+            marker = "> " if is_highlighted else "  "
             id_str = str(stable_id_of(item))
             id_padding = " " * (max_id_width - len(id_str))
+
+            if is_highlighted:
+                key_color = lambda txt: colored(txt, fg_color=220, bold=True)
+                item_name_color = lambda txt: colored(txt, fg_color=accent_color, bold=True)
+                desc_color = 252
+            else:
+                key_color = MENU_KEY_COLOR
+                item_name_color = accent_color
+                desc_color = MUTED_COLOR
+
             segments: list[tuple[str, int | None]] = [
-                (f"{marker}{position:02d}. ", MENU_KEY_COLOR),
+                (f"{marker}{position:02d}. ", key_color),
                 (f"(#{id_str}) {id_padding}", MUTED_COLOR),
-                (sanitize_text(name_of(item)), accent_color),
+                (sanitize_text(name_of(item)), item_name_color),
             ]
             if description:
-                segments.append((f" - {sanitize_text(description)}", MUTED_COLOR))
+                segments.append((f" - {sanitize_text(description)}", desc_color))
             await session.write_line(colored_truncate(segments, session.terminal_width))
 
         nav = _render_nav(

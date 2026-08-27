@@ -35,8 +35,13 @@ async def show_help(
     same opt-in shape as `netbbs.rendering.layout.screen_title`'s own
     (issue #162) -- a caller with `db` in scope threads through a
     resolved `node_theme.effective_header_color_256(db)`."""
-    await session.write_line(colored(title, fg_color=header_color, bold=True))
+    width = min(getattr(session, "terminal_width", 80), 78)
+    rule_len = max(0, width - len(title) - 6)
+    hdr = colored(f"╭── {title} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
+    await session.write_line(f"\r\n{hdr}")
     for line in lines:
-        await session.write_line(line)
+        await session.write_line(f"│  {line}")
+    footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
+    await session.write_line(footer)
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
     await session.read_key()

@@ -294,10 +294,11 @@ async def edit_resource_draft(
             available = max(1, session.terminal_width - label_width)
             value_lines = wrap_to_width(value, available) or [""]
             field_line_count += len(value_lines)
-            await session.write_line(f"{prefix}: {colored(value_lines[0], fg_color=MUTED_COLOR)}")
+            val_color = 252 if i == selected else MUTED_COLOR
+            await session.write_line(f"{prefix}: {colored(value_lines[0], fg_color=val_color)}")
             indent = " " * label_width
             for continuation in value_lines[1:]:
-                await session.write_line(f"{indent}{colored(continuation, fg_color=MUTED_COLOR)}")
+                await session.write_line(f"{indent}{colored(continuation, fg_color=val_color)}")
         menu_entries = [MenuEntry(label=f.menu_text, brief=f.brief, detailed=f.help) for f in fields]
         if save is not None:
             menu_entries.append(MenuEntry(label=save_menu_text, brief=_SAVE_BRIEF))

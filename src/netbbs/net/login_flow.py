@@ -3551,6 +3551,10 @@ async def _render_post_page(
     await session.write_line(f"\r\n{header}")
     accent = effective_accent_color(session, db)
     for position, post in enumerate(page.posts, start=1):
+        if position > 1:
+            rule_char = "─" if unicode_style else "-"
+            divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else MUTED_COLOR
+            await session.write_line(colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color))
         when = format_for_display(post.created_at, db)
         edited_marker = f" {badge('edited')}" if post.is_edited else ""
         author_display = _author_display_name(db, post, name_requirement=name_requirement)
@@ -3587,7 +3591,14 @@ async def _render_post_page(
         # genuinely multi-line content (paragraph breaks), unlike the
         # single-line fields above -- see sanitize_text's docstring.
         body = sanitize_text(post.body, allow_newlines=True)
-        await session.write_line(reflow(body, width=session.terminal_width))
+        reflowed = reflow(body, width=session.terminal_width)
+        lines = []
+        for line in reflowed.splitlines():
+            if line.strip().startswith(">"):
+                lines.append(colored(line, fg_color=MUTED_COLOR))
+            else:
+                lines.append(line)
+        await session.write_line("\r\n".join(lines) if lines else "")
 
 
 # -- user directory & vCard/finger (design doc) ------

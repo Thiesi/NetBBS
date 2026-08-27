@@ -299,8 +299,13 @@ async def _render_message(
         + colored(displayed_date, fg_color=METADATA_COLOR)
     )
     await session.write_line("")
+    rule_char = "─" if unicode_style else "-"
+    divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else METADATA_COLOR
+    divider = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
+    await session.write_line(divider)
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
     await session.write_line(colored(body, fg_color=VALUE_COLOR))
+    await session.write_line(divider)
 
 
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
