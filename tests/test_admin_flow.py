@@ -5965,6 +5965,51 @@ def test_operations_menu_reloads_after_outbox_action(db, lane, sysop, monkeypatc
     assert len(calls) == 3
 
 
+def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lane, sysop, monkeypatch):
+    """Only Outbox reloaded after the P1 snapshot-reuse fix's first cut
+    -- but Follow Log live-tails the diagnostic log while the SysOp
+    watches it, and Diagnostics can simply be open for a while, so
+    returning from either with new entries having landed left the
+    Operations screen's own "Recent errors/warnings" counts stale until
+    the SysOp happened to also visit Outbox (Codex follow-up, PR #197
+    review: unlike `[N]ode`, neither of these shares the shutdown-path
+    time-sensitivity the original fix was scoped around)."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    calls = []
+    real_backup_summary = admin_flow_module.get_last_backup_summary
+
+    def _counting_backup_summary(db_arg):
+        calls.append(1)
+        return real_backup_summary(db_arg)
+
+    monkeypatch.setattr(admin_flow_module, "get_last_backup_summary", _counting_backup_summary)
+
+    async def _fake_diagnostic_log_screen(session, lane, actor):
+        return None
+
+    async def _fake_diagnostic_log_tail_screen(session, lane):
+        return None
+
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_screen", _fake_diagnostic_log_screen)
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_tail_screen", _fake_diagnostic_log_tail_screen)
+
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+
+    # landing (1) -> operations initial (2) -> [d] reload (3) -> [f] reload (4)
+    session = FakeSession(["o", "d", "f", "b", "b"])
+    asyncio.run(
+        admin_menu(session, lane, sysop, node_controls=None, link_context=link_context)
+    )
+
+    assert len(calls) == 4
+
+
 # -- follow-up: the moderation-queue gauges had the same fake-capacity
 # bug as the active-session gauge (PR #197 review, finding #2) -- a
 # `max(10, pending_total)` denominator meant the bar was permanently

@@ -1286,29 +1286,44 @@ async def _operations_menu(
         if choice == "b":
             await session.write_line("")
             return
+        # Every dispatch branch below except `[N]ode` reloads the
+        # snapshot on return: Outbox can change `dead_letters`, Follow
+        # Log/Diagnostics can leave newer entries behind after however
+        # long the SysOp spent watching them, and a fresh backup can be
+        # triggered from Backup status -- none of them share Node
+        # control's own reason to skip the reload (a real DB-lane wait
+        # sitting in the shutdown/drain path itself), so unlike that one
+        # branch there's no cost to staying accurate here (Codex
+        # follow-up: the first cut of this fix over-corrected to
+        # "reload only after Outbox", leaving every other action's
+        # numbers stale until the SysOp happened to also visit Outbox
+        # or re-enter Operations from scratch).
         if choice == "n" and node_controls is not None:
             await _node_menu(session, lane, actor, node_controls)
         elif choice == "l" and link_context is not None:
             await _link_status_screen(session, lane, actor, link_context=link_context)
+            state = await lane.run(_load_ops)
         elif choice == "o" and link_context is not None:
             await _outbox_screen(session, lane, actor)
-            # Replaying/cancelling a dead-lettered item there changes
-            # `dead_letters` -- the one Outbox action that can actually
-            # move this screen's own numbers, so it's the one dispatch
-            # branch that needs a fresh snapshot afterward.
             state = await lane.run(_load_ops)
         elif choice == "d" and link_context is not None:
             await _diagnostic_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         elif choice == "f" and link_context is not None:
             await _diagnostic_log_tail_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "r" and link_context is not None:
             await _repair_carried_posts_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "k":
             await _backup_status_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         elif choice == "p":
             await _prune_drafts_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         else:
             await session.write(reject_unhandled_key(choice))
 
