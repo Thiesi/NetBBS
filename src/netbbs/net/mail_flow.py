@@ -58,6 +58,7 @@ from netbbs.mail import (
     unread_count,
 )
 from netbbs.net.char_input import reject_unhandled_key
+from netbbs.net.color_depth_preference import effective_truecolor
 from netbbs.net.composition import ReviewAction, edit_line_body, review_composition
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.editor_preference import fullscreen_editor_enabled
@@ -262,6 +263,7 @@ async def _show_sent(session: Session, lane: DatabaseLane, user: User) -> None:
 async def _render_message(
     session: Session,
     lane: DatabaseLane,
+    user: User,
     *,
     message: MailMessage,
     to_label: str | None,
@@ -300,7 +302,8 @@ async def _render_message(
     )
     await session.write_line("")
     rule_char = "─" if unicode_style else "-"
-    divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else METADATA_COLOR
+    truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
+    divider_color = 238 if truecolor else METADATA_COLOR
     divider = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
     await session.write_line(divider)
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
@@ -311,7 +314,7 @@ async def _render_message(
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
     message = await lane.run(mark_read, user, message)
     await _render_message(
-        session, lane, message=message, to_label=None,
+        session, lane, user, message=message, to_label=None,
         redraw_in_place=await lane.run(redraw_in_place_enabled, user),
         unicode_style=await lane.run(unicode_style_enabled, user),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
@@ -362,7 +365,7 @@ async def _show_sent_message(session: Session, lane: DatabaseLane, user: User, m
     recipient = await lane.run(get_user_by_id, message.recipient_user_id)
     to_label = recipient.username if recipient is not None else "(deleted account)"
     await _render_message(
-        session, lane, message=message, to_label=to_label,
+        session, lane, user, message=message, to_label=to_label,
         redraw_in_place=await lane.run(redraw_in_place_enabled, user),
         unicode_style=await lane.run(unicode_style_enabled, user),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, user),
@@ -482,6 +485,7 @@ async def _compose_mail(
     review_collapsed = await lane.run(breadcrumb_collapsed_enabled, user)
     review_accent_color = await lane.run(effective_accent_color_256)
     review_header_color = await lane.run(effective_header_color_256)
+    review_truecolor = await lane.run(lambda db: effective_truecolor(session, db, user))
     while True:
         action = await review_composition(
             session,
@@ -497,6 +501,7 @@ async def _compose_mail(
             collapsed=review_collapsed,
             accent_color=review_accent_color,
             header_color=review_header_color,
+            truecolor=review_truecolor,
         )
         if action is ReviewAction.CANCEL:
             await session.write_line(colored("Message cancelled.", fg_color=MUTED_COLOR))

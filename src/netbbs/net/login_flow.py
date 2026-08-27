@@ -154,7 +154,7 @@ from netbbs.net.chat_flow import (
     run_direct_chat_loop,
 )
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled, set_breadcrumb_collapsed_enabled
-from netbbs.net.color_depth_preference import color_depth_override, set_color_depth_override
+from netbbs.net.color_depth_preference import color_depth_override, effective_truecolor, set_color_depth_override
 from netbbs.net.node_theme import (
     effective_accent_color,
     effective_accent_color_256,
@@ -2998,7 +2998,7 @@ async def _render_board_page(
     Older/Newer/Recent), not on every loop iteration regardless of
     whether anything changed."""
     await _render_post_page(
-        session, db, board_name, page, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
+        session, db, board_name, page, user, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed,
     )
     options = []
@@ -3143,6 +3143,7 @@ async def _show_board(
                 collapsed=collapsed,
                 accent_color=accent_color,
                 header_color=header_color,
+                truecolor=effective_truecolor(session, db, user),
             )
             if action is ReviewAction.CANCEL:
                 await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
@@ -3528,11 +3529,43 @@ def _author_display_name(db: Database, post: Post, *, name_requirement: str | No
     return sanitize_text(post.author_label)
 
 
+def _render_quoted_body(body: str, width: int) -> str:
+    """Reflow `body`, coloring `>`-quoted lines in `MUTED_COLOR` (issue
+    #181). Runs `reflow()` per same-quotedness run of raw lines, not once
+    over the whole body: `reflow()` only paragraph-breaks on a *blank*
+    line, and otherwise collapses single line breaks and rewraps -- so a
+    quote immediately followed by a reply (no blank line between them,
+    the common case) would get merged into one rewrapped line, and a
+    multi-line quote's own wrapped continuation lines would lose their
+    leading `>` and go uncolored. Each quote run has its `>` prefix
+    stripped, gets reflowed as its own paragraph, and has `>` reapplied
+    to every wrapped line, so multi-line quotes wrap and color correctly
+    too."""
+    runs: list[tuple[bool, list[str]]] = []
+    for raw_line in body.split("\n"):
+        is_quote = raw_line.strip().startswith(">")
+        if runs and runs[-1][0] == is_quote:
+            runs[-1][1].append(raw_line)
+        else:
+            runs.append((is_quote, [raw_line]))
+
+    rendered: list[str] = []
+    for is_quote, raw_lines in runs:
+        if is_quote:
+            stripped = [line.split(">", 1)[1].lstrip(" ") for line in raw_lines]
+            for wrapped_line in reflow("\n".join(stripped), width=max(1, width - 2)).splitlines():
+                rendered.append(colored(f"> {wrapped_line}", fg_color=MUTED_COLOR))
+        else:
+            rendered.extend(reflow("\n".join(raw_lines), width=width).splitlines())
+    return "\r\n".join(rendered)
+
+
 async def _render_post_page(
     session: Session,
     db: Database,
     board_name: str,
     page: PostPage,
+    user: User,
     *,
     name_requirement: str | None,
     redraw_in_place: bool = False,
@@ -3553,7 +3586,7 @@ async def _render_post_page(
     for position, post in enumerate(page.posts, start=1):
         if position > 1:
             rule_char = "─" if unicode_style else "-"
-            divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else MUTED_COLOR
+            divider_color = 238 if effective_truecolor(session, db, user) else MUTED_COLOR
             await session.write_line(colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color))
         when = format_for_display(post.created_at, db)
         edited_marker = f" {badge('edited')}" if post.is_edited else ""
@@ -3591,14 +3624,7 @@ async def _render_post_page(
         # genuinely multi-line content (paragraph breaks), unlike the
         # single-line fields above -- see sanitize_text's docstring.
         body = sanitize_text(post.body, allow_newlines=True)
-        reflowed = reflow(body, width=session.terminal_width)
-        lines = []
-        for line in reflowed.splitlines():
-            if line.strip().startswith(">"):
-                lines.append(colored(line, fg_color=MUTED_COLOR))
-            else:
-                lines.append(line)
-        await session.write_line("\r\n".join(lines) if lines else "")
+        await session.write_line(_render_quoted_body(body, session.terminal_width))
 
 
 # -- user directory & vCard/finger (design doc) ------

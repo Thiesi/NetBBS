@@ -348,6 +348,7 @@ async def review_composition(
     collapsed: bool = False,
     accent_color: int = ACCENT_COLOR,
     header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    truecolor: bool = False,
 ) -> ReviewAction:
     """Render a complete draft and return one explicit review action.
 
@@ -360,7 +361,11 @@ async def review_composition(
     preference, same caching rule as every other screen in this rollout.
     `redraw_in_place` (dogfood feature request, `netbbs.net.
     redraw_preference`) is the same shape -- the caller's already-
-    resolved preference, not looked up here.
+    resolved preference, not looked up here. `truecolor` is likewise
+    already-resolved -- the caller's `netbbs.net.color_depth_preference.
+    effective_truecolor(session, db, user)`, which honors that user's own
+    `[C]olor depth` override rather than this module reading `session.
+    supports_truecolor` directly and silently ignoring it.
 
     Dogfood feature request, issue #160's cursor-navigation follow-up
     (item 2 of the prioritized list): `[T]o`/`[U]pdate subject`/`[B]ody`
@@ -412,7 +417,7 @@ async def review_composition(
         )
         await session.write_line(body_prefix)
         rule_char = "─" if unicode_style else "-"
-        divider_color = 238 if getattr(session, "supports_truecolor", False) or getattr(session, "color_depth", "") == "256" else MUTED_COLOR
+        divider_color = 238 if truecolor else MUTED_COLOR
         preview_rule = colored(rule_char * min(session.terminal_width, 78), fg_color=divider_color)
         await session.write_line(preview_rule)
         await session.write_line(_preview_body(body, session.terminal_width))
