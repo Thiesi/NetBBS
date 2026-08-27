@@ -172,7 +172,14 @@ def test_sysop_lands_on_an_operations_overview(db, lane, sysop):
     # live state indicator drops its brackets for a colored "●" dot by
     # default -- "[LOCAL ADMIN]"/"[DISABLED]" are the pre-spec form.
     assert "● LOCAL ADMIN" in text
-    assert "● DISABLED" in text
+    # Standalone mode (no `node_controls`) can't observe whether the
+    # live node actually has Link configured, so it must not claim
+    # "DISABLED" -- that would assert a real, observed config state
+    # this session has no way to know (Codex follow-up, PR #197
+    # review). See test_link_shows_disabled_badge_only_when_actually_
+    # observed_in_bbs for the in-BBS case where "DISABLED" is correct.
+    assert "● UNAVAILABLE" in text
+    assert "● DISABLED" not in text
     assert "Moderation: 0 pending" in text
     assert "Backup: " in text and "never" in text
     assert "CONSOLE" in text
@@ -5561,3 +5568,573 @@ def test_redraw_in_place_clears_a_direct_render_loop_screen(db, lane, sysop):
     text = _written_text(session)
     assert "Operations" in text
     assert clear_screen() in text
+
+
+def test_sysop_console_shows_active_session_count_without_a_fake_capacity_gauge(db, lane, sysop):
+    """SysOp console shows the live active-session count as a bare number
+    (PR #197 review, finding #2): no configured session-capacity limit
+    exists anywhere in this codebase, and the gauge this used to render
+    was denominated by `max(10, active_sessions)` -- a placeholder that
+    made the bar permanently 100%-full and red for any count above 10,
+    an identical "at capacity" alarm for 11 sessions and 10,000. An
+    unbounded count has no natural gauge, so it stands alone instead."""
+    node_controls = _node_controls()
+
+    async def _test():
+        s1 = FakeSession()
+        node_controls.session_registry.enter(s1)
+        session = FakeSession(["b"])
+        await admin_menu(session, lane, sysop, node_controls=node_controls)
+        return _visible(_written_text(session))
+
+    text = asyncio.run(_test())
+    assert "Active sessions: 1" in text
+    assert "█░░░░░░░░░" not in text
+
+
+def test_users_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Users sub-console shares clean double_frame panel with accounts telemetry (Issue #187)."""
+    session = FakeSession(["u", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "ACCOUNTS" in text
+    assert "Total users:" in text
+    assert "Active ratio: [" in text
+
+
+def test_content_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Content sub-console shares clean double_frame panel with content telemetry (Issue #187)."""
+    session = FakeSession(["c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "CONTENT" in text
+    assert "Message boards:" in text
+    assert "MODERATION QUEUE" in text
+    assert "Pending review: 0" in text
+    assert "All clear" in text
+
+
+def test_operations_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Operations sub-console shares clean double_frame panel with operations telemetry (Issue #187)."""
+    node_controls = _node_controls()
+    session = FakeSession(["o", "b", "b"])
+    asyncio.run(
+        admin_menu(session, lane, sysop, node_controls=node_controls)
+    )
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "NODE HEALTH" in text
+    assert "LINK OPERATIONS" in text
+    assert "Active sessions: 0" in text
+    # No fake-capacity gauge for an unbounded session count (PR #197
+    # review, finding #2) -- see the sibling test on the landing page.
+    assert "░░░░░░░░░░" not in text
+
+
+def test_sysop_subconsoles_ascii_fallback(db, lane, sysop):
+    """When unicode_style is False, sub-consoles degrade to unboxed ASCII telemetry cleanly."""
+    from netbbs.net.unicode_style_preference import set_unicode_style_enabled
+    set_unicode_style_enabled(db, sysop, False)
+
+    session = FakeSession(["u", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" not in text
+    assert "╚" not in text
+    assert "ACCOUNTS" in text
+    assert "Total users:" in text
+    assert "[##" in text or "[.." in text
+
+
+def test_subconsoles_adapt_to_40x24_terminal(db, lane, sysop):
+    """On a 40x24 terminal, sub-consoles compact telemetry panels and collapse descriptions (PR #197 review)."""
+    # Content sub-console
+    content_session = FakeSession(["c", "b", "b"])
+    content_session.terminal_width = 40
+    content_session.terminal_height = 24
+    _run(content_session, lane, sysop)
+    content_text = _visible(_written_text(content_session))
+    assert "CONTENT:" in content_text
+    assert "MODERATION QUEUE:" in content_text
+    assert "Choice: " in content_text
+
+    # Operations sub-console with full Link context and node controls
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    node = LinkNode(identity=identity)
+    link_context = LinkContext(node_identity=identity, link_node=node)
+    node_controls = _node_controls()
+
+    ops_session = FakeSession(["o", "b", "b"])
+    ops_session.terminal_width = 40
+    ops_session.terminal_height = 24
+    asyncio.run(
+        admin_menu(ops_session, lane, sysop, node_controls=node_controls, link_context=link_context)
+    )
+    ops_text = _visible(_written_text(ops_session))
+    assert "NODE HEALTH:" in ops_text
+    assert "LINK OPERATIONS:" in ops_text
+    assert "Choice: " in ops_text
+
+
+def test_very_short_terminal_omits_dashboard_panel(db, lane, sysop):
+    """When terminal height is < 18, dashboard panel is suppressed so menus still fit."""
+    session = FakeSession(["c", "b", "b"])
+    session.terminal_height = 14
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "MODERATION QUEUE" not in text
+    assert "Choice: " in text
+
+
+# -- PR #197 review follow-up: box overflow, capacity-gauge, and stale-
+# snapshot findings (both the Codex bot's inline review comments and an
+# independent /code-review pass) -----------------------------------------
+
+
+def _assert_double_frame_rows_match_border(text: str, label: str) -> None:
+    """`double_frame` pads every content row to its own declared `width`
+    -- but nothing upstream of it ever enforced that a caller's content
+    actually fit that width first (its own docstring: callers own
+    truncating/wrapping their own content). A caller passing a row wider
+    than the frame budget silently pushed that one row's right border
+    past where every other row's border sits. Mirrors the identical
+    checker `tests/test_voidrunner_domain.py` already uses for that
+    module's own unrelated `╭│╰`-style boxes."""
+    lines = [_ANSI_RE.sub("", line) for line in text.split("\r\n")]
+    border_widths = {len(l) for l in lines if l.strip().startswith(("╔", "╚"))}
+    assert len(border_widths) <= 1, f"{label}: inconsistent frame widths {border_widths}"
+    if not border_widths:
+        return
+    (border_width,) = border_widths
+    for line in lines:
+        if line.strip().startswith("║"):
+            assert line.rstrip().endswith("║"), f"{label}: right border missing: {line!r}"
+            assert len(line) == border_width, (
+                f"{label}: content row width {len(line)} != frame width {border_width}: {line!r}"
+            )
+
+
+def test_compact_subconsole_panels_fit_the_frame_at_40x24(db, lane, sysop):
+    """Every compact-mode telemetry row must fit inside its own
+    `double_frame` at the narrowest terminal these sub-consoles branch
+    on (PR #197 review, finding #3): `counts_row`/`telemetry_gauge`
+    output has no notion of a target width, and `double_frame` never
+    truncates or wraps its input, so a compact panel with several
+    fields silently ran the box's right border open at 40 columns."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+    node_controls = _node_controls()
+
+    for choice, label in (("u", "users"), ("c", "content"), ("o", "operations")):
+        session = FakeSession([choice, "b", "b"])
+        session.terminal_width = 40
+        session.terminal_height = 24
+        asyncio.run(
+            admin_menu(session, lane, sysop, node_controls=node_controls, link_context=link_context)
+        )
+        text = _written_text(session)
+        _assert_double_frame_rows_match_border(text, label)
+
+
+def test_subconsole_panel_survives_a_pathologically_narrow_terminal(db, lane, sysop):
+    """A client can legitimately report `terminal_width` as low as 1
+    (`netbbs.net.session.clamp_terminal_size` only floors it there) --
+    `double_frame` itself raises `ValueError` below width 4, and the
+    compact-panel code gated rendering only on `terminal_height >= 18`,
+    never on width, so this used to crash the SysOp console outright
+    (PR #197 review, finding #4)."""
+    for width in (1, 2, 3):
+        session = FakeSession(["u", "b", "b"])
+        session.terminal_width = width
+        session.terminal_height = 20
+        _run(session, lane, sysop)  # must not raise
+        assert "Choice: " in _written_text(session)
+
+
+def test_sysop_count_excludes_disabled_sysops(db, lane, sysop):
+    """The Users sub-console's `SysOps` telemetry must use the same
+    "usable SysOp" definition `count_sysops` already establishes
+    elsewhere (PR #197 review, finding #5) -- not a bare `user_level >=
+    SYSOP_LEVEL` filter, which still counted a disabled SysOp-level
+    account as able to administer the node."""
+    from netbbs.auth.users import set_user_disabled
+
+    other = create_user(db, "other-sysop", password="hunter2", user_level=SYSOP_LEVEL)
+    set_user_disabled(db, other, True, changed_by=sysop)
+
+    session = FakeSession(["u", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "SysOps: 1" in text
+    assert "SysOps: 2" not in text
+
+
+def test_operations_compact_panel_omits_diagnostics_without_link_context(db, lane, sysop):
+    """Without a `link_context`, `_load_ops` deliberately never queries
+    the diagnostic log -- the compact panel used to render a bare
+    'Recent errors: 0  warnings: 0' anyway, claiming a check that never
+    happened (PR #197 review, finding #7)."""
+    node_controls = _node_controls()
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _visible(_written_text(session))
+    assert "NODE HEALTH:" in text
+    assert "Recent errors" not in text
+
+
+def test_operations_compact_panel_keeps_standalone_warning(db, lane, sysop):
+    """Compact mode must keep the same "Live node controls unavailable
+    in standalone mode" explanation the non-compact layout already
+    shows when `node_controls` is `None` (PR #197 review, finding #6) --
+    it used to render only the bare NODE HEALTH badge with no
+    explanation at a narrow terminal. At this width the full sentence no
+    longer fits one boxed line, so it's word-wrapped across two (a
+    follow-up Codex finding on top of #6 itself: the first fix restored
+    the message but let it overflow its own frame) -- check both halves
+    landed and the box border still fits, rather than the old one-line
+    substring check."""
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Live node controls unavailable in" in text
+    assert "standalone mode." in text
+    _assert_double_frame_rows_match_border(text, "operations_compact_standalone_warning")
+
+
+def test_users_compact_panel_surfaces_pending_registration_warning(db, lane, sysop):
+    """Compact mode dropped the pending-registration warning outright --
+    not just its `⚠` glyph (finding #9, a separate fix) -- since the
+    `if stats["pending"] > 0:` block that builds it lived only inside
+    the non-compact panel branch. A SysOp on the classic 80x24 terminal
+    (still `compact` here, since compact triggers below height 28) or
+    the 40x24 floor never saw the signal at all (Codex follow-up on top
+    of the PR #197 review's original 10 findings)."""
+    create_user(db, "pending-one", password="hunter2", pending_approval=True)
+
+    session = FakeSession(["u", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "registration" in text and "awaiting review" in text
+    _assert_double_frame_rows_match_border(text, "users_compact_pending_warning")
+
+
+def test_menu_shows_notice_when_a_telemetry_panel_forces_descriptions_off(db, lane, sysop):
+    """`_degrade_description_level` can force `description_level` to
+    `"off"` on its own (a telemetry panel's height budget leaving no
+    room for descriptions) before `menu_grid` -- which has its own,
+    separate "Descriptions hidden" notice -- ever runs; `_menu_row`
+    takes the `action_bar` branch once the level is already `"off"`, so
+    `menu_grid`'s notice logic was unreachable and a SysOp who asked for
+    descriptions saw them silently vanish with no explanation (Codex
+    follow-up on top of the PR #197 review's original 10 findings)."""
+    from netbbs.net.menu_description_preference import set_menu_description_level
+    set_menu_description_level(db, sysop, "detailed")
+
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    # Word-wrapped at this width, same as menu_grid's own equivalent
+    # notice would be -- check both halves landed rather than the full
+    # sentence as one unbroken substring.
+    assert "Descriptions hidden --" in text
+    assert "terminal too" in text
+    assert "short to show them." in text
+
+
+def test_empty_moderation_queue_gauge_reads_as_healthy_not_error(db, lane, sysop):
+    """An empty moderation queue's gauge used to render with `tone=
+    "health"`, which colors a zero ratio as an error (red) -- directly
+    beside a green "All clear" label (PR #197 review, finding #8). The
+    non-empty branch already uses `tone="capacity"`, under which a zero
+    ratio reads as success; the empty branch must match it."""
+    session = FakeSession(["c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "All clear" in _visible(text)
+    assert "\x1b[38;5;196m" not in text  # ERROR_COLOR must not appear at all on this screen
+    assert "\x1b[38;5;82m" in text  # SUCCESS_COLOR: the gauge's own fill color
+
+
+def test_users_menu_ascii_mode_pending_warning_has_no_unicode_glyph(db, lane, sysop):
+    """The pending-registration warning's `⚠` glyph must be conditional
+    on `unicode_style`, matching every other unicode/ASCII branch point
+    in this module -- it used to be hardcoded, leaking a Unicode
+    character into the otherwise-unboxed ASCII fallback (PR #197
+    review, finding #9)."""
+    from netbbs.net.unicode_style_preference import set_unicode_style_enabled
+    set_unicode_style_enabled(db, sysop, False)
+    create_user(db, "pending-one", password="hunter2", pending_approval=True)
+
+    # The pending-registration warning only exists in the non-compact
+    # panel layout (a separate, pre-existing gap -- compact mode never
+    # surfaces it at all -- not this finding's concern), so a tall
+    # enough terminal is needed to actually reach the branch being
+    # fixed here. FakeSession's own default height (24) is compact.
+    session = FakeSession(["u", "b", "b"])
+    session.terminal_height = 30
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "registration" in text and "awaiting review" in text
+    assert "⚠" not in text
+
+
+def test_operations_menu_does_not_reload_after_returning_from_node_controls(db, lane, sysop, monkeypatch):
+    """Returning from `[N]ode` must reuse the existing snapshot, not
+    re-run `_load_ops`'s DB-lane query (PR #197 review, finding #1/P1):
+    the previous shape reloaded unconditionally at the top of every
+    redraw of the Operations loop, reintroducing a cancellable DB-lane
+    wait right after a SysOp schedules an immediate shutdown/drain from
+    the node-control screen. Two calls are expected and correct here --
+    one for the landing page's own initial load, one for Operations'
+    own initial load -- a third would mean the node-menu return
+    triggered an unwanted reload."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    calls = []
+    real_backup_summary = admin_flow_module.get_last_backup_summary
+
+    def _counting_backup_summary(db_arg):
+        calls.append(1)
+        return real_backup_summary(db_arg)
+
+    monkeypatch.setattr(admin_flow_module, "get_last_backup_summary", _counting_backup_summary)
+
+    async def _fake_node_menu(session, lane, actor, node_controls):
+        return None
+
+    monkeypatch.setattr(admin_flow_module, "_node_menu", _fake_node_menu)
+
+    node_controls = _node_controls()
+    session = FakeSession(["o", "n", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+
+    assert len(calls) == 2
+
+
+def test_operations_menu_reloads_after_outbox_action(db, lane, sysop, monkeypatch):
+    """Unlike the node-menu case above, returning from `[O]utbox` must
+    reload -- replaying/cancelling a dead-lettered item there can
+    actually change `dead_letters`, the one Outbox action that moves
+    this screen's own numbers."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    calls = []
+    real_backup_summary = admin_flow_module.get_last_backup_summary
+
+    def _counting_backup_summary(db_arg):
+        calls.append(1)
+        return real_backup_summary(db_arg)
+
+    monkeypatch.setattr(admin_flow_module, "get_last_backup_summary", _counting_backup_summary)
+
+    async def _fake_outbox_screen(session, lane, actor):
+        return None
+
+    monkeypatch.setattr(admin_flow_module, "_outbox_screen", _fake_outbox_screen)
+
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+
+    session = FakeSession(["o", "o", "b", "b"])
+    asyncio.run(
+        admin_menu(session, lane, sysop, node_controls=None, link_context=link_context)
+    )
+
+    assert len(calls) == 3
+
+
+def test_operations_menu_reloads_after_diagnostic_and_follow_log_screens(db, lane, sysop, monkeypatch):
+    """Only Outbox reloaded after the P1 snapshot-reuse fix's first cut
+    -- but Follow Log live-tails the diagnostic log while the SysOp
+    watches it, and Diagnostics can simply be open for a while, so
+    returning from either with new entries having landed left the
+    Operations screen's own "Recent errors/warnings" counts stale until
+    the SysOp happened to also visit Outbox (Codex follow-up, PR #197
+    review: unlike `[N]ode`, neither of these shares the shutdown-path
+    time-sensitivity the original fix was scoped around)."""
+    import netbbs.net.admin_flow as admin_flow_module
+
+    calls = []
+    real_backup_summary = admin_flow_module.get_last_backup_summary
+
+    def _counting_backup_summary(db_arg):
+        calls.append(1)
+        return real_backup_summary(db_arg)
+
+    monkeypatch.setattr(admin_flow_module, "get_last_backup_summary", _counting_backup_summary)
+
+    async def _fake_diagnostic_log_screen(session, lane, actor):
+        return None
+
+    async def _fake_diagnostic_log_tail_screen(session, lane):
+        return None
+
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_screen", _fake_diagnostic_log_screen)
+    monkeypatch.setattr(admin_flow_module, "_diagnostic_log_tail_screen", _fake_diagnostic_log_tail_screen)
+
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.boards import LinkContext
+
+    identity = bootstrap_node_identity("testnode")
+    link_context = LinkContext(node_identity=identity, link_node=LinkNode(identity=identity))
+
+    # landing (1) -> operations initial (2) -> [d] reload (3) -> [f] reload (4)
+    session = FakeSession(["o", "d", "f", "b", "b"])
+    asyncio.run(
+        admin_menu(session, lane, sysop, node_controls=None, link_context=link_context)
+    )
+
+    assert len(calls) == 4
+
+
+# -- follow-up: the moderation-queue gauges had the same fake-capacity
+# bug as the active-session gauge (PR #197 review, finding #2) -- a
+# `max(10, pending_total)` denominator meant the bar was permanently
+# "full" past 10 pending items. Fixed by dropping the gauge for a
+# non-empty queue, same as the session count; the empty-queue gauge
+# (already covered by test_empty_moderation_queue_gauge_reads_as_
+# healthy_not_error) is unaffected since its denominator was never
+# derived from the current value.
+
+
+def _pending_post(db, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.boards.posts import create_post
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop, moderated=True)
+    return create_post(db, board, alice, "Hello", "Body text")
+
+
+def test_landing_page_attention_panel_has_no_fake_capacity_gauge_when_pending(db, lane, sysop):
+    post = _pending_post(db, sysop)
+    assert post.status == "pending"
+
+    session = FakeSession(["b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Moderation: 1 pending" in text
+    assert "█" not in text and "░" not in text and "#" not in text
+
+
+def test_content_menu_moderation_queue_has_no_fake_capacity_gauge_when_pending(db, lane, sysop):
+    post = _pending_post(db, sysop)
+    assert post.status == "pending"
+
+    session = FakeSession(["c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Pending review: 1" in text
+    assert "█" not in text and "░" not in text and "#" not in text
+
+
+def test_link_shows_disabled_badge_only_when_actually_observed_in_bbs(db, lane, sysop):
+    """"DISABLED" is only accurate for the in-BBS SysOp session, which
+    has real `node_controls` for the live node process it's running
+    inside -- see test_sysop_lands_on_an_operations_overview for the
+    standalone-CLI case, which cannot observe this and must not claim
+    it either way (Codex follow-up, PR #197 review)."""
+    node_controls = _node_controls()
+    session = FakeSession(["b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _visible(_written_text(session))
+    assert "● DISABLED" in text
+    assert "● UNAVAILABLE" not in text
+
+
+def test_operations_compact_panel_fits_a_real_backup_timestamp(db, lane, sysop):
+    """`backup_at` is a full ISO timestamp (~27 columns) once a backup
+    has actually run -- `_wrap_counts_panel` only ever wraps/omits its
+    `pairs`, never its own label, so this alone (before Link's own
+    `Recent errors`/`warnings` pairs are even added) was wide enough to
+    overflow the 36-column-inner compact frame at the 40-column floor,
+    worst of all when `backup_pairs` is empty (no Link context) and
+    `_wrap_counts_panel` has nothing to test the label's width against
+    at all (Codex follow-up, PR #197 review)."""
+    from netbbs.backup import create_backup
+
+    identity_dir = db.path.parent / "netbbs_identity"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
+
+    node_controls = _node_controls()
+    session = FakeSession(["o", "b", "b"])
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _visible(_written_text(session))
+    assert "Backup:" in text
+    _assert_double_frame_rows_match_border(text, "operations_compact_backup_timestamp")
+
+
+def test_content_compact_panel_fits_a_triple_digit_moderation_backlog():
+    """The compact MODERATION QUEUE row's non-empty branch was a bare
+    `panel.append`, never routed through the width-aware wrapping every
+    other row in this panel already uses -- fine at single-digit counts,
+    but a caller-driven backlog of 100+ pending items is wide enough to
+    overflow the 36-column-inner compact frame on its own (Codex
+    follow-up, PR #197 review). Calls `_draw_content_menu` directly with
+    a hand-built `stats` dict -- it's a pure render function once given
+    one, no DB needed."""
+    from netbbs.net.admin_flow import _draw_content_menu
+
+    stats = {
+        "total_boards": 1, "total_posts": 0, "total_areas": 1, "total_files": 0,
+        "total_channels": 0, "total_doors": 0, "total_communities": 0,
+        "pending_posts": 100, "pending_files": 0,
+        "description_level": "off", "unicode_style": True,
+        "collapsed": False, "redraw_in_place": False, "header_color": 51,
+    }
+    session = FakeSession()
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(_draw_content_menu(session, stats=stats))
+    text = _visible(_written_text(session))
+    assert "Pending review: 100" in text
+    _assert_double_frame_rows_match_border(text, "content_compact_triple_digit_backlog")
+
+
+def test_users_compact_panel_fits_four_digit_account_counts():
+    """`telemetry_gauge`'s own ` current/total` ratio suffix grows with
+    this node's real account counts, unlike the gauge's fixed-width bar
+    -- at a fixed 10-cell bar, a 4-digit-vs-4-digit ratio
+    ("1000/1000") already overflows this 36-column-inner compact frame
+    once the "Active ratio: " label is added (Codex follow-up, PR #197
+    review); the bar was narrowed to 6 cells specifically for the
+    compact branch to keep real headroom."""
+    from netbbs.net.admin_flow import _draw_users_menu
+
+    stats = {
+        "total": 1000, "active": 1000, "pending": 0, "disabled": 0, "sysops": 1,
+        "description_level": "off", "unicode_style": True,
+        "collapsed": False, "redraw_in_place": False, "header_color": 51,
+    }
+    session = FakeSession()
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(_draw_users_menu(session, stats=stats))
+    text = _visible(_written_text(session))
+    assert "1000/1000" in text
+    _assert_double_frame_rows_match_border(text, "users_compact_four_digit_accounts")

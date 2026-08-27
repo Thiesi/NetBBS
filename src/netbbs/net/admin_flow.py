@@ -64,6 +64,7 @@ from netbbs.auth.users import (
     User,
     UserManagementError,
     approve_pending_user,
+    count_sysops,
     create_user,
     delete_user,
     get_user_by_id,
@@ -388,7 +389,10 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
     status_badge,
+    telemetry_gauge,
     truncate,
+    visible_width,
+    wrap_to_width,
 )
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -406,17 +410,162 @@ from netbbs.timeutil import (
 _logger = logging.getLogger(__name__)
 
 
-def _menu_row(entries: list[MenuEntry], description_level: str, *, width: int, height: int) -> str:
+def _menu_row(
+    entries: list[MenuEntry], description_level: str, *, width: int, height: int, degraded: bool = False
+) -> str:
     """Shared off/on branch for every hotkey-row menu in this module
     (issue #160's rollout, commit 1b1da33's own established pattern):
     `menu_grid` always renders one entry per line, even with
     descriptions off, so it isn't a byte-for-byte substitute for
     `action_bar`'s packed row at that level -- keep `action_bar` there
     so no screen's height changes for a caller who hasn't opted into
-    descriptions, and only switch to `menu_grid` once they have."""
+    descriptions, and only switch to `menu_grid` once they have.
+
+    `degraded=True` means the caller (`_degrade_description_level`)
+    already forced `description_level` to `"off"` before it ever reached
+    here, because its own telemetry panel ate into the available height
+    -- a real degrade of the SysOp's actual preference, not the level
+    they asked for. `menu_grid` has its own notice for exactly this
+    situation (`descriptions_collapsed`), but only when *it* detects the
+    squeeze; since `description_level == "off"` takes the `action_bar`
+    branch instead and never reaches `menu_grid` at all, that notice is
+    unreachable here and the degrade would otherwise happen silently
+    (PR #197 review). Append the equivalent notice ourselves, styled the
+    same way `menu_grid` styles its own."""
     if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
+        result = action_bar([e.label for e in entries], width=width)
+        if degraded:
+            notice_lines = [
+                colored(wrapped, fg_color=MUTED_COLOR)
+                for wrapped in wrap_to_width("Descriptions hidden -- terminal too short to show them.", width)
+            ]
+            result = f"{result}\r\n\r\n" + "\r\n".join(notice_lines)
+        return result
     return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
+
+
+def _link_health_snapshot(db: Database, link_context: LinkContext | None) -> dict[str, int]:
+    """The dead-letter count and recent-diagnostic error/warning tally
+    the SysOp landing page and the Operations sub-console both need --
+    factored out so the two screens can't silently drift into
+    disagreeing about what "recent" means by each re-deriving it."""
+    dead_letters = len(list_work_items(db, status="dead_lettered")) if link_context is not None else 0
+    recent_diagnostics = list_diagnostic_log_entries(db, limit=20) if link_context is not None else []
+    return {
+        "dead_letters": dead_letters,
+        "recent_errors": sum(entry.level == "ERROR" for entry in recent_diagnostics),
+        "recent_warnings": sum(entry.level == "WARNING" for entry in recent_diagnostics),
+    }
+
+
+def _wrap_counts_panel(label: str, pairs: Sequence[tuple[str, int]], *, width: int, continuation: str = "  ") -> list[str]:
+    """Split a `label` + `counts_row(pairs)` telemetry summary across as
+    many lines as the frame's real `width` needs. `counts_row` renders
+    every pair onto a single unconditional line, and `double_frame`
+    never truncates or wraps its input -- callers own pre-fitting their
+    own content (see that function's own docstring) -- so a compact
+    sub-console panel with several fields silently ran the box's right
+    border open on real narrow-but-supported terminals until this
+    existed. `continuation` prefixes every line after the first (the
+    label itself only ever appears once)."""
+    segments = [counts_row([pair]) for pair in pairs]
+    if not segments:
+        return [label]
+    lines: list[str] = []
+    prefix = label
+    current: list[str] = []
+    current_width = visible_width(prefix)
+    for segment in segments:
+        seg_width = visible_width(segment)
+        sep_width = 2 if current else 0
+        # No `current and ...` guard here: the label alone can already
+        # be wide enough (a status badge, e.g.) that even the *first*
+        # segment on an otherwise-empty line doesn't fit -- omitting
+        # this check for that case was the original bug, since it let a
+        # single wide-labeled line through unwrapped every time.
+        if current_width + sep_width + seg_width > width:
+            lines.append(prefix + "  ".join(current))
+            prefix = continuation
+            current = []
+            current_width = visible_width(prefix)
+            sep_width = 0
+        current.append(segment)
+        current_width += sep_width + seg_width
+    lines.append(prefix + "  ".join(current))
+    return lines
+
+
+def _wrap_panel_sentence(text: str, *, prefix: str, width: int, unicode_style: bool) -> list[str]:
+    """Word-wrap a plain-text panel sentence (not a `counts_row` pair --
+    see `_wrap_counts_panel` for those, and `_fit` above for the one
+    case -- an arbitrary-length backup/update-check message -- where a
+    hard cut is the right call instead) across as many lines as a boxed
+    panel's real `width` can hold, `prefix` (e.g. two leading spaces)
+    budgeted on every line so a multi-line sentence stays indented
+    consistently with its own first line. Wrapping, not cutting,
+    because these are short, fixed, known-in-advance phrases -- chopping
+    one off mid-word to fit a 40-column terminal would lose real
+    information for no reason a cut on unpredictable external text
+    doesn't have. An unboxed ASCII-fallback panel has no width
+    constraint to wrap against, so `text` passes through as a single
+    line unchanged there."""
+    if not unicode_style:
+        return [text]
+    budget = max(1, width - visible_width(prefix))
+    return wrap_to_width(text, budget) or [text]
+
+
+async def _write_panel(
+    session: Session, panel: list[str], *, unicode_style: bool, header_color: int | tuple[int, int, int]
+) -> None:
+    """Box `panel` in a `double_frame` when the terminal is wide enough
+    to hold one, else print its lines flat and unboxed -- the same
+    fallback already used when `unicode_style` is off. `double_frame`
+    itself raises below width 4, but `netbbs.net.session.
+    clamp_terminal_size` only floors a client-reported `terminal_width`
+    at 1, so a client legitimately reporting width 1-3 must not reach
+    that call at all."""
+    frame_width = min(session.terminal_width, 78)
+    if unicode_style and frame_width >= 4:
+        await session.write_line(double_frame(panel, width=frame_width, header_color=header_color))
+    else:
+        for line in panel:
+            await session.write_line(line)
+
+
+def _degrade_description_level(
+    *,
+    panel: list[str],
+    unicode_style: bool,
+    description_level: str,
+    entry_count: int,
+    terminal_width: int,
+    terminal_height: int,
+) -> tuple[str, int, bool]:
+    """Shrink a sub-console's description verbosity -- never its listed
+    entries -- when a framed telemetry panel above the menu would
+    otherwise push it past the terminal's visible height. Identical
+    height-reservation math the three telemetry-panel sub-consoles
+    (Users/Operations/Content) each need; factored out so a future fix
+    to it lands in one place instead of three. Returns `(effective_
+    description_level, available_menu_height, degraded)` -- `degraded`
+    is True only when a non-"off" request was forced to "off" here, so
+    `_menu_row` can still show the caller a "Descriptions hidden" notice
+    even though this degrade happens before `menu_grid`'s own equivalent
+    check ever runs (PR #197 review)."""
+    panel_height = (len(panel) + 2) if (panel and unicode_style) else len(panel)
+    reserved = panel_height + 4
+    available_menu_height = max(1, terminal_height - reserved)
+
+    effective_desc_level = description_level
+    degraded = False
+    if effective_desc_level != "off":
+        columns = 2 if terminal_width >= 72 else 1
+        needed_rows = -(-entry_count // columns) * 2
+        if needed_rows > available_menu_height:
+            effective_desc_level = "off"
+            degraded = True
+    return effective_desc_level, available_menu_height, degraded
 
 
 async def admin_menu(
@@ -536,8 +685,6 @@ async def _draw_admin_menu(
         pending_files = sum(
             len(list_pending_files(db, area, requesting_user=actor)) for area in all_areas
         )
-        dead_letters = len(list_work_items(db, status="dead_lettered")) if link_context is not None else 0
-        recent_diagnostics = list_diagnostic_log_entries(db, limit=20) if link_context is not None else []
         return {
             "pending_users": pending_users,
             "pending_posts": pending_posts,
@@ -552,9 +699,7 @@ async def _draw_admin_menu(
             "total_posts": sum(count_visible_posts(db, board)[0] for board in all_boards),
             "total_areas": len(all_areas),
             "total_files": sum(count_visible_files(db, area)[0] for area in all_areas),
-            "dead_letters": dead_letters,
-            "recent_errors": sum(entry.level == "ERROR" for entry in recent_diagnostics),
-            "recent_warnings": sum(entry.level == "WARNING" for entry in recent_diagnostics),
+            **_link_health_snapshot(db, link_context),
             "backup": get_last_backup_summary(db),
             "update": get_last_check_summary(db),
             "description_level": menu_description_level(db, actor),
@@ -572,6 +717,7 @@ async def _draw_admin_menu(
 
     unicode_style = state["unicode_style"]
     collapsed = state["collapsed"]
+    box_inner_width = min(session.terminal_width, 78) - 4
     await session.write_line(
         "\r\n" + screen_title(
             "SysOp operations console",
@@ -591,42 +737,73 @@ async def _draw_admin_menu(
     ) if node_controls is not None else status_badge("LOCAL ADMIN", tone="neutral", unicode_style=unicode_style)
     health: list[str] = [colored("NODE  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
     if active_sessions is not None:
-        health.append(counts_row([("  Active sessions", active_sessions)]))
+        # No configured session-capacity limit exists anywhere in this
+        # codebase to give a gauge a real denominator -- a `max(10,
+        # active_sessions)` placeholder made the bar permanently 100%-
+        # full (and red) for any count above 10, an identical "at
+        # capacity" alarm for 11 sessions and 10,000. An unbounded count
+        # has no natural gauge; show the number alone.
+        health.append(f"  {counts_row([('Active sessions', active_sessions)])}")
     else:
-        health.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+        standalone_lines = _wrap_panel_sentence(
+            "Live node controls unavailable in standalone mode.",
+            prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+        )
+        health.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
 
     if link_context is None:
-        health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+        # `node_controls is None` is this module's own established signal
+        # for "running through the standalone admin CLI, which opens its
+        # own DB handle and never observes the live node process" (see
+        # the identical check just above, for `active_sessions`) -- a
+        # standalone session genuinely cannot tell whether the live node
+        # actually has Link configured or not, so labeling it "DISABLED"
+        # the same as a real, observed disabled config would mislead a
+        # SysOp into diagnosing a configuration problem that may not
+        # exist (Codex follow-up).
+        link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+        health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
     else:
         node = link_context.link_node
         link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
         link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
         health.append(colored("LINK  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
-        health.append(
-            "  " + counts_row(
-                [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+        health.extend(
+            _wrap_counts_panel(
+                "  ",
+                [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                width=box_inner_width,
             )
         )
 
     health.append(colored("CONTENT", fg_color=LABEL_COLOR, bold=True))
-    health.append(
-        "  " + counts_row(
+    health.extend(
+        _wrap_counts_panel(
+            "  ",
             [
                 ("Users", state["total_users"]),
                 ("Message boards", state["total_boards"]),
                 ("Posts", state["total_posts"]),
                 ("File areas", state["total_areas"]),
                 ("Files", state["total_files"]),
-            ]
+            ],
+            width=box_inner_width,
         )
     )
 
     pending_total = state["pending_users"] + state["pending_posts"] + state["pending_files"]
     health.append(colored("ATTENTION", fg_color=LABEL_COLOR, bold=True))
+    # No gauge here: there's no real moderation-queue capacity to measure
+    # against (same reasoning as the active-session count above) -- a
+    # `max(10, pending_total)` denominator would just make the bar
+    # permanently "full" past 10 pending items, same bug as the session
+    # gauge this file already dropped for.
     health.append("  " + counts_row([("Moderation", pending_total)]) + " pending")
-    health.append(
-        "    " + counts_row(
-            [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])]
+    health.extend(
+        _wrap_counts_panel(
+            "    ",
+            [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])],
+            width=box_inner_width,
         )
     )
     backup_at, _backup_path = state["backup"]
@@ -641,8 +818,6 @@ async def _draw_admin_menu(
     # title`'s own "cut plain, then color" order (this codebase never
     # cuts already-SGR-styled text -- see `double_frame`'s docstring for
     # why).
-    box_inner_width = min(session.terminal_width, 78) - 4
-
     def _fit(text: str, prefix_len: int) -> str:
         return cut_to_width(text, box_inner_width - prefix_len) if unicode_style else text
 
@@ -659,17 +834,15 @@ async def _draw_admin_menu(
         )
     )
     if link_context is not None:
-        health.append(
-            "  " + counts_row([("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])])
+        health.extend(
+            _wrap_counts_panel(
+                "  ",
+                [("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])],
+                width=box_inner_width,
+            )
         )
 
-    if unicode_style:
-        await session.write_line(
-            double_frame(health, width=min(session.terminal_width, 78), header_color=state["header_color"])
-        )
-    else:
-        for line in health:
-            await session.write_line(line)
+    await _write_panel(session, health, unicode_style=unicode_style, header_color=state["header_color"])
 
     # Brief descriptions are kept to roughly 34 characters or less --
     # the actual available width once this renders in two columns at
@@ -739,12 +912,28 @@ async def _users_menu(
     through to that editor -- it needs it for the live-session-
     revocation guard on disable/delete -- this submenu itself doesn't
     use it directly."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    def _load_stats(db: Database) -> dict[str, Any]:
+        all_users = list_users(db)
+        total = len(all_users)
+        pending = sum(u.pending_approval for u in all_users)
+        disabled = sum(u.disabled_at is not None for u in all_users)
+        sysops = count_sysops(db)
+        active = sum(not u.pending_approval and u.disabled_at is None for u in all_users)
+        return {
+            "total": total,
+            "active": active,
+            "pending": pending,
+            "disabled": disabled,
+            "sysops": sysops,
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    stats = await lane.run(_load_stats)
+    await _draw_users_menu(session, stats=stats)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -754,48 +943,154 @@ async def _users_menu(
         elif choice == "c":
             await session.write_line("")
             await _create_user_screen(session, lane, actor)
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "l":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Registered users")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "r":
             await session.write_line("")
             await _registration_settings_screen(session, lane, actor)
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "p":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Promote/demote which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "e":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Enable/disable which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_users_menu(session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int] = HEADER_COLOR) -> None:
-    await session.write_line("\r\n" + screen_title("Users",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
+async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
+    unicode_style = stats["unicode_style"]
+    collapsed = stats["collapsed"]
+    redraw_in_place = stats["redraw_in_place"]
+    header_color = stats["header_color"]
+    description_level = stats["description_level"]
+
+    await session.write_line(
+        "\r\n"
+        + screen_title(
+            "Users",
+            breadcrumb=(session.node_display_name, "SysOp"),
+            subtitle="Account administration, registration policy, and access levels.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
+    )
+
+    panel: list[str] = []
+    if session.terminal_height >= 18:
+        compact = session.terminal_height < 28 or session.terminal_width < 72
+        box_inner_width = min(session.terminal_width, 78) - 4
+        if compact:
+            panel.extend(
+                _wrap_counts_panel(
+                    colored("ACCOUNTS: ", fg_color=LABEL_COLOR, bold=True),
+                    [
+                        ("Total users", stats["total"]),
+                        ("Active", stats["active"]),
+                        ("Pending", stats["pending"]),
+                        ("Disabled", stats["disabled"]),
+                        ("SysOps", stats["sysops"]),
+                    ],
+                    width=box_inner_width,
+                )
+            )
+            # `telemetry_gauge`'s own ` current/total` suffix grows with
+            # this node's real account counts (unbounded, unlike the
+            # fixed-width bar itself) -- a fixed 10-cell bar plus a
+            # 4-digit-vs-4-digit ratio ("1000/1000") already overflows
+            # this 36-column compact frame once the "Active ratio: "
+            # label is added. A narrower 6-cell bar keeps the same
+            # meter legible while leaving enough budget for a
+            # established node's real account counts (Codex follow-up,
+            # PR #197 review).
+            panel.append(
+                "  "
+                + colored("Active ratio: ", fg_color=METADATA_COLOR)
+                + telemetry_gauge(stats["active"], max(1, stats["total"]), width=6, unicode_style=unicode_style, tone="health")
+            )
+            if stats["pending"] > 0:
+                # The non-compact branch below already warns on pending
+                # registrations -- compact mode silently dropped the same
+                # signal entirely (PR #197 review), not just the glyph
+                # (that was finding #9, fixed separately).
+                warning_prefix = "⚠ " if unicode_style else "! "
+                warning_lines = _wrap_panel_sentence(
+                    f"{warning_prefix}{stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
+                    prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                )
+                panel.extend("  " + colored(line, fg_color=WARNING_COLOR, bold=True) for line in warning_lines)
+        else:
+            panel = [
+                colored("ACCOUNTS", fg_color=LABEL_COLOR, bold=True),
+                "  "
+                + counts_row(
+                    [
+                        ("Total users", stats["total"]),
+                        ("Active", stats["active"]),
+                        ("Pending", stats["pending"]),
+                        ("Disabled", stats["disabled"]),
+                    ]
+                ),
+                "  "
+                + counts_row([("SysOps", stats["sysops"])])
+                + "    "
+                + colored("Active ratio: ", fg_color=METADATA_COLOR)
+                + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health"),
+            ]
+            if stats["pending"] > 0:
+                warning_prefix = "⚠ " if unicode_style else "! "
+                panel.append(
+                    "  "
+                    + colored(
+                        f"{warning_prefix}{stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
+                        fg_color=WARNING_COLOR,
+                        bold=True,
+                    )
+                )
+
+        await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
+
+    entries = [
+        MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
+        MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
+        MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
+        MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
+        MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
+        MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+    ]
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+        panel=panel, unicode_style=unicode_style, description_level=description_level,
+        entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
+    )
+
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("C", "reate user"), brief="Add a new user account"),
-                MenuEntry(label=menu_key("L", "ist users"), brief="Browse and edit accounts"),
-                MenuEntry(label=menu_key("R", "egistration"), brief="Signup policy settings"),
-                MenuEntry(label=menu_key("P", "romote/demote"), brief="Change a user's level"),
-                MenuEntry(label=menu_key("E", "nable/disable"), brief="Toggle account access"),
-                MenuEntry(label=menu_key("D", "elete user"), brief="Permanently remove a user"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-            ],
-            description_level,
+            entries,
+            effective_desc_level,
             width=session.terminal_width,
-            height=session.terminal_height,
+            height=available_menu_height,
+            degraded=desc_degraded,
         )
     )
     await session.write("Choice: ")
@@ -813,12 +1108,39 @@ async def _operations_menu(
     link_context: LinkContext | None,
 ) -> None:
     """Operational observation and intervention, separate from durable settings."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
+    def _load_ops(db: Database) -> dict[str, Any]:
+        return {
+            **_link_health_snapshot(db, link_context),
+            "backup": get_last_backup_summary(db),
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    # A durable snapshot, reloaded only after an action that can actually
+    # change one of `_load_ops`'s own DB-backed fields (dead_letters,
+    # diagnostics, backup) -- mirrors `_draw_admin_menu`'s own snapshot-
+    # reuse discipline. Reloading unconditionally on every redraw (the
+    # previous shape here) meant returning from `[N]ode` after scheduling
+    # an immediate shutdown/drain re-ran this full DB-lane query before
+    # the screen could unwind, reintroducing a cancellable wait into the
+    # shutdown path. `active_sessions`/`maintenance`/`lockdown` are never
+    # part of this snapshot -- they read `node_controls` directly, in
+    # memory, so recomputing them every loop iteration is free.
+    state = await lane.run(_load_ops)
     while True:
+        unicode_style = state["unicode_style"]
+        collapsed = state["collapsed"]
+        redraw_in_place = state["redraw_in_place"]
+        header_color = state["header_color"]
+        description_level = state["description_level"]
+
+        active_sessions = len(node_controls.session_registry) if node_controls is not None else None
+        maintenance = node_controls.maintenance.is_active() if node_controls is not None else False
+        lockdown = node_controls.maintenance.is_lockdown_active() if node_controls is not None else False
+
         await session.write_line(
             "\r\n" + screen_title(
                 "Operations",
@@ -828,8 +1150,118 @@ async def _operations_menu(
                 clear=redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color,
-            node_name_gradient=session.node_name_gradient)
+                node_name_gradient=session.node_name_gradient,
+            )
         )
+
+        node_badge = status_badge(
+            "LOCKDOWN" if lockdown else "MAINTENANCE" if maintenance else "ONLINE",
+            tone="error" if lockdown else "warning" if maintenance else "success",
+            unicode_style=unicode_style,
+        ) if node_controls is not None else status_badge("LOCAL ADMIN", tone="neutral", unicode_style=unicode_style)
+
+        panel: list[str] = []
+        if session.terminal_height >= 18:
+            compact = session.terminal_height < 28 or session.terminal_width < 72
+            box_inner_width = min(session.terminal_width, 78) - 4
+            backup_at, _backup_path = state["backup"]
+            backup_str = sanitize_text(backup_at) if backup_at else colored("never", fg_color=WARNING_COLOR)
+
+            if compact:
+                if active_sessions is not None:
+                    panel.extend(
+                        _wrap_counts_panel(
+                            colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge + "  ",
+                            [("Active sessions", active_sessions)],
+                            width=box_inner_width,
+                        )
+                    )
+                else:
+                    panel.append(colored("NODE HEALTH: ", fg_color=LABEL_COLOR, bold=True) + node_badge)
+                    standalone_lines = _wrap_panel_sentence(
+                        "Live node controls unavailable in standalone mode.",
+                        prefix="  ", width=box_inner_width, unicode_style=unicode_style,
+                    )
+                    panel.extend(colored(f"  {line}", fg_color=MUTED_COLOR) for line in standalone_lines)
+
+                if link_context is None:
+                    # See `_draw_admin_menu`'s identical check for why
+                    # `node_controls is None` -- not `link_context` alone
+                    # -- decides the label here (Codex follow-up).
+                    link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+                    panel.append(colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
+                else:
+                    node = link_context.link_node
+                    link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+                    link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
+                    panel.extend(
+                        _wrap_counts_panel(
+                            colored("LINK OPERATIONS: ", fg_color=LABEL_COLOR, bold=True)
+                            + status_badge(link_label, tone=link_tone, unicode_style=unicode_style)
+                            + "  ",
+                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])],
+                            width=box_inner_width,
+                        )
+                    )
+                backup_pairs = []
+                if link_context is not None:
+                    # `_load_ops` deliberately skips the diagnostics query
+                    # without Link (see its own body) -- reporting these
+                    # as a bare "0" here would claim a check that never
+                    # happened, exactly like the non-compact branch below
+                    # already avoids by omitting the counts entirely.
+                    backup_pairs = [("Recent errors", state["recent_errors"]), ("warnings", state["recent_warnings"])]
+                # `_wrap_counts_panel` only ever wraps/omits its `pairs`,
+                # never its own `label` -- fine for every other label
+                # here (a short, fixed heading), but `backup_at` is a
+                # full ISO timestamp (~27 columns) once a backup has
+                # actually run, wide enough on its own to overflow this
+                # frame regardless of `backup_pairs` (worse still with
+                # none, the `link_context is None` case, where
+                # `_wrap_counts_panel` has nothing to test the label's
+                # width against at all and returns it completely as-is).
+                # Cut the plain timestamp first, then color -- same
+                # order `_fit` above already established for this exact
+                # value on the landing page.
+                backup_label_prefix, backup_label_suffix = "  Backup: ", "  "
+                if backup_at and unicode_style:
+                    backup_budget = box_inner_width - visible_width(backup_label_prefix) - visible_width(backup_label_suffix)
+                    compact_backup_str = sanitize_text(cut_to_width(backup_at, backup_budget))
+                else:
+                    compact_backup_str = backup_str
+                panel.extend(
+                    _wrap_counts_panel(
+                        backup_label_prefix + compact_backup_str + backup_label_suffix,
+                        backup_pairs, width=box_inner_width,
+                    )
+                )
+            else:
+                panel = [colored("NODE HEALTH  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
+                if active_sessions is not None:
+                    panel.append(f"  {counts_row([('Active sessions', active_sessions)])}")
+                else:
+                    panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+
+                if link_context is None:
+                    link_badge_text = "UNAVAILABLE" if node_controls is None else "DISABLED"
+                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_badge_text, tone="neutral", unicode_style=unicode_style))
+                else:
+                    node = link_context.link_node
+                    link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+                    link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
+                    panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
+                    panel.append(
+                        "  " + counts_row(
+                            [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+                        )
+                    )
+                    panel.append(
+                        "  " + counts_row([("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])])
+                    )
+                panel.append("  Backup: " + backup_str)
+
+            await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
+
         options = [
             MenuEntry(label=menu_key("K", "up status", prefix="Bac"), brief="Last backup status and history"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
@@ -846,32 +1278,61 @@ async def _operations_menu(
                 MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts"),
             ])
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
+
+        effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+            panel=panel, unicode_style=unicode_style, description_level=description_level,
+            entry_count=len(options), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
+        )
+
         await session.write_line(
-            _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
+            _menu_row(
+                options, effective_desc_level, width=session.terminal_width,
+                height=available_menu_height, degraded=desc_degraded,
+            )
         )
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
         if choice == "b":
             await session.write_line("")
             return
+        # Every dispatch branch below except `[N]ode` reloads the
+        # snapshot on return: Outbox can change `dead_letters`, Follow
+        # Log/Diagnostics can leave newer entries behind after however
+        # long the SysOp spent watching them, and a fresh backup can be
+        # triggered from Backup status -- none of them share Node
+        # control's own reason to skip the reload (a real DB-lane wait
+        # sitting in the shutdown/drain path itself), so unlike that one
+        # branch there's no cost to staying accurate here (Codex
+        # follow-up: the first cut of this fix over-corrected to
+        # "reload only after Outbox", leaving every other action's
+        # numbers stale until the SysOp happened to also visit Outbox
+        # or re-enter Operations from scratch).
         if choice == "n" and node_controls is not None:
             await _node_menu(session, lane, actor, node_controls)
         elif choice == "l" and link_context is not None:
             await _link_status_screen(session, lane, actor, link_context=link_context)
+            state = await lane.run(_load_ops)
         elif choice == "o" and link_context is not None:
             await _outbox_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         elif choice == "d" and link_context is not None:
             await _diagnostic_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         elif choice == "f" and link_context is not None:
             await _diagnostic_log_tail_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "r" and link_context is not None:
             await _repair_carried_posts_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "k":
             await _backup_status_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         elif choice == "p":
             await _prune_drafts_screen(session, lane)
+            state = await lane.run(_load_ops)
         elif choice == "a":
             await _audit_log_screen(session, lane, actor)
+            state = await lane.run(_load_ops)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -6367,12 +6828,35 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 async def _content_menu(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    def _load_stats(db: Database) -> dict[str, Any]:
+        all_boards = list_boards(db)
+        all_areas = list_file_areas(db)
+        channels = list_channels(db)
+        doors = list_doors(db)
+        communities = list_communities(db)
+        pending_posts = sum(len(list_pending_posts(db, b, requesting_user=actor)) for b in all_boards)
+        pending_files = sum(len(list_pending_files(db, a, requesting_user=actor)) for a in all_areas)
+        total_posts = sum(count_visible_posts(db, b)[0] for b in all_boards)
+        total_files = sum(count_visible_files(db, a)[0] for a in all_areas)
+        return {
+            "total_boards": len(all_boards),
+            "total_posts": total_posts,
+            "total_areas": len(all_areas),
+            "total_files": total_files,
+            "total_channels": len(channels),
+            "total_doors": len(doors),
+            "total_communities": len(communities),
+            "pending_posts": pending_posts,
+            "pending_files": pending_files,
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    stats = await lane.run(_load_stats)
+    await _draw_content_menu(session, stats=stats)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -6382,60 +6866,160 @@ async def _content_menu(
         elif choice == "m":
             await session.write_line("")
             await _board_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "f":
             await session.write_line("")
             await _area_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
             await _door_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "n":
             await session.write_line("")
             await _channel_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "c":
             await session.write_line("")
             await _category_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "o":
             await session.write_line("")
             await _community_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "g":
             await session.write_line("")
             await _grant_moderator_screen(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "r":
             await session.write_line("")
             await _revoke_moderator_screen(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_content_menu(session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int] = HEADER_COLOR) -> None:
+async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None:
+    unicode_style = stats["unicode_style"]
+    collapsed = stats["collapsed"]
+    redraw_in_place = stats["redraw_in_place"]
+    header_color = stats["header_color"]
+    description_level = stats["description_level"]
+
     await session.write_line(
-        "\r\n" + screen_title("Manage message boards/file areas/chat channels",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)
+        "\r\n"
+        + screen_title(
+            "Manage message boards/file areas/chat channels",
+            breadcrumb=(session.node_display_name, "SysOp"),
+            subtitle="Content repositories, categories, and moderation permissions.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
     )
+
+    panel: list[str] = []
+    if session.terminal_height >= 18:
+        compact = session.terminal_height < 28 or session.terminal_width < 72
+        box_inner_width = min(session.terminal_width, 78) - 4
+        pending_total = stats["pending_posts"] + stats["pending_files"]
+        if compact:
+            panel.extend(
+                _wrap_counts_panel(
+                    colored("CONTENT: ", fg_color=LABEL_COLOR, bold=True),
+                    [
+                        ("Message boards", stats["total_boards"]),
+                        ("Posts", stats["total_posts"]),
+                        ("File areas", stats["total_areas"]),
+                        ("Files", stats["total_files"]),
+                        ("Channels", stats["total_channels"]),
+                    ],
+                    width=box_inner_width,
+                )
+            )
+            if pending_total > 0:
+                # No gauge here: there's no real moderation-queue capacity
+                # to measure against -- a `max(10, pending_total)`
+                # denominator would just make the bar permanently "full"
+                # past 10 pending items, the same fake-capacity bug this
+                # file already dropped for the active-session gauge.
+                # `pending_total` is caller-driven (a real backlog can
+                # reach 3+ digits), so route it through the same
+                # width-aware wrapping the rest of this panel already
+                # uses rather than a bare `panel.append` (Codex
+                # follow-up, PR #197 review).
+                panel.extend(
+                    _wrap_counts_panel(
+                        colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True),
+                        [("Pending review", pending_total)],
+                        width=box_inner_width,
+                    )
+                )
+            else:
+                gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="capacity")
+                panel.append(
+                    colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True)
+                    + counts_row([("Pending review", 0)])
+                )
+                panel.append(
+                    f"  {gauge}  "
+                    + colored("All clear", fg_color=SUCCESS_COLOR)
+                )
+        else:
+            panel = [
+                colored("CONTENT REPOSITORY", fg_color=LABEL_COLOR, bold=True),
+                "  "
+                + counts_row([("Message boards", stats["total_boards"]), ("Posts", stats["total_posts"])]),
+                "  "
+                + counts_row([("File areas", stats["total_areas"]), ("Files", stats["total_files"])]),
+                "  "
+                + counts_row([("Chat channels", stats["total_channels"]), ("Doors", stats["total_doors"]), ("Communities", stats["total_communities"])]),
+                colored("MODERATION QUEUE", fg_color=LABEL_COLOR, bold=True),
+            ]
+            if pending_total > 0:
+                # No gauge here -- see the compact branch above for why.
+                panel.append("  " + counts_row([("Pending review", pending_total)]))
+                panel.append("    " + counts_row([("Posts", stats["pending_posts"]), ("Files", stats["pending_files"])]))
+            else:
+                gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="capacity")
+                panel.append(f"  {counts_row([('Pending review', 0)])}  {gauge}  " + colored("All clear", fg_color=SUCCESS_COLOR))
+
+        await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
+
+    entries = [
+        MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
+        MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
+        MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
+        MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
+        MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
+        MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
+        MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
+        MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
+        MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
+    ]
+    effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
+        panel=panel, unicode_style=unicode_style, description_level=description_level,
+        entry_count=len(entries), terminal_width=session.terminal_width, terminal_height=session.terminal_height,
+    )
+
     await session.write_line(
         _menu_row(
-            [
-                MenuEntry(label=menu_key("M", "essage boards"), brief="Create/edit message boards"),
-                MenuEntry(label=menu_key("F", "ile areas"), brief="Create/edit file areas"),
-                MenuEntry(label=menu_key("D", "oors"), brief="Register/edit door games"),
-                MenuEntry(label=menu_key("n", "nels", prefix="Chat cha"), brief="Create/edit chat channels"),
-                MenuEntry(label=menu_key("C", "ategories"), brief="Organize boards/areas/channels"),
-                MenuEntry(label=menu_key("O", "mmunities", prefix="C"), brief="Manage Communities"),
-                MenuEntry(label=menu_key("G", "rant moderator"), brief="Grant a moderation scope"),
-                MenuEntry(label=menu_key("R", "evoke moderator"), brief="Revoke a moderation scope"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"),
-            ],
-            description_level,
+            entries,
+            effective_desc_level,
             width=session.terminal_width,
-            height=session.terminal_height,
+            height=available_menu_height,
+            degraded=desc_degraded,
         )
     )
     await session.write("Choice: ")

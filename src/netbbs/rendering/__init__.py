@@ -43,6 +43,7 @@ from netbbs.rendering.layout import (
     menu_grid,
     screen_title,
     status_badge,
+    telemetry_gauge,
     visible_width,
 )
 from netbbs.rendering.menu import menu_key
@@ -101,6 +102,7 @@ __all__ = [
     "menu_grid",
     "screen_title",
     "status_badge",
+    "telemetry_gauge",
     "visible_width",
     "move_cursor",
     "reject_keystroke",
