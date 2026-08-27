@@ -455,12 +455,12 @@ def test_compose_character_truncates_only_when_even_the_first_group_does_not_fit
 # -- scroll region setup/teardown, via the real _chat_loop --------------
 
 
-def test_chat_loop_sets_a_scroll_region_reserving_the_last_two_rows(lane, hub, presence, mailbox, channel, alice):
+def test_chat_loop_sets_a_scroll_region_reserving_the_pinned_rows(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     # Default FakeSession terminal is 80x24 (netbbs.net.session.Session's
-    # own class defaults) -- rows 1-22 scroll, row 23 is the pinned
-    # status row, row 24 is the input row.
-    assert "\x1b[1;22r" in _written_text(session)
+    # own class defaults) -- rows 1-21 scroll, row 22 is the shelf divider,
+    # row 23 is the pinned status row, row 24 is the input row.
+    assert "\x1b[1;21r" in _written_text(session)
 
 
 def test_chat_loop_clears_the_screen_on_entry(lane, hub, presence, mailbox, channel, alice):
@@ -490,20 +490,14 @@ def test_clear_command_clears_the_screen_and_reestablishes_the_scroll_region(
     right after, same as every other command)."""
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/clear", "/quit"]))
     text = _written_text(session)
-    # Entry already writes this exact clear+scroll-region pair once --
-    # a bare "in text"/">= 2 on the plain clear_screen() count alone
-    # would pass even if /clear silently did nothing, since exit's own
-    # teardown (test_chat_loop_clears_the_screen_on_exit) writes a
-    # second bare clear_screen() regardless. Requiring the *paired*
-    # sequence twice is what actually proves /clear fired.
-    assert text.count("\x1b[2J\x1b[H\x1b[1;22r") >= 2
+    assert text.count("\x1b[2J\x1b[H\x1b[1;21r") >= 2
 
 
 def test_cls_is_a_working_alias_for_clear(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/cls", "/quit"]))
     text = _written_text(session)
     assert "Unknown command" not in text
-    assert text.count("\x1b[2J\x1b[H\x1b[1;22r") >= 2
+    assert text.count("\x1b[2J\x1b[H\x1b[1;21r") >= 2
 
 
 def test_clear_on_a_too_short_terminal_clears_without_touching_any_scroll_region(

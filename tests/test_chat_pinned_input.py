@@ -99,9 +99,10 @@ async def _run(lane, hub, presence, mailbox, channel, user, lines):
 def test_input_row_is_painted_on_entry_with_the_prompt_marker(lane, hub, presence, mailbox, channel, alice):
     session, _ = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/quit"]))
     text = _written_text(session)
-    # Row 24 on the default 80x24 terminal (row 22 is the last scrolling
-    # row, row 23 is the status row, row 24 is the pinned input row).
-    assert "\x1b[24;1H\x1b[2K> " in text
+    # Row 24 on the default 80x24 terminal (rows 1-21 scroll, row 22 is the shelf divider,
+    # row 23 is the status row, row 24 is the pinned input row).
+    expected_prompt = f"\x1b[24;1H\x1b[2K{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}"
+    assert expected_prompt in text
 
 
 def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox, channel, alice):
@@ -109,7 +110,8 @@ def test_input_row_is_redrawn_empty_after_a_command(lane, hub, presence, mailbox
     text = _written_text(session)
     # At least two distinct "row 24, cleared, prompt-only" repaints --
     # one on entry, at least one more after /away's own dispatch.
-    assert text.count("\x1b[24;1H\x1b[2K> ") >= 2
+    expected_prompt = f"\x1b[24;1H\x1b[2K{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}"
+    assert text.count(expected_prompt) >= 2
 
 
 def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence, mailbox, channel, alice):
@@ -138,11 +140,10 @@ def test_input_row_repaint_reflects_a_long_line_via_truncation(db, hub, presence
     assert "..." in text
 
 
-def test_pinned_ui_min_height_requires_three_rows(lane, hub, presence, mailbox, channel, alice):
-    """One more than the status-line-only minimum (2) -- at least one
-    row of actual scrolling content, plus both reserved rows."""
+def test_pinned_ui_min_height_requires_four_rows(lane, hub, presence, mailbox, channel, alice):
+    """At least one row of actual scrolling content, plus the three pinned rows."""
     session = FakeSession(["/quit"])
-    session.terminal_height = 2  # one below _PINNED_UI_MIN_HEIGHT (3)
+    session.terminal_height = 3  # one below _PINNED_UI_MIN_HEIGHT (4)
     history = InputHistory()
     asyncio.run(
         asyncio.wait_for(
@@ -151,7 +152,7 @@ def test_pinned_ui_min_height_requires_three_rows(lane, hub, presence, mailbox, 
     )
     text = _written_text(session)
     assert "\x1b[r" not in text  # scroll region never set, so never reset
-    assert "> " not in text  # no pinned input row painted either
+    assert "❯ " not in text and "> " not in text  # no pinned input row painted either
 
 
 # -- the real, byte-fed session: live_buffer/lock genuinely exercised -----
@@ -284,7 +285,8 @@ def test_in_progress_typing_survives_an_incoming_message(lane, hub, presence, ma
     assert "hello there" in text
     # The input row was redrawn showing alice's in-progress text intact
     # -- not silently dropped or corrupted by the interruption.
-    assert "> hel" in text
+    prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)}hel"
+    assert prompt_hel in text
     # The interruption's redraw happens strictly *after* alice's own
     # first three keystrokes were echoed, and *before* she resumes --
     # confirms this isn't a coincidental substring match from some
@@ -365,11 +367,11 @@ def test_tab_completion_candidate_list_does_not_land_on_the_status_row(
 
     # The candidate list is printed via the same content-region primitive
     # every other pinned-row print uses (scroll region + jump to its
-    # bottom row -- row 22 on the default 80x24 terminal, one above the
-    # status row at 23 and the pinned input row at 24), not a bare,
-    # region-unaware "\r\n" that would instead land wherever the cursor
-    # already was (the input row, the terminal's true last row).
-    scroll_bottom = alice_session.terminal_height - 2
+    # bottom row -- row 21 on the default 80x24 terminal, above the
+    # shelf divider at 22, status row at 23, and the pinned input row at 24),
+    # not a bare, region-unaware "\r\n" that would instead land wherever
+    # the cursor already was (the input row, the terminal's true last row).
+    scroll_bottom = alice_session.terminal_height - chat_flow._PINNED_ROWS
     assert set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) in text
 
 
@@ -623,11 +625,12 @@ def test_grow_above_minimum_mid_session_reinitializes_pinned_rows(lane, hub, pre
     text = session.output
     # The pinned input row's prompt marker appears once the terminal
     # grew back above the threshold -- it never could have before.
-    assert "> " in text
+    expected_prompt = chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=True)
+    assert expected_prompt in text
     # And the scroll region set at that point matches the *current*
     # (24-row) height, not left unset or computed from the stale
     # too-short one.
-    assert "\x1b[1;22r" in text  # set_scroll_region(1, 24 - 2)
+    assert "\x1b[1;21r" in text  # set_scroll_region(1, 24 - 3)
 
 
 def test_repeated_threshold_crossings_track_the_current_height_each_time(
@@ -647,7 +650,7 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
         )
         await asyncio.sleep(0.05)
 
-        session.terminal_height = 2  # shrink: hand the screen back
+        session.terminal_height = 3  # shrink below threshold (4): hand the screen back
         session.feed("one")
         session.feed_enter()
         await asyncio.sleep(0.05)
@@ -665,7 +668,7 @@ def test_repeated_threshold_crossings_track_the_current_height_each_time(
     session = asyncio.run(scenario())
     text = session.output
     # Growing back re-set the region at the (still) 24-row size.
-    assert text.count("\x1b[1;22r") >= 2  # once at entry, once on regrowth
+    assert text.count("\x1b[1;21r") >= 2  # once at entry, once on regrowth
     # Exit cleanup actually ran (ended "active" -- must reset before
     # handing control to whatever screen comes after /quit).
     assert text.endswith("\x1b[r" + "\x1b[2J\x1b[H")
@@ -707,7 +710,7 @@ def test_resize_within_the_pinned_range_clears_the_stale_row_instead_of_leaving_
     # the ordinary per-message repaint's own set_scroll_region call
     # (which never clears the screen), but the same clear_screen() +
     # set_scroll_region() pair a threshold crossing already gets.
-    assert "\x1b[2J\x1b[H\x1b[1;38r" in text  # clear_screen() + set_scroll_region(1, 40 - 2)
+    assert "\x1b[2J\x1b[H\x1b[1;37r" in text  # clear_screen() + set_scroll_region(1, 40 - 3)
 
 
 # -- Session.pinned_notice_hook (out-of-band notices, e.g. shutdown) --------
@@ -749,6 +752,6 @@ def test_pinned_notice_hook_is_installed_while_chat_is_active_and_cleared_on_exi
     assert session.pinned_notice_hook is None  # cleared once chat exits
 
     text = "".join(session.written)
-    scroll_bottom = session.terminal_height - 2
+    scroll_bottom = session.terminal_height - chat_flow._PINNED_ROWS
     assert set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) in text
     assert "This node is going down now" in text

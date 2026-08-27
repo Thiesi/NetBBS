@@ -571,7 +571,8 @@ def test_pinned_direct_chat_clears_submitted_input_before_rendering_it(tmp_path)
         output, peer_message = asyncio.run(scenario())
         committed = chat_flow._render_direct_chat_message("you", "hello", self_message=True)
         typed_at = output.index("hello")
-        cleared_at = output.index("\x1b[24;1H\x1b[2K> ", typed_at + len("hello"))
+        prompt_empty = f"\x1b[24;1H\x1b[2K{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=False)}"
+        cleared_at = output.index(prompt_empty, typed_at + len("hello"))
         committed_at = output.index(committed)
 
         assert typed_at < cleared_at < committed_at
@@ -587,6 +588,7 @@ def test_partial_input_survives_incoming_direct_chat_output_and_resize(tmp_path)
     try:
         alice = create_user(database, "alice", password="hunter2", user_level=10)
         bob = create_user(database, "bob", password="hunter2", user_level=10)
+        prompt_hel = f"{chat_flow._input_prompt(accent_color=chat_flow.ACCENT_COLOR, unicode_style=False)}hel"
 
         async def scenario():
             hub = ChatHub()
@@ -605,7 +607,7 @@ def test_partial_input_survives_incoming_direct_chat_output_and_resize(tmp_path)
             await asyncio.sleep(0.05)
             incoming = chat_flow._render_direct_chat_message(bob.username, "incoming", self_message=False)
             await hub.broadcast(room, incoming, exclude={peer_id})
-            await _run_until(lambda: "incoming" in session.output and "> hel" in session.output)
+            await _run_until(lambda: "incoming" in session.output and prompt_hel in session.output)
 
             session.terminal_height = 2
             session.feed("lo")
@@ -620,7 +622,7 @@ def test_partial_input_survives_incoming_direct_chat_output_and_resize(tmp_path)
 
         output, sent = asyncio.run(scenario())
         assert _plain(sent) == "alice: hello"
-        assert "> hel" in output
+        assert prompt_hel in output
         assert "\x1b[r\x1b[2J\x1b[H" in output  # shrink handed the screen back
         assert output.endswith("\x1b[r\x1b[2J\x1b[H")  # regrowth was tracked for cleanup
     finally:
