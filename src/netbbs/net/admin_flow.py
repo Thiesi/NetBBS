@@ -62,6 +62,7 @@ import nacl.signing
 from netbbs.auth.users import (
     AuthError,
     User,
+    SYSOP_LEVEL,
     UserManagementError,
     approve_pending_user,
     create_user,
@@ -388,6 +389,7 @@ from netbbs.rendering import (
     sanitize_text,
     screen_title,
     status_badge,
+    telemetry_gauge,
     truncate,
 )
 from netbbs.storage.database import Database
@@ -591,7 +593,8 @@ async def _draw_admin_menu(
     ) if node_controls is not None else status_badge("LOCAL ADMIN", tone="neutral", unicode_style=unicode_style)
     health: list[str] = [colored("NODE  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
     if active_sessions is not None:
-        health.append(counts_row([("  Active sessions", active_sessions)]))
+        sessions_gauge = telemetry_gauge(active_sessions, max(10, active_sessions), unicode_style=unicode_style)
+        health.append(f"  {counts_row([('Active sessions', active_sessions)])}  {sessions_gauge}")
     else:
         health.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
 
@@ -623,7 +626,11 @@ async def _draw_admin_menu(
 
     pending_total = state["pending_users"] + state["pending_posts"] + state["pending_files"]
     health.append(colored("ATTENTION", fg_color=LABEL_COLOR, bold=True))
-    health.append("  " + counts_row([("Moderation", pending_total)]) + " pending")
+    if pending_total > 0:
+        att_gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
+        health.append(f"  {counts_row([('Moderation', pending_total)])} pending  {att_gauge}")
+    else:
+        health.append("  " + counts_row([("Moderation", pending_total)]) + " pending")
     health.append(
         "    " + counts_row(
             [("Users", state["pending_users"]), ("Posts", state["pending_posts"]), ("Files", state["pending_files"])]
@@ -739,12 +746,28 @@ async def _users_menu(
     through to that editor -- it needs it for the live-session-
     revocation guard on disable/delete -- this submenu itself doesn't
     use it directly."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    def _load_stats(db: Database) -> dict[str, Any]:
+        all_users = list_users(db)
+        total = len(all_users)
+        pending = sum(u.pending_approval for u in all_users)
+        disabled = sum(u.disabled_at is not None for u in all_users)
+        sysops = sum(u.user_level >= SYSOP_LEVEL for u in all_users)
+        active = sum(not u.pending_approval and u.disabled_at is None for u in all_users)
+        return {
+            "total": total,
+            "active": active,
+            "pending": pending,
+            "disabled": disabled,
+            "sysops": sysops,
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    stats = await lane.run(_load_stats)
+    await _draw_users_menu(session, stats=stats)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -754,34 +777,107 @@ async def _users_menu(
         elif choice == "c":
             await session.write_line("")
             await _create_user_screen(session, lane, actor)
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "l":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Registered users")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "r":
             await session.write_line("")
             await _registration_settings_screen(session, lane, actor)
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "p":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Promote/demote which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "e":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Enable/disable which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
             await _pick_and_edit_user(session, lane, actor, node_controls, title="Delete which user?")
-            await _draw_users_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_users_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_users_menu(session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int] = HEADER_COLOR) -> None:
-    await session.write_line("\r\n" + screen_title("Users",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
+async def _draw_users_menu(
+    session: Session,
+    description_level: str | None = None,
+    redraw_in_place: bool = False,
+    unicode_style: bool = False,
+    collapsed: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    *,
+    stats: dict[str, Any] | None = None,
+) -> None:
+    if stats is not None:
+        unicode_style = stats.get("unicode_style", unicode_style)
+        collapsed = stats.get("collapsed", collapsed)
+        redraw_in_place = stats.get("redraw_in_place", redraw_in_place)
+        header_color = stats.get("header_color", header_color)
+        description_level = stats.get("description_level", description_level or "brief")
+    else:
+        description_level = description_level or "brief"
+
+    await session.write_line(
+        "\r\n"
+        + screen_title(
+            "Users",
+            breadcrumb=(session.node_display_name, "SysOp"),
+            subtitle="Account administration, registration policy, and access levels.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
+    )
+
+    if stats is not None:
+        panel: list[str] = [
+            colored("ACCOUNTS", fg_color=LABEL_COLOR, bold=True),
+            "  "
+            + counts_row(
+                [
+                    ("Total users", stats["total"]),
+                    ("Active", stats["active"]),
+                    ("Pending", stats["pending"]),
+                    ("Disabled", stats["disabled"]),
+                ]
+            ),
+            "  "
+            + counts_row([("SysOps", stats["sysops"])])
+            + "    "
+            + colored("Active ratio: ", fg_color=METADATA_COLOR)
+            + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health"),
+        ]
+        if stats["pending"] > 0:
+            panel.append(
+                "  "
+                + colored(
+                    f"⚠ {stats['pending']} registration{'s' if stats['pending'] != 1 else ''} awaiting review",
+                    fg_color=WARNING_COLOR,
+                    bold=True,
+                )
+            )
+
+        if unicode_style:
+            await session.write_line(
+                double_frame(panel, width=min(session.terminal_width, 78), header_color=header_color)
+            )
+        else:
+            for line in panel:
+                await session.write_line(line)
+
     await session.write_line(
         _menu_row(
             [
@@ -813,12 +909,33 @@ async def _operations_menu(
     link_context: LinkContext | None,
 ) -> None:
     """Operational observation and intervention, separate from durable settings."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
+    def _load_ops(db: Database) -> dict[str, Any]:
+        dead_letters = len(list_work_items(db, status="dead_lettered")) if link_context is not None else 0
+        recent_diagnostics = list_diagnostic_log_entries(db, limit=20) if link_context is not None else []
+        return {
+            "dead_letters": dead_letters,
+            "recent_errors": sum(entry.level == "ERROR" for entry in recent_diagnostics),
+            "recent_warnings": sum(entry.level == "WARNING" for entry in recent_diagnostics),
+            "backup": get_last_backup_summary(db),
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
     while True:
+        state = await lane.run(_load_ops)
+        unicode_style = state["unicode_style"]
+        collapsed = state["collapsed"]
+        redraw_in_place = state["redraw_in_place"]
+        header_color = state["header_color"]
+        description_level = state["description_level"]
+
+        active_sessions = len(node_controls.session_registry) if node_controls is not None else None
+        maintenance = node_controls.maintenance.is_active() if node_controls is not None else False
+        lockdown = node_controls.maintenance.is_lockdown_active() if node_controls is not None else False
+
         await session.write_line(
             "\r\n" + screen_title(
                 "Operations",
@@ -828,8 +945,52 @@ async def _operations_menu(
                 clear=redraw_in_place,
                 unicode_style=unicode_style, collapsed=collapsed,
                 header_color=header_color,
-            node_name_gradient=session.node_name_gradient)
+                node_name_gradient=session.node_name_gradient,
+            )
         )
+
+        node_badge = status_badge(
+            "LOCKDOWN" if lockdown else "MAINTENANCE" if maintenance else "ONLINE",
+            tone="error" if lockdown else "warning" if maintenance else "success",
+            unicode_style=unicode_style,
+        ) if node_controls is not None else status_badge("LOCAL ADMIN", tone="neutral", unicode_style=unicode_style)
+
+        panel: list[str] = [colored("NODE HEALTH  ", fg_color=LABEL_COLOR, bold=True) + node_badge]
+        if active_sessions is not None:
+            sessions_gauge = telemetry_gauge(active_sessions, max(10, active_sessions), unicode_style=unicode_style)
+            panel.append(f"  {counts_row([('Active sessions', active_sessions)])}  {sessions_gauge}")
+        else:
+            panel.append(colored("  Live node controls unavailable in standalone mode.", fg_color=MUTED_COLOR))
+
+        if link_context is None:
+            panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge("DISABLED", tone="neutral", unicode_style=unicode_style))
+        else:
+            node = link_context.link_node
+            link_tone = "warning" if not node.peers or state["dead_letters"] else "success"
+            link_label = "ATTENTION" if link_tone == "warning" else "HEALTHY"
+            panel.append(colored("LINK OPERATIONS  ", fg_color=LABEL_COLOR, bold=True) + status_badge(link_label, tone=link_tone, unicode_style=unicode_style))
+            panel.append(
+                "  " + counts_row(
+                    [("Peers", len(node.peers)), ("Relays", len(node.relays_serving_me)), ("Dead letters", state["dead_letters"])]
+                )
+            )
+            panel.append(
+                "  " + counts_row([("Recent Link errors", state["recent_errors"]), ("warnings", state["recent_warnings"])])
+            )
+
+        backup_at, _backup_path = state["backup"]
+        panel.append(
+            "  Backup: "
+            + (sanitize_text(backup_at) if backup_at else colored("never", fg_color=WARNING_COLOR))
+        )
+
+        if unicode_style:
+            await session.write_line(
+                double_frame(panel, width=min(session.terminal_width, 78), header_color=header_color)
+            )
+        else:
+            for line in panel:
+                await session.write_line(line)
         options = [
             MenuEntry(label=menu_key("K", "up status", prefix="Bac"), brief="Last backup status and history"),
             MenuEntry(label=menu_key("P", "rune drafts"), brief="Clean up old unsaved drafts"),
@@ -6367,12 +6528,35 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 async def _content_menu(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
 ) -> None:
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    def _load_stats(db: Database) -> dict[str, Any]:
+        all_boards = list_boards(db)
+        all_areas = list_file_areas(db)
+        channels = list_channels(db)
+        doors = list_doors(db)
+        communities = list_communities(db)
+        pending_posts = sum(len(list_pending_posts(db, b, requesting_user=actor)) for b in all_boards)
+        pending_files = sum(len(list_pending_files(db, a, requesting_user=actor)) for a in all_areas)
+        total_posts = sum(count_visible_posts(db, b)[0] for b in all_boards)
+        total_files = sum(count_visible_files(db, a)[0] for a in all_areas)
+        return {
+            "total_boards": len(all_boards),
+            "total_posts": total_posts,
+            "total_areas": len(all_areas),
+            "total_files": total_files,
+            "total_channels": len(channels),
+            "total_doors": len(doors),
+            "total_communities": len(communities),
+            "pending_posts": pending_posts,
+            "pending_files": pending_files,
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    stats = await lane.run(_load_stats)
+    await _draw_content_menu(session, stats=stats)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -6382,44 +6566,109 @@ async def _content_menu(
         elif choice == "m":
             await session.write_line("")
             await _board_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "f":
             await session.write_line("")
             await _area_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "d":
             await session.write_line("")
             await _door_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "n":
             await session.write_line("")
             await _channel_menu(session, lane, actor, link_context=link_context)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "c":
             await session.write_line("")
             await _category_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "o":
             await session.write_line("")
             await _community_menu(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "g":
             await session.write_line("")
             await _grant_moderator_screen(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         elif choice == "r":
             await session.write_line("")
             await _revoke_moderator_screen(session, lane, actor)
-            await _draw_content_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            stats = await lane.run(_load_stats)
+            await _draw_content_menu(session, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_content_menu(session: Session, description_level: str, redraw_in_place: bool, unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int] = HEADER_COLOR) -> None:
+async def _draw_content_menu(
+    session: Session,
+    description_level: str | None = None,
+    redraw_in_place: bool = False,
+    unicode_style: bool = False,
+    collapsed: bool = False,
+    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    *,
+    stats: dict[str, Any] | None = None,
+) -> None:
+    if stats is not None:
+        unicode_style = stats.get("unicode_style", unicode_style)
+        collapsed = stats.get("collapsed", collapsed)
+        redraw_in_place = stats.get("redraw_in_place", redraw_in_place)
+        header_color = stats.get("header_color", header_color)
+        description_level = stats.get("description_level", description_level or "brief")
+    else:
+        description_level = description_level or "brief"
+
     await session.write_line(
-        "\r\n" + screen_title("Manage message boards/file areas/chat channels",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient)
+        "\r\n"
+        + screen_title(
+            "Manage message boards/file areas/chat channels",
+            breadcrumb=(session.node_display_name, "SysOp"),
+            subtitle="Content repositories, categories, and moderation permissions.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
     )
+
+    if stats is not None:
+        panel = [
+            colored("CONTENT REPOSITORY", fg_color=LABEL_COLOR, bold=True),
+            "  "
+            + counts_row([("Message boards", stats["total_boards"]), ("Posts", stats["total_posts"])]),
+            "  "
+            + counts_row([("File areas", stats["total_areas"]), ("Files", stats["total_files"])]),
+            "  "
+            + counts_row([("Chat channels", stats["total_channels"]), ("Doors", stats["total_doors"]), ("Communities", stats["total_communities"])]),
+            colored("MODERATION QUEUE", fg_color=LABEL_COLOR, bold=True),
+        ]
+        pending_total = stats["pending_posts"] + stats["pending_files"]
+        if pending_total > 0:
+            gauge = telemetry_gauge(pending_total, max(10, pending_total), unicode_style=unicode_style, tone="capacity")
+            panel.append("  " + counts_row([("Pending review", pending_total)]) + f"  {gauge}")
+            panel.append("    " + counts_row([("Posts", stats["pending_posts"]), ("Files", stats["pending_files"])]))
+        else:
+            gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="health")
+            panel.append(f"  {counts_row([('Pending review', 0)])}  {gauge}  " + colored("All clear", fg_color=SUCCESS_COLOR))
+
+        if unicode_style:
+            await session.write_line(
+                double_frame(panel, width=min(session.terminal_width, 78), header_color=header_color)
+            )
+        else:
+            for line in panel:
+                await session.write_line(line)
+
     await session.write_line(
         _menu_row(
             [

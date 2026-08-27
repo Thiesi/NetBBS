@@ -168,6 +168,75 @@ def counts_row(pairs: Sequence[tuple[str, int]]) -> str:
     )
 
 
+def telemetry_gauge(
+    current: int,
+    total: int,
+    *,
+    width: int = 10,
+    unicode_style: bool = True,
+    fill_color: int | tuple[int, int, int] | None = None,
+    empty_color: int | tuple[int, int, int] = MUTED_COLOR,
+    tone: str = "capacity",
+    show_ratio: bool = True,
+) -> str:
+    """Render a mini ASCII/Unicode graphical progress bar for capacity or health.
+
+    Example:
+      Unicode: [██░░░░░░░░] 2/10
+      ASCII:   [##........] 2/10
+
+    Parameters:
+      current: Current measured value (e.g. active sessions).
+      total: Nominal or maximum capacity.
+      width: Number of bar blocks (default 10).
+      unicode_style: True for Unicode block/shade elements (█/░), False for ASCII (#/.).
+      fill_color: Optional explicit color override for filled blocks.
+      empty_color: Color for unfilled blocks (defaults to MUTED_COLOR).
+      tone: Tone semantic for automatic fill color:
+        - "capacity": low-to-moderate ratio is SUCCESS_COLOR, >= 0.75 WARNING_COLOR, >= 0.9 ERROR_COLOR.
+        - "health": >= 0.8 SUCCESS_COLOR, >= 0.5 WARNING_COLOR, < 0.5 ERROR_COLOR.
+        - "neutral": ACCENT_COLOR.
+      show_ratio: Whether to append ' current/total' suffix (default True).
+    """
+    if width < 1:
+        raise ValueError("gauge width must be >= 1")
+
+    ratio = 0.0 if total <= 0 else max(0.0, min(1.0, current / total))
+    filled = int(round(ratio * width))
+    filled = max(0, min(width, filled))
+    empty = width - filled
+
+    if fill_color is not None:
+        effective_fill = fill_color
+    elif tone == "capacity":
+        if ratio >= 0.9:
+            effective_fill = ERROR_COLOR
+        elif ratio >= 0.75:
+            effective_fill = WARNING_COLOR
+        else:
+            effective_fill = SUCCESS_COLOR
+    elif tone == "health":
+        if ratio >= 0.8:
+            effective_fill = SUCCESS_COLOR
+        elif ratio >= 0.5:
+            effective_fill = WARNING_COLOR
+        else:
+            effective_fill = ERROR_COLOR
+    else:
+        effective_fill = ACCENT_COLOR
+
+    fill_char = "█" if unicode_style else "#"
+    empty_char = "░" if unicode_style else "."
+
+    bar = colored(fill_char * filled, fg_color=effective_fill) + colored(empty_char * empty, fg_color=empty_color)
+    bracket_l = colored("[", fg_color=METADATA_COLOR)
+    bracket_r = colored("]", fg_color=METADATA_COLOR)
+    base = f"{bracket_l}{bar}{bracket_r}"
+    if show_ratio:
+        return f"{base} {colored(f'{current}/{total}', fg_color=VALUE_COLOR, bold=True)}"
+    return base
+
+
 def empty_state(
     title: str,
     *,

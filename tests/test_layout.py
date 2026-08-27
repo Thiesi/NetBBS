@@ -6,7 +6,18 @@ import re
 
 import pytest
 
-from netbbs.rendering import MenuEntry, action_bar, badge, clear_screen, empty_state, menu_grid, menu_key, screen_title, visible_width
+from netbbs.rendering import (
+    MenuEntry,
+    action_bar,
+    badge,
+    clear_screen,
+    empty_state,
+    menu_grid,
+    menu_key,
+    screen_title,
+    telemetry_gauge,
+    visible_width,
+)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -441,3 +452,52 @@ def test_layout_rejects_non_positive_width(width):
         action_bar(["item"], width=width)
     with pytest.raises(ValueError):
         empty_state("Nothing", width=width)
+    with pytest.raises(ValueError):
+        telemetry_gauge(2, 10, width=width)
+
+
+def test_telemetry_gauge_unicode_and_ascii():
+    gauge_unicode = telemetry_gauge(2, 10, width=10, unicode_style=True)
+    plain_u = visible(gauge_unicode)
+    assert plain_u == "[██░░░░░░░░] 2/10"
+    assert visible_width(plain_u) == 17
+
+    gauge_ascii = telemetry_gauge(2, 10, width=10, unicode_style=False)
+    plain_a = visible(gauge_ascii)
+    assert plain_a == "[##........] 2/10"
+    assert visible_width(plain_a) == 17
+
+
+def test_telemetry_gauge_boundaries_and_clamping():
+    # Zero current
+    assert visible(telemetry_gauge(0, 10, width=10, unicode_style=True)) == "[░░░░░░░░░░] 0/10"
+    # Full capacity
+    assert visible(telemetry_gauge(10, 10, width=10, unicode_style=True)) == "[██████████] 10/10"
+    # Exceeding capacity
+    assert visible(telemetry_gauge(15, 10, width=10, unicode_style=True)) == "[██████████] 15/10"
+    # Negative / zero total
+    assert visible(telemetry_gauge(0, 0, width=10, unicode_style=True)) == "[░░░░░░░░░░] 0/0"
+    assert visible(telemetry_gauge(-5, 10, width=10, unicode_style=True)) == "[░░░░░░░░░░] -5/10"
+
+
+def test_telemetry_gauge_show_ratio_option():
+    bar_only = visible(telemetry_gauge(4, 10, width=10, unicode_style=True, show_ratio=False))
+    assert bar_only == "[████░░░░░░]"
+    assert visible_width(bar_only) == 12
+
+
+def test_telemetry_gauge_tones():
+    # Capacity tone: low is success, mid warning, high error
+    low = telemetry_gauge(2, 10, tone="capacity")
+    mid = telemetry_gauge(8, 10, tone="capacity")
+    high = telemetry_gauge(10, 10, tone="capacity")
+    assert "\x1b[38;5;10m" in low or "\x1b[32m" in low or "2/10" in low
+    assert "\x1b[38;5;11m" in mid or "\x1b[33m" in mid or "8/10" in mid
+    assert "\x1b[38;5;9m" in high or "\x1b[31m" in high or "10/10" in high
+
+    # Health tone: high is success, mid warning, low error
+    h_good = telemetry_gauge(9, 10, tone="health")
+    h_poor = telemetry_gauge(2, 10, tone="health")
+    assert "9/10" in h_good
+    assert "2/10" in h_poor
+

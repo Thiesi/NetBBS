@@ -5561,3 +5561,73 @@ def test_redraw_in_place_clears_a_direct_render_loop_screen(db, lane, sysop):
     text = _written_text(session)
     assert "Operations" in text
     assert clear_screen() in text
+
+
+def test_sysop_console_shows_graphical_telemetry_gauge(db, lane, sysop):
+    """SysOp console renders mini graphical gauge for active sessions (Issue #187)."""
+    node_controls = _node_controls()
+
+    async def _test():
+        s1 = FakeSession()
+        node_controls.session_registry.enter(s1)
+        session = FakeSession(["b"])
+        await admin_menu(session, lane, sysop, node_controls=node_controls)
+        return _visible(_written_text(session))
+
+    text = asyncio.run(_test())
+    assert "Active sessions: 1" in text
+    assert "[█░░░░░░░░░] 1/10" in text
+
+
+def test_users_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Users sub-console shares clean double_frame panel with accounts telemetry (Issue #187)."""
+    session = FakeSession(["u", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "ACCOUNTS" in text
+    assert "Total users:" in text
+    assert "Active ratio: [" in text
+
+
+def test_content_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Content sub-console shares clean double_frame panel with content telemetry (Issue #187)."""
+    session = FakeSession(["c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "CONTENT REPOSITORY" in text
+    assert "Message boards:" in text
+    assert "MODERATION QUEUE" in text
+    assert "Pending review: 0" in text
+    assert "All clear" in text
+
+
+def test_operations_menu_shows_consistent_dashboard_frame_and_telemetry(db, lane, sysop):
+    """Operations sub-console shares clean double_frame panel with operations telemetry (Issue #187)."""
+    node_controls = _node_controls()
+    session = FakeSession(["o", "b", "b"])
+    asyncio.run(
+        admin_menu(session, lane, sysop, node_controls=node_controls)
+    )
+    text = _visible(_written_text(session))
+    assert "╔" in text and "╚" in text
+    assert "NODE HEALTH" in text
+    assert "LINK OPERATIONS" in text
+    assert "Active sessions: 0" in text
+    assert "[░░░░░░░░░░] 0/10" in text
+
+
+def test_sysop_subconsoles_ascii_fallback(db, lane, sysop):
+    """When unicode_style is False, sub-consoles degrade to unboxed ASCII telemetry cleanly."""
+    from netbbs.net.unicode_style_preference import set_unicode_style_enabled
+    set_unicode_style_enabled(db, sysop, False)
+
+    session = FakeSession(["u", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "╔" not in text
+    assert "╚" not in text
+    assert "ACCOUNTS" in text
+    assert "Total users:" in text
+    assert "[##" in text or "[.." in text
