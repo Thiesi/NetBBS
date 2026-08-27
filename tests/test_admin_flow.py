@@ -6087,3 +6087,54 @@ def test_operations_compact_panel_fits_a_real_backup_timestamp(db, lane, sysop):
     text = _visible(_written_text(session))
     assert "Backup:" in text
     _assert_double_frame_rows_match_border(text, "operations_compact_backup_timestamp")
+
+
+def test_content_compact_panel_fits_a_triple_digit_moderation_backlog():
+    """The compact MODERATION QUEUE row's non-empty branch was a bare
+    `panel.append`, never routed through the width-aware wrapping every
+    other row in this panel already uses -- fine at single-digit counts,
+    but a caller-driven backlog of 100+ pending items is wide enough to
+    overflow the 36-column-inner compact frame on its own (Codex
+    follow-up, PR #197 review). Calls `_draw_content_menu` directly with
+    a hand-built `stats` dict -- it's a pure render function once given
+    one, no DB needed."""
+    from netbbs.net.admin_flow import _draw_content_menu
+
+    stats = {
+        "total_boards": 1, "total_posts": 0, "total_areas": 1, "total_files": 0,
+        "total_channels": 0, "total_doors": 0, "total_communities": 0,
+        "pending_posts": 100, "pending_files": 0,
+        "description_level": "off", "unicode_style": True,
+        "collapsed": False, "redraw_in_place": False, "header_color": 51,
+    }
+    session = FakeSession()
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(_draw_content_menu(session, stats=stats))
+    text = _visible(_written_text(session))
+    assert "Pending review: 100" in text
+    _assert_double_frame_rows_match_border(text, "content_compact_triple_digit_backlog")
+
+
+def test_users_compact_panel_fits_four_digit_account_counts():
+    """`telemetry_gauge`'s own ` current/total` ratio suffix grows with
+    this node's real account counts, unlike the gauge's fixed-width bar
+    -- at a fixed 10-cell bar, a 4-digit-vs-4-digit ratio
+    ("1000/1000") already overflows this 36-column-inner compact frame
+    once the "Active ratio: " label is added (Codex follow-up, PR #197
+    review); the bar was narrowed to 6 cells specifically for the
+    compact branch to keep real headroom."""
+    from netbbs.net.admin_flow import _draw_users_menu
+
+    stats = {
+        "total": 1000, "active": 1000, "pending": 0, "disabled": 0, "sysops": 1,
+        "description_level": "off", "unicode_style": True,
+        "collapsed": False, "redraw_in_place": False, "header_color": 51,
+    }
+    session = FakeSession()
+    session.terminal_width = 40
+    session.terminal_height = 24
+    asyncio.run(_draw_users_menu(session, stats=stats))
+    text = _visible(_written_text(session))
+    assert "1000/1000" in text
+    _assert_double_frame_rows_match_border(text, "users_compact_four_digit_accounts")

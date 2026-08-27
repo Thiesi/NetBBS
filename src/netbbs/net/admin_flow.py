@@ -1014,10 +1014,19 @@ async def _draw_users_menu(session: Session, *, stats: dict[str, Any]) -> None:
                     width=box_inner_width,
                 )
             )
+            # `telemetry_gauge`'s own ` current/total` suffix grows with
+            # this node's real account counts (unbounded, unlike the
+            # fixed-width bar itself) -- a fixed 10-cell bar plus a
+            # 4-digit-vs-4-digit ratio ("1000/1000") already overflows
+            # this 36-column compact frame once the "Active ratio: "
+            # label is added. A narrower 6-cell bar keeps the same
+            # meter legible while leaving enough budget for a
+            # established node's real account counts (Codex follow-up,
+            # PR #197 review).
             panel.append(
                 "  "
                 + colored("Active ratio: ", fg_color=METADATA_COLOR)
-                + telemetry_gauge(stats["active"], max(1, stats["total"]), unicode_style=unicode_style, tone="health")
+                + telemetry_gauge(stats["active"], max(1, stats["total"]), width=6, unicode_style=unicode_style, tone="health")
             )
             if stats["pending"] > 0:
                 # The non-compact branch below already warns on pending
@@ -6945,9 +6954,17 @@ async def _draw_content_menu(session: Session, *, stats: dict[str, Any]) -> None
                 # denominator would just make the bar permanently "full"
                 # past 10 pending items, the same fake-capacity bug this
                 # file already dropped for the active-session gauge.
-                panel.append(
-                    colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True)
-                    + counts_row([("Pending review", pending_total)])
+                # `pending_total` is caller-driven (a real backlog can
+                # reach 3+ digits), so route it through the same
+                # width-aware wrapping the rest of this panel already
+                # uses rather than a bare `panel.append` (Codex
+                # follow-up, PR #197 review).
+                panel.extend(
+                    _wrap_counts_panel(
+                        colored("MODERATION QUEUE: ", fg_color=LABEL_COLOR, bold=True),
+                        [("Pending review", pending_total)],
+                        width=box_inner_width,
+                    )
                 )
             else:
                 gauge = telemetry_gauge(0, 10, unicode_style=unicode_style, tone="capacity")
