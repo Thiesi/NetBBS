@@ -3275,7 +3275,8 @@ async def _chat_loop(
 
             async def list_candidates(candidates: Sequence[str], line_text: str, cursor: int) -> None:
                 await _print_candidates_and_redraw_input(
-                    session, live_buffer, session.terminal_height, candidates, line_text, cursor
+                    session, live_buffer, session.terminal_height, candidates, line_text, cursor,
+                    accent_color=pinned_ui.accent_color, unicode_style=pinned_ui.unicode_style,
                 )
 
             while True:

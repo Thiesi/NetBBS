@@ -312,3 +312,21 @@ def test_chat_loop_height_three_degrades_to_unpinned_scrolling(lane, hub, presen
     text = "".join(session.written)
     assert "\x1b[r" not in text
     assert "❯ " not in text and "> " not in text
+
+
+def test_tab_completion_candidate_listing_preserves_prompt_styling(lane, hub, presence, mailbox, channel, alice):
+    """Multiple completion candidates redraw input with preserved styled prompt (accent + Unicode)."""
+    live_buf = chat_flow.LiveInputBuffer()
+    session = FakeSession()
+    session.terminal_height = 24
+    session.terminal_width = 80
+
+    asyncio.run(
+        chat_flow._print_candidates_and_redraw_input(
+            session, live_buf, 24, ["/who", "/whisper"], "/wh", 3,
+            accent_color=208, unicode_style=True,
+        )
+    )
+    text = "".join(session.written)
+    assert "/who  /whisper" in text
+    assert colored("❯ ", fg_color=208, bold=True) in text
