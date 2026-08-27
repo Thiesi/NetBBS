@@ -285,10 +285,10 @@ before/after banners; SSH's version reaches them through `send_auth_
 banner` (before) and a kbdint challenge's own `instruction` field
 (after) rather than an interactive screen, since SSH authenticates at
 the protocol layer with no such screen of its own. Each of the three is
-its own independent singleton, reachable from Settings > Banners &
-Mastheads > Banners (issue #178's reorg), with no built-in default art
--- disabled is a complete non-event, unlike the welcome banner's own
-always-renders-something default.
+its own independent singleton, reachable from Settings > Session
+banners, with no built-in default art -- disabled is a complete
+non-event, unlike the welcome banner's own always-renders-something
+default.
 
 The main-menu masthead (issue #161) also extends to the three top-level
 index/listing screens -- board list, file areas, and the chat channel
@@ -310,9 +310,8 @@ drill-down screens or the inside of a live chat channel -- see issue
 #176's own scoping discussion for why those are a bigger feature and a
 categorically different rendering model, respectively, not simply "one
 level deeper." Each of the three is its own independent singleton,
-reachable from Settings > Banners & Mastheads > Mastheads (issue #178's
-reorg), with the same no-default-art/complete-non-event-when-disabled
-shape issue #177's own banners use.
+reachable from Settings > Section mastheads, with the same no-default-
+art/complete-non-event-when-disabled shape issue #177's own banners use.
 
 The project intentionally provides two composition paths:
 
@@ -3020,9 +3019,9 @@ given backup directory actually is before trusting it. Also records
 `last_backup_at`/`last_backup_path` into the live node's own `node_config`
 table (same key-value store `netbbs.selfupdate`'s update-check state already
 uses) — purely for a future read-only SysOp status line (`_system_menu`,
-alongside `Banners & [M]astheads`/`[U]pdate`/`[T]imestamp`/`[L]ink status`;
-letter `K` for "bacKup", since `B` is already every submenu's universal
-`[B]ack`), not required for restore itself.
+alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
+for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
+required for restore itself.
 
 `restore_backup(*, source, db_path, identity_dir)` reverses each of the
 copies above -- **superseded by §13.10's staged/validated workflow (issue
@@ -4643,6 +4642,111 @@ gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
   constant, so a future SysOp level-preset feature cannot hand that range to a
   real user by accident.
 
+### Issue #165 — MRC gateway scoping
+
+**Goal:** let NetBBS callers reach the existing cross-BBS MRC (Multi Relay
+Chat) network without coupling NetBBS's own premium chat model — Noise
+XX transport, Link-wide presence, per-message trust-filtered scrollback,
+all closed by issue #164 — to a third-party network's pace or ceiling.
+Sequenced after #164, which is done (shipped in v5.3.0): this scoping
+pass was unblocked the moment that landed.
+
+**Reference protocol, since no formal MRC spec exists:** verified
+directly against ENiGMA½ BBS's own reference client/multiplexer
+(`core/mrc.js`, `core/servers/chat/mrc_multiplexer.js`), the most
+actively maintained modern implementation. MRC is a single central hub
+(historically `mrc.bottomlessabyss.net`), not a federated or
+peer-to-peer network — every participating BBS is one more client of the
+same hub. The wire protocol is a single persistent TCP socket (TLS
+optional, separate port), newline-delimited, tilde-separated 7-field
+lines: `from_user~from_site~from_room~to_user~to_site~to_room~body~`.
+`to_user`/`to_room` double as addressing and as an ad hoc control
+channel (`to_user="SERVER"`/`"CLIENT"` carries heartbeat/roster/registration
+commands like `IAMHERE`, `USERLIST`, `STATS`, `LOGOFF`, `INFOSYS`/`INFOWEB`/
+etc.). The only "handshake" is one unauthenticated line the client sends
+on connect — `{boardName}~{clientSoftware}/{os}/{version}` — no password,
+token, or signature ties a connection, a user name, or a claimed board
+name to anything real; any client can claim to be any board. Name fields
+are constrained to ASCII 33–125, 30 chars, with Mystic `|NN` pipe-color
+codes stripped; message bodies to ASCII 32–125. There is no history or
+backfill concept at all — a message reaches only whatever clients happen
+to be connected at the instant it's sent.
+
+This resolves several of the issue's own open questions directly, rather
+than leaving them for a later pass: MRC has no identity a gateway could
+verify, so nothing about it can ever feed Phase 4's trust/reputation
+model, and nothing resembling NetBBS's own trusted-scrollback concept
+has an MRC-side equivalent to bridge to.
+
+**Existing precedent this reuses, not reinvents:** `netbbs.link.
+realtime_channels.LiveChannelBridge` is the architectural template — one
+instance per running node, holding no storage of its own, forwarding
+everything through the same `netbbs.chat.hub.ChatHub.broadcast()` a
+purely local participant's own message already goes through. Its own
+`_handle_channel_message` already renders a remote-authored message with
+`author_fingerprint=None` and a descriptive `author_label` (`f"{user_id}
+@{fingerprint}"`) — the exact shape an MRC-authored message needs, no new
+`channel_messages` column or storage rule required. The outbound hook
+point already exists too: `netbbs.net.chat_flow`'s per-message send path
+calls `link_context.realtime_bridge.broadcast_local_message_live(channel,
+recorded_message)` immediately after `record_message`/`hub.broadcast` —
+a sibling MRC bridge attaches at that identical call site, independent
+of `link_context` and of whether Link itself is even configured.
+
+**Decision 1 (locked in) — one in-process bridge per running node, no
+separate daemon.** Unlike ENiGMA½'s own two-tier design (a per-connection
+client process plus a separate local "multiplexer" process fanning
+multiple local sessions into one hub connection), NetBBS is already a
+single asyncio process per node — there is no per-connection-process
+architecture here to multiplex in the first place. One `MrcBridge`
+instance, analogous to `LiveChannelBridge`, owns the one outbound hub
+socket for the whole node.
+
+**Decision 2 (locked in) — bridging is per-channel, explicit, and off by
+default; never automatic for every channel.** MRC rooms are flat,
+global, and unauthenticated with no ACL concept at all — "every local
+channel bridges by default" would silently leak channel contents onto a
+public, unauthenticated network the moment a SysOp enables MRC at all.
+A SysOp must name which local channel maps to which MRC room, the same
+opt-in shape every other Link-adjacent per-channel setting already uses.
+
+**Decision 3 (locked in) — channels only, never direct/private chat.**
+Matches the issue's own framing, and is reinforced by the protocol
+itself: MRC's `to_user` targeting carries no real confidentiality (the
+hub, or any client willing to lie about its own identity, can see or
+spoof it), so gatewaying anything shaped like private chat would be a
+false promise of privacy NetBBS itself doesn't need to make.
+
+**Decision 4 (locked in) — inbound content is always rendered as
+external/untrusted, and never enters Phase 4 at all.** An inbound MRC
+message becomes a `ChannelMessage` with `author_fingerprint=None` and an
+`author_label` such as `f"{mrc_user}@{mrc_site} (MRC)"` — visually
+distinct from both a local and a genuine Link-originated author label.
+It is never passed to `decide_node_action`/quarantine/trust scoring:
+there is no cryptographic identity on the MRC side to hang a trust
+decision on, so inventing one would be theater, not protection.
+
+**Decision 5 (locked in) — bounded failure containment, matching this
+project's existing "bound remotely influenced resources" invariant.**
+Reconnect-with-backoff on the one outbound socket (mirroring the retry
+behavior every MRC implementation already converges on); a bounded
+outbound send queue so a stalled or unreachable hub degrades to that one
+bridge going quiet, never blocking local chat delivery or the caller who
+just sent a message; malformed or oversized inbound lines are dropped
+and logged, never allowed to crash the local channel. Every outbound
+field is sanitized to MRC's own documented charset/length limits before
+it's sent; inbound Mystic `|NN` pipe-color codes are stripped, never
+rendered as NetBBS's own ANSI — matches "sanitize before styling," and
+treats them as untrusted input either way.
+
+**Left open for a future implementation pass, deliberately not decided
+here:** the exact SysOp-facing configuration screen shape (a new Settings
+leaf, or folded into an existing per-channel settings surface); what a
+live bridge's connected/disconnected status looks like to a SysOp; and
+whether/how a SysOp can disable one misbehaving bridge without touching
+MRC node-wide. This scoping pass answers architecture and trust-boundary
+questions; it does not itself authorize implementation to begin.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
@@ -4650,11 +4754,12 @@ gate (§5.1) and sits safely below `SYSOP_LEVEL = 255`. This only works if:
 - true client-side Link-mail encryption;
 - Link-chat initial scrollback policy;
 - schema fingerprinting beyond SQLite `user_version`;
-- Community defaults as mandatory floors/ceilings;
-- cross-network gateway adapters such as FTN/FidoNet.
+- Community defaults as mandatory floors/ceilings.
 
 A deferred topic becomes normative only after an explicit design decision. Do
-not infer commitment from its appearance in this list.
+not infer commitment from its appearance in this list. (FidoNet/BinkP
+gatewaying is tracked instead under issue #166, its own active scoping
+issue, not this list.)
 
 ---
 
