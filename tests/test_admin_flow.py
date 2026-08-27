@@ -3257,12 +3257,20 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
 # -- welcome banner --------------------------------------------------------
 
 
-def test_welcome_banner_option_appears_in_the_system_submenu(db, lane, sysop):
+def test_banners_and_mastheads_option_appears_in_the_system_submenu(db, lane, sysop):
+    # menu_key("M", "astheads", prefix="Banners & ") highlights only the
+    # "M", but the "Banners & " prefix is plain text -- issue #178 folded
+    # welcome/logoff/new-account banners and every masthead under this one
+    # Settings entry, two levels above where Welcome banner itself lives.
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Banners & " in _written_text(session)
+
+
+def test_welcome_banner_option_appears_in_the_banners_menu(db, lane, sysop):
     # menu_key("W", "elcome banner") highlights the "W" separately, so
     # the contiguous literal text is "elcome banner", not "Welcome banner".
-    # Welcome banner now lives in the [S]ystem submenu, not the top-level
-    # admin menu.
-    session = FakeSession(["s", "b", "b"])
+    session = FakeSession(["s", "m", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "elcome banner" in _written_text(session)
 
@@ -3270,7 +3278,7 @@ def test_welcome_banner_option_appears_in_the_system_submenu(db, lane, sysop):
 def test_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
-    session = FakeSession(["s", "w", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No banner file found" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -3280,7 +3288,7 @@ def test_enable_with_oversized_file_shows_friendly_error_and_leaves_flag_disable
     from netbbs.net.welcome_banner import MAX_BANNER_SIZE_BYTES, banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"x" * (MAX_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "w", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "over the" in _written_text(session)
     assert "byte limit" in _written_text(session)
@@ -3291,7 +3299,7 @@ def test_enable_with_valid_file_present_succeeds_and_sets_flag(db, lane, sysop):
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
-    session = FakeSession(["s", "w", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Welcome banner enabled" in _written_text(session)
     assert is_welcome_banner_enabled(db) is True
@@ -3303,7 +3311,7 @@ def test_disable_reverts_flag_without_deleting_file(db, lane, sysop):
     banner_path(db).write_bytes(b"MY CUSTOM BANNER")
     set_welcome_banner_enabled(db, True)
 
-    session = FakeSession(["s", "w", "d", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Reverted to the default banner" in _written_text(session)
     assert is_welcome_banner_enabled(db) is False
@@ -3319,7 +3327,7 @@ def test_preview_screen_renders_resolved_banner_content(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "w", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE BANNER TEXT" in text
@@ -3331,7 +3339,7 @@ def test_preview_screen_when_disabled_shows_default_and_says_so(db, lane, sysop)
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "w", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "showing the DEFAULT banner" in text
@@ -3352,7 +3360,7 @@ def test_preview_screen_color_depth_override_forces_truecolor(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "w", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "rendering: truecolor gradient" in text
@@ -3368,7 +3376,7 @@ def test_preview_screen_color_depth_override_forces_256_color(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait (dogfood fix: the preview used to be cleared by
     # the menu's own immediate redraw before it could be read).
-    session = FakeSession(["s", "w", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "p", "x", "b", "b", "b", "b", "b"])
     session.supports_truecolor = True
     _run(session, lane, sysop)
     text = _written_text(session)
@@ -3382,7 +3390,7 @@ def test_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_banner_pa
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "w", "i", "A", "CTRL+O", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -3404,7 +3412,7 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
 
     banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["s", "w", "i", "A", "CTRL+X", "d", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "i", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No changes saved" in _written_text(session)
     assert banner_path(db).read_bytes() == b"ORIGINAL"
@@ -3414,13 +3422,13 @@ def test_edit_then_quit_without_saving_leaves_banner_file_untouched(db, lane, sy
 
 
 def test_gallery_option_appears_in_the_welcome_banner_menu(db, lane, sysop):
-    session = FakeSession(["s", "w", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "allery" in _written_text(session)
 
 
 def test_gallery_lists_bundled_welcome_banner_presets_by_name(db, lane, sysop):
-    session = FakeSession(["s", "w", "g", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Synthwave / Magenta-Cyan Neon Grid" in text
@@ -3433,7 +3441,7 @@ def test_gallery_selecting_a_preset_previews_its_decoded_content_before_applying
     # item 01 on the picker's first page -- Synthwave / Magenta-Cyan Neon Grid.
     # Declining loops back into the gallery's own picker (dogfood fix),
     # so exiting cleanly needs one extra "b" beyond the usual 3.
-    session = FakeSession(["s", "w", "g", "0", "1", "n", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "n", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
@@ -3445,7 +3453,7 @@ def test_gallery_applying_a_preset_writes_its_bytes_and_enables_the_banner(db, l
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "w", "g", "0", "1", "y", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -3463,7 +3471,7 @@ def test_gallery_applying_a_preset_writes_its_bytes_and_enables_the_banner(db, l
 def test_gallery_back_without_selecting_leaves_the_banner_untouched(db, lane, sysop):
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
-    session = FakeSession(["s", "w", "g", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_welcome_banner_enabled(db) is False
 
@@ -3477,7 +3485,7 @@ def test_gallery_declining_a_preset_returns_to_the_same_gallery_to_try_another(d
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "w", "g", "0", "1", "n", "0", "3", "y", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "n", "0", "3", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
@@ -3492,13 +3500,13 @@ def test_gallery_declining_a_preset_returns_to_the_same_gallery_to_try_another(d
 
 
 def test_from_disk_option_appears_in_the_welcome_banner_menu(db, lane, sysop):
-    session = FakeSession(["s", "w", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "rom disk" in _written_text(session)
 
 
 def test_from_disk_with_no_other_files_shows_an_empty_state_message(db, lane, sysop, tmp_path):
-    session = FakeSession(["s", "w", "f", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "No other .ans files found in" in text
@@ -3511,7 +3519,7 @@ def test_from_disk_excludes_the_current_target_file_and_lists_only_others(db, la
     banner_path(db).write_bytes(b"ALREADY THE CURRENT BANNER")
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    session = FakeSession(["s", "w", "f", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     # Scoped to the picker screen itself, not the whole session's output --
@@ -3529,7 +3537,7 @@ def test_from_disk_selecting_and_declining_previews_but_does_not_load(db, lane, 
 
     # Declining loops back into this same picker (same dogfood fix as
     # the bundled gallery), so exiting cleanly needs one extra "b".
-    session = FakeSession(["s", "w", "f", "0", "1", "n", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "n", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'custom.ans':" in text
@@ -3543,7 +3551,7 @@ def test_from_disk_selecting_and_confirming_loads_and_enables_it(db, lane, sysop
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    session = FakeSession(["s", "w", "f", "0", "1", "y", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -3564,7 +3572,7 @@ def test_from_disk_rejects_an_oversized_file_without_loading_it(db, lane, sysop,
 
     (tmp_path / "toobig.ans").write_bytes(b"A" * (MAX_BANNER_SIZE_BYTES + 1))
 
-    session = FakeSession(["s", "w", "f", "0", "1", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "over the" in text
@@ -3576,18 +3584,10 @@ def test_from_disk_rejects_an_oversized_file_without_loading_it(db, lane, sysop,
 # -- main-menu masthead (issue #161) ---------------------------------------
 
 
-def test_masthead_option_appears_in_the_system_submenu(db, lane, sysop):
-    # menu_key("M", "asthead") highlights the "M" separately, so the
-    # contiguous literal text is "asthead", not "Masthead".
-    session = FakeSession(["s", "b", "b"])
-    _run(session, lane, sysop)
-    assert "asthead" in _written_text(session)
-
-
 def test_masthead_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, lane, sysop):
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled
 
-    session = FakeSession(["s", "m", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No masthead file found" in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
@@ -3601,7 +3601,7 @@ def test_masthead_enable_with_oversized_file_shows_friendly_error_and_leaves_fla
     )
 
     main_menu_banner_path(db).write_bytes(b"x" * (MAX_MASTHEAD_SIZE_BYTES + 1))
-    session = FakeSession(["s", "m", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "over the" in _written_text(session)
     assert "byte limit" in _written_text(session)
@@ -3612,7 +3612,7 @@ def test_masthead_enable_with_valid_file_present_succeeds_and_sets_flag(db, lane
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled, main_menu_banner_path
 
     main_menu_banner_path(db).write_bytes(b"MY CUSTOM MASTHEAD")
-    session = FakeSession(["s", "m", "e", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Main-menu masthead enabled" in _written_text(session)
     assert is_main_menu_banner_enabled(db) is True
@@ -3628,7 +3628,7 @@ def test_masthead_disable_reverts_flag_without_deleting_file(db, lane, sysop):
     main_menu_banner_path(db).write_bytes(b"MY CUSTOM MASTHEAD")
     set_main_menu_banner_enabled(db, True)
 
-    session = FakeSession(["s", "m", "d", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Masthead disabled" in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
@@ -3643,7 +3643,7 @@ def test_masthead_preview_screen_renders_resolved_content(db, lane, sysop):
 
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait, same fix as the welcome-banner preview above.
-    session = FakeSession(["s", "m", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "MY DISTINCTIVE MASTHEAD TEXT" in text
@@ -3653,7 +3653,7 @@ def test_masthead_preview_screen_renders_resolved_content(db, lane, sysop):
 def test_masthead_preview_screen_when_disabled_says_no_masthead_shown(db, lane, sysop):
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait, same fix as the welcome-banner preview above.
-    session = FakeSession(["s", "m", "p", "x", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "no masthead would be shown" in text
@@ -3666,7 +3666,7 @@ def test_masthead_edit_option_opens_the_ansi_editor_and_a_save_round_trips_into_
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "m", "i", "A", "CTRL+O", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -3688,7 +3688,7 @@ def test_masthead_edit_then_quit_without_saving_leaves_banner_file_untouched(db,
 
     main_menu_banner_path(db).write_bytes(b"ORIGINAL")
 
-    session = FakeSession(["s", "m", "i", "A", "CTRL+X", "d", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "i", "A", "CTRL+X", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No changes saved" in _written_text(session)
     assert main_menu_banner_path(db).read_bytes() == b"ORIGINAL"
@@ -3698,13 +3698,13 @@ def test_masthead_edit_then_quit_without_saving_leaves_banner_file_untouched(db,
 
 
 def test_masthead_gallery_option_appears_in_the_masthead_menu(db, lane, sysop):
-    session = FakeSession(["s", "m", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "allery" in _written_text(session)
 
 
 def test_masthead_gallery_lists_bundled_masthead_presets_by_name(db, lane, sysop):
-    session = FakeSession(["s", "m", "g", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "g", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Neon Horizon Strip" in text
@@ -3715,7 +3715,7 @@ def test_masthead_gallery_applying_a_preset_writes_its_bytes_and_enables_the_mas
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled, main_menu_banner_path
 
-    session = FakeSession(["s", "m", "g", "0", "1", "y", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -3735,7 +3735,7 @@ def test_masthead_gallery_declining_the_apply_prompt_leaves_the_masthead_disable
 
     # Declining loops back into the gallery's own picker (dogfood fix),
     # so exiting cleanly needs one extra "b" beyond the usual 3.
-    session = FakeSession(["s", "m", "g", "0", "1", "n", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "n", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Not applied." in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
@@ -3745,7 +3745,7 @@ def test_masthead_gallery_declining_the_apply_prompt_leaves_the_masthead_disable
 
 
 def test_masthead_from_disk_option_appears_in_the_masthead_menu(db, lane, sysop):
-    session = FakeSession(["s", "m", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "rom disk" in _written_text(session)
 
@@ -3755,7 +3755,7 @@ def test_masthead_from_disk_selecting_and_confirming_loads_and_enables_it(db, la
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN MASTHEAD")
 
-    session = FakeSession(["s", "m", "f", "0", "1", "y", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "f", "0", "1", "y", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -4194,19 +4194,20 @@ def test_node_name_gradient_change_is_audit_logged(db, lane, sysop):
     assert "blue" in rows[0]["detail"]
 
 
-# -- session banners (issue #177) ---------------------------------------
+# -- banners & mastheads reorg (issue #178) ------------------------------
 
 
-def test_session_banners_option_appears_in_the_system_submenu(db, lane, sysop):
-    session = FakeSession(["s", "s", "b", "b", "b"])
+def test_banners_option_appears_in_the_banners_and_mastheads_menu(db, lane, sysop):
+    session = FakeSession(["s", "m", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "ession banners" in _written_text(session)
+    assert "anners" in _written_text(session)
 
 
-def test_session_banners_menu_lists_all_three(db, lane, sysop):
-    session = FakeSession(["s", "s", "b", "b", "b"])
+def test_banners_menu_lists_all_four(db, lane, sysop):
+    session = FakeSession(["s", "m", "n", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
+    assert "elcome banner" in text
     assert "ogoff banner" in text
     assert "fore signup" in text
     assert "ter signup" in text
@@ -4218,7 +4219,7 @@ def test_session_banners_menu_lists_all_three(db, lane, sysop):
 def test_logoff_banner_enable_with_no_file_present_shows_friendly_error(db, lane, sysop):
     from netbbs.net.logoff_banner import is_logoff_banner_enabled
 
-    session = FakeSession(["s", "s", "l", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No banner file found" in _written_text(session)
     assert is_logoff_banner_enabled(db) is False
@@ -4228,7 +4229,7 @@ def test_logoff_banner_enable_with_oversized_file_shows_friendly_error(db, lane,
     from netbbs.net.logoff_banner import MAX_LOGOFF_BANNER_SIZE_BYTES, logoff_banner_path
 
     logoff_banner_path(db).write_bytes(b"x" * (MAX_LOGOFF_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "s", "l", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "over the" in text and "byte limit" in text
@@ -4238,7 +4239,7 @@ def test_logoff_banner_enable_with_valid_file_succeeds_and_is_audit_logged(db, l
     from netbbs.net.logoff_banner import is_logoff_banner_enabled, logoff_banner_path
 
     logoff_banner_path(db).write_bytes(b"MY CUSTOM LOGOFF BANNER")
-    session = FakeSession(["s", "s", "l", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Logoff banner enabled" in _written_text(session)
     assert is_logoff_banner_enabled(db) is True
@@ -4256,7 +4257,7 @@ def test_logoff_banner_disable_reverts_flag_without_deleting_file(db, lane, syso
     logoff_banner_path(db).write_bytes(b"MY CUSTOM LOGOFF BANNER")
     set_logoff_banner_enabled(db, True)
 
-    session = FakeSession(["s", "s", "l", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "disabled" in _written_text(session).lower()
     assert is_logoff_banner_enabled(db) is False
@@ -4269,13 +4270,13 @@ def test_logoff_banner_preview_shows_resolved_content(db, lane, sysop):
     logoff_banner_path(db).write_bytes(b"MY DISTINCTIVE LOGOFF TEXT")
     set_logoff_banner_enabled(db, True)
 
-    session = FakeSession(["s", "s", "l", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "MY DISTINCTIVE LOGOFF TEXT" in _written_text(session)
 
 
 def test_logoff_banner_preview_when_disabled_says_no_banner(db, lane, sysop):
-    session = FakeSession(["s", "s", "l", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "no banner" in text.lower()
@@ -4288,7 +4289,7 @@ def test_logoff_banner_edit_round_trips_into_logoff_banner_path(db, lane, sysop)
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "s", "l", "i", "A", "CTRL+O", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -4314,7 +4315,7 @@ def test_new_account_banner_before_enable_with_valid_file_succeeds(db, lane, sys
     )
 
     new_account_banner_before_path(db).write_bytes(b"MY CUSTOM SIGNUP BANNER")
-    session = FakeSession(["s", "s", "e", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "e", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "New-account (before) banner enabled" in _written_text(session)
     assert is_new_account_banner_before_enabled(db) is True
@@ -4335,7 +4336,7 @@ def test_new_account_banner_before_disable_reverts_flag_without_deleting_file(db
     new_account_banner_before_path(db).write_bytes(b"MY CUSTOM SIGNUP BANNER")
     set_new_account_banner_before_enabled(db, True)
 
-    session = FakeSession(["s", "s", "e", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "e", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_new_account_banner_before_enabled(db) is False
     assert new_account_banner_before_path(db).read_bytes() == b"MY CUSTOM SIGNUP BANNER"
@@ -4350,7 +4351,7 @@ def test_new_account_banner_before_preview_shows_resolved_content(db, lane, syso
     new_account_banner_before_path(db).write_bytes(b"DISTINCTIVE SIGNUP TEXT")
     set_new_account_banner_before_enabled(db, True)
 
-    session = FakeSession(["s", "s", "e", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "e", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE SIGNUP TEXT" in _written_text(session)
 
@@ -4365,7 +4366,7 @@ def test_new_account_banner_after_enable_with_valid_file_succeeds(db, lane, syso
     )
 
     new_account_banner_after_path(db).write_bytes(b"MY CUSTOM WELCOME BANNER")
-    session = FakeSession(["s", "s", "f", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "f", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "New-account (after) banner enabled" in _written_text(session)
     assert is_new_account_banner_after_enabled(db) is True
@@ -4386,7 +4387,7 @@ def test_new_account_banner_after_disable_reverts_flag_without_deleting_file(db,
     new_account_banner_after_path(db).write_bytes(b"MY CUSTOM WELCOME BANNER")
     set_new_account_banner_after_enabled(db, True)
 
-    session = FakeSession(["s", "s", "f", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "f", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_new_account_banner_after_enabled(db) is False
     assert new_account_banner_after_path(db).read_bytes() == b"MY CUSTOM WELCOME BANNER"
@@ -4401,24 +4402,25 @@ def test_new_account_banner_after_preview_shows_resolved_content(db, lane, sysop
     new_account_banner_after_path(db).write_bytes(b"DISTINCTIVE WELCOME TEXT")
     set_new_account_banner_after_enabled(db, True)
 
-    session = FakeSession(["s", "s", "f", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "f", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE WELCOME TEXT" in _written_text(session)
 
 
-# -- section mastheads (issue #176) ---------------------------------------
+# -- mastheads submenu (issue #178) ---------------------------------------
 
 
-def test_section_mastheads_option_appears_in_the_system_submenu(db, lane, sysop):
-    session = FakeSession(["s", "e", "b", "b", "b"])
+def test_mastheads_option_appears_in_the_banners_and_mastheads_menu(db, lane, sysop):
+    session = FakeSession(["s", "m", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "ction mastheads" in _written_text(session)
+    assert "astheads" in _written_text(session)
 
 
-def test_section_mastheads_menu_lists_all_three(db, lane, sysop):
-    session = FakeSession(["s", "e", "b", "b", "b"])
+def test_mastheads_menu_lists_all_four(db, lane, sysop):
+    session = FakeSession(["s", "m", "m", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
+    assert "ain menu" in text
     assert "ard list" in text
     assert "ile areas" in text
     assert "hat channels" in text
@@ -4430,7 +4432,7 @@ def test_section_mastheads_menu_lists_all_three(db, lane, sysop):
 def test_board_list_masthead_enable_with_no_file_present_shows_friendly_error(db, lane, sysop):
     from netbbs.net.board_list_banner import is_board_list_banner_enabled
 
-    session = FakeSession(["s", "e", "o", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No masthead file found" in _written_text(session)
     assert is_board_list_banner_enabled(db) is False
@@ -4440,7 +4442,7 @@ def test_board_list_masthead_enable_with_oversized_file_shows_friendly_error(db,
     from netbbs.net.board_list_banner import MAX_BOARD_LIST_BANNER_SIZE_BYTES, board_list_banner_path
 
     board_list_banner_path(db).write_bytes(b"x" * (MAX_BOARD_LIST_BANNER_SIZE_BYTES + 1))
-    session = FakeSession(["s", "e", "o", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "over the" in text and "byte limit" in text
@@ -4450,7 +4452,7 @@ def test_board_list_masthead_enable_with_valid_file_succeeds_and_is_audit_logged
     from netbbs.net.board_list_banner import board_list_banner_path, is_board_list_banner_enabled
 
     board_list_banner_path(db).write_bytes(b"MY CUSTOM BOARD MASTHEAD")
-    session = FakeSession(["s", "e", "o", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Board list masthead enabled" in _written_text(session)
     assert is_board_list_banner_enabled(db) is True
@@ -4472,7 +4474,7 @@ def test_board_list_masthead_disable_reverts_flag_without_deleting_file(db, lane
     board_list_banner_path(db).write_bytes(b"MY CUSTOM BOARD MASTHEAD")
     set_board_list_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "o", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_board_list_banner_enabled(db) is False
     assert board_list_banner_path(db).read_bytes() == b"MY CUSTOM BOARD MASTHEAD"
@@ -4484,7 +4486,7 @@ def test_board_list_masthead_preview_shows_resolved_content(db, lane, sysop):
     board_list_banner_path(db).write_bytes(b"DISTINCTIVE BOARD TEXT")
     set_board_list_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "o", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE BOARD TEXT" in _written_text(session)
 
@@ -4495,7 +4497,7 @@ def test_board_list_masthead_edit_round_trips_into_board_list_banner_path(db, la
     from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
     from netbbs.rendering.screen_buffer import ScreenBuffer
 
-    session = FakeSession(["s", "e", "o", "i", "A", "CTRL+O", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "i", "A", "CTRL+O", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Saved" in _written_text(session)
 
@@ -4518,7 +4520,7 @@ def test_file_area_masthead_enable_with_valid_file_succeeds(db, lane, sysop):
     from netbbs.net.file_area_banner import file_area_banner_path, is_file_area_banner_enabled
 
     file_area_banner_path(db).write_bytes(b"MY CUSTOM FILE AREA MASTHEAD")
-    session = FakeSession(["s", "e", "f", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "f", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "File area masthead enabled" in _written_text(session)
     assert is_file_area_banner_enabled(db) is True
@@ -4539,7 +4541,7 @@ def test_file_area_masthead_disable_reverts_flag_without_deleting_file(db, lane,
     file_area_banner_path(db).write_bytes(b"MY CUSTOM FILE AREA MASTHEAD")
     set_file_area_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "f", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "f", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_file_area_banner_enabled(db) is False
     assert file_area_banner_path(db).read_bytes() == b"MY CUSTOM FILE AREA MASTHEAD"
@@ -4551,7 +4553,7 @@ def test_file_area_masthead_preview_shows_resolved_content(db, lane, sysop):
     file_area_banner_path(db).write_bytes(b"DISTINCTIVE FILE AREA TEXT")
     set_file_area_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "f", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "f", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE FILE AREA TEXT" in _written_text(session)
 
@@ -4566,7 +4568,7 @@ def test_chat_channel_picker_masthead_enable_with_valid_file_succeeds(db, lane, 
     )
 
     chat_channel_picker_banner_path(db).write_bytes(b"MY CUSTOM CHANNEL MASTHEAD")
-    session = FakeSession(["s", "e", "c", "e", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "c", "e", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Chat channel picker masthead enabled" in _written_text(session)
     assert is_chat_channel_picker_banner_enabled(db) is True
@@ -4587,7 +4589,7 @@ def test_chat_channel_picker_masthead_disable_reverts_flag_without_deleting_file
     chat_channel_picker_banner_path(db).write_bytes(b"MY CUSTOM CHANNEL MASTHEAD")
     set_chat_channel_picker_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "c", "d", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "c", "d", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert is_chat_channel_picker_banner_enabled(db) is False
     assert chat_channel_picker_banner_path(db).read_bytes() == b"MY CUSTOM CHANNEL MASTHEAD"
@@ -4602,7 +4604,7 @@ def test_chat_channel_picker_masthead_preview_shows_resolved_content(db, lane, s
     chat_channel_picker_banner_path(db).write_bytes(b"DISTINCTIVE CHANNEL TEXT")
     set_chat_channel_picker_banner_enabled(db, True)
 
-    session = FakeSession(["s", "e", "c", "p", "x", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "c", "p", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "DISTINCTIVE CHANNEL TEXT" in _written_text(session)
 

@@ -285,10 +285,10 @@ before/after banners; SSH's version reaches them through `send_auth_
 banner` (before) and a kbdint challenge's own `instruction` field
 (after) rather than an interactive screen, since SSH authenticates at
 the protocol layer with no such screen of its own. Each of the three is
-its own independent singleton, reachable from Settings > Session
-banners, with no built-in default art -- disabled is a complete
-non-event, unlike the welcome banner's own always-renders-something
-default.
+its own independent singleton, reachable from Settings > Banners &
+Mastheads > Banners (issue #178's reorg), with no built-in default art
+-- disabled is a complete non-event, unlike the welcome banner's own
+always-renders-something default.
 
 The main-menu masthead (issue #161) also extends to the three top-level
 index/listing screens -- board list, file areas, and the chat channel
@@ -310,8 +310,9 @@ drill-down screens or the inside of a live chat channel -- see issue
 #176's own scoping discussion for why those are a bigger feature and a
 categorically different rendering model, respectively, not simply "one
 level deeper." Each of the three is its own independent singleton,
-reachable from Settings > Section mastheads, with the same no-default-
-art/complete-non-event-when-disabled shape issue #177's own banners use.
+reachable from Settings > Banners & Mastheads > Mastheads (issue #178's
+reorg), with the same no-default-art/complete-non-event-when-disabled
+shape issue #177's own banners use.
 
 The project intentionally provides two composition paths:
 
@@ -3019,9 +3020,9 @@ given backup directory actually is before trusting it. Also records
 `last_backup_at`/`last_backup_path` into the live node's own `node_config`
 table (same key-value store `netbbs.selfupdate`'s update-check state already
 uses) — purely for a future read-only SysOp status line (`_system_menu`,
-alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
-for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
-required for restore itself.
+alongside `Banners & [M]astheads`/`[U]pdate`/`[T]imestamp`/`[L]ink status`;
+letter `K` for "bacKup", since `B` is already every submenu's universal
+`[B]ack`), not required for restore itself.
 
 `restore_backup(*, source, db_path, identity_dir)` reverses each of the
 copies above -- **superseded by §13.10's staged/validated workflow (issue

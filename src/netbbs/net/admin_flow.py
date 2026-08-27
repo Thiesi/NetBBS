@@ -884,7 +884,7 @@ async def _system_menu(
     node_controls: NodeControls | None,
     link_context: LinkContext | None = None,
 ) -> None:
-    """Durable node settings: welcome banner, updates, timestamps, and trust.
+    """Durable node settings: banners & mastheads, updates, timestamps, and trust.
 
     The old operational keys remain accepted here as non-advertised
     compatibility aliases; the visible home for those actions is now the
@@ -901,13 +901,9 @@ async def _system_menu(
         if choice == "b":
             await session.write_line("")
             return
-        elif choice == "w":
-            await session.write_line("")
-            await _welcome_banner_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
         elif choice == "m":
             await session.write_line("")
-            await _main_menu_banner_menu(session, lane, actor)
+            await _banners_and_mastheads_menu(session, lane, actor)
             await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
         elif choice == "c":
             await session.write_line("")
@@ -920,14 +916,6 @@ async def _system_menu(
         elif choice == "a":
             await session.write_line("")
             await _node_name_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
-        elif choice == "s":
-            await session.write_line("")
-            await _session_banners_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
-        elif choice == "e":
-            await session.write_line("")
-            await _section_mastheads_menu(session, lane, actor)
             await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
         elif choice == "n" and node_controls is not None:
             await session.write_line("")
@@ -982,12 +970,9 @@ async def _draw_system_menu(
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     option_list = [
-        MenuEntry(label=menu_key("W", "elcome banner"), brief="First-login greeting text"),
-        MenuEntry(label=menu_key("M", "asthead"), brief="Custom art above the main menu"),
+        MenuEntry(label=menu_key("M", "astheads", prefix="Banners & "), brief="Welcome/logoff/new-account banners and every masthead"),
         MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
         MenuEntry(label=menu_key("a", "me", prefix="Node N"), brief="The name and gradient shown in every screen's own corner"),
-        MenuEntry(label=menu_key("S", "ession banners"), brief="Logoff and new-account banners"),
-        MenuEntry(label=menu_key("e", "ction mastheads", prefix="S"), brief="Above the board/file/chat pickers"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
@@ -4359,6 +4344,75 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
         )
 
 
+# -- banners & mastheads umbrella (issue #178) -----------------------------
+#
+# Every banner/masthead singleton -- welcome, logoff, new-account
+# before/after, main-menu, board list, file areas, chat channel picker --
+# reachable through this one Settings entry, grouped into two
+# subsections (Banners, Mastheads) that mirror this file's own
+# menu-within-menu convention (`_theme_colors_menu` inside `_system_menu`).
+# Replaces the flat `[W]elcome banner`/`[M]asthead` top-level rows and
+# folds in the "Session banners" (issue #177) and "Section mastheads"
+# (issue #176) interim groupings, which named this exact reorg as their
+# own eventual destination. Each leaf screen's own enable/disable/
+# preview/edit shape is unchanged -- only the navigation path to reach
+# it moved.
+
+
+async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+    description_level = await lane.run(menu_description_level, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "n":
+            await session.write_line("")
+            await _banners_menu(session, lane, actor)
+            await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "m":
+            await session.write_line("")
+            await _mastheads_menu(session, lane, actor)
+            await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        else:
+            await session.write(reject_unhandled_key(choice))
+
+
+async def _draw_banners_and_mastheads_menu(
+    session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
+    unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
+) -> None:
+    await session.write_line("\r\n" + screen_title("Banners & Mastheads",
+            breadcrumb=(session.node_display_name, "System"), width=session.terminal_width, clear=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
+            node_name_gradient=session.node_name_gradient))
+    await session.write_line(
+        colored(
+            "Every optional SysOp-authored banner and masthead, grouped by kind.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write_line(
+        "\r\n" + _menu_row(
+            [
+                MenuEntry(label=menu_key("n", "nners", prefix="Ba"), brief="Welcome, logoff, and new-account text"),
+                MenuEntry(label=menu_key("M", "astheads"), brief="Art above the main menu and section pickers"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+            ],
+            description_level,
+            width=session.terminal_width,
+            height=session.terminal_height,
+        )
+    )
+    await session.write("Choice: ")
+
+
 # -- welcome banner (design doc -- part one of a three-part skinning
 # initiative) ----------------------------------------------------------
 
@@ -4423,7 +4477,7 @@ async def _draw_welcome_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Welcome banner",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     await session.write_line(detail)
     await session.write_line(
@@ -4435,7 +4489,7 @@ async def _draw_welcome_banner_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample banner"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
             width=session.terminal_width,
@@ -4789,7 +4843,7 @@ async def _draw_main_menu_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
-            breadcrumb=(session.node_display_name, "System"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     await session.write_line(detail)
     await session.write_line(
@@ -4808,7 +4862,7 @@ async def _draw_main_menu_banner_menu(
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
                 MenuEntry(label=menu_key("G", "allery"), brief="Apply a bundled sample masthead"),
                 MenuEntry(label=menu_key("F", "rom disk"), brief="Load your own .ans file from this node"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5035,65 +5089,62 @@ async def _main_menu_banner_filesystem_screen(
         return
 
 
-# -- session banners (issue #177) ---------------------------------------
+# -- banners (issue #178) ------------------------------------------------
 #
-# Three more optional SysOp-authored banners, each its own independent
-# singleton exactly like the welcome banner/main-menu masthead above
-# (colocated .ans file, node_config enabled flag, size cap, silent
-# fallback) -- but grouped under one new "Session banners" Settings entry
-# rather than three more flat top-level rows, since there was no good
-# non-colliding mnemonic left for three more entries in an already-dense
-# Settings menu. No [G]allery/[F]rom disk here, unlike the welcome
-# banner/masthead above -- those depend on a curated preset library
-# (issue #169's bundled samples) that doesn't exist for these three yet;
-# preview/enable/disable/edit alone already covers issue #177's own
-# acceptance criteria. Where these ultimately live in the admin UI is
-# expected to change again once issue #178's own broader reorg (one
-# "Banners & Mastheads" entry covering every banner/masthead, existing
-# and new) lands -- this is a reasonable interim grouping, not a
-# commitment to keep this exact shape.
+# Welcome banner plus the three session-point banners added by issue
+# #177 (logoff, new-account before/after), all four independent
+# singletons on the same mechanism (colocated .ans file, node_config
+# enabled flag, size cap, silent fallback). No [G]allery/[F]rom disk for
+# the three #177 banners -- those depend on a curated preset library
+# (issue #169's bundled samples) that doesn't exist for these yet;
+# preview/enable/disable/edit alone already covers their own acceptance
+# criteria.
 
 
-async def _session_banners_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    await _draw_session_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == "w":
+            await session.write_line("")
+            await _welcome_banner_menu(session, lane, actor)
+            await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "l":
             await session.write_line("")
             await _logoff_banner_menu(session, lane, actor)
-            await _draw_session_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "e":
             await session.write_line("")
             await _new_account_banner_before_menu(session, lane, actor)
-            await _draw_session_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _new_account_banner_after_menu(session, lane, actor)
-            await _draw_session_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_session_banners_menu(
+async def _draw_banners_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
-    await session.write_line("\r\n" + screen_title("Session banners",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place,
+    await session.write_line("\r\n" + screen_title("Banners",
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
         colored(
-            "Optional banners shown at specific points in a caller's session -- signing off, "
+            "Optional banners shown throughout a caller's session -- first login, signing off, "
             "and starting/finishing self-service signup.",
             fg_color=MUTED_COLOR,
         )
@@ -5101,10 +5152,11 @@ async def _draw_session_banners_menu(
     await session.write_line(
         "\r\n" + _menu_row(
             [
+                MenuEntry(label=menu_key("W", "elcome banner"), brief="First-login greeting text"),
                 MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
                 MenuEntry(label=menu_key("e", "fore signup", prefix="B"), brief="Shown once, before Create account"),
                 MenuEntry(label=menu_key("f", "ter signup", prefix="A"), brief="Shown once signup succeeds"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners & Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5166,7 +5218,7 @@ async def _draw_logoff_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Logoff banner",
-            breadcrumb=(session.node_display_name, "System", "Session banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -5181,7 +5233,7 @@ async def _draw_logoff_banner_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5317,7 +5369,7 @@ async def _draw_new_account_banner_before_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (before)",
-            breadcrumb=(session.node_display_name, "System", "Session banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -5335,7 +5387,7 @@ async def _draw_new_account_banner_before_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5475,7 +5527,7 @@ async def _draw_new_account_banner_after_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (after)",
-            breadcrumb=(session.node_display_name, "System", "Session banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -5493,7 +5545,7 @@ async def _draw_new_account_banner_after_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the banner on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the banner off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the banner text"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Session banners"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5581,72 +5633,71 @@ async def _edit_new_account_banner_after_screen(session: Session, lane: Database
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
-# -- section mastheads (issue #176) --------------------------------------
+# -- mastheads (issue #178) -----------------------------------------------
 #
-# Extends the main-menu masthead (issue #161) to the three top-level
-# index/listing screens -- board list, file areas, chat channel picker --
-# via netbbs.net.picker.pick_item's own new `masthead` parameter (issue
-# #176), each an independent singleton on the same mechanism as every
-# banner/masthead above. Grouped under one new "Section mastheads"
-# Settings entry for the same reason issue #177's own "Session banners"
-# entry exists -- no good non-colliding mnemonic was left for three more
-# flat top-level rows -- and, like that entry, this is a reasonable
-# interim grouping, not a commitment to keep this exact shape once issue
-# #178's own broader "Banners & Mastheads" reorg lands.
+# Main-menu masthead (issue #161) plus the three section mastheads added
+# by issue #176 (board list, file areas, chat channel picker, via
+# netbbs.net.picker.pick_item's own `masthead` parameter), all four
+# independent singletons on the same mechanism.
 
 
-async def _section_mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
+async def _mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
-    await _draw_section_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+    await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
     while True:
         choice = (await session.read_key()).lower()
 
         if choice == "b":
             await session.write_line("")
             return
+        elif choice == "m":
+            await session.write_line("")
+            await _main_menu_banner_menu(session, lane, actor)
+            await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "o":
             await session.write_line("")
             await _board_list_masthead_menu(session, lane, actor)
-            await _draw_section_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "f":
             await session.write_line("")
             await _file_area_masthead_menu(session, lane, actor)
-            await _draw_section_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "c":
             await session.write_line("")
             await _chat_channel_picker_masthead_menu(session, lane, actor)
-            await _draw_section_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+            await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
 
-async def _draw_section_mastheads_menu(
+async def _draw_mastheads_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
-    await session.write_line("\r\n" + screen_title("Section mastheads",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place,
+    await session.write_line("\r\n" + screen_title("Mastheads",
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
         colored(
-            "Optional mastheads shown above the board list, file-area list, and chat channel "
-            "picker -- at every level of browsing (top level, a category, a Community), the "
-            "same way the main-menu masthead marks the main menu.",
+            "Optional mastheads shown above the main menu, board list, file-area list, and "
+            "chat channel picker -- at every level of browsing (top level, a category, a "
+            "Community) where applicable.",
             fg_color=MUTED_COLOR,
         )
     )
     await session.write_line(
         "\r\n" + _menu_row(
             [
+                MenuEntry(label=menu_key("M", "ain menu"), brief="Custom art above the main menu"),
                 MenuEntry(label=menu_key("o", "ard list", prefix="B"), brief="Above every board-list view"),
                 MenuEntry(label=menu_key("F", "ile areas"), brief="Above every file-area-list view"),
                 MenuEntry(label=menu_key("C", "hat channels"), brief="Above the channel picker"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners & Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5708,7 +5759,7 @@ async def _draw_board_list_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Board list masthead",
-            breadcrumb=(session.node_display_name, "System", "Section mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -5723,7 +5774,7 @@ async def _draw_board_list_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Section mastheads"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
@@ -5857,7 +5908,7 @@ async def _draw_file_area_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("File area masthead",
-            breadcrumb=(session.node_display_name, "System", "Section mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -5872,7 +5923,7 @@ async def _draw_file_area_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Section mastheads"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
@@ -6006,7 +6057,7 @@ async def _draw_chat_channel_picker_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Chat channel picker masthead",
-            breadcrumb=(session.node_display_name, "System", "Section mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -6021,7 +6072,7 @@ async def _draw_chat_channel_picker_masthead_menu(
                 MenuEntry(label=menu_key("E", "nable"), brief="Turn the masthead on"),
                 MenuEntry(label=menu_key("D", "isable"), brief="Turn the masthead off"),
                 MenuEntry(label=menu_key("i", "t", prefix="Ed"), brief="Edit the masthead art"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Section mastheads"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads"),
             ],
             description_level,
             width=session.terminal_width,
