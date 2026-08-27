@@ -111,6 +111,17 @@ class LiveChannelBridge:
         # (_untrack_on_close) -- stale presence from a now-disconnected
         # peer must not linger.
         self._remote_node_presence: dict[str, dict[str, str]] = {}
+        # channel_id -> {user_id: display_label} -- issue #195's merged
+        # live roster: the last-known remote roster for a linked channel
+        # this node subscribes to (received via presence_snapshot/delta
+        # from that channel's origin). `_remote_channel_presence_source`
+        # tracks which peer fingerprint populated each entry, so a
+        # disconnect can clear only the channels that peer actually owns
+        # -- one subscriber session is shared across every channel from
+        # the same origin (`ensure_live_subscription`'s own registry
+        # reuse), so this can't simply key on session identity alone.
+        self._remote_channel_presence: dict[str, dict[str, str]] = {}
+        self._remote_channel_presence_source: dict[str, str] = {}
         # peer_fingerprint -> whether this node has already sent that
         # peer its initial node_presence_snapshot for the *current*
         # session -- track_session can be called more than once per
@@ -203,6 +214,10 @@ class LiveChannelBridge:
                 del self._subscribers[channel_id]
         self._remote_node_presence.pop(session.remote_fingerprint, None)
         self._node_presence_sent.discard(session.remote_fingerprint)
+        for channel_id, fingerprint in list(self._remote_channel_presence_source.items()):
+            if fingerprint == session.remote_fingerprint:
+                del self._remote_channel_presence_source[channel_id]
+                self._remote_channel_presence.pop(channel_id, None)
 
     async def close(self) -> None:
         if self._watchers:
@@ -283,15 +298,37 @@ class LiveChannelBridge:
         )
         await self._hub.broadcast(channel.name, message)
 
+        # Issue #195: keep the merged live roster (populated by the
+        # initial presence_snapshot below) in sync with subsequent
+        # deltas too -- otherwise it would go stale the instant anyone
+        # joined or left after the snapshot was taken. Bounded the same
+        # way the snapshot itself already is; mirrors
+        # `_handle_node_presence_delta`'s identical shape.
+        online = self._remote_channel_presence.setdefault(channel.channel_id, {})
+        self._remote_channel_presence_source[channel.channel_id] = session.remote_fingerprint
+        user_id = frame.payload["user_id"]
+        if kind == "join":
+            if user_id not in online and len(online) >= _MAX_PRESENCE_SNAPSHOT_ENTRIES:
+                pass  # bounded -- silently dropped, not a protocol violation to strike over
+            else:
+                online[user_id] = frame.payload["display_label"]
+        else:
+            online.pop(user_id, None)
+
     async def _handle_presence_snapshot(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
-        # Accepted and validated; a merged live remote-roster display
-        # (e.g. a channel /who list annotated with connected peers) is
-        # deferred UI work -- this vertical's presence requirement is
-        # satisfied by presence_delta's live join/leave notices.
-        await self._lane.run(
+        channel = await self._lane.run(
             _decide_channel_subscribe_authorization, channel_id=frame.payload["channel_id"],
             peer_fingerprint=session.remote_fingerprint,
         )
+        # Issue #195: merged live roster -- annotates a channel's own
+        # /who list with connected peers, not just live join/leave
+        # notices. Replaces any prior snapshot for this channel outright
+        # (a fresh subscribe supersedes whatever was tracked before).
+        entries = frame.payload["entries"][:_MAX_PRESENCE_SNAPSHOT_ENTRIES]
+        self._remote_channel_presence[channel.channel_id] = {
+            entry["user_id"]: entry["display_label"] for entry in entries
+        }
+        self._remote_channel_presence_source[channel.channel_id] = session.remote_fingerprint
 
     async def _node_realtime_allowed(self, fingerprint: str) -> bool:
         """Design doc §8.10.2's "checked again at message delivery"
@@ -331,6 +368,24 @@ class LiveChannelBridge:
         holds a live session with. A UI caller (Who's Online, issue
         #164) reads this directly; nothing here renders it."""
         return {fingerprint: dict(entries) for fingerprint, entries in self._remote_node_presence.items()}
+
+    def remote_channel_presence(self, channel_id: str) -> dict[str, str]:
+        """`{user_id: display_label}` -- the last-known remote roster for
+        `channel_id`, if this node currently subscribes to it live and
+        has received at least one snapshot or delta. Empty if not
+        subscribed, or if the channel isn't linked at all. A UI caller
+        (`/who`, issue #195) reads this directly to annotate the local
+        roster; nothing here renders it."""
+        return dict(self._remote_channel_presence.get(channel_id, {}))
+
+    def remote_channel_origin_fingerprint(self, channel_id: str) -> str | None:
+        """Which peer fingerprint populated `remote_channel_presence`'s
+        current entries for `channel_id`, if any -- lets a caller
+        annotate a remote roster entry with which node it came from
+        (issue #195), the same way Who's Online already annotates
+        node-wide remote entries (`netbbs.net.login_flow.
+        _who_entry_description`). `None` if not currently subscribed."""
+        return self._remote_channel_presence_source.get(channel_id)
 
     async def _live_subscribers(self, channel: Channel) -> list[LinkRealtimeSession]:
         """Currently-registered subscriber sessions for `channel`,

@@ -139,6 +139,7 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
+from netbbs.link.realtime_channels import LiveChannelBridge
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -940,6 +941,7 @@ class ChatCommandContext:
     pinned_ui_enabled: bool
     session_registry: ActiveSessionRegistry | None = None
     direct_invites: DirectChatInvites | None = None
+    realtime_bridge: LiveChannelBridge | None = None
 
 
 @dataclass(frozen=True)
@@ -1893,11 +1895,38 @@ def _roster_usernames(hub: ChatHub, channel: Channel) -> list[str]:
     return sorted(usernames, key=str.lower)
 
 
+def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str]]:
+    """Issue #195: `ctx.channel`'s merged live roster from a linked
+    origin, if this node currently holds a live subscription to it --
+    `(sanitized display_label, origin fingerprint)` pairs, sorted
+    case-insensitively the same way `_roster_usernames` sorts local
+    participants. Empty when not Linked, not currently subscribed, or
+    Link is disabled on this node (`ctx.realtime_bridge is None`).
+
+    These entries have no local `User` row -- a remote peer's own
+    self-reported label, same trust level as any other Link-sourced
+    display text, sanitized the same way `_message_author_label`
+    already sanitizes an unresolvable remote author label. No away
+    status either: `PresenceRegistry` only knows this node's own local
+    accounts."""
+    if ctx.realtime_bridge is None:
+        return []
+    entries = ctx.realtime_bridge.remote_channel_presence(ctx.channel.channel_id)
+    if not entries:
+        return []
+    fingerprint = ctx.realtime_bridge.remote_channel_origin_fingerprint(ctx.channel.channel_id) or ""
+    return sorted(
+        ((sanitize_text(label), fingerprint) for label in entries.values()),
+        key=lambda pair: pair[0].lower(),
+    )
+
+
 async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
-    if not usernames:
+    remote_entries = _remote_roster_entries(ctx)
+    if not usernames and not remote_entries:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -1910,15 +1939,19 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
         return result
 
     labels = await ctx.lane.run(_labels)
+    labels.extend(label for label, _fingerprint in remote_entries)
     await ctx.session.write_line(", ".join(labels))
 
 
 async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     """`/who` (design doc): the more detailed presence
     view of `ctx.channel` — one line per person, with an away
-    indicator where applicable."""
+    indicator where applicable, plus (issue #195) one line per remote
+    participant known through a live Link subscription, annotated with
+    which linked node they're on."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
-    if not usernames:
+    remote_entries = _remote_roster_entries(ctx)
+    if not usernames and not remote_entries:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -1941,6 +1974,9 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
         else:
             suffix = ""
         await ctx.session.write_line(f"{label}{suffix}")
+    for label, fingerprint in remote_entries:
+        node_note = f" (on linked node {fingerprint[:12]}…)" if fingerprint else " (on a linked node)"
+        await ctx.session.write_line(f"{label}{node_note}")
 
 
 async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
@@ -3348,6 +3384,7 @@ async def _chat_loop(
                                 pinned_ui_enabled=pinned_ui_enabled,
                                 session_registry=session_registry,
                                 direct_invites=direct_invites,
+                                realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                             )
                             action = await _dispatch_command(ctx, line)
                             if isinstance(action, _EnterPrivate):
@@ -3390,6 +3427,7 @@ async def _chat_loop(
                                 pinned_ui_enabled=pinned_ui_enabled,
                                 session_registry=session_registry,
                                 direct_invites=direct_invites,
+                                realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                             )
                             if not presence.is_online(private_target.username):
                                 await session.write_line(

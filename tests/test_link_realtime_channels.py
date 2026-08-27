@@ -637,3 +637,77 @@ def test_remote_node_presence_is_populated_from_the_origins_initial_snapshot(tmp
             await subscriber.teardown()
 
     asyncio.run(scenario())
+
+
+def test_remote_channel_presence_is_populated_from_the_origins_initial_snapshot(tmp_path):
+    """Issue #195's merged live roster -- the channel-scoped counterpart
+    to `test_remote_node_presence_is_populated_from_the_origins_initial_
+    snapshot` above. `_handle_subscribe`'s presence_snapshot already
+    carries the origin's own local hub participants for this exact
+    channel (unlike node-wide presence, which comes from `PresenceRegistry`
+    instead) -- this proves the *subscriber's* bridge actually stores
+    that snapshot, then keeps it in sync through subsequent deltas, then
+    clears it on disconnect, exactly the same three-part shape already
+    proven for node-wide presence."""
+    async def scenario():
+        origin = _Node(tmp_path, "origin-channel-presence")
+        subscriber = _Node(tmp_path, "subscriber-channel-presence")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="roster-room")
+        origin.hub.join(origin_channel.name, ParticipantId(username="dave", session_key=1))
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            _establish_trust(origin.db, subscriber.identity.fingerprint)
+            _establish_trust(subscriber.db, origin.identity.fingerprint)
+            origin_hello = origin.link_node.build_hello(
+                addresses=[
+                    {"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": server.port}
+                ],
+                outgoing_only=False, created_at=utc_now_iso(),
+            )
+            subscriber.link_node.handle_hello(origin_hello)
+
+            session = await ensure_live_subscription(
+                channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
+                lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
+            )
+            assert session is not None
+
+            assert await _wait_until(
+                lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) == {"dave": "dave"}
+            )
+            assert (
+                subscriber.bridge.remote_channel_origin_fingerprint(subscriber_channel.channel_id)
+                == origin.identity.fingerprint
+            )
+
+            # A subsequent local join/leave on the origin (deltas, not a
+            # fresh snapshot) keeps the same tracked roster in sync.
+            await origin.bridge.broadcast_local_presence_live(origin_channel, change="join", username="erin")
+            assert await _wait_until(
+                lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) ==
+                {"dave": "dave", "erin": "erin"}
+            )
+
+            await origin.bridge.broadcast_local_presence_live(origin_channel, change="leave", username="dave")
+            assert await _wait_until(
+                lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) == {"erin": "erin"}
+            )
+
+            # Closing the session clears that channel's remote roster --
+            # stale data from a now-disconnected origin must not linger.
+            await session.close(reason="test_done")
+            assert await _wait_until(
+                lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) == {}
+            )
+            assert subscriber.bridge.remote_channel_origin_fingerprint(subscriber_channel.channel_id) is None
+        finally:
+            await server.stop()
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
