@@ -3136,3 +3136,26 @@ double (not subclassing `Session`) will need the same one-line
 addition if it ever exercises a "press any key" pause -- check for this
 specifically if a similar `AttributeError: ... has no attribute
 'read_any_key'` shows up after adding one.
+
+A `tests/test_picker.py` real-loopback-socket test combining an arrow-
+key press (`_DOWN = b"\x1b[A"`/`b"\x1b[B"`, issue #171's highlight
+navigation) with `pick_item`'s `name_segments_of` (multi-colored row
+rendering, dogfood report -- the admin audit log wanting independent
+timestamp/action/actor colors) hung indefinitely *only* under `pytest`
+-- the identical scenario, run as a standalone script importing this
+same test file's own helpers (`_run_server`/`_read_until_quiet`/
+`_visible`), completed correctly in well under a second, 3/3 repeated
+runs. Every other arrow-key test in this file (not combined with
+`name_segments_of`) and every other `name_segments_of` test (not
+combined with an arrow key) passed fine under `pytest` individually --
+only this specific combination hung, and only when pytest ran it.
+Root cause not found (`pytest-asyncio` isn't even installed, ruling out
+the most obvious event-loop-conflict suspect) -- the regression test
+for this combination was dropped rather than shipped hanging (a hung
+test blocking the whole suite is worse than a coverage gap), and the
+underlying behavior (`item_name_color if is_highlighted else color`, a
+one-line override in `pick_item`'s row-rendering loop) was verified
+correct by the standalone script instead. If this resurfaces --
+especially if a *real* deadlock shows up outside tests -- start from
+this exact combination (arrow-key nav + multi-segment row color) rather
+than re-deriving it from scratch.

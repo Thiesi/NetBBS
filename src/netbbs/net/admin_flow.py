@@ -364,6 +364,7 @@ from netbbs.rendering import (
     MENU_KEY_COLOR,
     METADATA_COLOR,
     MUTED_COLOR,
+    NICK_COLOR,
     RESET,
     SUCCESS_COLOR,
     VALUE_COLOR,
@@ -1374,13 +1375,9 @@ async def _system_menu(
             await session.write_line("")
             await _update_settings_screen(session, lane, actor)
             await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
-        elif choice == "a":
+        elif choice == "n":
             await session.write_line("")
             await _node_name_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
-        elif choice == "n" and node_controls is not None:
-            await session.write_line("")
-            await _node_menu(session, lane, actor, node_controls)
             await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
         elif choice == "t":
             await session.write_line("")
@@ -1431,9 +1428,9 @@ async def _draw_system_menu(
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
     option_list = [
-        MenuEntry(label=menu_key("M", "astheads", prefix="Banners & "), brief="Welcome/logoff/new-account banners and every masthead"),
+        MenuEntry(label=menu_key("M", "astheads", prefix="Banners & ", capitalize=True), brief="Welcome/logoff/new-account banners and every masthead"),
         MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
-        MenuEntry(label=menu_key("a", "me", prefix="Node N"), brief="The name and gradient shown in every screen's own corner"),
+        MenuEntry(label=menu_key("N", "ode name"), brief="The name and gradient shown in every screen's own corner"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
@@ -3998,14 +3995,49 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
         return names
 
     usernames = await lane.run(_resolve_names)
+    display_format, display_timezone = await lane.run(resolve_display_preferences)
 
     def _actor_name(entry) -> str:
         if entry.actor_user_id is None:
             return "(system)"
         return usernames.get(entry.actor_user_id, "(deleted account)")
 
+    def _when(entry) -> str:
+        # Dogfood report: `entry.created_at` is `utc_now_iso()`'s own
+        # always-6-decimal *storage* format (design doc/timeutil.py's
+        # own docstring: fixed precision so two events never hash/sign
+        # differently just because one happened to land on a whole
+        # second) -- never meant to reach a human eye directly.
+        # `format_for_display` is this codebase's own established fix,
+        # already used everywhere else a stored timestamp reaches a
+        # screen; the audit log was just never wired through it.
+        return format_for_display(entry.created_at, override_format=display_format, override_timezone=display_timezone)
+
     def _row_label(entry) -> str:
-        return f"{entry.created_at}  {entry.action}  (by {_actor_name(entry)})"
+        return f"{_when(entry)}  {entry.action}  (by {_actor_name(entry)})"
+
+    accent_color = await lane.run(effective_accent_color_256)
+
+    def _row_name_segments(entry) -> list[tuple[str, int]]:
+        # Dogfood report: distinct colors per field, not one flat
+        # accent-colored string -- METADATA_COLOR for the timestamp
+        # matches that constant's own documented purpose ("timestamps,
+        # counts, and secondary context"); the action keeps this
+        # screen's own `accent_color` (respects a SysOp's node-wide
+        # accent override, same as every other navigable item name in
+        # this module); NICK_COLOR for the actor matches the existing
+        # "a person's own identity gets its own color" convention
+        # `netbbs.net.chat_flow` already established. Punctuation/glue
+        # text stays MUTED_COLOR, the module's existing convention for
+        # de-emphasized connective text.
+        return [
+            (_when(entry), METADATA_COLOR),
+            ("  ", None),
+            (entry.action, accent_color),
+            ("  (by ", MUTED_COLOR),
+            (_actor_name(entry), NICK_COLOR),
+            (")", MUTED_COLOR),
+        ]
 
     def _row_description(entry) -> str:
         parts = []
@@ -4022,18 +4054,19 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
         name_of=_row_label,
         stable_id_of=lambda entry: entry.id,
         description_of=_row_description,
+        name_segments_of=_row_name_segments,
         title=f"Audit log ({order_label})",
         empty_message="Nothing logged yet.",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
+        accent_color=accent_color,
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is None:
         return
 
-    await session.write_line(colored(f"\r\nWhen: {selected.created_at}", fg_color=MUTED_COLOR))
+    await session.write_line(colored(f"\r\nWhen: {_when(selected)}", fg_color=MUTED_COLOR))
     await session.write_line(f"Action: {sanitize_text(selected.action)}")
     await session.write_line(f"By: {sanitize_text(_actor_name(selected))}")
     if selected.object_type is not None:

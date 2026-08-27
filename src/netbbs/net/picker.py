@@ -53,17 +53,18 @@ from netbbs.rendering import (
     MENU_KEY_COLOR,
     MUTED_COLOR,
     MenuEntry,
+    SegmentColor,
     action_bar,
     clear_screen,
     colored,
     colored_truncate,
-    cut_to_width,
     menu_grid,
     menu_key,
     reject_keystroke,
     sanitize_text,
     screen_title,
     visible_width,
+    wrap_to_width,
 )
 
 T = TypeVar("T")
@@ -90,6 +91,7 @@ async def pick_item(
     name_of: Callable[[T], str],
     stable_id_of: Callable[[T], int],
     description_of: Callable[[T], str | None] = lambda item: None,
+    name_segments_of: Callable[[T], Sequence[tuple[str, SegmentColor]]] | None = None,
     title: str,
     breadcrumb: Sequence[str] = (),
     empty_message: str,
@@ -129,6 +131,24 @@ async def pick_item(
     name_of(item).lower()`) deliberately uses the *raw*, unsanitized
     name — matching is a text-comparison operation, not something
     written to the terminal, so there's nothing to protect there.
+
+    `name_segments_of` (dogfood report, the admin audit log's own
+    timestamp/action/actor fields wanting independent colors rather
+    than one flat name string) is an optional richer alternative to
+    `name_of` for *rendering* only -- when given, its `(text, color)`
+    segments replace the single-colored name in the row itself, each
+    independently sanitized then colored exactly like `colored_truncate`
+    already composes any other multi-field row (this screen's own
+    selector/permanent-reference/name split). `name_of` is still
+    required and unaffected either way -- it remains the sole source of
+    truth for search matching, the completer's candidate list, and any
+    caller that never wires up `name_segments_of` at all (every existing
+    caller, byte-for-byte unchanged). A highlighted row overrides every
+    segment to the single accent+bold highlight style, the same
+    "selection state wins over field identity" rule the plain `name_of`
+    path already follows -- distinguishable field colors are a
+    normal-row affordance, not something a cursor selection needs on
+    top of its own already-unambiguous marker.
 
     `breadcrumb` supplies ancestor location segments (e.g. a category
     or Community name) between the node name and `title` — a real
@@ -379,11 +399,15 @@ async def pick_item(
                 item_name_color = accent_color
                 desc_color = MUTED_COLOR
 
-            segments: list[tuple[str, int | None]] = [
+            segments: list[tuple[str, SegmentColor]] = [
                 (f"{marker}{position:02d}. ", key_color),
                 (f"(#{id_str}) {id_padding}", MUTED_COLOR),
-                (sanitize_text(name_of(item)), item_name_color),
             ]
+            if name_segments_of is not None:
+                for text, color in name_segments_of(item):
+                    segments.append((sanitize_text(text), item_name_color if is_highlighted else color))
+            else:
+                segments.append((sanitize_text(name_of(item)), item_name_color))
             if description:
                 segments.append((f" - {sanitize_text(description)}", desc_color))
             await session.write_line(colored_truncate(segments, session.terminal_width))
@@ -412,39 +436,51 @@ async def pick_item(
             boilerplate += ", Ctrl-R: refresh"
         boilerplate += ", Ctrl-H: help"
         trailer = f"{trailer}; {boilerplate}" if trailer else boilerplate
-        # Dogfood-reported regression: with sort mode (and/or refresh)
-        # active, nav + separator + trailer could run past the real
-        # terminal width -- unlike every other line on this screen
-        # (each already deterministically cut via colored_truncate/
-        # menu_grid), this one wasn't clamped at all, so whichever
-        # client rendered it wrapped wherever it happened to land,
-        # sometimes mid-word. Cut the trailer to whatever room remains,
-        # mirroring `menu_grid`'s own established "hard cut, not a
-        # client wrap" convention for this kind of trailing text.
+        # Dogfood-reported regression, and a real dogfood-reported
+        # *re*-regression on top of the original fix: with sort mode
+        # (and/or refresh) active, nav + separator + trailer could run
+        # past the real terminal width. The original fix (issue #102-
+        # adjacent) hard-cut the trailer to whatever room remained on
+        # the shared line -- but on an ordinary 80-column terminal with
+        # a sort label active, that budget is often under 40 columns,
+        # nowhere near enough for the full boilerplate ("or type a
+        # 2-digit number to select; Ctrl-L: redraw, Ctrl-H: help"),
+        # silently deleting real instructions -- including the Ctrl-H
+        # hint pointing at the one screen that explains all of this --
+        # every time, not just in some rare edge case. Wrap instead of
+        # cutting: try the trailer on the shared line first (the
+        # overwhelmingly common case -- no sort label, or a short one --
+        # is completely unaffected, so most pickers' page_size still
+        # never changes), and only fall back to giving it its own
+        # following line(s) -- wrapped, not cut, so nothing is ever
+        # silently lost -- when it genuinely doesn't fit.
         separator = " — " if unicode_style else " - "
         last_nav_line = nav.rsplit("\r\n", 1)[-1]
         if description_level == "off":
             # The compact `action_bar` form's last (often only) line is
             # short, so folding the trailer onto it is cheap and keeps
             # this screen's height completely unchanged from before
-            # descriptions existed at all.
+            # descriptions existed at all -- but only when it actually
+            # fits; see the comment above for why a hard cut here was
+            # the wrong tradeoff.
             available_for_trailer = session.terminal_width - visible_width(last_nav_line) - visible_width(separator)
-            trailer = cut_to_width(trailer, max(0, available_for_trailer))
-            await session.write_line(f"\r\n{nav}{separator}{trailer}" if trailer else f"\r\n{nav}")
+            if trailer and visible_width(trailer) <= max(0, available_for_trailer):
+                await session.write_line(f"\r\n{nav}{separator}{trailer}")
+            else:
+                await session.write_line(f"\r\n{nav}")
+                for wrapped in wrap_to_width(trailer, session.terminal_width):
+                    await session.write_line(wrapped)
         else:
             # `menu_grid`'s own last line, unlike `action_bar`'s, is
             # often padded out to nearly the full width already (issue
             # #160's flat-section column-splitting fills every row to
             # its column width) -- folding the trailer onto it the same
             # way left almost no room and cut "Sort: X" down to nothing.
-            # Its own line instead; `_page_size` already measures
-            # whatever this function actually renders, so the one extra
-            # line is accounted for automatically, not a hardcoded
-            # assumption to keep in sync.
-            trailer = cut_to_width(trailer, max(0, session.terminal_width))
+            # Its own line(s) instead, wrapped rather than cut for the
+            # same reason as the `off` branch above.
             await session.write_line(f"\r\n{nav}")
-            if trailer:
-                await session.write_line(trailer)
+            for wrapped in wrap_to_width(trailer, session.terminal_width):
+                await session.write_line(wrapped)
         await session.write("Choice: ")
         return page_items
 

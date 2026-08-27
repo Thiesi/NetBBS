@@ -11,7 +11,7 @@ from netbbs.rendering.ansi import colored
 from netbbs.rendering.theme import MENU_KEY_COLOR
 
 
-def menu_key(key: str, rest: str = "", *, prefix: str = "") -> str:
+def menu_key(key: str, rest: str = "", *, prefix: str = "", capitalize: bool = False) -> str:
     """
     Render a menu option like `[B]oards` with the bracketed key
     highlighted (bold + a color reserved for exactly this purpose — see
@@ -36,7 +36,20 @@ def menu_key(key: str, rest: str = "", *, prefix: str = "") -> str:
     title-cased label, so there's nothing to fix there. Case is display
     only in both cases: dispatch always lowercases the actual keystroke
     before comparing it, regardless of what's shown here.
+
+    `capitalize=True` (dogfood report) opts a `prefix`-using call back
+    into its passed-in case instead of the forced-lowercase default
+    above -- for the *other* real shape `prefix` covers: a `prefix`
+    ending at a genuine word boundary (a space, e.g. `"Banners & "`
+    before `"Mastheads"`), where the hotkey isn't a mid-word letter at
+    all but a whole word's own natural leading capital. The default
+    can't safely auto-detect this from `prefix` alone -- several
+    existing callers deliberately use a *lowercase*, sentence-style
+    `prefix` ending in a space too (e.g. `menu_key("b", "oard",
+    prefix="message ")`, mid-sentence prose, not a menu heading), where
+    forcing a capital would be wrong -- so this stays each caller's own
+    explicit choice, defaulting to today's unchanged behavior.
     """
-    display_key = key.lower() if prefix else key
+    display_key = key if capitalize else (key.lower() if prefix else key)
     highlighted = colored(display_key, fg_color=MENU_KEY_COLOR, bold=True)
     return f"{prefix}[{highlighted}]{rest}"

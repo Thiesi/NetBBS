@@ -47,7 +47,7 @@ from netbbs.rendering.layout import (
     visible_width,
 )
 from netbbs.rendering.menu import menu_key
-from netbbs.rendering.reflow import DEFAULT_WIDTH, colored_truncate, reflow, truncate
+from netbbs.rendering.reflow import DEFAULT_WIDTH, SegmentColor, colored_truncate, reflow, truncate
 from netbbs.rendering.sanitize import sanitize_text
 from netbbs.rendering.screen_buffer import Cell, ScreenBuffer, Snapshot, diff_ansi, full_render_ansi
 from netbbs.rendering.width import char_width, cut_to_width, display_width, truncate_to_width, wrap_to_width
@@ -112,6 +112,7 @@ __all__ = [
     "set_scroll_region",
     "menu_key",
     "DEFAULT_WIDTH",
+    "SegmentColor",
     "colored_truncate",
     "reflow",
     "truncate",

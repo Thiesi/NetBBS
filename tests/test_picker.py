@@ -97,6 +97,45 @@ def test_empty_list_shows_message_and_returns_none():
     assert result["value"] is None
 
 
+def test_name_segments_of_colors_each_field_independently():
+    """Dogfood report (the admin audit log's own timestamp/action/actor
+    fields wanting independent colors): `name_segments_of`, when given,
+    replaces the single-colored `name_of` string in the row with its own
+    `(text, color)` segments, each colored separately -- confirms both
+    colors actually reach the wire, and that the plain visible text is
+    still exactly what a plain `name_of` row would have shown."""
+    items = ["x"]
+
+    def segments(_item):
+        return [("2026-08-27", ERROR_COLOR), (" ", None), ("promote", MUTED_COLOR)]
+
+    async def handler(session: Session):
+        await pick_item(
+            session, items, name_of=lambda x: "2026-08-27 promote", stable_id_of=lambda x: 1,
+            name_segments_of=segments, title="Test", empty_message="none",
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await skip_initial_negotiation(reader)
+            data = await _read_until_quiet(reader)
+            assert fg(ERROR_COLOR).encode() in data
+            assert fg(MUTED_COLOR).encode() in data
+            assert b"2026-08-27 promote" in _visible(data)
+
+            writer.write(b"b")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_search_and_goto_are_rejected_when_the_list_is_empty_but_refreshable():
     """
     Dogfood report, issue #155: an empty list with a `refresh` callback
@@ -2173,3 +2212,61 @@ def test_nav_trailer_line_never_exceeds_the_terminal_width():
 
     asyncio.run(scenario())
     assert result["value"] is None
+
+
+def test_nav_trailer_wraps_instead_of_losing_text_on_an_ordinary_terminal():
+    """Dogfood report: the fix above (clamp the combined nav+trailer
+    line to the negotiated width) was itself achieved by *cutting* the
+    trailer to whatever room remained on the shared `action_bar` line --
+    on an perfectly ordinary 80-column terminal with a sort label
+    active (exactly `netbbs.net.login_flow`'s board-browsing screen,
+    `description_level="off"`), that budget is under 40 columns,
+    nowhere near enough for "or type a 2-digit number to select;
+    Ctrl-L: redraw, Ctrl-H: help" -- silently deleting real
+    instructions, including the Ctrl-H hint pointing at the one screen
+    that explains all of this, on every single page render, not some
+    rare edge case. Confirms the full boilerplate now always survives
+    somewhere in the rendered output (wrapped onto its own line(s)
+    instead), while every line individually still respects the
+    negotiated width."""
+    items = ["item1", "item2"]
+
+    async def on_sort():
+        return None
+
+    def sort_label():
+        return "Activity"
+
+    async def handler(session: Session):
+        await session.read_line()
+        await pick_item(
+            session, items, name_of=lambda x: x, stable_id_of=lambda x: items.index(x) + 1,
+            title="Items", empty_message="none", on_sort=on_sort, sort_label=sort_label,
+        )
+
+    async def scenario():
+        server = await _run_server(handler)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            await skip_initial_negotiation(reader)
+            writer.write(bytes([IAC, WILL, NAWS]))
+            writer.write(_naws_subneg(80, 24))
+            writer.write(b"x\r\n")
+            await writer.drain()
+
+            data = await _read_until_quiet(reader)
+            text = _visible(data).decode()
+            for line in text.split("\r\n"):
+                assert len(line) <= 80, f"line exceeds 80 columns: {line!r}"
+            assert "Ctrl-H: help" in text, "trailer boilerplate was lost, not wrapped"
+            assert "or type a 2-digit number to select" in text
+
+            writer.write(b"b")
+            await writer.drain()
+            await _read_until_quiet(reader)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())

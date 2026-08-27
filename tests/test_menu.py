@@ -67,3 +67,20 @@ def test_menu_key_without_prefix_keeps_the_key_case_as_passed():
     so there's nothing to lowercase."""
     result = menu_key("B", "oards")
     assert _visible(result) == "[B]oards"
+
+
+def test_menu_key_capitalize_true_keeps_passed_case_despite_a_prefix():
+    """Dogfood report: `prefix="Banners & "` before `"Mastheads"` isn't
+    a mid-word hotkey at all -- it's a whole word's own natural leading
+    capital, sitting right after a word-boundary space. The default
+    lowercase-when-prefixed behavior can't tell this apart from a
+    genuine mid-word case (`Cha[n]nels`) by inspecting `prefix` alone,
+    so `capitalize=True` is each caller's own explicit opt-in back to
+    its passed-in case."""
+    result = menu_key("M", "astheads", prefix="Banners & ", capitalize=True)
+    assert _visible(result) == "Banners & [M]astheads"
+
+
+def test_menu_key_capitalize_false_is_the_unchanged_default():
+    result = menu_key("M", "astheads", prefix="Banners & ")
+    assert _visible(result) == "Banners & [m]astheads"

@@ -668,10 +668,36 @@ def test_audit_log_lists_actions_across_every_user_and_shows_full_detail(db, lan
 
     text = _written_text(session)
     assert "promote" in text
-    assert "by sysop" in text
+    # "by sysop" now spans a field-color boundary (dogfood report: the
+    # actor gets its own color, distinct from the surrounding "(by "/
+    # ")" glue text) -- check the visible (ANSI-stripped) text instead
+    # of the raw literal substring.
+    assert "by sysop" in _visible(text)
     assert "By: sysop" in text
     assert "Target: alice" in text
     assert "user_level 10 -> 50" in text
+
+
+def test_audit_log_timestamp_uses_the_display_format_not_raw_storage_precision(db, lane, sysop):
+    """Dogfood report: `entry.created_at` is `utc_now_iso()`'s own
+    always-6-decimal *storage* format (e.g. "2026-08-27T14:12:03.456789Z"
+    -- fixed precision so two events never hash/sign differently just
+    because one happened to land on a whole second), never meant to
+    reach a human directly. The audit log was showing it raw instead of
+    going through `format_for_display` like every other timestamp in
+    this module -- confirms it's now reformatted (default display
+    format has no seconds or sub-second precision at all) both in the
+    picker's own row and in an entry's full detail view."""
+    from netbbs.moderation import record_action
+
+    record_action(db, actor=sysop, action="promote", detail="user_level 10 -> 50")
+
+    session = FakeSession(["o", "a", "y", "0", "1", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert ".Z" not in text and "Z  promote" not in text  # raw storage suffix never leaks through
+    assert re.search(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", text), f"no display-formatted date found in {text!r}"
+    assert not re.search(r"\d{2}:\d{2}:\d{2}\.\d{6}", text), "raw microsecond-precision timestamp leaked through"
 
 
 def test_list_users_sort_by_highest_level_first_changes_pick_order(db, lane, sysop):
@@ -1177,7 +1203,7 @@ def _node_controls() -> NodeControls:
 
 
 def test_node_option_hidden_without_node_controls(db, lane, sysop):
-    session = FakeSession(["s", "n", "b", "b"])
+    session = FakeSession(["n", "b", "b"])
     _run(session, lane, sysop)  # _run's admin_menu call passes no node_controls
     bell_index = session.written.index("\b \b\a")
     assert session.written[bell_index] == "\b \b\a"
@@ -1191,7 +1217,7 @@ def test_who_lists_and_disconnects_another_session(db, lane, sysop):
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)  # let the other session register
 
-        admin_session = FakeSession(["s", "n", "w", "0", "1", "y", "", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "0", "1", "y", "", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1214,7 +1240,7 @@ def test_who_refuses_to_disconnect_own_session(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["s", "n", "w", "0", "1", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "0", "1", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1230,7 +1256,7 @@ def test_who_screen_explains_what_selecting_a_session_does(db, lane, sysop):
     """Design doc -- node management, Thiesi's own dogfood-testing
     report: previously the screen never said anywhere that selecting a
     session disconnects it -- a SysOp only found out by doing it."""
-    session = FakeSession(["s", "n", "w", "b", "b", "b"])
+    session = FakeSession(["n", "w", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "Select a session below to disconnect it." in _written_text(session)
 
@@ -1244,7 +1270,7 @@ def test_who_screen_delivers_a_custom_message_to_the_target_before_disconnecting
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["s", "n", "w", "0", "1", "y", "Reconnect in a few minutes.", "b", "b", "b"]
+            ["n", "w", "0", "1", "y", "Reconnect in a few minutes.", "b", "b", "b"]
         )
         registry.enter(admin_session)
         try:
@@ -1268,7 +1294,7 @@ def test_who_screen_with_no_custom_message_sends_nothing_extra_to_the_target(db,
 
         # Blank message -- the target must receive nothing at all before
         # being disconnected, same as before this feature existed.
-        admin_session = FakeSession(["s", "n", "w", "0", "1", "y", "", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "0", "1", "y", "", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1307,7 +1333,7 @@ def test_who_screen_shows_the_real_persisted_session_id_not_a_recomputed_positio
         # session (which returns control to _who_screen without needing
         # its own "b"), this one backs straight out of the picker itself
         # first, then unwinds node/sysop menus same as always.
-        admin_session = FakeSession(["s", "n", "w", "b", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "b", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1353,7 +1379,7 @@ def test_who_screen_goto_targets_the_exact_session_by_its_real_id(db, lane, syso
         # "g" (goto), target session_id 2 (b, page position 01 here --
         # but selection must be driven by the typed ID, not position),
         # then confirm disconnecting it with no custom message.
-        admin_session = FakeSession(["s", "n", "w", "g", "2", "y", "", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "g", "2", "y", "", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1405,7 +1431,7 @@ def test_shutdown_screen_triggers_the_sequence_as_a_background_task(db, lane, sy
         # afterward -- "does disconnect_all() reach a still-mid-read
         # session" is already covered thoroughly in tests/test_shutdown.py
         # (via a session that genuinely blocks), not re-proven here.
-        admin_session = FakeSession(["s", "n", "s", "i", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "i", "", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1430,7 +1456,7 @@ def test_shutdown_screen_with_custom_message_replaces_the_default(db, lane, syso
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["s", "n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b", "b"]
+            ["n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -1455,7 +1481,7 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
         # doc, node management: [S]hutdown now behaves exactly like
         # [D]rain, an operator-chosen delay rather than a fixed config
         # value with no override.
-        admin_session = FakeSession(["s", "n", "s", "g", "", "", "n", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "g", "", "", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1474,7 +1500,7 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
 
 def test_node_menu_shows_maintenance_and_drain_options(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "b", "b", "b"])
+    session = FakeSession(["n", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     text = _written_text(session)
     # menu_key wraps just the letter itself in ANSI color codes -- the
@@ -1486,7 +1512,7 @@ def test_node_menu_shows_maintenance_and_drain_options(db, lane, sysop):
 
 def test_maintenance_mode_screen_turns_it_on(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is True
     assert "Maintenance mode is now ON." in _written_text(session)
@@ -1495,7 +1521,7 @@ def test_maintenance_mode_screen_turns_it_on(db, lane, sysop):
 def test_maintenance_mode_screen_turns_it_back_off(db, lane, sysop):
     node_controls = _node_controls()
     node_controls.maintenance.enable_lockdown()
-    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is False
     assert "Maintenance mode is now off." in _written_text(session)
@@ -1503,7 +1529,7 @@ def test_maintenance_mode_screen_turns_it_back_off(db, lane, sysop):
 
 def test_maintenance_mode_screen_declined_confirmation_does_nothing(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "m", "n", "b", "b", "b"])
+    session = FakeSession(["n", "m", "n", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is False
 
@@ -1512,7 +1538,7 @@ def test_maintenance_mode_screen_does_not_touch_shutdown_lockout(db, lane, sysop
     """Design doc §13.8: [M]aintenance mode's lockdown flag is entirely
     separate from shutdown's own `is_active()` lockout."""
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is True
     assert node_controls.maintenance.is_active() is False
@@ -1541,7 +1567,7 @@ def test_drain_screen_triggers_the_sequence_as_a_background_task(db, lane, sysop
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["s", "n", "d", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "0", "", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1559,7 +1585,7 @@ def test_drain_screen_never_disconnects_the_issuing_sysop(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["s", "n", "d", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "0", "", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1581,7 +1607,7 @@ def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["s", "n", "d", "0", "Reconnect after the upgrade.", "y", "b", "b", "b"]
+            ["n", "d", "0", "Reconnect after the upgrade.", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -1595,13 +1621,13 @@ def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
 
 
 def test_drain_screen_rejects_a_negative_delay(db, lane, sysop):
-    session = FakeSession(["s", "n", "d", "-5", "b", "b", "b"])
+    session = FakeSession(["n", "d", "-5", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "cannot be negative" in _written_text(session)
 
 
 def test_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
-    session = FakeSession(["s", "n", "d", "soon", "b", "b", "b"])
+    session = FakeSession(["n", "d", "soon", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "Not a number" in _written_text(session)
 
@@ -1615,7 +1641,7 @@ def test_drain_screen_declined_confirmation_does_nothing(db, lane, sysop):
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["s", "n", "d", "0", "", "n", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "0", "", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1647,7 +1673,7 @@ def test_drain_screen_offers_to_cancel_an_already_scheduled_drain(db, lane, syso
         node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
 
         # "d" -> already-scheduled notice -> "y" (cancel it) -> back x3
-        admin_session = FakeSession(["s", "n", "d", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1673,7 +1699,7 @@ def test_drain_screen_declining_the_cancel_offer_replaces_the_existing_schedule(
 
         # "d" -> already-scheduled notice -> "n" (don't cancel, continue)
         # -> the ordinary delay/message/confirm prompts for a new one.
-        admin_session = FakeSession(["s", "n", "d", "n", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "n", "0", "", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1700,7 +1726,7 @@ def test_shutdown_screen_now_prompts_for_a_delay_like_drain_does(db, lane, sysop
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["s", "n", "s", "g", "0.2", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "g", "0.2", "", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1724,7 +1750,7 @@ def test_shutdown_screen_offers_to_cancel_an_already_scheduled_shutdown(db, lane
         first_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.shutdown_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
 
-        admin_session = FakeSession(["s", "n", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "y", "b", "b", "b"])
         node_controls.session_registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1762,7 +1788,7 @@ def test_shutdown_screen_refuses_to_cancel_a_signal_triggered_shutdown(db, lane,
 
         # No "y" in this script at all -- the "Cancel it?" prompt must
         # never be reached, so there is nothing here to answer.
-        admin_session = FakeSession(["s", "n", "s", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "b", "b", "b"])
         node_controls.session_registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1794,7 +1820,7 @@ def test_node_menu_shows_maintenance_and_schedule_status(db, lane, sysop):
         drain_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 90.0, message=None)
 
-        session = FakeSession(["s", "n", "b", "b", "b"])
+        session = FakeSession(["n", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -1821,7 +1847,7 @@ def test_node_menu_status_line_notes_a_signal_triggered_shutdown_cannot_be_cance
             shutdown_task, deadline=loop.time() + 30.0, message=None, source="sigint", cancellable=False
         )
 
-        session = FakeSession(["s", "n", "b", "b", "b"])
+        session = FakeSession(["n", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -1841,7 +1867,7 @@ def test_node_menu_status_line_notes_a_signal_triggered_shutdown_cannot_be_cance
 
 def test_node_menu_shows_lock_and_drain_option(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "b", "b", "b"])
+    session = FakeSession(["n", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "ock & drain" in _written_text(session)
 
@@ -1855,7 +1881,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["s", "n", "l", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "l", "0", "", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1871,7 +1897,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
 
 def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "l", "-5", "b", "b", "b"])
+    session = FakeSession(["n", "l", "-5", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "cannot be negative" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -1879,7 +1905,7 @@ def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
 
 def test_lock_and_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "l", "soon", "b", "b", "b"])
+    session = FakeSession(["n", "l", "soon", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "Not a number" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -1887,7 +1913,7 @@ def test_lock_and_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
 
 def test_lock_and_drain_screen_declined_final_confirmation_leaves_lockdown_off(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["s", "n", "l", "0", "", "n", "b", "b", "b"])
+    session = FakeSession(["n", "l", "0", "", "n", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "Cancelled." in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -1903,7 +1929,7 @@ def test_lock_and_drain_screen_offers_to_cancel_a_bare_already_scheduled_drain(d
         drain_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 60.0, message=None)
 
-        session = FakeSession(["s", "n", "l", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -1926,7 +1952,7 @@ def test_lock_and_drain_screen_cancels_lockdown_and_drain_while_still_counting(d
             drain_task, deadline=loop.time() + 60.0, message=None, source="lock_and_drain"
         )
 
-        session = FakeSession(["s", "n", "l", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -1947,7 +1973,7 @@ def test_lock_and_drain_screen_cancel_after_drain_already_finished(db, lane, sys
     drain's own liveness, is what keeps this "active"."""
     node_controls = _node_controls()
     node_controls.maintenance.enable_lockdown(source="lock_and_drain")
-    session = FakeSession(["s", "n", "l", "y", "b", "b", "b"])
+    session = FakeSession(["n", "l", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
 
     text = _written_text(session)
@@ -1966,7 +1992,7 @@ def test_lock_and_drain_screen_declining_cancel_leaves_it_active(db, lane, sysop
             drain_task, deadline=loop.time() + 60.0, message=None, source="lock_and_drain"
         )
 
-        session = FakeSession(["s", "n", "l", "n", "b", "b", "b"])
+        session = FakeSession(["n", "l", "n", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -1991,7 +2017,7 @@ def test_lock_and_drain_screen_still_starts_a_drain_when_maintenance_was_enabled
         node_controls = _node_controls()
         node_controls.maintenance.enable_lockdown()  # plain [M], default source="maintenance"
 
-        session = FakeSession(["s", "n", "l", "0", "", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "0", "", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2029,7 +2055,7 @@ def test_lock_and_drain_screen_never_disables_maintenance_that_predates_it(db, l
         # Revisiting the screen: not "Lock & drain is active" (it never
         # owned the lock), but the ordinary "a drain is already
         # scheduled -- cancel it?" sub-flow, answered yes.
-        session = FakeSession(["s", "n", "l", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -4096,17 +4122,17 @@ def test_colors_option_appears_in_the_system_submenu(db, lane, sysop):
 def test_node_name_option_appears_in_the_system_submenu(db, lane, sysop):
     session = FakeSession(["s", "b", "b"])
     _run(session, lane, sysop)
-    assert "Node N" in _written_text(session)
+    assert "ode name" in _written_text(session)
 
 
 def test_node_name_screen_shows_the_current_name(db, lane, sysop):
-    session = FakeSession(["s", "a", "b", "b", "b"])
+    session = FakeSession(["s", "n", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Name: 'NetBBS'" in _written_text(session)
 
 
 def test_node_name_screen_shows_solid_by_default(db, lane, sysop):
-    session = FakeSession(["s", "a", "b", "b", "b"])
+    session = FakeSession(["s", "n", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "solid (no gradient)" in _written_text(session)
 
@@ -4114,7 +4140,7 @@ def test_node_name_screen_shows_solid_by_default(db, lane, sysop):
 def test_node_name_blank_entry_leaves_it_unchanged(db, lane, sysop):
     from netbbs.config import get_node_display_name
 
-    session = FakeSession(["s", "a", "n", "", "b", "b", "b"])
+    session = FakeSession(["s", "n", "n", "", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No change." in _written_text(session)
     assert get_node_display_name(db) == "NetBBS"
@@ -4123,7 +4149,7 @@ def test_node_name_blank_entry_leaves_it_unchanged(db, lane, sysop):
 def test_node_name_setting_a_new_name_persists_it(db, lane, sysop):
     from netbbs.config import get_node_display_name
 
-    session = FakeSession(["s", "a", "n", "My Cool BBS", "b", "b", "b"])
+    session = FakeSession(["s", "n", "n", "My Cool BBS", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Node name set to 'My Cool BBS'." in _written_text(session)
     assert get_node_display_name(db) == "My Cool BBS"
@@ -4133,7 +4159,7 @@ def test_node_name_rejects_a_name_over_the_length_limit(db, lane, sysop):
     from netbbs.config import MAX_NODE_DISPLAY_NAME_LENGTH, get_node_display_name
 
     too_long = "x" * (MAX_NODE_DISPLAY_NAME_LENGTH + 1)
-    session = FakeSession(["s", "a", "n", too_long, "b", "b", "b"])
+    session = FakeSession(["s", "n", "n", too_long, "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "cannot exceed" in text
@@ -4141,7 +4167,7 @@ def test_node_name_rejects_a_name_over_the_length_limit(db, lane, sysop):
 
 
 def test_node_name_change_is_audit_logged(db, lane, sysop):
-    session = FakeSession(["s", "a", "n", "My Cool BBS", "b", "b", "b"])
+    session = FakeSession(["s", "n", "n", "My Cool BBS", "b", "b", "b"])
     _run(session, lane, sysop)
 
     rows = db.connection.execute(
@@ -4153,13 +4179,13 @@ def test_node_name_change_is_audit_logged(db, lane, sysop):
 
 
 def test_node_name_menu_invalid_key_is_rejected(db, lane, sysop):
-    session = FakeSession(["s", "a", "z", "b", "b", "b"])
+    session = FakeSession(["s", "n", "z", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "\b \b\a" in session.written
 
 
 def test_node_name_gradient_option_appears_in_the_node_name_menu(db, lane, sysop):
-    session = FakeSession(["s", "a", "b", "b", "b"])
+    session = FakeSession(["s", "n", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "radient" in _written_text(session)
 
@@ -4167,7 +4193,7 @@ def test_node_name_gradient_option_appears_in_the_node_name_menu(db, lane, sysop
 def test_node_name_gradient_lists_every_preset(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
-    session = FakeSession(["s", "a", "g", "", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", "", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "solid" in text
@@ -4180,7 +4206,7 @@ def test_node_name_gradient_can_be_set_and_persists(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
     index = 1 + sorted(GRADIENTS).index("rainbow")
-    session = FakeSession(["s", "a", "g", str(index), "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", str(index), "y", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Node name gradient set to 'rainbow'." in _written_text(session)
     assert node_name_gradient_override(db) == "rainbow"
@@ -4190,7 +4216,7 @@ def test_node_name_gradient_can_be_cleared_back_to_solid(db, lane, sysop):
     from netbbs.net.node_theme import node_name_gradient_override, set_node_name_gradient_override
 
     set_node_name_gradient_override(db, "gold")
-    session = FakeSession(["s", "a", "g", "0", "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", "0", "y", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Node name gradient set to 'solid'." in _written_text(session)
     assert node_name_gradient_override(db) is None
@@ -4202,14 +4228,14 @@ def test_node_name_gradient_declining_confirmation_makes_no_change(db, lane, sys
     from netbbs.net.node_theme import node_name_gradient_override
 
     index = 1 + sorted(GRADIENTS).index("red")
-    session = FakeSession(["s", "a", "g", str(index), "n", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", str(index), "n", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Not applied." in _written_text(session)
     assert node_name_gradient_override(db) is None
 
 
 def test_node_name_gradient_invalid_choice_makes_no_change(db, lane, sysop):
-    session = FakeSession(["s", "a", "g", "99", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", "99", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Not a valid choice" in _written_text(session)
 
@@ -4218,7 +4244,7 @@ def test_node_name_gradient_change_is_audit_logged(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
     index = 1 + sorted(GRADIENTS).index("blue")
-    session = FakeSession(["s", "a", "g", str(index), "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", str(index), "y", "b", "b", "b"])
     _run(session, lane, sysop)
 
     rows = db.connection.execute(
@@ -5277,6 +5303,37 @@ def test_update_screen_manual_check_forwards_the_stored_token(db, lane, sysop, m
     _run(session, lane, sysop)
 
     assert seen_tokens == ["ghp_testtoken1234"]
+
+
+# -- Settings menu hotkeys (dogfood report) ----------------------------------
+
+
+def test_settings_mastheads_hotkey_is_capitalized_despite_the_prefix(db, lane, sysop):
+    """`menu_key`'s own default lowercases a prefixed hotkey (correct
+    for a genuine mid-word letter), but "Banners & Mastheads" isn't
+    mid-word -- "Mastheads" is its own capitalized word right after a
+    space. Confirms the real Settings screen actually shows a capital
+    M, not just that `menu_key(capitalize=True)` works in isolation
+    (covered separately in `tests/test_menu.py`)."""
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Banners & [\x1b[1m\x1b[38;5;46mM\x1b[0m]astheads" in _written_text(session)
+
+
+def test_settings_n_reaches_node_name_not_a_hidden_node_control_shortcut(db, lane, sysop):
+    """Dogfood report: Settings used to also have an undocumented "N"
+    that jumped straight to Node control (sessions/shutdown/maintenance/
+    drain) despite no visible menu entry for it -- confusing, and it
+    meant "Node name" couldn't use its own natural hotkey and had to
+    fall back to a buried mid-word "a" (`Node N[a]me`). Node control is
+    already reachable from the main SysOp console and from Operations,
+    so the Settings copy was removed outright rather than made visible
+    (Thiesi's own call) -- "N" now belongs to Node name instead."""
+    session = FakeSession(["s", "n", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Node name" in text
+    assert "Sessions, shutdown" not in text
 
 
 # -- node-wide timestamp display format/timezone ----------------------------

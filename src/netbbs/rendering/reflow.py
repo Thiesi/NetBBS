@@ -62,7 +62,14 @@ def truncate(text: str, width: int, *, ellipsis: str = "...") -> str:
     return truncate_to_width(text, width, ellipsis=ellipsis)
 
 
-_SegmentColor = int | tuple[int, int, int] | None | Callable[[str], str]
+#: Public alias (dogfood report, `netbbs.net.picker`'s own multi-segment
+#: row rendering) -- previously private/module-internal since
+#: `colored_truncate` was this module's only caller of it; a second
+#: caller building its own `(text, color)` segment list ahead of time
+#: needs to spell this type out too, so it's exported like every other
+#: shared rendering type instead of duplicated.
+SegmentColor = int | tuple[int, int, int] | None | Callable[[str], str]
+_SegmentColor = SegmentColor
 
 
 def _render_segment(text: str, color: _SegmentColor) -> str:
