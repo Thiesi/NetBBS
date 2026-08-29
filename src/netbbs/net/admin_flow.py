@@ -1682,17 +1682,28 @@ def _trust_subject_stable_id(subject: TrustSubject) -> int:
 
 
 async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    subjects = await lane.run(list_trust_subjects)
+    async def _load_subjects() -> list[TrustSubject]:
+        return await lane.run(list_trust_subjects)
+
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     selected = await pick_item(
-        session, subjects,
+        session, await _load_subjects(),
         name_of=_trust_subject_name,
         stable_id_of=_trust_subject_stable_id,
         description_of=lambda subject: subject.kind,
         title="Trust subjects",
         empty_message="No remote trust subjects have been registered.",
+        # Dogfood report: without `refresh`, an empty list hit `pick_item`'s
+        # silent early return (no held prompt at all) -- under
+        # `redraw_in_place`, the very next redraw wiped the empty_message
+        # before it could be read. Every sibling trust screen (Domains,
+        # Anchors, ...) stays on an interactive prompt regardless of list
+        # state; a real subject list can also go stale while this screen
+        # is open, same reasoning `login_flow`'s "Who's online" already
+        # documents for its own `refresh`.
+        refresh=_load_subjects,
         redraw_in_place=redraw_in_place,
         unicode_style=unicode_style,
         collapsed=collapsed,
@@ -2263,6 +2274,13 @@ async def _trust_config_history_screen(session: Session, lane: DatabaseLane) -> 
                 f"{row.created_at} remote-{row.object_kind}:{row.object_id} {row.action} "
                 f"{json.dumps(row.details, sort_keys=True, ensure_ascii=True)}"
             )
+    # Dogfood report: this screen used to return straight to _trust_menu's
+    # loop with no pause at all -- under redraw_in_place, the very next
+    # redraw wiped everything just written (most visibly the empty-log
+    # case, a single line with nothing else on screen to leave a
+    # lingering impression) before it could be read.
+    await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
 
 
 # -- create ------------------------------------------------------------

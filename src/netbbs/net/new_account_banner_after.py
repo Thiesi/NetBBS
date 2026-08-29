@@ -59,7 +59,7 @@ def new_account_banner_after_path(db: Database) -> Path:
     """The well-known path a custom banner file must be placed at,
     colocated with the database file -- deliberately does not
     auto-create anything, matching `welcome_banner.banner_path`."""
-    return db.path.parent / f"{db.path.stem}_new_account_banner_after.ans"
+    return (db.path.parent / f"{db.path.stem}_new_account_banner_after.ans").resolve()
 
 
 @dataclass(frozen=True)

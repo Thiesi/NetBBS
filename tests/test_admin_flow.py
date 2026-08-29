@@ -381,6 +381,38 @@ def test_trust_domains_screen_gives_a_friendly_message_for_a_non_numeric_weight(
     assert list_trust_domains(db) == []
 
 
+def test_trust_history_screen_pauses_before_returning(db, lane, sysop):
+    """Dogfood report: this screen used to write its report (or, with an
+    empty log, just "No configuration history.") and return immediately
+    -- with redraw_in_place on, the next _trust_menu redraw wiped it
+    before a SysOp could read it. It must now hold on a real dismiss
+    key, matching every other report-then-continue screen in this file."""
+    session = FakeSession(["s", "p", "h", "x", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _written_text(session)
+    assert "No configuration history." in text
+    assert "Press any key to continue..." in text
+
+
+def test_trust_subjects_screen_stays_interactive_when_the_list_is_empty(db, lane, sysop):
+    """Dogfood report: with no registered subjects, `pick_item` used to
+    hit its silent early-return path (no held prompt at all) since this
+    screen passed no `refresh` -- under redraw_in_place, the very next
+    _trust_menu redraw erased the "No remote trust subjects..." message
+    before it could be read, unlike every sibling trust screen (Domains,
+    Anchors, ...), which always holds on an interactive prompt regardless
+    of list state. Passing `refresh` puts Subjects on that same
+    interactive footing: reaching [B]ack takes a real keystroke, not an
+    immediate return."""
+    session = FakeSession(["s", "p", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    text = _written_text(session)
+    assert "No remote trust subjects have been registered." in text
+    assert "Ctrl-R: refresh" in text
+
+
 def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, sysop):
     subject = TrustSubject.node("remote-node")
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")

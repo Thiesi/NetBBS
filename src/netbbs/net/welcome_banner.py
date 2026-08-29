@@ -200,8 +200,15 @@ def banner_path(db: Database) -> Path:
     colocated with the database file. Deliberately does not
     auto-create anything (unlike `netbbs.net.ssh.ensure_host_key`) --
     a missing file is normal, expected state here, not an error to
-    paper over."""
-    return db.path.parent / f"{db.path.stem}_welcome_banner.ans"
+    paper over.
+
+    `.resolve()` matters here: `db.path` is commonly a relative default
+    (e.g. `Path("netbbs.db")`), and joining a relative `.parent` of "."
+    collapses away entirely, leaving a bare filename with no directory
+    at all -- exactly the "which folder?" a SysOp reading this path
+    off a help screen from a different shell session needs answered
+    (dogfood report)."""
+    return (db.path.parent / f"{db.path.stem}_welcome_banner.ans").resolve()
 
 
 @dataclass(frozen=True)

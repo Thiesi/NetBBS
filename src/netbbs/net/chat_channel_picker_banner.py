@@ -60,7 +60,7 @@ def chat_channel_picker_banner_path(db: Database) -> Path:
     """The well-known path a custom masthead file must be placed at,
     colocated with the database file -- deliberately does not
     auto-create anything, matching `welcome_banner.banner_path`."""
-    return db.path.parent / f"{db.path.stem}_chat_channel_picker_banner.ans"
+    return (db.path.parent / f"{db.path.stem}_chat_channel_picker_banner.ans").resolve()
 
 
 @dataclass(frozen=True)

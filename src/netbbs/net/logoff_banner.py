@@ -60,7 +60,7 @@ def logoff_banner_path(db: Database) -> Path:
     """The well-known path a custom logoff banner file must be placed
     at, colocated with the database file -- deliberately does not
     auto-create anything, matching `welcome_banner.banner_path`."""
-    return db.path.parent / f"{db.path.stem}_logoff_banner.ans"
+    return (db.path.parent / f"{db.path.stem}_logoff_banner.ans").resolve()
 
 
 @dataclass(frozen=True)
