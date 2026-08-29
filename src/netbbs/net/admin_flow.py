@@ -5727,7 +5727,7 @@ async def _draw_banners_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Banners",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & mastheads"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
