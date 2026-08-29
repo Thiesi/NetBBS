@@ -4878,6 +4878,18 @@ async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, acto
             await session.write(reject_unhandled_key(choice))
 
 
+async def _write_wrapped_subtitle(
+    session: Session, text: str, *, color: int | tuple[int, int, int] = MUTED_COLOR
+) -> None:
+    """Word-wrap a screen's plain-text descriptive subtitle to the real
+    terminal width before coloring it, one wrapped physical line at a
+    time -- coloring the whole sentence first and relying on the
+    terminal's own soft-wrap (dogfood report) let it run past the right
+    edge unpredictably on anything narrower than the text itself."""
+    for wrapped in wrap_to_width(text, session.terminal_width) or [text]:
+        await session.write_line(colored(wrapped, fg_color=color))
+
+
 async def _draw_banners_and_mastheads_menu(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
@@ -4886,11 +4898,8 @@ async def _draw_banners_and_mastheads_menu(
             breadcrumb=(session.node_display_name, "System"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored(
-            "Every optional SysOp-authored banner and masthead, grouped by kind.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session, "Every optional SysOp-authored banner and masthead, grouped by kind."
     )
     await session.write_line(
         "\r\n" + _menu_row(
@@ -5730,12 +5739,10 @@ async def _draw_banners_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored(
-            "Optional banners shown throughout a caller's session -- first login, signing off, "
-            "and starting/finishing self-service signup.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session,
+        "Optional banners shown throughout a caller's session -- first login, signing off, "
+        "and starting/finishing self-service signup.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
@@ -6715,16 +6722,14 @@ async def _draw_mastheads_menu(
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
 ) -> None:
     await session.write_line("\r\n" + screen_title("Mastheads",
-            breadcrumb=(session.node_display_name, "System", "Mastheads & banneers"), width=session.terminal_width, clear=redraw_in_place,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners"), width=session.terminal_width, clear=redraw_in_place,
             unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored(
-            "Optional mastheads shown above the main menu, message-board list, file-area list, and "
-            "chat channel picker -- at every level of browsing (top level, a category, a "
-            "Community) where applicable.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session,
+        "Optional mastheads shown above the main menu, message-board list, file-area list, and "
+        "chat channel picker -- at every level of browsing (top level, a category, a "
+        "Community) where applicable.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
