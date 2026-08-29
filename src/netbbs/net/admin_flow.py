@@ -5744,7 +5744,7 @@ async def _draw_banners_menu(
                 MenuEntry(label=menu_key("L", "ogoff banner"), brief="Shown on an intentional Log off"),
                 MenuEntry(label=menu_key("e", "fore signup", prefix="B"), brief="Shown once, before Create account"),
                 MenuEntry(label=menu_key("f", "ter signup", prefix="A"), brief="Shown once signup succeeds"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners & Mastheads"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
             ],
             description_level,
             width=session.terminal_width,
@@ -6730,10 +6730,10 @@ async def _draw_mastheads_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("M", "ain menu"), brief="Custom art above the main menu"),
-                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above every message-board-list view"),
+                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above every board-list view"),
                 MenuEntry(label=menu_key("F", "ile areas"), brief="Above every file-area-list view"),
                 MenuEntry(label=menu_key("C", "hat channels"), brief="Above the channel picker"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Banners & Mastheads"),
+                MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
             ],
             description_level,
             width=session.terminal_width,
