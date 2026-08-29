@@ -57,6 +57,12 @@ async def show_help(
         for line in lines:
             await session.write_line(line)
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+        # HELP_KEY (Ctrl-H) is a real terminal control byte, not a synthesized
+        # signal -- a client's own key-repeat can queue several of it before
+        # this screen ever draws. Without discarding those first, the very
+        # next queued repeat instantly satisfies this dismiss read, closing
+        # the screen before a human eye can register it (dogfood report).
+        await session.discard_buffered_input()
         await session.read_any_key()
         return
     width = min(getattr(session, "terminal_width", 80), 78)
@@ -80,4 +86,5 @@ async def show_help(
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
     await session.write_line(footer)
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+    await session.discard_buffered_input()
     await session.read_any_key()

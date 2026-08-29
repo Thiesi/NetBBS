@@ -3291,13 +3291,16 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
 
 
 def test_banners_and_mastheads_option_appears_in_the_system_submenu(db, lane, sysop):
-    # menu_key("M", "astheads", prefix="Banners & ") highlights only the
-    # "M", but the "Banners & " prefix is plain text -- issue #178 folded
-    # welcome/logoff/new-account banners and every masthead under this one
-    # Settings entry, two levels above where Welcome banner itself lives.
-    session = FakeSession(["s", "b", "b"])
+    # issue #178 folded welcome/logoff/new-account banners and every
+    # masthead under this one Settings entry, two levels above where
+    # Welcome banner itself lives. Later renamed to "Mastheads & banners"
+    # with separate "Ba[n]nners"/"[M]astheads" entries (commits 222042c/
+    # 875b5ce), replacing the original single "Banners & [M]astheads" wording.
+    # The System menu's own hotkey into it also moved from "b" to "m" in
+    # that same restructure.
+    session = FakeSession(["s", "m", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Banners & " in _written_text(session)
+    assert "Mastheads & banners" in _written_text(session)
 
 
 def test_welcome_banner_option_appears_in_the_banners_menu(db, lane, sysop):
@@ -5309,15 +5312,19 @@ def test_update_screen_manual_check_forwards_the_stored_token(db, lane, sysop, m
 
 
 def test_settings_mastheads_hotkey_is_capitalized_despite_the_prefix(db, lane, sysop):
-    """`menu_key`'s own default lowercases a prefixed hotkey (correct
-    for a genuine mid-word letter), but "Banners & Mastheads" isn't
-    mid-word -- "Mastheads" is its own capitalized word right after a
-    space. Confirms the real Settings screen actually shows a capital
-    M, not just that `menu_key(capitalize=True)` works in isolation
-    (covered separately in `tests/test_menu.py`)."""
-    session = FakeSession(["s", "b", "b"])
+    """Originally: `menu_key`'s own default lowercases a prefixed hotkey
+    (correct for a genuine mid-word letter), but "Banners & Mastheads"
+    wasn't mid-word -- "Mastheads" was its own capitalized word right
+    after a space, needing `capitalize=True` to keep the M capital.
+    Superseded by commits 222042c/875b5ce, which restructured this into
+    its own "Mastheads & banners" screen with a bare `menu_key("M",
+    "astheads")` entry -- no prefix left to fight with, but still worth
+    confirming the real Settings screen shows a capital M. The System
+    menu's own hotkey into that screen also moved from "b" to "m" in
+    that same restructure."""
+    session = FakeSession(["s", "m", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Banners & [\x1b[1m\x1b[38;5;46mM\x1b[0m]astheads" in _written_text(session)
+    assert "[\x1b[1m\x1b[38;5;46mM\x1b[0m]astheads" in _written_text(session)
 
 
 def test_settings_n_reaches_node_name_not_a_hidden_node_control_shortcut(db, lane, sysop):

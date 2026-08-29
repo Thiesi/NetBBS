@@ -37,6 +37,9 @@ class FakeSession:
     async def read_any_key(self, **kwargs) -> str:
         return await self.read_key(**kwargs)
 
+    async def discard_buffered_input(self) -> None:
+        return None
+
 
 def _text(session: FakeSession) -> str:
     return "".join(session.written)
