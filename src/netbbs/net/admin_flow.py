@@ -5415,7 +5415,7 @@ async def _draw_main_menu_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     await session.write_line(detail)
     await session.write_line(
@@ -5822,7 +5822,7 @@ async def _draw_logoff_banner_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Logoff banner",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -6121,7 +6121,7 @@ async def _draw_new_account_banner_before_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (before)",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -6428,7 +6428,7 @@ async def _draw_new_account_banner_after_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (after)",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Banners"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -6811,7 +6811,7 @@ async def _draw_board_list_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Board list masthead",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -7112,7 +7112,7 @@ async def _draw_file_area_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("File area masthead",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
@@ -7404,7 +7404,7 @@ async def _draw_chat_channel_picker_masthead_menu(
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Chat channel picker masthead",
-            breadcrumb=(session.node_display_name, "System", "Banners & Mastheads", "Mastheads"), width=session.terminal_width,
+            breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
     await session.write_line(
