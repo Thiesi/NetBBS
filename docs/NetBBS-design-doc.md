@@ -4872,7 +4872,7 @@ peers... stays explicitly deferred to whenever Phase 5 starts" — is
 updated alongside this decision: Phase 5 has been active for a while now,
 and this issue is that decision, not a further deferral of it.
 
-### Issue #200 — War Dialer: async multiplayer BBS-crew door game
+### Issue #200 — War Dialer: async multiplayer BBS-crew door game — closed
 
 **Goal:** decide the design for a second door-game genre alongside
 Voidrunner's single-player persistent model — an asynchronous,
@@ -4906,16 +4906,30 @@ history rather than the genre's default reskin, which every existing
 Discord clone already uses.
 
 **Decision 4 (locked in) — Rank is a single, monotonic metric doing
-double duty as leaderboard score and PvP bracket gate.** `crew×10 +
-exchanges_controlled×500 + successful_raids×25 + successful_jobs×15`,
-tiers Newbie/Wannabe/Script Kiddie/Hacker/Elite/Legend. Never decreasing
-within a season was the deciding constraint: a raw balance that could
-drop would let a strong player deliberately sandbag into a weaker
-bracket to prey on newcomers. Direct PvP (Raid) is gated to your own
-tier ±1; territory contests (Root the Exchange) are intentionally
-*not* gated, since a district's defense is the controller's committed
-garrison rather than their full Rank, keeping territory contestable by
-newcomers even against a top-bracket controller.
+double duty as leaderboard score and PvP bracket gate.** Tiers Newbie/
+Wannabe/Script Kiddie/Hacker/Elite/Legend. Never decreasing within a
+season was the deciding constraint: a raw balance that could drop would
+let a strong player deliberately sandbag into a weaker bracket to prey
+on newcomers. Direct PvP (Raid) is gated to your own tier ±1; territory
+contests (Root the Exchange) are intentionally *not* gated, since a
+district's defense is the controller's committed garrison rather than
+their full Rank, keeping territory contestable by newcomers even
+against a top-bracket controller.
+
+**Corrected at implementation time:** this decision was originally
+recorded as `crew×10 + exchanges_controlled×500 + successful_raids×25 +
+successful_jobs×15` — but `crew` and `exchanges_controlled` there meant
+*current* holdings, which can both go down (a bust, a rival rooting
+your exchange), silently reintroducing the exact sandbagging hole this
+decision exists to close. The shipped formula instead sums four
+lifetime counters that only ever increment — crew *ever* recruited,
+exchanges *ever* successfully taken, successful raids, successful jobs
+— `crew_recruited_total×10 + exchanges_taken_total×500 +
+successful_raids×25 + successful_jobs×15`
+(`netbbs.doors.bundled.war_dialer.rank_score`). Current crew and
+current exchange-control remain separate, ordinary fluctuating fields
+used only for combat odds and territory defense — never inputs to
+Rank.
 
 **Decision 5 (locked in) — seasons (4 weeks), separate from Rank
 brackets, because they solve a different problem.** Brackets prevent
@@ -4941,7 +4955,18 @@ between.
 Explicitly out of scope for v1: procedural exchange generation, a
 multi-resource economy, factions/alliances, and an item/weapon shop —
 plausible v2 additions once the core loop is proven, not part of this
-vertical. Full acceptance criteria on issue #200 itself.
+vertical.
+
+Implemented in full (`src/netbbs/doors/bundled/war_dialer.py`, listed
+in `BUNDLED_DOORS` alongside Retro Trivia and Voidrunner): all five
+actions with the formulas above, the offline "while you were away"
+event summary, lazy season/turn/Heat catch-up on login, the bust
+mechanic, and both new-player protections. 33 tests
+(`tests/test_war_dialer_domain.py`) cover the domain formulas plus
+real-SQLite storage-layer behavior, including a real-threads
+concurrency regression proving two simultaneous raids on the same
+target row cannot lose an update. Issue #200 is closed; all of its
+acceptance criteria are met.
 
 ### Deliberately deferred without active issue
 
