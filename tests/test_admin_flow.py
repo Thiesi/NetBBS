@@ -3667,6 +3667,37 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     assert "gallery" in text.lower()
 
 
+def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
+    """Dogfood report: the hub screen you land on first (System ->
+    Mastheads & banners) had a "(Ctrl-H for...)" hint but no handler at
+    all for it -- Ctrl-H silently did nothing, worse than no hint since
+    every leaf screen one level down does answer it. This screen owns no
+    single file, so its help points a SysOp at a specific banner/masthead
+    below instead of a path."""
+    session = FakeSession(["s", "m", "\x08", "x", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "press Ctrl-H on that screen" in text
+
+
+def test_banners_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
+    """Same gap, one level down: the "Banners" submenu (Welcome/Logoff/
+    before/after signup) also owns no single file."""
+    session = FakeSession(["s", "m", "n", "\x08", "x", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "press Ctrl-H on that screen" in text
+
+
+def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
+    """Same gap, one level down: the "Mastheads" submenu (main menu/
+    board list/file areas/chat channels) also owns no single file."""
+    session = FakeSession(["s", "m", "m", "\x08", "x", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "press Ctrl-H on that screen" in text
+
+
 # -- main-menu masthead (issue #161) ---------------------------------------
 
 

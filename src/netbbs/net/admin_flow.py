@@ -4892,6 +4892,10 @@ async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, acto
             await session.write_line("")
             await _mastheads_menu(session, lane, actor)
             await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _draw_banners_and_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -4931,7 +4935,7 @@ async def _draw_banners_and_mastheads_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5087,11 +5091,9 @@ async def _preview_welcome_banner_screen(session: Session, lane: DatabaseLane, a
 async def _enable_welcome_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(welcome_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_BANNER_SIZE_BYTES:
@@ -5263,6 +5265,25 @@ async def _banner_help_screen(
     await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
 
 
+async def _banner_router_help_screen(
+    session: Session, *, header_color: int | tuple[int, int, int], unicode_style: bool
+) -> None:
+    """Ctrl-H's content one level above `_banner_help_screen`: this
+    screen and its two children (Banners, Mastheads) are pure navigation
+    -- none of them owns a single target file, so `_banner_help_screen`'s
+    own "here's the exact path" answer doesn't apply yet. Dogfood report:
+    a SysOp reasonably tries Ctrl-H at the first screen they land on, not
+    only at a specific banner's own menu, and got silently nothing here
+    -- worse than no hint at all, since every leaf screen one level down
+    does answer Ctrl-H."""
+    lines = [
+        colored("Placing your own .ans file", fg_color=header_color, bold=True),
+        "  Each banner/masthead below has its own file and its own exact path --",
+        "  pick one, then press Ctrl-H on that screen to see where it goes.",
+    ]
+    await show_help(session, "Banner/masthead help", lines, header_color=header_color, unicode_style=unicode_style)
+
+
 async def _welcome_banner_filesystem_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
@@ -5298,10 +5319,12 @@ async def _welcome_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         # Dogfood report: this message used to fall straight through to
         # the menu's own immediate redraw, which -- with redraw_in_place
         # on (the default for new accounts) -- cleared it before it could
@@ -5511,11 +5534,9 @@ async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane,
 async def _enable_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(main_menu_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_MASTHEAD_SIZE_BYTES:
@@ -5639,10 +5660,12 @@ async def _main_menu_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -5745,6 +5768,10 @@ async def _banners_menu(session: Session, lane: DatabaseLane, actor: User) -> No
             await session.write_line("")
             await _new_account_banner_after_menu(session, lane, actor)
             await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _draw_banners_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -5776,7 +5803,7 @@ async def _draw_banners_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -5893,11 +5920,9 @@ async def _preview_logoff_banner_screen(session: Session, lane: DatabaseLane) ->
 async def _enable_logoff_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(logoff_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_LOGOFF_BANNER_SIZE_BYTES:
@@ -6017,10 +6042,12 @@ async def _logoff_banner_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -6149,12 +6176,10 @@ async def _draw_new_account_banner_before_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored(
-            "Shown once, right when a caller starts self-service signup -- before the Create "
-            "account prompts, never repeated on a fixable retry.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session,
+        "Shown once, right when a caller starts self-service signup -- before the Create "
+        "account prompts, never repeated on a fixable retry.",
     )
     await session.write_line(detail)
     await session.write_line(
@@ -6173,6 +6198,7 @@ async def _draw_new_account_banner_before_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -6198,11 +6224,9 @@ async def _preview_new_account_banner_before_screen(session: Session, lane: Data
 async def _enable_new_account_banner_before_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_before_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_BEFORE_SIZE_BYTES:
@@ -6322,10 +6346,12 @@ async def _new_account_banner_before_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -6506,11 +6532,9 @@ async def _preview_new_account_banner_after_screen(session: Session, lane: Datab
 async def _enable_new_account_banner_after_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(new_account_banner_after_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No banner file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_NEW_ACCOUNT_BANNER_AFTER_SIZE_BYTES:
@@ -6630,10 +6654,12 @@ async def _new_account_banner_after_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -6731,6 +6757,10 @@ async def _mastheads_menu(session: Session, lane: DatabaseLane, actor: User) -> 
             await session.write_line("")
             await _chat_channel_picker_masthead_menu(session, lane, actor)
             await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == HELP_KEY:
+            await session.write_line("")
+            await _banner_router_help_screen(session, header_color=header_color, unicode_style=unicode_style)
+            await _draw_mastheads_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -6763,7 +6793,7 @@ async def _draw_mastheads_menu(
             height=session.terminal_height,
         )
     )
-    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
+    await session.write_line(colored("(Ctrl-H for help placing your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -6878,11 +6908,9 @@ async def _preview_board_list_masthead_screen(session: Session, lane: DatabaseLa
 async def _enable_board_list_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(board_list_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_BOARD_LIST_BANNER_SIZE_BYTES:
@@ -7006,10 +7034,12 @@ async def _board_list_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -7138,9 +7168,10 @@ async def _draw_file_area_masthead_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored("Shown above every file-area-browsing view -- the top level, a category, or a "
-                "Community/Uncategorized scope.", fg_color=MUTED_COLOR)
+    await _write_wrapped_subtitle(
+        session,
+        "Shown above every file-area-browsing view -- the top level, a category, or a "
+        "Community/Uncategorized scope.",
     )
     await session.write_line(detail)
     await session.write_line(
@@ -7159,6 +7190,7 @@ async def _draw_file_area_masthead_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -7178,11 +7210,9 @@ async def _preview_file_area_masthead_screen(session: Session, lane: DatabaseLan
 async def _enable_file_area_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(file_area_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_FILE_AREA_BANNER_SIZE_BYTES:
@@ -7298,10 +7328,12 @@ async def _file_area_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
@@ -7430,9 +7462,10 @@ async def _draw_chat_channel_picker_masthead_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored("Shown above every channel-picker view -- the top level, a category, or a "
-                "Community/Uncategorized scope. Never inside a live channel.", fg_color=MUTED_COLOR)
+    await _write_wrapped_subtitle(
+        session,
+        "Shown above every channel-picker view -- the top level, a category, or a "
+        "Community/Uncategorized scope. Never inside a live channel.",
     )
     await session.write_line(detail)
     await session.write_line(
@@ -7451,6 +7484,7 @@ async def _draw_chat_channel_picker_masthead_menu(
             height=session.terminal_height,
         )
     )
+    await session.write_line(colored("(Ctrl-H for where to place your own .ans files)", fg_color=MUTED_COLOR))
     await session.write("Choice: ")
 
 
@@ -7474,11 +7508,9 @@ async def _preview_chat_channel_picker_masthead_screen(session: Session, lane: D
 async def _enable_chat_channel_picker_masthead_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     status = await lane.run(chat_channel_picker_banner_status)
     if not status.exists:
-        await session.write_line(
-            colored(
-                f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
-                fg_color=MUTED_COLOR,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"No masthead file found at {status.path}. Place a .ans file there first, then enable.",
         )
         return
     if (status.size_bytes or 0) > MAX_CHAT_CHANNEL_PICKER_BANNER_SIZE_BYTES:
@@ -7598,10 +7630,12 @@ async def _chat_channel_picker_masthead_filesystem_screen(
 
     files, directory = await lane.run(_list)
     if not files:
-        await session.write_line(colored(
-            f"\r\nNo other .ans files found in {directory}. Place one there "
-            f"(e.g. via SFTP/SCP), then browse again.", fg_color=MUTED_COLOR,
-        ))
+        await session.write_line("")
+        await _write_wrapped_subtitle(
+            session,
+            f"No other .ans files found in {directory}. Place one there "
+            f"(e.g. via SFTP/SCP), then browse again.",
+        )
         await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
         await session.read_any_key()
         return
