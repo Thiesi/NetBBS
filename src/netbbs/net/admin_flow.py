@@ -4907,8 +4907,14 @@ async def _write_wrapped_subtitle(
     terminal width before coloring it, one wrapped physical line at a
     time -- coloring the whole sentence first and relying on the
     terminal's own soft-wrap (dogfood report) let it run past the right
-    edge unpredictably on anything narrower than the text itself."""
-    for wrapped in wrap_to_width(text, session.terminal_width) or [text]:
+    edge unpredictably on anything narrower than the text itself.
+
+    `break_long_words=False`: several callers embed a filesystem path
+    (e.g. "No other .ans files found in {directory}...") -- a long path
+    is exactly the unbreakable-token case that must overflow rather
+    than get cut mid-character (dogfood report, caught by a test path
+    long enough to trigger it)."""
+    for wrapped in wrap_to_width(text, session.terminal_width, break_long_words=False) or [text]:
         await session.write_line(colored(wrapped, fg_color=color))
 
 
@@ -5007,7 +5013,7 @@ async def _draw_welcome_banner_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Welcome banner",
@@ -5461,7 +5467,7 @@ async def _draw_main_menu_banner_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Main-menu masthead",
@@ -5870,7 +5876,7 @@ async def _draw_logoff_banner_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Logoff banner",
@@ -6169,7 +6175,7 @@ async def _draw_new_account_banner_before_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (before)",
@@ -6475,7 +6481,7 @@ async def _draw_new_account_banner_after_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("New account banner (after)",
@@ -6860,7 +6866,7 @@ async def _draw_board_list_masthead_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Board list masthead",
@@ -7161,7 +7167,7 @@ async def _draw_file_area_masthead_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("File area masthead",
@@ -7455,7 +7461,7 @@ async def _draw_chat_channel_picker_masthead_menu(
     detail = (
         colored(state, fg_color=state_color, bold=status.enabled)
         + colored(" -- file: ", fg_color=LABEL_COLOR)
-        + colored(str(status.path), fg_color=METADATA_COLOR)
+        + colored(status.path.name, fg_color=METADATA_COLOR)
         + colored(f" ({file_state})", fg_color=file_color)
     )
     await session.write_line("\r\n" + screen_title("Chat channel picker masthead",

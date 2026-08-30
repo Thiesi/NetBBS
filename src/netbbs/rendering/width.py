@@ -76,7 +76,7 @@ def cut_to_width(text: str, width: int) -> str:
     return text[:cut]
 
 
-def wrap_to_width(text: str, width: int) -> list[str]:
+def wrap_to_width(text: str, width: int, *, break_long_words: bool = True) -> list[str]:
     """
     Greedy word-wrap using display columns, not stdlib `textwrap`'s
     character count. Splits on whitespace the same way `textwrap.wrap`
@@ -91,14 +91,23 @@ def wrap_to_width(text: str, width: int) -> list[str]:
     long URL, or -- the case that actually matters here -- an entire
     run of CJK text, since that script doesn't use spaces between
     words at all) is hard-broken at a real display-column boundary
-    instead of overflowing the line. That fallback is what makes CJK
-    wrap correctly with no script-specific line-breaking logic of its
-    own: an unspaced CJK paragraph is just one long "word" under this
-    splitting rule, and breaking between any two characters at the
-    width boundary is already the linguistically correct behavior for
-    that script -- not an approximation adopted for lack of a better
-    option.
-    """
+    instead of overflowing the line, by default. That fallback is what
+    makes CJK wrap correctly with no script-specific line-breaking
+    logic of its own: an unspaced CJK paragraph is just one long "word"
+    under this splitting rule, and breaking between any two characters
+    at the width boundary is already the linguistically correct
+    behavior for that script -- not an approximation adopted for lack
+    of a better option.
+
+    `break_long_words=False` (same name/meaning as stdlib `textwrap`'s
+    own parameter) turns that fallback off: an over-width word is
+    instead emitted whole, on its own line, overflowing `width` rather
+    than being split. Use this for content where a mid-token break
+    corrupts meaning rather than just looking untidy -- a filesystem
+    path is the concrete case (dogfood report: a long absolute path,
+    embedded in an otherwise-wrappable sentence or standing alone,
+    doesn't survive being cut in half the way CJK text does; overflow
+    is the lesser problem)."""
     if width < 1:
         raise ValueError(f"width must be >= 1, got {width}")
 
@@ -116,6 +125,9 @@ def wrap_to_width(text: str, width: int) -> list[str]:
                 lines.append(" ".join(current))
                 current = []
                 current_width = 0
+            if not break_long_words:
+                lines.append(word)
+                continue
             while display_width(word) > width:
                 piece = cut_to_width(word, width)
                 if not piece:

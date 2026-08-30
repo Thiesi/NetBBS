@@ -153,3 +153,24 @@ def test_wrap_to_width_mixed_ascii_and_cjk_wraps_by_words_where_possible():
     assert lines[0] == "hello"
     for line in lines:
         assert display_width(line) <= 6
+
+
+def test_wrap_to_width_break_long_words_false_overflows_instead_of_cutting():
+    """Dogfood report: a filesystem path embedded in an otherwise-
+    wrappable sentence (or standing alone) got corrupted by the default
+    hard-break fallback -- correct for unspaced CJK prose, but a broken
+    path is worse than one overflowing line for content meant to be
+    read or copy-pasted intact."""
+    path = "/" + "x" * 40
+    lines = wrap_to_width(f"See {path} for details", 20, break_long_words=False)
+    assert path in lines
+    # Every other word still wraps normally around the unbroken token.
+    assert "".join(lines).replace(" ", "") == f"See{path}fordetails".replace(" ", "")
+
+
+def test_wrap_to_width_break_long_words_false_is_not_the_default():
+    """The default stays exactly as before -- CJK and other genuinely
+    unspaced-script content still needs the hard-break fallback."""
+    text = _CJK * 3
+    assert wrap_to_width(text, 8) == wrap_to_width(text, 8, break_long_words=True)
+    assert len(wrap_to_width(text, 8, break_long_words=False)) == 1

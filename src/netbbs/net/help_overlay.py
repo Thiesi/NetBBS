@@ -80,7 +80,19 @@ async def show_help(
     hdr = colored(f"╭── {title} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
     await session.write_line(f"\r\n{hdr}")
     for line in lines:
-        for wrapped in ([line] if visible_width(line) <= inner_width else wrap_to_width(line, inner_width)):
+        # break_long_words=False: a filesystem path (`_banner_help_screen`'s
+        # whole point is showing one intact and copy-pasteable) is exactly
+        # the unbreakable-token case -- wrap_to_width's own hard-break
+        # fallback for an over-width "word" is correct for unspaced CJK
+        # prose, but would instead corrupt a path into two unusable
+        # fragments (dogfood report, caught by a test path just long
+        # enough to trigger it). Overflowing the closing border on that
+        # one line is the accepted trade-off.
+        wrapped_lines = (
+            [line] if visible_width(line) <= inner_width
+            else wrap_to_width(line, inner_width, break_long_words=False)
+        )
+        for wrapped in wrapped_lines:
             pad = " " * max(0, inner_width - visible_width(wrapped))
             await session.write_line(f"│  {wrapped}{pad}│")
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)

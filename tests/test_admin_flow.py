@@ -3667,6 +3667,33 @@ def test_welcome_banner_ctrl_h_shows_where_to_place_the_file(db, lane, sysop):
     assert "gallery" in text.lower()
 
 
+def test_welcome_banner_ctrl_h_shows_a_long_path_intact_not_cut_in_half(tmp_path):
+    """Dogfood report: the boxed Ctrl-H help screen word-wraps its content
+    to fit inside the frame, and a filesystem path has no spaces to break
+    on -- a deeply-nested node directory (a real, unremarkable case, not
+    an edge case) hard-broke the path across two box lines mid-character,
+    defeating the whole point of showing it (copy-paste it intact).
+    Reproduced with an explicit long path rather than relying on
+    pytest's own tmp_path nesting happening to be long enough."""
+    from netbbs.net.welcome_banner import banner_path
+
+    deep = tmp_path
+    for segment in ("a" * 20, "b" * 20, "c" * 20, "d" * 20):
+        deep = deep / segment
+    deep.mkdir(parents=True)
+    db = Database(deep / "node.db")
+    lane = DatabaseLane(db.path)
+    sysop = create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+
+    session = FakeSession(["s", "m", "n", "w", "\x08", "x", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    lane.close()
+    db.close()
+
+    assert str(banner_path(db)) in text
+
+
 def test_banners_and_mastheads_hub_ctrl_h_shows_generic_help(db, lane, sysop):
     """Dogfood report: the hub screen you land on first (System ->
     Mastheads & banners) had a "(Ctrl-H for...)" hint but no handler at
