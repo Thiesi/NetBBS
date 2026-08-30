@@ -79,6 +79,13 @@ async def show_help(
     rule_len = max(0, width - len(title) - 6)
     hdr = colored(f"╭── {title} " + "─" * rule_len + "╮", fg_color=header_color, bold=True)
     await session.write_line(f"\r\n{hdr}")
+    # Dogfood report: these side borders used to render as plain,
+    # uncolored text -- an inherited shortcut from an earlier fix where
+    # coloring them broke tests doing plain substring matches against
+    # box content, reverted rather than fixed properly at the time.
+    # Matches `netbbs.rendering.layout.double_frame`'s own "║ "/" ║"
+    # convention: same header_color, same bold, as the top/bottom rule.
+    side_border = colored("│", fg_color=header_color, bold=True)
     for line in lines:
         # break_long_words=False: a filesystem path (`_banner_help_screen`'s
         # whole point is showing one intact and copy-pasteable) is exactly
@@ -94,7 +101,7 @@ async def show_help(
         )
         for wrapped in wrapped_lines:
             pad = " " * max(0, inner_width - visible_width(wrapped))
-            await session.write_line(f"│  {wrapped}{pad}│")
+            await session.write_line(f"{side_border}  {wrapped}{pad}{side_border}")
     footer = colored("╰" + "─" * (width - 2) + "╯", fg_color=header_color, bold=True)
     await session.write_line(footer)
     await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))

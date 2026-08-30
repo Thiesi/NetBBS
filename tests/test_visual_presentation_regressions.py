@@ -10,6 +10,8 @@ Regression tests for PR #189's visual presentation polish:
 from __future__ import annotations
 
 import asyncio
+import re
+
 import pytest
 
 from netbbs.auth.users import create_user
@@ -74,6 +76,13 @@ class FakeSession(Session):
 
 def _raw_text(session: FakeSession) -> str:
     return "".join(session.written)
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # ============================================================================
@@ -244,7 +253,7 @@ def test_show_help_boxed_when_unicode_style_true():
     session = FakeSession(keys=[" "], width=80)
     lines = ["First help line", "Second help line"]
     asyncio.run(show_help(session, "Help", lines, unicode_style=True))
-    output = _raw_text(session)
+    output = _visible(_raw_text(session))
 
     assert "╭── Help " in output
     assert "│  First help line" in output
@@ -253,12 +262,26 @@ def test_show_help_boxed_when_unicode_style_true():
     assert "╯" in output
 
 
+def test_show_help_side_borders_are_colored_like_the_top_and_bottom_rule():
+    """Dogfood report: the side "│" characters used to render as plain,
+    uncolored text while the top/bottom rule and title used header_color
+    -- an inherited shortcut from an earlier fix, not a deliberate design
+    choice. Now matches netbbs.rendering.layout.double_frame's own
+    side-border convention."""
+    session = FakeSession(keys=[" "], width=80)
+    asyncio.run(show_help(session, "Help", ["First help line"], unicode_style=True, header_color=HEADER_COLOR))
+    output = _raw_text(session)
+
+    colored_border = colored("│", fg_color=HEADER_COLOR, bold=True)
+    assert output.count(colored_border) >= 2
+
+
 def test_show_help_wraps_long_lines_inside_frame():
     session = FakeSession(keys=[" "], width=60)
     # Long help line that exceeds width 60
     long_line = "This is an exceptionally long help line that definitely needs wrapping within the frame bounds."
     asyncio.run(show_help(session, "Help", [long_line], unicode_style=True))
-    output = _raw_text(session)
+    output = _visible(_raw_text(session))
 
     # Long line should have wrapped into multiple lines, each beginning with "│  "
     boxed_lines = [l for l in output.splitlines() if l.startswith("│  ")]
