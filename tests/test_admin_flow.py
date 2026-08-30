@@ -1463,7 +1463,10 @@ def test_shutdown_screen_triggers_the_sequence_as_a_background_task(db, lane, sy
         # afterward -- "does disconnect_all() reach a still-mid-read
         # session" is already covered thoroughly in tests/test_shutdown.py
         # (via a session that genuinely blocks), not re-proven here.
-        admin_session = FakeSession(["n", "s", "i", "", "y", "b", "b", "b"])
+        # "m" toggles the Mode field to immediate, "s" saves (confirming
+        # with "y") -- the draft-editor field screen's own hotkeys, not
+        # the old fixed prompt chain.
+        admin_session = FakeSession(["n", "s", "m", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1488,7 +1491,7 @@ def test_shutdown_screen_with_custom_message_replaces_the_default(db, lane, syso
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["n", "s", "i", "Emergency patch, back shortly.", "y", "b", "b", "b"]
+            ["n", "s", "m", "c", "Emergency patch, back shortly.", "s", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -1508,12 +1511,10 @@ def test_shutdown_screen_declined_confirmation_does_nothing(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        # "g" (graceful) now also prompts for a delay (blank keeps the
-        # configured default) before the custom-message prompt -- design
-        # doc, node management: [S]hutdown now behaves exactly like
-        # [D]rain, an operator-chosen delay rather than a fixed config
-        # value with no override.
-        admin_session = FakeSession(["n", "s", "g", "", "", "n", "b", "b", "b"])
+        # Graceful is already the field screen's default, so no field
+        # needs touching -- "s" saves straight away, then declines the
+        # final "Confirm graceful shutdown...?" with "n".
+        admin_session = FakeSession(["n", "s", "s", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1599,7 +1600,7 @@ def test_drain_screen_triggers_the_sequence_as_a_background_task(db, lane, sysop
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["n", "d", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "d", "0", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -1617,7 +1618,7 @@ def test_drain_screen_never_disconnects_the_issuing_sysop(db, lane, sysop):
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "d", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "d", "0", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1639,7 +1640,7 @@ def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
         await asyncio.sleep(0)
 
         admin_session = FakeSession(
-            ["n", "d", "0", "Reconnect after the upgrade.", "y", "b", "b", "b"]
+            ["n", "d", "d", "0", "c", "Reconnect after the upgrade.", "s", "y", "b", "b", "b"]
         )
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
@@ -1653,13 +1654,17 @@ def test_drain_screen_with_custom_message_replaces_the_default(db, lane, sysop):
 
 
 def test_drain_screen_rejects_a_negative_delay(db, lane, sysop):
-    session = FakeSession(["n", "d", "-5", "b", "b", "b"])
+    # Unlike the old linear chain, an invalid field entry no longer
+    # aborts the whole screen -- it just leaves the Delay field
+    # unchanged and redraws, so this needs one more "b" than a
+    # successful run to actually leave the draft screen afterward.
+    session = FakeSession(["n", "d", "d", "-5", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "cannot be negative" in _written_text(session)
 
 
 def test_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
-    session = FakeSession(["n", "d", "soon", "b", "b", "b"])
+    session = FakeSession(["n", "d", "d", "soon", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=_node_controls()))
     assert "Not a number" in _written_text(session)
 
@@ -1673,7 +1678,7 @@ def test_drain_screen_declined_confirmation_does_nothing(db, lane, sysop):
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["n", "d", "0", "", "n", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "s", "n", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1730,8 +1735,9 @@ def test_drain_screen_declining_the_cancel_offer_replaces_the_existing_schedule(
         node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message="old message")
 
         # "d" -> already-scheduled notice -> "n" (don't cancel, continue)
-        # -> the ordinary delay/message/confirm prompts for a new one.
-        admin_session = FakeSession(["n", "d", "n", "0", "", "y", "b", "b", "b"])
+        # -> the draft field screen for a new one: "d"/"0" sets Delay,
+        # "s"/"y" saves and confirms.
+        admin_session = FakeSession(["n", "d", "n", "d", "0", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1758,7 +1764,7 @@ def test_shutdown_screen_now_prompts_for_a_delay_like_drain_does(db, lane, sysop
         node_controls = _node_controls()
         registry = node_controls.session_registry
 
-        admin_session = FakeSession(["n", "s", "g", "0.2", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "d", "0.2", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)

@@ -3159,3 +3159,18 @@ correct by the standalone script instead. If this resurfaces --
 especially if a *real* deadlock shows up outside tests -- start from
 this exact combination (arrow-key nav + multi-segment row color) rather
 than re-deriving it from scratch.
+
+Running the test suite from inside a `.claude/worktrees/...` checkout
+with the repo's shared `.venv` can silently exercise the *main*
+checkout's code instead of the worktree's own edits: `netbbs` is
+installed editable, and that editable pointer resolves to the main
+working tree's `src/`, not whichever worktree the interpreter happens
+to be invoked from -- `python -c "import netbbs.net.admin_flow as m;
+print(m.__file__)"` from inside a worktree confirmed this directly. A
+worktree-local edit that "doesn't take effect" under a normal `pytest`
+invocation there is the first thing to suspect, not a broken edit --
+verify with that same one-liner before debugging further. Fixed for a
+given invocation by prepending the worktree's own `src/` via
+`PYTHONPATH` (`PYTHONPATH="$(pwd)/src" .venv/Scripts/python.exe -m
+pytest ...`), which takes priority over the editable install's
+site-packages entry.

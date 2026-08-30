@@ -4470,6 +4470,71 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
     )
 
 
+def _delay_seconds_field(key: str = "delay_seconds") -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """Non-negative, always-has-a-value seconds field for `[S]hutdown`/
+    `[D]rain`'s own draft screens. Unlike `_optional_int_field`, there is
+    no "blank/'none'" clearing convention here -- a delay is never
+    absent, only zero -- and unlike the old linear prompt this replaces,
+    an invalid or negative entry leaves the draft's existing value
+    untouched and says why, rather than aborting the whole screen (the
+    dogfood-reported bug: mistyping the delay used to discard the
+    mode/message already chosen)."""
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        await session.write(f"Delay in seconds [{draft[key]:g}]: ")
+        raw = (await session.read_line()).strip()
+        if not raw:
+            return
+        try:
+            value = float(raw)
+        except ValueError:
+            await session.write_line(colored("Not a number.", fg_color=MUTED_COLOR))
+            return
+        if value < 0:
+            await session.write_line(colored("Delay cannot be negative.", fg_color=MUTED_COLOR))
+            return
+        draft[key] = value
+
+    return prompt
+
+
+_SHUTDOWN_DRAIN_MODES = ["graceful", "immediate"]
+
+
+def _shutdown_field_specs() -> list[FieldSpec]:
+    """Mode/delay/message, gathered as an independently addressable
+    draft (dogfood report) instead of the fixed linear chain
+    `_shutdown_screen` used to walk -- see `_delay_seconds_field`'s own
+    docstring for the specific bug this fixes."""
+    return [
+        FieldSpec(
+            key="mode", hotkey="m", menu_text=menu_key("M", "ode"), label="Mode",
+            render=lambda d: d["mode"],
+            prompt=choice_field("mode", _SHUTDOWN_DRAIN_MODES),
+            step=choice_step("mode", _SHUTDOWN_DRAIN_MODES),
+            brief="Graceful (wait) or immediate",
+            help=(
+                "Graceful warns everyone, then waits the delay below before disconnecting "
+                "them. Immediate disconnects everyone right away, ignoring the delay."
+            ),
+        ),
+        FieldSpec(
+            key="delay_seconds", hotkey="d", menu_text=menu_key("D", "elay"), label="Delay",
+            render=lambda d: f"{d['delay_seconds']:g}s" if d["mode"] == "graceful" else "n/a (immediate)",
+            prompt=_delay_seconds_field(),
+            brief="Seconds before disconnecting",
+            help="How long to wait, once triggered, before disconnecting everyone. Only used in graceful mode.",
+        ),
+        FieldSpec(
+            key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
+            render=lambda d: d.get("message") or "(default message)",
+            prompt=text_field("message"),
+            brief="Shown instead of the default notice",
+            help='Broadcast to every connected session instead of the default "going down" notice.',
+        ),
+    ]
+
+
 async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     """
     Design doc -- node management, Thiesi's own request: now behaves
@@ -4492,26 +4557,37 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
     responsible for never reaching its own `schedule()` call in that
     case. A SysOp-created shutdown remains fully cancellable/replaceable
     exactly as before.
+
+    Dogfood report: the mode/delay/message gather below used to be a
+    fixed linear chain (mode, then delay, then message, then a final
+    confirm) with no way back -- mistyping the delay discarded the mode
+    already chosen and aborted the whole screen. Now an `edit_resource_
+    draft` field screen (see `_shutdown_field_specs`): every field is
+    independently addressable and redisplayed with its current value,
+    and a bad entry only rejects that one field. The final "Confirm
+    {mode} shutdown?" step survives inside `save` below, unlike every
+    other `edit_resource_draft` caller's own `save` -- this one
+    disconnects every session, including the acting SysOp's own, so the
+    field summary alone isn't treated as confirmation enough; declining
+    it exits this screen with nothing scheduled, same as `[B]ack`.
     """
     if node_controls.shutdown_scheduler.is_scheduled():
         remaining = node_controls.shutdown_scheduler.remaining_seconds()
         if not node_controls.shutdown_scheduler.is_cancellable():
             source_label = _shutdown_source_label(node_controls.shutdown_scheduler.source())
-            await session.write_line(
-                colored(
-                    f"\r\nA shutdown was triggered externally ({source_label}) and is already "
-                    f"in progress -- going down in {format_remaining_seconds(remaining)}. It "
-                    "cannot be cancelled or replaced from here.",
-                    fg_color=ALERT_COLOR, bold=True,
-                )
+            await _write_wrapped_subtitle(
+                session,
+                f"\r\nA shutdown was triggered externally ({source_label}) and is already "
+                f"in progress -- going down in {format_remaining_seconds(remaining)}. It "
+                "cannot be cancelled or replaced from here.",
+                color=ALERT_COLOR, bold=True,
             )
             return
-        await session.write_line(
-            colored(
-                f"\r\nA shutdown is already scheduled -- going down in "
-                f"{format_remaining_seconds(remaining)}.",
-                fg_color=ALERT_COLOR, bold=True,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"\r\nA shutdown is already scheduled -- going down in "
+            f"{format_remaining_seconds(remaining)}.",
+            color=ALERT_COLOR, bold=True,
         )
         if await prompt_yes_no(session, "Cancel it?", default=False):
             node_controls.shutdown_scheduler.cancel()
@@ -4524,68 +4600,70 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
             colored("Continuing -- scheduling a new shutdown will replace it.", fg_color=MUTED_COLOR)
         )
 
-    await session.write_line(
-        colored(
-            "\r\nThis locks out new logins and warns every connected session "
-            "(including this one) immediately. Everyone is then disconnected -- "
-            "either right away, or after a grace period, depending on your choice "
-            "below. This cannot be undone once the grace period actually elapses.",
-            fg_color=MUTED_COLOR,
+    await _write_wrapped_subtitle(
+        session,
+        "\r\nThis locks out new logins and warns every connected session "
+        "(including this one) immediately. Everyone is then disconnected -- "
+        "either right away, or after a grace period, depending on the mode "
+        "below. This cannot be undone once the grace period actually elapses.",
+    )
+
+    draft: dict = {
+        "mode": "graceful", "delay_seconds": node_controls.graceful_delay_seconds, "message": None,
+    }
+
+    async def save(draft: dict) -> bool | None:
+        graceful = draft["mode"] == "graceful"
+        delay_seconds = draft["delay_seconds"]
+        message = draft["message"]
+        mode_label = "graceful" if graceful else "immediate"
+        confirm_detail = f" in {delay_seconds:g}s" if graceful else ""
+        if not await prompt_yes_no(session, f"Confirm {mode_label} shutdown{confirm_detail}?", default=False):
+            await session.write_line("Cancelled.")
+            return None
+
+        # Logged before triggering, not after: the sequence disconnects
+        # this very session too (see run_shutdown_sequence's own docstring
+        # on why it's fired as a background task rather than awaited
+        # inline), so there's no guarantee this session survives long
+        # enough afterward to still be able to write an audit row.
+        await lane.run(
+            record_action, actor=actor, action="trigger_shutdown",
+            detail=f"graceful={graceful}, delay_seconds={delay_seconds}, message={message!r}",
         )
-    )
-    await session.write("Graceful (wait, then disconnect) or immediate? [G/i]: ")
-    mode_answer = (await session.read_line()).strip().lower()
-    graceful = mode_answer != "i"
-
-    delay_seconds = node_controls.graceful_delay_seconds
-    if graceful:
-        await session.write(f"Delay in seconds before disconnecting [{int(node_controls.graceful_delay_seconds)}]: ")
-        delay_raw = (await session.read_line()).strip()
-        try:
-            delay_seconds = float(delay_raw) if delay_raw else node_controls.graceful_delay_seconds
-        except ValueError:
-            await session.write_line("Not a number -- cancelled.")
-            return
-        if delay_seconds < 0:
-            await session.write_line("Delay cannot be negative -- cancelled.")
-            return
-
-    await session.write("Custom broadcast message (leave blank for the default): ")
-    message_raw = (await session.read_line()).strip()
-    message = message_raw or None
-
-    mode_label = "graceful" if graceful else "immediate"
-    if not await prompt_yes_no(session, f"Confirm {mode_label} shutdown?", default=False):
-        await session.write_line("Cancelled.")
-        return
-
-    # Logged before triggering, not after: the sequence disconnects
-    # this very session too (see run_shutdown_sequence's own docstring
-    # on why it's fired as a background task rather than awaited
-    # inline), so there's no guarantee this session survives long
-    # enough afterward to still be able to write an audit row.
-    await lane.run(
-        record_action, actor=actor, action="trigger_shutdown",
-        detail=f"graceful={graceful}, delay_seconds={delay_seconds}, message={message!r}",
-    )
-    _logger.info(
-        "shutdown scheduled by %s (graceful=%s, delay_seconds=%s)", actor.username, graceful, delay_seconds
-    )
-    task = asyncio.create_task(
-        run_shutdown_sequence(
-            graceful=graceful,
-            session_registry=node_controls.session_registry,
-            maintenance=node_controls.maintenance,
-            delay_seconds=delay_seconds,
-            shutdown_event=node_controls.shutdown_event,
-            message=message,
+        _logger.info(
+            "shutdown scheduled by %s (graceful=%s, delay_seconds=%s)", actor.username, graceful, delay_seconds
         )
+        task = asyncio.create_task(
+            run_shutdown_sequence(
+                graceful=graceful,
+                session_registry=node_controls.session_registry,
+                maintenance=node_controls.maintenance,
+                delay_seconds=delay_seconds,
+                shutdown_event=node_controls.shutdown_event,
+                message=message,
+            )
+        )
+        loop = asyncio.get_running_loop()
+        node_controls.shutdown_scheduler.schedule(
+            task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=message
+        )
+        await session.write_line("Shutdown sequence started.")
+        return True
+
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Schedule shutdown",
+        fields=_shutdown_field_specs(), draft=draft, save=save,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
     )
-    loop = asyncio.get_running_loop()
-    node_controls.shutdown_scheduler.schedule(
-        task, deadline=loop.time() + (delay_seconds if graceful else 0.0), message=message
-    )
-    await session.write_line("Shutdown sequence started.")
 
 
 # -- maintenance mode and drain (design doc §13.8) --------------------------
@@ -4627,6 +4705,29 @@ async def _maintenance_mode_screen(session: Session, lane: DatabaseLane, actor: 
     await session.write_line(f"Maintenance mode is now {'ON' if not currently_on else 'off'}.")
 
 
+def _drain_field_specs() -> list[FieldSpec]:
+    """Delay/message, gathered as an independently addressable draft
+    (dogfood report) instead of the fixed linear chain `_drain_screen`
+    used to walk -- `_shutdown_field_specs`'s own two-field subset,
+    since drain has no graceful/immediate mode of its own."""
+    return [
+        FieldSpec(
+            key="delay_seconds", hotkey="d", menu_text=menu_key("D", "elay"), label="Delay",
+            render=lambda d: f"{d['delay_seconds']:g}s",
+            prompt=_delay_seconds_field(),
+            brief="Seconds before disconnecting",
+            help="How long to wait, once triggered, before disconnecting every non-SysOp session.",
+        ),
+        FieldSpec(
+            key="message", hotkey="c", menu_text=menu_key("C", "ustom message"), label="Custom message",
+            render=lambda d: d.get("message") or "(default message)",
+            prompt=text_field("message"),
+            brief="Shown instead of the default notice",
+            help='Broadcast to every non-SysOp session instead of the default "going down" notice.',
+        ),
+    ]
+
+
 async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     """
     Warns every currently-connected non-SysOp session, then disconnects
@@ -4642,15 +4743,23 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
     is now explicitly offered a chance to cancel it first, rather than
     silently launching a second, uncoordinated countdown racing the
     first one -- see `SequenceScheduler`'s own docstring.
+
+    Dogfood report: the delay/message gather below used to be a fixed
+    linear chain with no way back -- mistyping the delay discarded
+    whatever message had already been typed and aborted the whole
+    screen. Now an `edit_resource_draft` field screen (see
+    `_drain_field_specs`), same shape and same reasoning as
+    `_shutdown_screen`'s own conversion -- including the final "Confirm
+    drain?" step kept inside `save` below rather than folded away, since
+    this disconnects every non-SysOp session at once.
     """
     if node_controls.drain_scheduler.is_scheduled():
         remaining = node_controls.drain_scheduler.remaining_seconds()
-        await session.write_line(
-            colored(
-                f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
-                f"{format_remaining_seconds(remaining)}.",
-                fg_color=ALERT_COLOR, bold=True,
-            )
+        await _write_wrapped_subtitle(
+            session,
+            f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
+            f"{format_remaining_seconds(remaining)}.",
+            color=ALERT_COLOR, bold=True,
         )
         if await prompt_yes_no(session, "Cancel it?", default=False):
             node_controls.drain_scheduler.cancel()
@@ -4662,48 +4771,54 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
             colored("Continuing -- scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
         )
 
-    await session.write_line(
-        colored(
-            "\r\nThis warns every connected non-SysOp session, waits, then disconnects "
-            "them. SysOp sessions (including this one) are never warned or "
-            "disconnected by this. The node itself is not shut down, and new non-SysOp "
-            "logins are not blocked either -- turn on [M]aintenance mode too if you want "
-            "the node to actually stay empty afterward.",
-            fg_color=MUTED_COLOR,
+    await _write_wrapped_subtitle(
+        session,
+        "\r\nThis warns every connected non-SysOp session, waits, then disconnects "
+        "them. SysOp sessions (including this one) are never warned or "
+        "disconnected by this. The node itself is not shut down, and new non-SysOp "
+        "logins are not blocked either -- turn on [M]aintenance mode too if you want "
+        "the node to actually stay empty afterward.",
+    )
+
+    draft: dict = {"delay_seconds": 60.0, "message": None}
+
+    async def save(draft: dict) -> bool | None:
+        delay_seconds = draft["delay_seconds"]
+        message = draft["message"]
+        if not await prompt_yes_no(
+            session, f"Confirm drain (disconnect non-SysOps after {delay_seconds:g}s)?", default=False
+        ):
+            await session.write_line("Cancelled.")
+            return None
+
+        await lane.run(
+            record_action, actor=actor, action="trigger_drain",
+            detail=f"delay_seconds={delay_seconds}, message={message!r}",
         )
-    )
-    await session.write("Delay in seconds before disconnecting [60]: ")
-    delay_raw = (await session.read_line()).strip()
-    try:
-        delay_seconds = float(delay_raw) if delay_raw else 60.0
-    except ValueError:
-        await session.write_line("Not a number -- cancelled.")
-        return
-    if delay_seconds < 0:
-        await session.write_line("Delay cannot be negative -- cancelled.")
-        return
-
-    await session.write("Custom broadcast message (leave blank for the default): ")
-    message_raw = (await session.read_line()).strip()
-    message = message_raw or None
-
-    if not await prompt_yes_no(session, f"\r\nConfirm drain (disconnect non-SysOps after {int(delay_seconds)}s)?", default=False):
-        await session.write_line("Cancelled.")
-        return
-
-    await lane.run(
-        record_action, actor=actor, action="trigger_drain",
-        detail=f"delay_seconds={delay_seconds}, message={message!r}",
-    )
-    _logger.info("drain scheduled by %s (delay_seconds=%s)", actor.username, delay_seconds)
-    task = asyncio.create_task(
-        run_drain_sequence(
-            session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
+        _logger.info("drain scheduled by %s (delay_seconds=%s)", actor.username, delay_seconds)
+        task = asyncio.create_task(
+            run_drain_sequence(
+                session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
+            )
         )
+        loop = asyncio.get_running_loop()
+        node_controls.drain_scheduler.schedule(task, deadline=loop.time() + delay_seconds, message=message)
+        await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {delay_seconds:g}s.")
+        return True
+
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Schedule drain",
+        fields=_drain_field_specs(), draft=draft, save=save,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
     )
-    loop = asyncio.get_running_loop()
-    node_controls.drain_scheduler.schedule(task, deadline=loop.time() + delay_seconds, message=message)
-    await session.write_line(f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s.")
 
 
 async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
@@ -4901,7 +5016,7 @@ async def _banners_and_mastheads_menu(session: Session, lane: DatabaseLane, acto
 
 
 async def _write_wrapped_subtitle(
-    session: Session, text: str, *, color: int | tuple[int, int, int] = MUTED_COLOR
+    session: Session, text: str, *, color: int | tuple[int, int, int] = MUTED_COLOR, bold: bool = False
 ) -> None:
     """Word-wrap a screen's plain-text descriptive subtitle to the real
     terminal width before coloring it, one wrapped physical line at a
@@ -4913,9 +5028,14 @@ async def _write_wrapped_subtitle(
     (e.g. "No other .ans files found in {directory}...") -- a long path
     is exactly the unbreakable-token case that must overflow rather
     than get cut mid-character (dogfood report, caught by a test path
-    long enough to trigger it)."""
+    long enough to trigger it).
+
+    `bold` (dogfood report: `[S]hutdown`/`[D]rain`'s own alert-colored
+    warning lines had this exact same unwrapped-raw-`colored()` bug,
+    just with `bold=True` on top) -- passed straight through to
+    `colored()` for a caller that needs its wrapped lines bold too."""
     for wrapped in wrap_to_width(text, session.terminal_width, break_long_words=False) or [text]:
-        await session.write_line(colored(wrapped, fg_color=color))
+        await session.write_line(colored(wrapped, fg_color=color, bold=bold))
 
 
 async def _draw_banners_and_mastheads_menu(
