@@ -3728,6 +3728,47 @@ def test_mastheads_submenu_ctrl_h_shows_generic_help(db, lane, sysop):
 # -- main-menu masthead (issue #161) ---------------------------------------
 
 
+def test_main_menu_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop):
+    """Dogfood report: unlike its sibling screens, this subtitle was
+    written after `detail` via a bare `colored(...)` call rather than
+    `_write_wrapped_subtitle` -- a different-enough shape (inline "\\r\\n"
+    prefix instead of a leading blank write_line) that an earlier
+    per-function audit for the same class of bug missed it."""
+    session = FakeSession(["s", "m", "m", "m", "b", "b", "b", "b", "b"])
+    session.terminal_width = 60
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    full_sentence = (
+        "Shown above the main menu, which stays fully live/dynamic underneath "
+        "it -- disabled by default, no effect on any existing node."
+    )
+    assert full_sentence not in text
+    assert "Shown above the main menu" in text
+    for line in text.split("\n"):
+        assert len(line.rstrip("\r")) <= 60
+
+
+def test_board_list_masthead_subtitle_wraps_on_a_narrow_terminal(db, lane, sysop):
+    """Same gap, same fix, different screen (dogfood report named this
+    one specifically)."""
+    session = FakeSession(["s", "m", "m", "o", "b", "b", "b", "b", "b"])
+    session.terminal_width = 60
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    full_sentence = (
+        "Shown above every board-browsing view -- the top level, a category, or a "
+        "Community/Uncategorized scope."
+    )
+    assert full_sentence not in text
+    assert "Shown above every board-browsing view" in text
+    for line in text.split("\n"):
+        assert len(line.rstrip("\r")) <= 60
+
+
 def test_masthead_enable_with_no_file_present_shows_friendly_error_and_leaves_flag_disabled(db, lane, sysop):
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled
 

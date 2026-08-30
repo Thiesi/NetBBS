@@ -5474,12 +5474,11 @@ async def _draw_main_menu_banner_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
             header_color=await lane.run(effective_header_color_256), node_name_gradient=session.node_name_gradient))
     await session.write_line(detail)
-    await session.write_line(
-        "\r\n" + colored(
-            "Shown above the main menu, which stays fully live/dynamic underneath "
-            "it -- disabled by default, no effect on any existing node.",
-            fg_color=MUTED_COLOR,
-        )
+    await session.write_line("")
+    await _write_wrapped_subtitle(
+        session,
+        "Shown above the main menu, which stays fully live/dynamic underneath "
+        "it -- disabled by default, no effect on any existing node.",
     )
     await session.write_line(
         "\r\n" + _menu_row(
@@ -5883,9 +5882,10 @@ async def _draw_logoff_banner_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored("Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
-                "timeout, kick, or account revocation.", fg_color=MUTED_COLOR)
+    await _write_wrapped_subtitle(
+        session,
+        "Shown above the ordinary Goodbye message on an intentional Log off only -- never on an idle "
+        "timeout, kick, or account revocation.",
     )
     await session.write_line(detail)
     await session.write_line(
@@ -6488,12 +6488,10 @@ async def _draw_new_account_banner_after_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Banners"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored(
-            "Shown once self-service signup succeeds -- covers both an immediate login and a "
-            "pending-approval account, alongside the existing message either way.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session,
+        "Shown once self-service signup succeeds -- covers both an immediate login and a "
+        "pending-approval account, alongside the existing message either way.",
     )
     await session.write_line(detail)
     await session.write_line(
@@ -6873,9 +6871,10 @@ async def _draw_board_list_masthead_menu(
             breadcrumb=(session.node_display_name, "System", "Mastheads & banners", "Mastheads"), width=session.terminal_width,
             clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
             node_name_gradient=session.node_name_gradient))
-    await session.write_line(
-        colored("Shown above every board-browsing view -- the top level, a category, or a "
-                "Community/Uncategorized scope.", fg_color=MUTED_COLOR)
+    await _write_wrapped_subtitle(
+        session,
+        "Shown above every board-browsing view -- the top level, a category, or a "
+        "Community/Uncategorized scope.",
     )
     await session.write_line(detail)
     await session.write_line(
