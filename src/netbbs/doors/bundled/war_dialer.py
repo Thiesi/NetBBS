@@ -866,7 +866,7 @@ def draw_menu(p: Palette, has_turns: bool) -> None:
     out_line()
     if has_turns:
         out_line(f"  {p.gold}[T]{RESET}rade Warez   {p.gold}[C]{RESET}rew Recruit   {p.gold}[J]{RESET}ob   "
-                  f"{p.gold}[R]{RESET}aid   {p.gold}[X]{RESET} Root Exchange")
+                  f"{p.gold}[R]{RESET}aid   Root E{p.gold}[x]{RESET}change")
     else:
         out_line(f"  {p.muted}Out of turns for today.{RESET}")
     out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[Q]{RESET}uit")
