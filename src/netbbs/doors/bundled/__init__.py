@@ -68,6 +68,16 @@ BUNDLED_DOORS: tuple[BundledDoor, ...] = (
         ),
         resource="voidrunner.py",
     ),
+    BundledDoor(
+        key="war_dialer",
+        name="War Dialer",
+        description=(
+            "Asynchronous, play-by-post multiplayer: rival 80s/90s BBS-scene crews fight over "
+            "ten shared phone exchanges. Actions resolve instantly against a shared world; find "
+            "out what happened to you while you were away on your next login. Four-week seasons."
+        ),
+        resource="war_dialer.py",
+    ),
 )
 
 
