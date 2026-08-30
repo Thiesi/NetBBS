@@ -4872,6 +4872,77 @@ peers... stays explicitly deferred to whenever Phase 5 starts" — is
 updated alongside this decision: Phase 5 has been active for a while now,
 and this issue is that decision, not a further deferral of it.
 
+### Issue #200 — War Dialer: async multiplayer BBS-crew door game
+
+**Goal:** decide the design for a second door-game genre alongside
+Voidrunner's single-player persistent model — an asynchronous,
+play-by-post multiplayer game in the LORD/TradeWars BBS-door lineage,
+where actions taken by one player affect another player's persistent
+state regardless of whether that player is online, and the target finds
+out via a summary on their next login.
+
+**Decision 1 (locked in) — no platform or door-API changes.** §Phase 7
+already states doors run with real filesystem access and no enforced
+isolation. This game owns its own SQLite database (WAL mode) keyed by
+the door API's stable numeric user ID, the same pattern Voidrunner
+already uses for its own save state. Cross-player shared state is
+therefore the door's own responsibility, not a new NetBBS capability —
+issue #63's "single-player, session-scoped only" boundary for the
+platform itself is unaffected.
+
+**Decision 2 (locked in) — resolution is synchronous, not tick-based.**
+Every action resolves inside the acting player's own live door session.
+No cron/daemon, matching the fact that a door process only exists while
+someone is logged in. Passive accrual (territory income, Heat decay) is
+computed lazily from elapsed wall-clock time whenever next read, the
+standard idle-game pattern, rather than requiring a background tick.
+
+**Decision 3 (locked in) — theme is 80s/90s BBS-scene hacker/phreaker
+crews, not a generic crime-syndicate reskin.** Rival crews (Legion of
+Doom/Masters of Deception energy) fighting over "exchanges" (phone
+NPA-NXX prefixes); "Heat" is literal federal attention
+(Sundevil-era Secret Service/FBI); this reads as the platform's own
+history rather than the genre's default reskin, which every existing
+Discord clone already uses.
+
+**Decision 4 (locked in) — Rank is a single, monotonic metric doing
+double duty as leaderboard score and PvP bracket gate.** `crew×10 +
+exchanges_controlled×500 + successful_raids×25 + successful_jobs×15`,
+tiers Newbie/Wannabe/Script Kiddie/Hacker/Elite/Legend. Never decreasing
+within a season was the deciding constraint: a raw balance that could
+drop would let a strong player deliberately sandbag into a weaker
+bracket to prey on newcomers. Direct PvP (Raid) is gated to your own
+tier ±1; territory contests (Root the Exchange) are intentionally
+*not* gated, since a district's defense is the controller's committed
+garrison rather than their full Rank, keeping territory contestable by
+newcomers even against a top-bracket controller.
+
+**Decision 5 (locked in) — seasons (4 weeks), separate from Rank
+brackets, because they solve a different problem.** Brackets prevent
+moment-to-moment exploitation (a veteran farming a specific weak
+player); they do nothing about long-run stagnation, where early players
+simply compound the largest crews/territory indefinitely and a
+newcomer has no on-ramp. A season boundary resets
+Rank/cash/crew/exchange-control, flavored in-fiction as a Fed crackdown
+wiping the scene's boards.
+
+**Decision 6 (locked in) — bounded action economy and a self-limiting
+risk curve, no separate anti-snowball mechanic.** 15 turns/day on a
+rolling 24h window. Heat gain per action (Trade Warez +2, Root Exchange
++8, Raid +10, Run a Job +15) decays −5/real-hour; above 80, each
+heat-gaining action rolls a bust chance of `(Heat−80)×2%`, capped ~40%,
+costing 25% cash and 20% crew and resetting Heat to 0. Success chance
+for both PvE and PvP actions is `attacker_crew / (attacker_crew +
+defender_crew)`, clamped to [10%, 90%] so nothing is ever a guaranteed
+win or loss. New accounts get 48h Raid immunity, and no attacker may
+Raid the same target twice in a row without the target logging in
+between.
+
+Explicitly out of scope for v1: procedural exchange generation, a
+multi-resource economy, factions/alliances, and an item/weapon shop —
+plausible v2 additions once the core loop is proven, not part of this
+vertical. Full acceptance criteria on issue #200 itself.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
