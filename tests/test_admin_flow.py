@@ -5637,9 +5637,27 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
 
 
 def test_backup_status_shows_no_backup_yet_message(db, lane, sysop):
-    session = FakeSession(["s", "k", "b", "b"])
+    session = FakeSession(["s", "k", " ", "b", "b"])
     _run(session, lane, sysop)
     assert "No backup has been taken on this node yet." in _written_text(session)
+
+
+def test_backup_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
+    # GitHub issue #205 (2026-08-31 ReLink dogfood report: "the Backup
+    # hotkey does nothing"). Root cause: this screen's few lines of
+    # output returned straight into the SysOp console's own immediate
+    # redraw with no pause, unlike every other single-shot info screen
+    # in this module -- easy to read as "nothing happened" in a real
+    # terminal. Before the fix, "s","k","b" alone was enough to reach
+    # the very end (System menu's own [B]ack immediately following);
+    # confirms the fix by needing one extra keypress to get there: "b"
+    # now dismisses the new pause first, so a second "b" is needed to
+    # actually leave the System menu.
+    session = FakeSession(["s", "k", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Press any key to continue..." in text
+    assert "Return to the main menu" in text
 
 
 def test_backup_status_shows_last_backup_summary(db, lane, sysop):
@@ -5649,7 +5667,7 @@ def test_backup_status_shows_last_backup_summary(db, lane, sysop):
     destination = db.path.parent / "backup1"
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=destination)
 
-    session = FakeSession(["s", "k", "b", "b"])
+    session = FakeSession(["s", "k", " ", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Last backup:" in text
@@ -5665,7 +5683,7 @@ def test_backup_status_shows_recent_backup_history(db, lane, sysop):
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup2")
 
-    session = FakeSession(["s", "k", "b", "b"])
+    session = FakeSession(["s", "k", " ", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
@@ -5679,7 +5697,7 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
     identity_dir = db.path.parent / "netbbs_identity"
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
 
-    session = FakeSession(["s", "k", "b", "b"])
+    session = FakeSession(["s", "k", " ", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Recent backups:" not in _written_text(session)

@@ -3579,6 +3579,18 @@ async def _backup_status_screen(session: Session, lane: DatabaseLane, actor: Use
             )
             await session.write_line(f"  {when}: {sanitize_text(run.outcome)}")
 
+    # Dogfood-reported bug, GitHub issue #205: unlike almost every other
+    # single-shot info screen in this module, this one returned straight
+    # to the SysOp console's own immediate redraw with no pause -- on a
+    # short screen like this (a handful of lines, easily fitting inside
+    # whatever the console dashboard above it already occupied), the
+    # redraw could land before a human had time to actually read it,
+    # reading as "the hotkey did nothing." Matches the "Press any key to
+    # continue..." + read_any_key() convention every other such screen
+    # in this module already uses.
+    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
 
 # -- node-wide display format/timezone -------------------------------------
 
