@@ -430,6 +430,18 @@ not advertised when their runtime context is unavailable. The dashboard can be
 refreshed explicitly, and action screens return to the console without losing
 the operator's place.
 
+Status context in the console is deliberately two-tier (issue #206). The five
+top-level consoles — Users, Content, Operations, Settings, Node — each show a
+full panel of what's actually relevant there: live counts, health badges, or
+current configuration values. Every nested screen beneath them that has no
+such panel of its own instead shows one condensed status line carrying just
+two facts obtainable without live node/session/Link state: last backup and
+last update-check outcome. This keeps recovery-relevant context visible while
+an operator is deep in a nested screen without threading live node state
+through call chains that don't otherwise need it, and without re-deriving a
+richer panel nested screens have no room to show. A screen that already has
+its own full panel does not also show the condensed line.
+
 ---
 
 ## 4. Accounts, authentication, identity, and addressing
@@ -5036,22 +5048,10 @@ one well-known anchor) is ever wanted, that discovery/ranking layer
 would need to be built fresh for this model rather than reusing the
 async one — an accepted, deferred cost, not an oversight.
 
-**Still open, not decided here — the issue's other acceptance criteria:**
-
-- New bounded-resource limits for live relay (concurrent bridged-session
-  caps, per-relay bandwidth/rate bounds distinct from existing per-
-  session frame-rate bounds, idle/abandoned-rendezvous timeout policy) —
-  matching every other remotely-influenced NetBBS resource's existing
-  bar, per this issue's own acceptance criteria. Not yet defined.
-- A stated, explicit answer for what two mutually-unreachable nodes
-  experience *today*, before this ships — not silent failure. Not yet
-  decided.
-- The rendezvous protocol's own exact frame shape at the relay (this
-  decision only settles that it stays outside the Noise/session layer
-  entirely, not its concrete design).
-
-Issue #168 stays open for these; only the double-hop-vs-proxy fork is
-resolved by this entry.
+Only the double-hop-vs-proxy fork is resolved by this entry — issue #168
+itself carries the remaining open acceptance criteria (bounded-resource
+limits, the pre-ship fallback experience, the rendezvous frame shape) and
+stays open for them.
 
 ### Issue #201 — managed netbbs.org subdomain + dynamic DNS
 
@@ -5065,21 +5065,30 @@ updater* (the node periodically checks its own public address and pushes
 a record update when it changes) — a board could plausibly want the
 first without the second (static IP, still wants a friendly subdomain).
 
-**Decision 1 (locked in) — offered via a prominent first-run prompt, not
-a silent default and not a toggle a SysOp has to go discover.** Two
-different concerns were in tension here and both are real: a bare
-opt-in-only design loses most of the feature's actual value (the whole
-pitch is removing first-run friction — a setting nobody discovers might
-as well not exist), but a silent default also isn't right, because this
-makes the node contact and register public presence with project
-infrastructure before the SysOp has decided whether they want that at
-all — a private/test node would get unexpectedly enrolled. This is the
-same *kind* of decision as Link participation itself, which already
-isn't automatic on a fresh node (seeds must be configured before a node
-reaches out and joins the mesh) — for internal consistency, "does my
-node touch external infrastructure and become discoverable" should stay
-an explicit choice here too, just asked at the moment it matters (first
-run) instead of requiring discovery later.
+**Decision 1 (locked in) — offered via a prominent prompt on first-SysOp
+bootstrap or first authenticated SysOp login, not a silent default and
+not a toggle a SysOp has to go discover.** Two different concerns were
+in tension here and both are real: a bare opt-in-only design loses most
+of the feature's actual value (the whole pitch is removing first-run
+friction — a setting nobody discovers might as well not exist), but a
+silent default also isn't right, because this makes the node contact and
+register public presence with project infrastructure before the SysOp
+has decided whether they want that at all — a private/test node would
+get unexpectedly enrolled. This is the same *kind* of decision as Link
+participation itself, which already isn't automatic on a fresh node
+(seeds must be configured before a node reaches out and joins the mesh)
+— for internal consistency, "does my node touch external infrastructure
+and become discoverable" should stay an explicit choice here too, just
+asked at the moment it matters instead of requiring discovery later.
+Code review follow-up (PR #218): a supported persistent deployment
+bootstraps its first SysOp via `netbbs.admin` and then runs headlessly
+under systemd/rc.d — a literal "first daemon run" prompt has no
+interactive input channel at that point and would either block startup
+or silently be skipped. The prompt is anchored to an existing
+interactive surface instead — first-SysOp bootstrap, or that SysOp's
+first authenticated login if bootstrap itself stays a non-interactive
+CLI invocation — with the accept/decline answer persisted so it is
+asked exactly once, not on every subsequent login.
 
 **Decision 2 (locked in) — the managed-service credential is a separate,
 auto-generated, per-registration secret, not the node's own Ed25519 key.**
@@ -5099,13 +5108,25 @@ credential keeps the two systems', and their compromise/recovery
 stories, fully independent.
 
 **Decision 3 (locked in) — name governance is first-come-first-served
-plus a reserved-word blocklist, no preventive identity vetting.**
-Matches how the project treats registration/content elsewhere (SysOp
-owns the trust decision, best-effort not gatekept) — requiring identity
-verification before registering a subdomain would add real friction
-against the feature's own point, for a comparatively low-stakes
-resource. The blocklist covers only the obvious cases (the project's own
-names, trademarks, slurs) — not a general dispute-avoidance mechanism.
+plus a reserved-word blocklist, no preventive identity vetting, capped
+at one registration per node.** Matches how the project treats
+registration/content elsewhere (SysOp owns the trust decision,
+best-effort not gatekept) — requiring identity verification before
+registering a subdomain would add real friction against the feature's
+own point, for a comparatively low-stakes resource. The blocklist covers
+only the obvious cases (the project's own names, trademarks, slurs) —
+not a general dispute-avoidance mechanism. Code review follow-up (PR
+#218): first-come-first-served plus a blocklist bounds *which* names can
+be taken but not *how many* — without a cap, one node could hold
+indefinitely many names, consuming DNS-provider records/cost and
+squatting desirable ones, kept alive for free by the same updater
+contact that already proves liveness for Decision 5. Capped at one name
+per node/registration-credential: this feature's own pitch is "my
+board's name," not a bulk registrar, and a SysOp who genuinely wants to
+rename releases the old one first (subject to Decision 5's cooldown
+below). Attempting a second registration while one is already held fails
+with a clear, visible error naming the existing registration — never a
+silent no-op.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5114,42 +5135,93 @@ project's current scale, there is no realistic alternative to a human
 and revoking if warranted. Documented explicitly so this isn't mistaken
 for a more automated process than actually exists.
 
-**Decision 5 (locked in) — abandoned names reclaim automatically; leaving
-voluntarily is instant self-service, no grace period.** Two distinct
-exit paths, deliberately different: a SysOp who chooses to leave the
-managed tier (switch providers, drop DNS entirely) can do so immediately
-at will — nothing security-critical depends on the hostname continuing
-to resolve correctly (see the grounding fact below), so there's no
-reason to gate a voluntary departure. A node that simply disappears
-(no successful liveness/update contact for an operator-chosen inactivity
-window) instead goes inert — not immediately reassignable — and is only
-genuinely released back to the pool after a further grace period,
-standard registrar practice, giving a node recovering from downtime a
-window to reclaim its own name automatically. Exact window/grace-period
-lengths are an implementation-time parameter, not fixed here.
+**Decision 5 (revised — see correction below) — both exit paths, voluntary
+release and abandoned-node reclaim, share one grace period before a name
+becomes assignable to a *different* registrant.** Originally designed as
+two deliberately different paths — instant, no-grace-period release for
+a SysOp who chooses to leave, versus a delayed reclaim for a node that
+simply disappears — on the reasoning that nothing security-critical
+depends on hostname continuity (see the superseded grounding fact below,
+kept for the record). A Codex review follow-up on PR #218 correctly
+identified that reasoning as wrong: **releasing or losing a managed name
+is a credential-theft risk, not just a UX inconvenience,** for exactly
+the callers Link's Noise handshake does not cover — Telnet and plain
+HTTP accept plaintext passwords with no protocol-level protection at
+all, and even an HTTPS caller can be handed a convincing fake board
+after the new registrant obtains a legitimate certificate for the name
+they now control. A caller who still has the old hostname bookmarked
+after reassignment can have credentials harvested by whoever holds the
+name now, entirely outside Link's own trust model. Unifying both exit
+paths under one shared cooldown (the same grace period the abandoned-
+node path already used) closes this for voluntary release too: a SysOp
+choosing to leave stops their own renewal and DNS-updater contact
+immediately, but the name itself does not become claimable by a
+*different* registrant until the cooldown elapses — matching standard
+registrar practice, and costing a deliberately-leaving SysOp nothing
+beyond the same short wait an accidentally-lapsed one already accepted.
+Exact cooldown length is an implementation-time parameter, not fixed
+here, but it is now the same parameter for both paths, not two.
 
-**Grounding fact that de-risks the whole migration/reassignment
-question:** §8.10 already states plainly that "the remote node label,
-endpoint, DNS name, and TCP address are never identity authority" —
-real node identity is verified by the Noise XX handshake against the
+**Superseded reasoning, kept for the record (see the correction
+above):** §8.10 states that "the remote node label, endpoint, DNS name,
+and TCP address are never identity authority" — real *Link* node
+identity is verified by the Noise XX handshake against the
 Ed25519-derived key, entirely independent of how a connection was
-dialed. So even a worst-case stale or reassigned DNS name cannot
-impersonate a node at the protocol level; a mismatched handshake simply
-fails. The residual exposure is UX confusion (a plain Telnet/web caller
-following an old bookmark lands somewhere unexpected), not a security
-hole — this is why decisions 4 and 5 above can stay this lightweight.
+dialed, so a reassigned DNS name genuinely cannot impersonate a node at
+the Link protocol level. That fact is still true and still the reason
+Decision 4's manual, complaint-driven dispute process can stay
+lightweight for *impersonation* claims. It is not, however, sufficient
+to make instant reassignment safe overall, because ordinary Telnet/web
+callers are never protected by that handshake in the first place —
+conflating "Link-protocol-safe" with "safe" was the error Decision 5's
+original wording made.
 
 **Settled without being a real fork:** how this interacts with existing
 Link node addressing — a full peer's descriptor already advertises a
 host/port (`advertised_host`/`advertised_port`) for other nodes to dial;
 a stable managed hostname is exactly what belongs there instead of a raw
 dynamic IP. No new addressing concept, no conflict with fingerprint-
-based node identity, which stays the actual trust root regardless.
+based node identity, which stays the actual trust root regardless. This
+covers only the Link-to-Link dial path, not the caller-facing address a
+human dials — see Decision 6.
+
+**Decision 6 (locked in) — the managed hostname's caller-facing address
+is standard ports on a fixed, documented convention, not a new discovery
+mechanism.** Code review follow-up (PR #218): an A/AAAA record alone
+cannot tell a human caller which transport or port to use, and
+`advertised_host`/`advertised_port` (Decision 5's "settled without being
+a real fork" above) describes only the Link HTTP listener — a
+Link-disabled or outgoing-only board has no dialable address there at
+all, so reusing it doesn't by itself deliver on "myboard.netbbs.org" as
+a caller-facing promise. Resolved by convention rather than a new
+protocol: a managed subdomain implies the node's Telnet (23), SSH (22),
+and web (443) listeners sit on their standard ports — the same
+assumption every plain hostname-based BBS address already carries. A
+board that cannot or will not run on standard ports keeps its managed
+DNS record (useful for the dynamic-IP-tracking half of this feature
+alone) but does not get a bare `myboard.netbbs.org` caller address as
+part of it; publishing a nonstandard port remains the SysOp's own
+responsibility to communicate, same as today.
+
+**Decision 7 (locked in) — the managed-DNS credential is in scope for
+node backup/restore, as a future addition to §13.4's contract, not a
+separate ceremony.** Code review follow-up (PR #218): §13.4 already
+treats a node's recoverable state as one atomic set of specific
+artifacts (database, node identity, SSH host key, banners) precisely
+because a partial backup silently loses things a SysOp needs after
+restoring from disk loss. The managed-DNS credential (Decision 2) is
+exactly that kind of durable node state — without it, a restored node
+cannot update, voluntarily release, or benefit from Decision 5's
+same-owner reclaim window for its existing registration. When this
+feature is implemented, its credential file joins §13.4's backup
+manifest as a thirteenth artifact, following the same plain-file-copy
+handling already used for node identity and the SSH host key; §13.4
+itself is not amended now, since the artifact does not exist yet.
 
 **Still open, implementation-time detail, not blocking this decision:**
 which DNS provider(s) the managed path actually runs on and what that
-costs to operate; the exact inactivity/grace-period window lengths for
-Decision 5.
+costs to operate; the exact cooldown length shared by Decision 5's two
+exit paths.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

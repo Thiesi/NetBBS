@@ -86,6 +86,21 @@ class LocalCLISession(Session):
     async def read_key(self, echo: bool = True) -> str:
         return await char_input.read_key(self, self.write, echo)
 
+    async def read_any_key(self, echo: bool = True) -> str:
+        # Code review follow-up (PR #214): without this override, the
+        # `Session.read_any_key` base default delegates to `read_key`
+        # above, which deliberately discards CR/LF as noise -- correct
+        # for a hotkey menu, wrong for a "press any key to continue"
+        # pause where Enter is the single most natural response.
+        # Telnet/SSH/web all override this the same way, routing to
+        # char_input.read_any_key instead; this session never did,
+        # despite sharing every other Session behavior with them (this
+        # class's own module docstring: "modeled directly on
+        # TelnetSession"). Without it, a SysOp running the standalone
+        # `python -m netbbs.admin` CLI specifically could press Enter at
+        # any such pause and see nothing happen.
+        return await char_input.read_any_key(self, self.write, echo)
+
     async def read_editor_key(self, *, distinguish_ctrl_h: bool = False) -> char_input.EditorKey:
         return await char_input.read_editor_key(self, distinguish_ctrl_h=distinguish_ctrl_h)
 

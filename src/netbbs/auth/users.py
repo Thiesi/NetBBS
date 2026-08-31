@@ -769,8 +769,19 @@ def clear_verify_key(db: Database, target: User, *, changed_by: User) -> User:
     "pubkey-only SysOp with no local recovery path" risk. Checked here,
     with a clear `AuthError`, rather than left to the constraint to
     reject blindly.
+
+    Code review follow-up (PR #213): the row update, the blocklist
+    re-key (`migrate_blocklist_key_to_local_user` -- see its own
+    docstring for why this must happen, not just the audit-log insert),
+    and the audit-log insert now run inside one `BEGIN IMMEDIATE`
+    transaction, same discipline `set_user_level`/`set_user_disabled`
+    already established -- an audit-insert failure (a concurrently
+    deleted actor, storage exhaustion) used to leave the key permanently
+    removed with no audit trail, since the row update committed on its
+    own before the separately-committing `record_action` ever ran.
     """
-    from netbbs.moderation.log import record_action
+    from netbbs.moderation.blocklist import migrate_blocklist_key_to_local_user
+    from netbbs.moderation.log import record_action_without_commit
 
     row = db.connection.execute(
         "SELECT password_hash FROM users WHERE id = ?", (target.id,)
@@ -780,11 +791,22 @@ def clear_verify_key(db: Database, target: User, *, changed_by: User) -> User:
             f"cannot remove {target.username!r}'s SSH key -- this account has no password set "
             "and would be locked out of the node entirely. Set a password first."
         )
-    db.connection.execute(
-        "UPDATE users SET public_key = NULL, fingerprint = NULL WHERE id = ?", (target.id,)
-    )
-    db.connection.commit()
-    record_action(db, actor=changed_by, action="clear_verify_key", target_user_id=target.id)
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        db.connection.execute(
+            "UPDATE users SET public_key = NULL, fingerprint = NULL WHERE id = ?", (target.id,)
+        )
+        if target.fingerprint is not None:
+            migrate_blocklist_key_to_local_user(
+                db, old_fingerprint=target.fingerprint, local_user_id=target.id
+            )
+        record_action_without_commit(db, actor=changed_by, action="clear_verify_key", target_user_id=target.id)
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
     return _get_user_by_id(db, target.id)
 
 

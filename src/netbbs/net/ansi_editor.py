@@ -385,7 +385,7 @@ async def _flush(session: Session, state: _EditorState) -> None:
     status = (
         f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
         f"fg={fg_label} bg={bg_label}  "
-        f"Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+O save  Ctrl+X quit  Ctrl+G help"
+        f"Ctrl+G help  Ctrl+O save  Ctrl+X quit  Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg"
     )
     # Must never exceed the canvas width: a status line long enough to
     # wrap (the palette names alone push this well past 80 columns,
@@ -393,6 +393,17 @@ async def _flush(session: Session, state: _EditorState) -> None:
     # wrapped remainder lands on the row below, which this function's
     # single clear_line() never touches, so it accumulates garbage
     # there on every redraw instead of being overwritten in place.
+    #
+    # Code review follow-up (PR #211): "Ctrl+G help" must survive that
+    # truncation, not just be present in the untruncated string -- at
+    # the default 80-column canvas the full line is well past 80
+    # columns even before accounting for the worst-case palette names
+    # ("Bright Magenta" on both fg and bg), so something has to be cut.
+    # Ordered so the least critical hints (the individual paint-tool
+    # keys, all re-discoverable via Ctrl+G itself) are what gets cut on
+    # a narrow terminal, never the help hint that exists specifically to
+    # be discoverable. Position/color state and "how do I get help"
+    # both fit comfortably within 80 columns even in the worst case.
     status = truncate(status, state.buffer.width)
     await session.write(move_cursor(state.buffer.height + _STATUS_ROW_OFFSET, 1))
     await session.write(clear_line())

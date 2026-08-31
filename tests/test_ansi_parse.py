@@ -98,6 +98,31 @@ def test_sgr_truecolor_does_not_corrupt_subsequent_state():
     assert buf.get_cell(0, 1) == Cell(char="Y")
 
 
+def test_sgr_out_of_range_truecolor_component_is_clamped_not_stored_raw():
+    # Code review follow-up (PR #211): an out-of-range but well-formed
+    # sequence like 38;2;999;1;2 used to be stored on the Cell
+    # unvalidated -- harmless at parse time, but this module's own
+    # promise of best-effort parsing that "still can't corrupt anything
+    # irrecoverably" broke the moment such a Cell reached full_render_
+    # ansi -> colored() -> fg_rgb(), which raises ValueError on an
+    # out-of-range component. Confirms the parser itself never produces
+    # an invalid value in the first place.
+    buf = ScreenBuffer(5, 1)
+    parse_ansi_into_buffer("\x1b[38;2;999;1;2mX", buf)
+    fg = buf.get_cell(0, 0).fg
+    assert isinstance(fg, tuple)
+    assert all(0 <= component <= 255 for component in fg)
+
+
+def test_sgr_out_of_range_256_color_index_is_clamped_not_stored_raw():
+    # Same class of bug, the pre-existing 256-color form -- 38;5;999 is
+    # equally well-formed-looking and equally capable of reaching fg(),
+    # which raises ValueError on an out-of-range palette index.
+    buf = ScreenBuffer(5, 1)
+    parse_ansi_into_buffer("\x1b[38;5;999mX", buf)
+    assert 0 <= buf.get_cell(0, 0).fg <= 255
+
+
 def test_sgr_reset_clears_style():
     buf = ScreenBuffer(5, 1)
     parse_ansi_into_buffer("\x1b[31;1mR\x1b[0mN", buf)

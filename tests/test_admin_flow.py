@@ -5562,6 +5562,64 @@ def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):
     assert "Node name: Roanoke" in text
 
 
+def test_settings_panel_rows_fit_a_narrow_terminal(db, lane, sysop):
+    # Code review follow-up (PR #215): double_frame explicitly does not
+    # truncate or wrap oversized content -- with the default node name
+    # and update-check state already close to filling a 40-column
+    # frame's 36 content columns, a configured node name or a longer
+    # update outcome pushed the right border past the terminal edge and
+    # corrupted the box. Confirms every rendered line stays within the
+    # frame's own width regardless.
+    from netbbs.config import set_node_display_name
+
+    set_node_display_name(db, "Quite Long Configured Node Name")
+    session = FakeSession(["s", "b", "b"])
+    session.terminal_width = 40
+    _run(session, lane, sysop)
+    for line in _visible(_written_text(session)).split("\r\n"):
+        assert len(line) <= 40, f"line exceeded terminal width: {line!r}"
+
+
+def test_settings_panel_handles_a_partial_update_check_record(db, lane, sysop):
+    # Code review follow-up (PR #215): record_check_outcome persists
+    # checked_at/outcome as two separate committing set_config calls --
+    # a check opened mid-write, or interrupted between them, can leave
+    # checked_at set with outcome still None. The old "outcome if
+    # checked_at else 'never checked'" then passed None straight to
+    # sanitize_text and crashed this screen with TypeError. Confirms it
+    # renders instead, with an honest "in progress" state.
+    from netbbs.config import set_config
+    from netbbs.timeutil import utc_now_iso
+
+    set_config(db, "selfupdate_last_check_at", utc_now_iso())  # no matching outcome key
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)  # must not raise
+    text = _visible(_written_text(session))
+    assert "Update checks: auto -- check in progress" in text
+
+
+def test_settings_panel_sanitizes_the_timestamp_example(db, lane, sysop):
+    # Code review follow-up (PR #215): is_valid_display_format only
+    # checks %-directives against an allowlist -- any other literal
+    # character, including a raw control byte, passes through
+    # unchecked and format_for_display preserves it verbatim. Unlike
+    # every other value in this panel, the formatted timestamp example
+    # was concatenated without sanitize_text, letting a crafted format
+    # string inject a real escape sequence into this framed output.
+    # Confirms the escape byte is stripped -- the literal bracket text
+    # that follows it survives (sanitize_text removes only the Cc
+    # control character itself), proving this is really about
+    # defusing the escape, not dropping the whole value.
+    from netbbs.timeutil import set_display_format
+
+    set_display_format(db, "\x1b[31mFAKE%H:%M")
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)  # raw, not ANSI-stripped -- checking for the raw injected escape
+    assert "\x1b[31mFAKE" not in text
+    assert "[31mFAKE" in text
+
+
 # -- condensed status line on nested screens (issue #206) --------------------
 
 
@@ -5595,6 +5653,60 @@ def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
     text = _visible(_written_text(session))
     assert "Backup: never" in text
     assert "Update: not checked" in text
+
+
+def test_condensed_status_line_formats_the_backup_time_per_display_preferences(db, lane, sysop):
+    # Code review follow-up (PR #216): this was the one place in the
+    # module still concatenating a stored timestamp raw (with its
+    # always-6-decimal storage precision and trailing "Z") instead of
+    # resolving the node's configured format/timezone through
+    # format_for_display like every other timestamp -- inconsistent with
+    # the Backup status screen and everywhere else a timestamp appears.
+    from netbbs.backup import create_backup
+
+    identity_dir = db.path.parent / "netbbs_identity"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
+
+    session = FakeSession(["c", "d", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert ".Z" not in text  # raw storage suffix never leaks through
+    assert re.search(r"Backup: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", text), (
+        f"no display-formatted backup time found in {text!r}"
+    )
+
+
+def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
+    # Code review follow-up (PR #216): field_row neither wraps nor
+    # truncates, and a recorded update-check outcome can be an
+    # arbitrary-length message (an HTTP client's own exception text,
+    # e.g.) -- unconstrained, this "condensed" row could exceed even the
+    # 40-column floor this module supports, wrapping in the terminal and
+    # disrupting the screen below it.
+    from netbbs.selfupdate import record_check_outcome
+
+    record_check_outcome(db, "update failed: " + "connection reset by peer " * 5)
+    session = FakeSession(["c", "d", "b", "b", "b"])
+    session.terminal_width = 40
+    _run(session, lane, sysop)
+    status_lines = [
+        line for line in _visible(_written_text(session)).split("\r\n") if "Backup:" in line
+    ]
+    assert status_lines, "condensed status line not found in output"
+    assert len(status_lines[0]) <= 40, f"condensed status line exceeded terminal width: {status_lines[0]!r}"
+
+
+def test_user_picker_page_size_reserves_a_line_for_the_condensed_status_line(lane):
+    # Code review follow-up (PR #216): the condensed status line (issue
+    # #206) added one more line to this screen's own render -- without a
+    # matching bump to _USER_PICKER_RESERVED_LINES, a full page on a
+    # standard 24-row terminal pushed the nav/choice prompt past the
+    # viewport.
+    from netbbs.net.admin_flow import _USER_PICKER_RESERVED_LINES, _user_picker_page_size
+
+    session = FakeSession([])
+    session.terminal_height = 24
+    assert _user_picker_page_size(session) == 24 - _USER_PICKER_RESERVED_LINES
 
 
 # -- node-wide timestamp display format/timezone ----------------------------

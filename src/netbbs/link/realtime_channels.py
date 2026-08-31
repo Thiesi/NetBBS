@@ -524,7 +524,7 @@ async def ensure_live_subscription(
                 session = await asyncio.wait_for(
                     dial_realtime_session(
                         host, port, node_identity, on_frame=bridge.on_frame, registry=registry,
-                        lane=lane, enforce_trust_policy=True,
+                        lane=lane, enforce_trust_policy=True, expected_fingerprint=origin_fingerprint,
                     ),
                     timeout=dial_timeout_seconds,
                 )

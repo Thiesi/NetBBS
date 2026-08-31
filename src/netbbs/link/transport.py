@@ -1205,6 +1205,7 @@ async def dial_realtime_session(
     registry: LinkRealtimeSessionRegistry,
     lane: DatabaseLane | None = None,
     enforce_trust_policy: bool = False,
+    expected_fingerprint: str | None = None,
 ) -> LinkRealtimeSession:
     """Dial `host`/`port`, complete the Noise XX handshake as initiator,
     apply the same Phase 4 trust gate `LinkRealtimeServer` applies to an
@@ -1213,7 +1214,20 @@ async def dial_realtime_session(
     handshake, or trust-policy failure; raises `LinkTransportError` if
     this session loses the duplicate-session tiebreak (design doc
     §8.10.1) -- the caller should not treat that as a dial failure to
-    retry so much as "a session to this peer already exists"."""
+    retry so much as "a session to this peer already exists".
+
+    Code review follow-up: Noise XX authenticates that *some* node with
+    a valid, chain-verified key answered at `host`/`port` -- it says
+    nothing about whether that's the *specific* node the caller meant to
+    reach. A caller dialing a known peer's own advertised address (the
+    only real caller today, `netbbs.link.realtime_channels.
+    ensure_live_subscription`, reaching a linked channel's origin) must
+    pass `expected_fingerprint` so a stale/reassigned/reused address --
+    or, once a real-time relay design lands, a relay terminating the
+    connection itself instead of forwarding it -- gets refused here
+    rather than silently treated as the intended peer by whatever code
+    called this. `None` (a caller with no specific peer in mind, e.g. a
+    future generic listen-for-anyone bootstrap path) skips the check."""
     if enforce_trust_policy and lane is None:
         raise ValueError("enforce_trust_policy requires a lane")
     reader, writer = await asyncio.open_connection(host, port)
@@ -1223,6 +1237,12 @@ async def dial_realtime_session(
         await _reject_before_session(writer)
         raise
     fingerprint = remote.root_fingerprint
+    if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+        await _reject_before_session(writer)
+        raise LinkProtocolError(
+            f"expected a real-time session with {expected_fingerprint}, "
+            f"but {host}:{port} authenticated as {fingerprint}"
+        )
     if enforce_trust_policy:
         assert lane is not None
         allowed = await lane.run(_decide_realtime_admission, fingerprint)
@@ -1274,6 +1294,7 @@ class LinkRealtimeConnector:
         registry: LinkRealtimeSessionRegistry,
         lane: DatabaseLane | None = None,
         enforce_trust_policy: bool = False,
+        expected_fingerprint: str | None = None,
         min_backoff_seconds: float = REALTIME_RECONNECT_MIN_BACKOFF_SECONDS,
         max_backoff_seconds: float = REALTIME_RECONNECT_MAX_BACKOFF_SECONDS,
         stable_after_seconds: float = REALTIME_RECONNECT_STABLE_AFTER_SECONDS,
@@ -1286,6 +1307,7 @@ class LinkRealtimeConnector:
         self._registry = registry
         self._lane = lane
         self._enforce_trust_policy = enforce_trust_policy
+        self._expected_fingerprint = expected_fingerprint
         self._min_backoff = min_backoff_seconds
         self._max_backoff = max_backoff_seconds
         self._stable_after = stable_after_seconds
@@ -1324,6 +1346,7 @@ class LinkRealtimeConnector:
                     self._host, self._port, self._identity, on_frame=self._on_frame,
                     registry=self._registry, lane=self._lane,
                     enforce_trust_policy=self._enforce_trust_policy,
+                    expected_fingerprint=self._expected_fingerprint,
                 )
                 self._current_session = session
                 await session.closed.wait()

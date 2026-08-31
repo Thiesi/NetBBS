@@ -188,16 +188,34 @@ def _apply_sgr(
         elif code == 49:
             bg = None
         elif code == 38 and i + 2 < len(params) and params[i + 1] == 5:
-            fg = params[i + 2]
+            fg = _clamp_byte(params[i + 2])
             i += 2
         elif code == 48 and i + 2 < len(params) and params[i + 1] == 5:
-            bg = params[i + 2]
+            bg = _clamp_byte(params[i + 2])
             i += 2
         elif code == 38 and i + 4 < len(params) and params[i + 1] == 2:
-            fg = (params[i + 2], params[i + 3], params[i + 4])
+            fg = (_clamp_byte(params[i + 2]), _clamp_byte(params[i + 3]), _clamp_byte(params[i + 4]))
             i += 4
         elif code == 48 and i + 4 < len(params) and params[i + 1] == 2:
-            bg = (params[i + 2], params[i + 3], params[i + 4])
+            bg = (_clamp_byte(params[i + 2]), _clamp_byte(params[i + 3]), _clamp_byte(params[i + 4]))
             i += 4
         i += 1
     return fg, bg, bold
+
+
+def _clamp_byte(value: int) -> int:
+    """Clamp a parsed SGR color component to a valid 0-255 byte.
+
+    Code review follow-up (PR #211): a well-formed-looking but
+    out-of-range sequence (`38;2;999;1;2m`, or the pre-existing
+    256-color form's own `38;5;999m`) used to be stored on the `Cell`
+    unvalidated. This module's own docstring promises best-effort
+    parsing that "still can't corrupt anything irrecoverably," but an
+    out-of-range value only surfaced that promise was broken once the
+    editor's first `full_render_ansi` routed it through `colored()` ->
+    `fg()`/`fg_rgb()`, which raise `ValueError` on exactly this input --
+    opening such a file aborted the editor instead of degrading
+    gracefully. Clamping here, at parse time, is cheaper than making
+    every downstream color consumer defensive against a value this
+    parser itself could have rejected first."""
+    return max(0, min(255, value))
