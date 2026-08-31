@@ -21,6 +21,7 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.communities import create_community
+from netbbs.doors.registry import create_door
 from netbbs.files.areas import create_file_area
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _main_menu
@@ -120,6 +121,23 @@ def test_main_menu_shows_uncategorized_when_an_uncategorized_board_exists(tmp_pa
     db = Database(tmp_path / "node.db")
     bob = create_user(db, "bob", password="hunter2pw", user_level=10)
     create_board(db, "general", creator=bob)  # no community_id
+    session = FakeSession(keys=["l"])
+
+    _run_main_menu(session, db, bob)
+
+    assert "ncategorized" in _written_text(session)
+    db.close()
+
+
+def test_main_menu_shows_uncategorized_when_only_an_uncategorized_door_exists(tmp_path):
+    # GitHub issue #204 (2026-08-31 ReLink dogfood): a lone uncategorized
+    # door game didn't make [U]ncategorized appear at all, even though
+    # jumping directly to the door still worked -- `_has_uncategorized_
+    # resources` never checked `has_visible_doors`, unlike the shared
+    # resource-type sub-menu one screen deeper, which already did.
+    db = Database(tmp_path / "node.db")
+    bob = create_user(db, "bob", password="hunter2pw", user_level=10)
+    create_door(db, "Retro Trivia", "/bin/true", creator=bob)  # no community_id
     session = FakeSession(keys=["l"])
 
     _run_main_menu(session, db, bob)
