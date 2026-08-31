@@ -5535,6 +5535,33 @@ def test_settings_n_reaches_node_name_not_a_hidden_node_control_shortcut(db, lan
     assert "Sessions, shutdown" not in text
 
 
+def test_settings_shows_a_current_values_panel(db, lane, sysop):
+    # GitHub issue #206: Settings was the one top-level SysOp console
+    # screen with no glance-able status of its own at all (Users/
+    # Content/Operations/Node all already had one) -- unlike those,
+    # Settings is durable config with nothing to count, so this shows
+    # each setting's *current value* instead of a total/pending count.
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "CURRENT VALUES" in text
+    assert "Node name:" in text
+    assert "Update checks:" in text
+    assert "Timestamps shown as:" in text
+    assert "Trust policy:" in text
+    assert "clear" in text  # no sole-authority exceptions on a fresh node
+
+
+def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):
+    # Confirms the panel is actually live data (reloaded after each
+    # action, same discipline Users/Content/Operations already use), not
+    # a stale snapshot computed once when Settings was first entered.
+    session = FakeSession(["s", "n", "n", "Roanoke", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Node name: Roanoke" in text
+
+
 # -- node-wide timestamp display format/timezone ----------------------------
 
 
