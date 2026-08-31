@@ -403,6 +403,7 @@ from netbbs.timeutil import (
     resolve_display_preferences,
     set_display_format,
     set_display_timezone,
+    utc_now_iso,
 )
 
 # Design doc -- node management, Thiesi's own request: an operator
@@ -1352,12 +1353,32 @@ async def _system_menu(
     The old operational keys remain accepted here as non-advertised
     compatibility aliases; the visible home for those actions is now the
     operations console."""
-    description_level = await lane.run(menu_description_level, actor)
-    unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    header_color = await lane.run(effective_header_color_256)
-    await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+
+    def _load_settings_stats(db: Database) -> dict[str, Any]:
+        # GitHub issue #206: unlike its Users/Content/Operations/Node
+        # siblings, this screen had no glance-able status of its own at
+        # all -- just the title and menu. Settings is durable
+        # configuration, not countable stats, so "current values" (not
+        # totals/pending counts) is the shape that actually fits here.
+        display_format, display_timezone = resolve_display_preferences(db)
+        return {
+            "node_name": get_node_display_name(db),
+            "auto_update_enabled": get_auto_update_check_enabled(db),
+            "update": get_last_check_summary(db),
+            "display_timezone": display_timezone,
+            "timestamp_example": format_for_display(
+                utc_now_iso(), override_format=display_format, override_timezone=display_timezone
+            ),
+            "trust_exceptions": len(list_sole_authorities(db)),
+            "description_level": menu_description_level(db, actor),
+            "unicode_style": unicode_style_enabled(db, actor),
+            "collapsed": breadcrumb_collapsed_enabled(db, actor),
+            "redraw_in_place": redraw_in_place_enabled(db, actor),
+            "header_color": effective_header_color_256(db),
+        }
+
+    stats = await lane.run(_load_settings_stats)
+    await _draw_system_menu(session, node_controls, link_context, stats=stats)
     while True:
         choice = (await session.read_key()).lower()
 
@@ -1367,51 +1388,63 @@ async def _system_menu(
         elif choice == "m":
             await session.write_line("")
             await _banners_and_mastheads_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "c":
             await session.write_line("")
             await _theme_colors_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "u":
             await session.write_line("")
             await _update_settings_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "n":
             await session.write_line("")
             await _node_name_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "t":
             await session.write_line("")
             await _timestamp_settings_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "p":
             await session.write_line("")
             await _trust_menu(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "l" and link_context is not None:
             await session.write_line("")
             await _link_status_screen(session, lane, actor, link_context=link_context)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "o" and link_context is not None:
             await session.write_line("")
             await _outbox_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "r" and link_context is not None:
             await session.write_line("")
             await _repair_carried_posts_screen(session, lane)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "d" and link_context is not None:
             await session.write_line("")
             await _diagnostic_log_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "f" and link_context is not None:
             await session.write_line("")
             await _diagnostic_log_tail_screen(session, lane)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "k":
             await session.write_line("")
             await _backup_status_screen(session, lane, actor)
-            await _draw_system_menu(session, node_controls, link_context, description_level, redraw_in_place, unicode_style, header_color=header_color)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -1420,14 +1453,45 @@ async def _draw_system_menu(
     session: Session,
     node_controls: NodeControls | None,
     link_context: LinkContext | None = None,
-    description_level: str = "off",
-    redraw_in_place: bool = False,
-    unicode_style: bool = False,
-    collapsed: bool = False,
-    header_color: int | tuple[int, int, int] = HEADER_COLOR,
+    *,
+    stats: dict[str, Any],
 ) -> None:
+    description_level = stats["description_level"]
+    unicode_style = stats["unicode_style"]
+    collapsed = stats["collapsed"]
+    redraw_in_place = stats["redraw_in_place"]
+    header_color = stats["header_color"]
+
     await session.write_line("\r\n" + screen_title("Settings",
             breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed, header_color=header_color, node_name_gradient=session.node_name_gradient))
+
+    if session.terminal_height >= 18:
+        # GitHub issue #206: "current values at a glance," not counts --
+        # unlike Users/Content (registered accounts, boards/files),
+        # Settings is durable configuration with nothing to total or
+        # count, so this panel shows what each setting is currently set
+        # to instead, one line per submenu that has a single
+        # headline-worthy value. Mastheads & banners/Colors are left out
+        # -- neither reduces to one meaningful line (banners: several
+        # independent on/off toggles; colors: several independent
+        # swatches) without misrepresenting the others as unset.
+        update_checked_at, update_outcome = stats["update"]
+        update_state = "auto" if stats["auto_update_enabled"] else "manual"
+        update_summary = update_outcome if update_checked_at else "never checked"
+        trust_summary = (
+            f"{stats['trust_exceptions']} exception(s) active"
+            if stats["trust_exceptions"] else "clear"
+        )
+        panel = [
+            colored("CURRENT VALUES", fg_color=LABEL_COLOR, bold=True),
+            "  " + colored("Node name: ", fg_color=METADATA_COLOR) + sanitize_text(stats["node_name"]),
+            "  " + colored("Update checks: ", fg_color=METADATA_COLOR) + f"{update_state} -- {sanitize_text(update_summary)}",
+            "  " + colored("Timestamps shown as: ", fg_color=METADATA_COLOR) + f"{stats['timestamp_example']} ({sanitize_text(stats['display_timezone'])})",
+            "  " + colored("Trust policy: ", fg_color=METADATA_COLOR)
+            + colored(trust_summary, fg_color=ERROR_COLOR if stats["trust_exceptions"] else SUCCESS_COLOR),
+        ]
+        await _write_panel(session, panel, unicode_style=unicode_style, header_color=header_color)
+
     option_list = [
         MenuEntry(label=menu_key("M", "astheads & banners"), brief="Welcome/logoff/new-account banners and every masthead"),
         MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
