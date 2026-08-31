@@ -1088,6 +1088,39 @@ def test_admin_removing_a_public_key_refused_with_no_password_set(db, lane, syso
     assert "no password set" in _written_text(session)
 
 
+def test_key_list_marks_the_primary_key_and_warns_before_removing_it(db, lane, sysop):
+    # Code review follow-up (PR #225): removing the primary key while
+    # others remain doesn't drop the account to keyless -- another
+    # remaining key gets mechanically promoted -- but that promotion
+    # carries no cryptographic proof of continuity (design doc §4.5).
+    # Confirms the list surfaces which key is primary and that removing
+    # it specifically gets a different, more informative warning than
+    # an ordinary (non-primary) key removal does.
+    from netbbs.auth.users import add_ssh_key
+
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    alice = create_user(db, "alice", verify_key=verify_key, user_level=10)
+    phone_key = nacl.signing.SigningKey.generate()
+    alice = add_ssh_key(db, alice, phone_key.verify_key, label="phone", changed_by=sysop)
+
+    session = FakeSession(["u", "e", "0", "1", "k", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "default" in text and "(primary)" in text
+    # "phone" is listed too, but never marked primary.
+    phone_line = next(line for line in text.split("\r\n") if "phone" in line)
+    assert "(primary)" not in phone_line
+
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "n", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "primary key" in text
+    assert "won't provably continue this identity" in text
+
+    updated = next(u for u in list_users(db) if u.username == "alice")
+    assert updated.fingerprint == alice.fingerprint  # declined -- nothing changed
+
+
 # -- delete -----------------------------------------------------------------
 
 
@@ -5738,9 +5771,14 @@ def test_timestamp_settings_screen_shows_current_format_and_timezone(db, lane, s
 
 
 def test_timestamp_settings_screen_can_set_a_new_timezone(db, lane, sysop):
+    # Dogfood feature request: the Timezone field opens a real,
+    # searchable picker (netbbs.net.picker.pick_item) instead of a bare
+    # free-text prompt -- "s" (search) + a query that matches exactly
+    # one zone auto-selects it, the same single-match shortcut every
+    # other pick_item screen in this module already has.
     from netbbs.timeutil import resolve_display_preferences
 
-    session = FakeSession(["s", "t", "z", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "s", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
     _, tz = resolve_display_preferences(db)
     assert tz == "Europe/Berlin"
@@ -5760,20 +5798,28 @@ def test_timestamp_settings_screen_blank_leaves_both_unchanged(db, lane, sysop):
     from netbbs.timeutil import resolve_display_preferences
 
     before = resolve_display_preferences(db)
-    # Visit both fields but answer blank each time -- blank = keep.
-    session = FakeSession(["s", "t", "f", "", "z", "", "b", "b", "b"])
+    # Visit both fields but decline each -- a blank format answer keeps
+    # it unchanged; backing out of the timezone picker without picking
+    # anything (pick_item's own "b") does the same for that field.
+    session = FakeSession(["s", "t", "f", "", "z", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     assert resolve_display_preferences(db) == before
 
 
-def test_timestamp_settings_screen_rejects_an_invalid_timezone(db, lane, sysop):
+def test_timestamp_settings_screen_timezone_search_with_no_matches_leaves_it_unchanged(db, lane, sysop):
+    # There's no longer a way to type an arbitrary bogus string into
+    # this field at all -- pick_item only ever offers real, already-
+    # valid IANA names -- so the old "rejects an invalid timezone" case
+    # is replaced by its picker-shaped equivalent: a search matching
+    # nothing shows "No matches." and lets the SysOp back out unchanged,
+    # same pick_item behavior every other searchable screen already has.
     from netbbs.timeutil import resolve_display_preferences
 
     before = resolve_display_preferences(db)
-    session = FakeSession(["s", "t", "z", "Not/A/Real/Zone", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "s", "Not/A/Real/Zone", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert resolve_display_preferences(db) == before  # rejected -- nothing changed
-    assert "invalid timezone" in _written_text(session).lower()
+    assert resolve_display_preferences(db) == before  # cancelled -- nothing changed
+    assert "No matches." in _written_text(session)
 
 
 def test_timestamp_settings_screen_rejects_an_invalid_format(db, lane, sysop):
@@ -5797,7 +5843,7 @@ def test_timestamp_settings_screen_setting_a_timezone_fixes_the_chat_status_line
     from netbbs.net.chat_flow import _render_chat_status_line
     from netbbs.timeutil import format_for_display, utc_now_iso
 
-    session = FakeSession(["s", "t", "z", "Europe/Berlin", "b", "b", "b"])
+    session = FakeSession(["s", "t", "z", "s", "Europe/Berlin", "b", "b", "b"])
     _run(session, lane, sysop)
 
     channel = create_channel(db, "lobby", creator=sysop)

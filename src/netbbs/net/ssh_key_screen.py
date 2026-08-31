@@ -65,10 +65,19 @@ async def manage_ssh_keys_screen(session: Session, lane: DatabaseLane, target: U
             await session.write_line(colored("  (none registered)", fg_color=MUTED_COLOR))
         for position, key in enumerate(keys, start=1):
             added = format_for_display(key.created_at, override_format=display_format, override_timezone=display_timezone)
+            # (primary) marks the one key `User.fingerprint` mirrors --
+            # the one Link event authorship/identity display actually
+            # uses (design doc §4.5) -- surfaced here (code review
+            # follow-up, PR #225) so removing it is an informed choice:
+            # another remaining key gets mechanically promoted in its
+            # place, but that promotion carries no cryptographic proof
+            # of continuity, a real, disclosed limitation, not a bug.
+            primary_note = colored("  (primary)", fg_color=LABEL_COLOR) if key.fingerprint == target.fingerprint else ""
             await session.write_line(
                 f"  {position}. "
                 + colored(sanitize_text(key.label), fg_color=METADATA_COLOR)
                 + colored(f"  {key.fingerprint[:12]}…  added {added}", fg_color=MUTED_COLOR)
+                + primary_note
             )
 
         options = [menu_key("A", "dd a key"), menu_key("B", "ack")]
@@ -125,7 +134,25 @@ async def _remove_key(session: Session, lane: DatabaseLane, target: User, keys: 
         await session.write_line(colored("Not a valid key number.", fg_color=ERROR_COLOR))
         return target
     key = keys[position - 1]
-    if not await prompt_yes_no(session, f"Remove key {key.label!r}?", default=False):
+    if key.fingerprint == target.fingerprint and len(keys) > 1:
+        # Code review follow-up (PR #225): removing the primary key
+        # while others remain doesn't drop the account to keyless --
+        # add_ssh_key/remove_ssh_key mechanically promote a different
+        # remaining key into the mirror so login/display keep working --
+        # but that promotion carries no cryptographic proof of
+        # continuity (design doc §4.5). Content authored after this
+        # point is not provably a continuation of what came before it
+        # to a remote Link peer, even though it's the same local
+        # account. Worth a specific warning, not just the generic
+        # "remove key X?" every other removal gets.
+        prompt = (
+            f"Remove key {key.label!r}? It's your account's primary key -- another "
+            "remaining key will take over, but Link-authored content won't provably "
+            "continue this identity to remote nodes."
+        )
+    else:
+        prompt = f"Remove key {key.label!r}?"
+    if not await prompt_yes_no(session, prompt, default=False):
         return target
     try:
         target = await lane.run(remove_ssh_key, target, key.fingerprint, changed_by=changed_by)
