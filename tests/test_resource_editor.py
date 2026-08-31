@@ -1293,3 +1293,85 @@ def test_redraw_hint_omitted_when_not_requested():
         )
     )
     assert "enable in-place redraw" not in _written_text(session)
+
+
+# -- section grouping (dogfood report: the main menu's grouped, multi- -----
+# -- column layout and this screen's own flat field list read as wildly ---
+# -- different levels of polish for no principled reason) ------------------
+
+
+def _sectioned_fields() -> list[FieldSpec]:
+    return [
+        FieldSpec(
+            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            render=lambda draft: draft.get("name") or "(blank)",
+            prompt=text_field("name", required=True),
+            section="Identity",
+        ),
+        FieldSpec(
+            key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
+            render=lambda draft: "yes" if draft.get("pinned") else "no",
+            prompt=bool_field("pinned", "Pinned?"),
+            section="Display",
+        ),
+    ]
+
+
+def test_unsectioned_fields_show_no_section_headers():
+    # Every existing edit_resource_draft caller (board/channel/file-area/
+    # Community create-edit forms) never sets `section` -- confirms the
+    # feature only activates once a caller actually opts in.
+    session = FakeSession(["b"])
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=[_name_field(), _pinned_field()], draft={"name": "", "pinned": False},
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "IDENTITY" not in text
+    assert "DISPLAY" not in text
+
+
+def test_sectioned_fields_show_bold_uppercase_headers_in_order():
+    session = FakeSession(["b"])
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=_sectioned_fields(), draft={"name": "lobby", "pinned": True},
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "IDENTITY" in text
+    assert "DISPLAY" in text
+    # Each field's own value line still appears, grouped under its own
+    # section header rather than the old flat list.
+    identity_index = text.index("IDENTITY")
+    display_index = text.index("DISPLAY")
+    assert identity_index < text.index("Name: lobby") < display_index < text.index("Pinned: yes")
+
+
+def test_sectioned_fields_group_the_descriptive_menu_row_too():
+    # The hotkey menu row already routed through menu_grid before this
+    # feature existed -- confirms a sectioned screen gets real per-
+    # section columns there too, not just a heading above the field
+    # list. A tall terminal here (the screen's own docstring: the whole
+    # field list plus this row must fit, or the descriptive form falls
+    # back to the plain compact one) so the descriptive form is actually
+    # exercised, not silently skipped.
+    session = FakeSession(["b"])
+    session.terminal_height = 60
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=_sectioned_fields(), draft={"name": "lobby", "pinned": True},
+            save=None, back_menu_text=menu_key("B", "ack"),
+            description_level="brief",
+        )
+    )
+    text = _visible(_written_text(session))
+    # Once in the value list above, once as the menu row's own heading.
+    assert text.count("IDENTITY") == 2
+    assert text.count("DISPLAY") == 2
