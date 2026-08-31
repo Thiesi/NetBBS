@@ -18,6 +18,20 @@ Anything else is skipped rather than raised -- a file this parser
 mishandles still can't corrupt anything irrecoverably, since the
 original bytes on disk are untouched until the SysOp explicitly saves
 from inside the editor.
+
+Recognizes both SGR color forms real content in this codebase actually
+emits (design doc -- welcome banner: 256-color everywhere, truecolor
+gated behind `Session.supports_truecolor`): 256-color (`38;5;n`/
+`48;5;n`, an `int` palette index) and 24-bit truecolor (`38;2;r;g;b`/
+`48;2;r;g;b`, an `(r, g, b)` tuple) -- `Cell.fg`/`Cell.bg` and
+everything downstream (`ScreenBuffer`, `diff_ansi`/`full_render_ansi`,
+`encode_ansi_bytes`) accept either. Before this, a `38;2;...` sequence
+matched no branch below at all: its own `2` and the `r`/`g`/`b`
+integers that followed fell through as if they were independent,
+unrelated SGR codes instead of being recognized as one unit -- silent
+color-state corruption, not a crash (dogfood-reported bug, GitHub issue
+#210 -- confirmed against this same file's own live NetBBS masthead,
+itself a 24-bit gradient banner).
 """
 
 from __future__ import annotations
@@ -33,8 +47,8 @@ def parse_ansi_into_buffer(text: str, buffer: ScreenBuffer) -> None:
     callers wanting a clean slate should call `buffer.clear()` first."""
     row = 0
     col = 0
-    fg: int | None = None
-    bg: int | None = None
+    fg: _Color | None = None
+    bg: _Color | None = None
     bold = False
     # Real terminals defer wrapping past the last column until another
     # character actually needs to be placed ("deferred wrap"/auto-margin
@@ -144,9 +158,12 @@ def _parse_params(params_str: str) -> list[int]:
     return params
 
 
+_Color = int | tuple[int, int, int]
+
+
 def _apply_sgr(
-    params: list[int], fg: int | None, bg: int | None, bold: bool
-) -> tuple[int | None, int | None, bool]:
+    params: list[int], fg: _Color | None, bg: _Color | None, bold: bool
+) -> tuple[_Color | None, _Color | None, bool]:
     if not params:
         params = [0]
     i = 0
@@ -176,5 +193,11 @@ def _apply_sgr(
         elif code == 48 and i + 2 < len(params) and params[i + 1] == 5:
             bg = params[i + 2]
             i += 2
+        elif code == 38 and i + 4 < len(params) and params[i + 1] == 2:
+            fg = (params[i + 2], params[i + 3], params[i + 4])
+            i += 4
+        elif code == 48 and i + 4 < len(params) and params[i + 1] == 2:
+            bg = (params[i + 2], params[i + 3], params[i + 4])
+            i += 4
         i += 1
     return fg, bg, bold

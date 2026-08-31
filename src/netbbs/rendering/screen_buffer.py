@@ -47,11 +47,14 @@ _MAX_WIDTH = 500
 _MAX_HEIGHT = 200
 
 
+_Color = int | tuple[int, int, int]
+
+
 @dataclass(frozen=True)
 class Cell:
     char: str = " "
-    fg: int | None = None
-    bg: int | None = None
+    fg: _Color | None = None
+    bg: _Color | None = None
     bold: bool = False
 
 
@@ -67,13 +70,13 @@ class ScreenBuffer:
         self._rows: list[list[Cell]] = [[Cell() for _ in range(self.width)] for _ in range(self.height)]
 
     def write_cell(
-        self, row: int, col: int, char: str, *, fg: int | None = None, bg: int | None = None, bold: bool = False
+        self, row: int, col: int, char: str, *, fg: _Color | None = None, bg: _Color | None = None, bold: bool = False
     ) -> None:
         self._check_bounds(row, col)
         self._rows[row][col] = Cell(char=char, fg=fg, bg=bg, bold=bold)
 
     def write_wide_cell(
-        self, row: int, col: int, char: str, *, fg: int | None = None, bg: int | None = None, bold: bool = False
+        self, row: int, col: int, char: str, *, fg: _Color | None = None, bg: _Color | None = None, bold: bool = False
     ) -> None:
         """Writes a double-width glyph (`netbbs.rendering.width.
         char_width(char) == 2`, e.g. an East Asian Wide/Fullwidth
@@ -110,7 +113,7 @@ class ScreenBuffer:
             raise ValueError(f"cell ({row}, {col}) out of bounds for a {self.width}x{self.height} buffer")
 
 
-def _style(cell: Cell) -> tuple[int | None, int | None, bool]:
+def _style(cell: Cell) -> tuple[_Color | None, _Color | None, bool]:
     return (cell.fg, cell.bg, cell.bold)
 
 

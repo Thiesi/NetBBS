@@ -98,6 +98,24 @@ def test_encode_then_decode_then_parse_round_trips_a_styled_buffer():
     assert result.snapshot() == buf.snapshot()
 
 
+def test_encode_then_decode_then_parse_round_trips_a_truecolor_buffer():
+    # GitHub issue #210: encode_ansi_bytes used to call the plain
+    # 256-color-only `fg`/`bg` helpers unconditionally, which raise
+    # ValueError on anything outside 0-255 -- a truecolor tuple `Cell`
+    # (now producible by parse_ansi_into_buffer) would have crashed a
+    # save from inside the editor rather than round-tripping.
+    buf = ScreenBuffer(10, 2)
+    buf.write_cell(0, 0, "X", fg=(255, 42, 109), bg=(10, 20, 30), bold=True)
+    buf.write_cell(0, 1, "Y", fg=2)  # mixed with an ordinary 256-color cell
+
+    encoded = encode_ansi_bytes(buf)
+    decoded_text = decode_ansi_bytes(encoded)
+    result = ScreenBuffer(10, 2)
+    parse_ansi_into_buffer(decoded_text, result)
+
+    assert result.snapshot() == buf.snapshot()
+
+
 def test_encode_of_an_empty_buffer_does_not_raise():
     buf = ScreenBuffer(5, 3)
     encoded = encode_ansi_bytes(buf)

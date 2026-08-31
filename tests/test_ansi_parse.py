@@ -70,6 +70,34 @@ def test_sgr_extended_256_color_background():
     assert buf.get_cell(0, 0).bg == 201
 
 
+def test_sgr_truecolor_foreground():
+    buf = ScreenBuffer(5, 1)
+    parse_ansi_into_buffer("\x1b[38;2;255;42;109mX", buf)
+    assert buf.get_cell(0, 0).fg == (255, 42, 109)
+
+
+def test_sgr_truecolor_background():
+    buf = ScreenBuffer(5, 1)
+    parse_ansi_into_buffer("\x1b[48;2;10;20;30mX", buf)
+    assert buf.get_cell(0, 0).bg == (10, 20, 30)
+
+
+def test_sgr_truecolor_does_not_corrupt_subsequent_state():
+    # GitHub issue #210 (2026-08-31 ReLink dogfood): before the 38;2/
+    # 48;2 branches existed, a truecolor sequence matched no `_apply_sgr`
+    # branch at all -- its "2" and the r/g/b integers that followed fell
+    # through and got reinterpreted as unrelated, independent SGR codes
+    # (e.g. "255" as a 256-color index via a *different* 38;5 sequence
+    # earlier in the same params list, "42" as green foreground, "109"
+    # as nothing recognized) instead of being consumed as one unit.
+    # Confirms both the color itself and the character immediately after
+    # the sequence land correctly, with no leftover corrupted style.
+    buf = ScreenBuffer(10, 1)
+    parse_ansi_into_buffer("\x1b[38;2;255;42;109mX\x1b[0mY", buf)
+    assert buf.get_cell(0, 0) == Cell(char="X", fg=(255, 42, 109))
+    assert buf.get_cell(0, 1) == Cell(char="Y")
+
+
 def test_sgr_reset_clears_style():
     buf = ScreenBuffer(5, 1)
     parse_ansi_into_buffer("\x1b[31;1mR\x1b[0mN", buf)
