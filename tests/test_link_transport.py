@@ -524,6 +524,67 @@ def test_dial_realtime_session_completes_a_handshake_and_registers_both_sides():
     assert [frame.type for frame in received] == ["subscribe"]
 
 
+def test_dial_realtime_session_accepts_a_matching_expected_fingerprint():
+    async def scenario():
+        alice = bootstrap_node_identity("alice-dial-match")
+        bob = bootstrap_node_identity("bob-dial-match")
+        registry_a = LinkRealtimeSessionRegistry(own_fingerprint=alice.fingerprint)
+        registry_b = LinkRealtimeSessionRegistry(own_fingerprint=bob.fingerprint)
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=bob, registry=registry_b, on_frame=_default_on_frame,
+        )
+        await server.start()
+        try:
+            session_a = await dial_realtime_session(
+                "127.0.0.1", server.port, alice, on_frame=_default_on_frame, registry=registry_a,
+                expected_fingerprint=bob.fingerprint,
+            )
+            assert session_a.remote_fingerprint == bob.fingerprint
+            await session_a.close(reason="test_done")
+        finally:
+            await registry_b.close_all(reason="test_done")
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_dial_realtime_session_refuses_a_fingerprint_mismatch():
+    # Code review follow-up: dial_realtime_session used to accept
+    # whichever fingerprint the Noise handshake authenticated, with no
+    # check against what the caller actually meant to reach --
+    # ensure_live_subscription dials a linked channel's origin by its
+    # own advertised address, and a stale/reassigned/reused address (or,
+    # once a real-time relay design lands, a relay terminating the
+    # connection itself instead of forwarding it) would have been
+    # silently accepted as if it really were that origin. Confirms the
+    # mismatch is refused rather than handed to the caller as a normal
+    # session, and that nothing gets left registered on either side.
+    async def scenario():
+        alice = bootstrap_node_identity("alice-dial-mismatch")
+        bob = bootstrap_node_identity("bob-dial-mismatch")
+        mallory = bootstrap_node_identity("mallory-dial-mismatch")
+        registry_a = LinkRealtimeSessionRegistry(own_fingerprint=alice.fingerprint)
+        registry_b = LinkRealtimeSessionRegistry(own_fingerprint=bob.fingerprint)
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=bob, registry=registry_b, on_frame=_default_on_frame,
+        )
+        await server.start()
+        try:
+            with pytest.raises(LinkProtocolError):
+                await dial_realtime_session(
+                    "127.0.0.1", server.port, alice, on_frame=_default_on_frame, registry=registry_a,
+                    expected_fingerprint=mallory.fingerprint,  # not who's actually listening (bob)
+                )
+            await asyncio.sleep(0.05)
+            assert registry_a.get(bob.fingerprint) is None
+            assert registry_b.get(alice.fingerprint) is None
+        finally:
+            await registry_b.close_all(reason="test_done")
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
 def test_realtime_session_registry_converges_on_the_deterministic_winner_for_simultaneous_connections():
     async def scenario():
         alice = bootstrap_node_identity("alice-dedup")

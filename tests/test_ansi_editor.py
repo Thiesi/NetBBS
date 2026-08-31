@@ -301,6 +301,31 @@ def test_status_line_never_exceeds_the_canvas_width(tmp_path):
         assert len(line) <= 80, f"status line exceeded canvas width: {line!r}"
 
 
+def test_ctrl_g_help_hint_survives_truncation_even_in_the_worst_case(tmp_path):
+    # Code review follow-up (PR #211): the fix above (truncate to canvas
+    # width) proved the status line never *overflows*, but adding "Ctrl+G
+    # help" at the end of an already-past-80-columns line meant it was
+    # exactly the part truncation cut first -- discoverable only by
+    # already knowing it exists. Confirms the hint survives even with
+    # both fg and bg set to the longest palette name, the worst case.
+    async def scenario():
+        session = FakeSession([
+            "CTRL+P", "1", "4",  # foreground -> "Bright Magenta"
+            "CTRL+B", "1", "4",  # background -> "Bright Magenta"
+            "A", "CTRL+O",
+        ])
+        await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft",
+            autosave_interval_seconds=9999,
+        )
+        return session
+
+    session = asyncio.run(scenario())
+    status_lines = _status_line_texts(session)
+    assert status_lines, "expected at least one status-line redraw"
+    assert "Ctrl+G help" in status_lines[-1]
+
+
 # -- save / quit ------------------------------------------------------------
 
 

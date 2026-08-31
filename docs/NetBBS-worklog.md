@@ -1638,7 +1638,7 @@ confirmed to fail without the fix -- the pattern any future dial-timeout
 regression test in this codebase should follow, rather than trusting a
 `ClientError`-only mock to stand in for what a real elapsed timeout does.
 
-### Real-time relay does not exist, and the async relay model does not transfer to it (issue #168)
+### Real-time relay does not exist yet, and the async relay model does not transfer to it (issue #168)
 
 `relay_mailbox.py`/`relay_selection.py` are pure store-and-forward: a relay
 accepts one opaque, already-encrypted envelope it structurally cannot
@@ -1653,15 +1653,26 @@ reliability-ranked relay-selection shape transfers to live traffic, which
 must hold open bidirectional state and consume live bandwidth for an
 entire conversation's duration instead. Design doc §8.10 already names
 this as a deliberately deferred, separate future protocol, not a gap
-nobody noticed. Before building it: the central open decision is
-double-hop relay-as-participant (needs an *additional* application-layer
-encryption hop between the two actual chat participants to keep true
-end-to-end confidentiality once a relay can decrypt/re-encrypt) versus a
-raw-socket/below-Noise blind proxy (preserves the existing two-party
-mutual-auth property untouched, but the relay isn't a Link-protocol
-participant in this shape and doesn't fit the existing consent/
-reliability-selection model at all) -- a security-model decision, not an
-implementation detail, and not yet made.
+nobody noticed.
+
+The security-model fork this implies -- double-hop relay-as-participant
+(needs an *additional* application-layer encryption hop between the two
+actual chat participants to keep true end-to-end confidentiality once a
+relay can decrypt/re-encrypt) versus a raw-socket/below-Noise blind proxy
+(preserves the existing two-party mutual-auth property untouched, but the
+relay isn't a Link-protocol participant in this shape and doesn't fit the
+existing consent/reliability-selection model at all) -- is now decided:
+raw-socket/TCP-level proxy, recorded in the design doc (§16, "Issue #168").
+Whichever design ships, the completed handshake's authenticated fingerprint
+must still be checked against the fingerprint that was actually requested
+before either endpoint uses the session -- a relay that terminates the
+connection itself, or pairs the requester with a different locally-trusted
+node, is otherwise indistinguishable from the intended peer even though
+Noise itself authenticated correctly (the same binding gap
+`dial_realtime_session`'s `expected_fingerprint` parameter closes for
+today's direct, non-relayed dialing). Implementation (rendezvous protocol,
+bounded-resource limits, the pre-ship fallback experience for two mutually-
+unreachable nodes) has not been built -- see issue #168 for what remains.
 
 ### Node-wide presence and scrollback trust visibility (issue #164)
 

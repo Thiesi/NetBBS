@@ -121,6 +121,31 @@ def is_blocked(db: Database, user: User) -> bool:
     return row is not None
 
 
+def migrate_blocklist_key_to_local_user(db: Database, *, old_fingerprint: str, local_user_id: int) -> None:
+    """
+    Re-key an existing fingerprint-based blocklist entry to `local_user_id`
+    instead, in place, preserving the block across an identity change
+    rather than silently orphaning it.
+
+    GitHub issue #212's own follow-up (code review, PR #213): `block_user`
+    keys a block by fingerprint whenever the target has one at block time
+    (see that function's own docstring); if that fingerprint is later
+    removed (`netbbs.auth.users.clear_verify_key`), `is_blocked` stops
+    finding the entry the moment the account no longer has a fingerprint
+    to check -- it looks up by `local_user_id` alone in that case, and the
+    orphaned row's `local_user_id` is still NULL. The account then reads
+    as unblocked on its very next password login, silently bypassing an
+    active restriction. Callers removing a fingerprint must call this
+    first, inside the same transaction, not treat it as optional cleanup.
+    A no-op if no entry exists for `old_fingerprint` (most accounts were
+    never blocked).
+    """
+    db.connection.execute(
+        "UPDATE blocklist SET fingerprint = NULL, local_user_id = ? WHERE fingerprint = ?",
+        (local_user_id, old_fingerprint),
+    )
+
+
 def list_blocklist(db: Database) -> list[BlocklistEntry]:
     rows = db.connection.execute("SELECT * FROM blocklist ORDER BY created_at").fetchall()
     return [_row_to_entry(row) for row in rows]

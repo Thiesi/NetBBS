@@ -18,9 +18,12 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import MAX_SUBJECT_BYTES, create_post, list_posts_page
+from netbbs.chat.hub import ChatHub
+from netbbs.chat.mailbox import MessageMailbox
+from netbbs.chat.presence import PresenceRegistry
 from netbbs.directory import get_bio
 from netbbs.net import login_flow
-from netbbs.net.char_input import EditorKey, EditorKeyKind
+from netbbs.net.char_input import EditorKey, EditorKeyKind, InputHistory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
@@ -316,6 +319,37 @@ def test_profile_ssh_public_key_self_service_clear_declined_keeps_the_key(db, la
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is not None
+
+
+def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lane, alice):
+    # Code review follow-up (PR #213): _main_menu's own `user` local was
+    # never refreshed after _edit_profile returned, so every later
+    # branch this same session reached (a second Profile visit here,
+    # but equally posting/uploading/chatting) kept using the pre-edit
+    # User object -- `User` is frozen, so _edit_profile's own draft
+    # update never reached the caller at all. Confirms the fix: a
+    # second Profile visit's own initial render (seeded from `user.
+    # fingerprint` before any key is touched, see _edit_profile's own
+    # draft-construction) already shows the key set on the *first*
+    # visit, rather than seeding from the stale pre-edit `None` again.
+    import base64
+
+    import nacl.signing
+
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    raw_b64 = base64.b64encode(bytes(verify_key)).decode()
+
+    session = FakeSession(["p", "k", raw_b64, "b", "p", "b", "l", "y"])
+    asyncio.run(
+        login_flow._main_menu(
+            session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane
+        )
+    )
+    text = _written_text(session)
+    # "(none set)" is the field's own render for no key -- must appear
+    # exactly once (the very first visit's pre-key render), not twice
+    # (which would mean the second visit still thought there was no key).
+    assert text.count("(none set)") == 1
 
 
 # -- composing a new post ---------------------------------------------------

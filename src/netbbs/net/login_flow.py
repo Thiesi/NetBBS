@@ -1549,6 +1549,19 @@ async def _main_menu(
             # identical lane-is-None degrade-gracefully reasoning.
             if lane is not None:
                 await _edit_profile(session, lane, user)
+                # Code review follow-up (PR #213): the profile screen's
+                # own draft only ever received the updated fingerprint
+                # for its own "Add"/"Replace"/"Clear" verb -- this loop's
+                # own `user` was never refreshed, so every later branch
+                # this session reaches (posting, uploading, chatting)
+                # kept attributing to the pre-edit key even after it was
+                # replaced or removed. `User` is frozen -- re-fetch
+                # rather than mutate. Falls back to the pre-edit `user`
+                # in the extreme, unlikely case a concurrent session
+                # deleted this same account mid-edit -- `_main_menu`'s
+                # own loop has no other path for "the account I'm
+                # logged in as no longer exists" to unwind through here.
+                user = get_user_by_id(db, user.id) or user
             else:
                 await session.write_line(
                     colored("Your profile is not available in this context.", fg_color=MUTED_COLOR)

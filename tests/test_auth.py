@@ -368,3 +368,24 @@ def test_clear_verify_key_refuses_a_key_only_account_with_no_password(db):
     # Refused cleanly -- the key is still there and still usable.
     assert get_user_by_username(db, "thiesi").fingerprint is not None
     authorize_public_key(db, "thiesi", signing_key.verify_key)
+
+
+def test_clear_verify_key_preserves_an_existing_block(db):
+    # Code review follow-up (PR #213): block_user keys a block by
+    # fingerprint whenever the target has one at block time -- if
+    # clear_verify_key then removed that fingerprint without migrating
+    # the blocklist entry, is_blocked would stop finding it (it only
+    # checks local_user_id once the account has no fingerprint left),
+    # and a restricted account would read as unblocked on its very next
+    # password login. Confirms the block survives the key removal.
+    from netbbs.moderation.blocklist import block_user, is_blocked
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    signing_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", password="hunter2", verify_key=signing_key.verify_key)
+    block_user(db, thiesi, blocked_by=sysop, reason="testing")
+    assert is_blocked(db, thiesi) is True
+
+    updated = clear_verify_key(db, thiesi, changed_by=sysop)
+    assert updated.fingerprint is None
+    assert is_blocked(db, updated) is True

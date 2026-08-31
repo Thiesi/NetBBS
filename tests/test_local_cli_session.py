@@ -148,6 +148,24 @@ def test_read_key_delegates_to_char_input(monkeypatch):
     assert result == "q"
 
 
+def test_read_any_key_delegates_to_char_input_and_accepts_enter(monkeypatch):
+    # Code review follow-up (PR #214): this session never overrode
+    # read_any_key, so the Session base default silently fell back to
+    # read_key -- which deliberately discards CR/LF as noise, correct
+    # for an ordinary hotkey menu but wrong for a "press any key to
+    # continue" pause, where Enter is the most natural response.
+    # Telnet/SSH/web all override this to route through char_input.
+    # read_any_key instead; confirms this session now does too by
+    # checking Enter alone (bare "\r", nothing else queued) is accepted
+    # rather than skipped over waiting for a non-CR/LF byte that never
+    # arrives.
+    _patch_stdout(monkeypatch)
+    read_byte_fn, read_byte_with_timeout_fn = _fake_byte_source("\r")
+    session = LocalCLISession(read_byte_fn=read_byte_fn, read_byte_with_timeout_fn=read_byte_with_timeout_fn)
+    result = asyncio.run(session.read_any_key())
+    assert result == "\r"
+
+
 def test_read_line_masks_when_echo_is_false(monkeypatch):
     fake_stdout = _patch_stdout(monkeypatch)
     read_byte_fn, read_byte_with_timeout_fn = _fake_byte_source("hunter2\r")
