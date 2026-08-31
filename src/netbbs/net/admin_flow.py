@@ -67,6 +67,7 @@ from netbbs.auth.users import (
     count_sysops,
     create_user,
     delete_user,
+    clear_verify_key,
     get_user_by_id,
     get_user_by_username,
     list_users,
@@ -3146,10 +3147,24 @@ async def _user_detail_screen(
             )
         elif choice == "k":
             await session.write_line("")
-            verb = "Replace" if target.fingerprint else "Add"
-            await session.write(f"{verb} public key (base64, or an ssh-ed25519 line, blank to cancel): ")
+            has_key = bool(target.fingerprint)
+            verb = "Replace" if has_key else "Add"
+            clear_hint = ", 'clear' to remove it" if has_key else ""
+            await session.write(
+                f"{verb} public key (base64, or an ssh-ed25519 line, blank to cancel{clear_hint}): "
+            )
             text = (await session.read_line()).strip()
-            if text:
+            if has_key and text.lower() == "clear":
+                if await prompt_yes_no(
+                    session, f"Remove {target.username!r}'s SSH public key?", default=False
+                ):
+                    try:
+                        target = await lane.run(clear_verify_key, target, changed_by=actor)
+                    except AuthError as exc:
+                        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+                    else:
+                        await session.write_line(f"Public key removed for {target.username!r}.")
+            elif text:
                 try:
                     verify_key = parse_verify_key(text)
                 except IdentityError as exc:

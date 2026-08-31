@@ -68,6 +68,7 @@ from netbbs.auth.users import (
     User,
     account_still_active,
     authenticate_password_async,
+    clear_verify_key,
     create_user_async,
     get_user_by_id,
     get_user_by_username,
@@ -4227,14 +4228,35 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         SysOp to do it for them. Reuses the same `set_verify_key`
         domain function; `changed_by=user` records the account acting
         on its own key, distinct in the moderation log from a SysOp
-        doing it on someone else's behalf."""
+        doing it on someone else's behalf.
+
+        Dogfood follow-up (GitHub issue #212): typing 'clear' (only
+        offered once a key is actually set) removes it via
+        `clear_verify_key`, after a confirmation -- previously there was
+        no way to remove a key at all, self-service or SysOp-assisted."""
         await session.write_line("")
-        verb = "Replace" if draft["ssh_fingerprint"] else "Add"
+        has_key = bool(draft["ssh_fingerprint"])
+        verb = "Replace" if has_key else "Add"
+        clear_hint = ", 'clear' to remove it" if has_key else ""
         await session.write(
-            f"{verb} your SSH public key (base64, or an ssh-ed25519 line, blank to cancel): "
+            f"{verb} your SSH public key (base64, or an ssh-ed25519 line, blank to cancel{clear_hint}): "
         )
         text = (await session.read_line()).strip()
         if not text:
+            return
+        if has_key and text.lower() == "clear":
+            if not await prompt_yes_no(
+                session, "Remove your SSH public key? You'll only be able to log in with your password.",
+                default=False,
+            ):
+                return
+            try:
+                updated = await lane.run(clear_verify_key, user, changed_by=user)
+            except AuthError as exc:
+                await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+                return
+            draft["ssh_fingerprint"] = updated.fingerprint
+            await session.write_line(colored("SSH public key removed.", fg_color=MUTED_COLOR))
             return
         try:
             verify_key = parse_verify_key(text)
@@ -4459,7 +4481,9 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             help=(
                 "Attaches an SSH public key to this account so you can log in over SSH with "
                 "key-based authentication instead of (or alongside) your password. Paste it "
-                "as base64, or a full 'ssh-ed25519 ...' line."
+                "as base64, or a full 'ssh-ed25519 ...' line. Once a key is set, type 'clear' "
+                "at the prompt to remove it -- only offered if you have a password set, since "
+                "an account needs at least one way to log in."
             ),
         ),
     ]

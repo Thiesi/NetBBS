@@ -750,6 +750,44 @@ def set_verify_key(db: Database, target: User, verify_key: nacl.signing.VerifyKe
     return _get_user_by_id(db, target.id)
 
 
+def clear_verify_key(db: Database, target: User, *, changed_by: User) -> User:
+    """
+    Remove `target`'s public key, requiring a password already be set on
+    the account.
+
+    Dogfood follow-up: `set_verify_key` above could attach or replace a
+    key, but nothing could ever remove one -- neither self-service
+    (`netbbs.net.login_flow`'s own `[K]` Profile field) nor the SysOp
+    admin console. The `users` table's own CHECK constraint
+    (`password_hash IS NOT NULL OR public_key IS NOT NULL`,
+    `netbbs.storage.migrations`) exists precisely because an account
+    must always keep at least one credential -- clearing a key on an
+    account with no password would either hit that constraint as a raw
+    `sqlite3.IntegrityError`, or (if the constraint were ever loosened)
+    permanently lock the account out with no way back in.
+    `netbbs.admin.__main__`'s own bootstrap flow calls out exactly this
+    "pubkey-only SysOp with no local recovery path" risk. Checked here,
+    with a clear `AuthError`, rather than left to the constraint to
+    reject blindly.
+    """
+    from netbbs.moderation.log import record_action
+
+    row = db.connection.execute(
+        "SELECT password_hash FROM users WHERE id = ?", (target.id,)
+    ).fetchone()
+    if row is None or row["password_hash"] is None:
+        raise AuthError(
+            f"cannot remove {target.username!r}'s SSH key -- this account has no password set "
+            "and would be locked out of the node entirely. Set a password first."
+        )
+    db.connection.execute(
+        "UPDATE users SET public_key = NULL, fingerprint = NULL WHERE id = ?", (target.id,)
+    )
+    db.connection.commit()
+    record_action(db, actor=changed_by, action="clear_verify_key", target_user_id=target.id)
+    return _get_user_by_id(db, target.id)
+
+
 def set_can_verify_identity(db: Database, target: User, can_verify: bool, *, changed_by: User) -> User:
     """
     Grant or revoke `target`'s identity-verification permission (design
