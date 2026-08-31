@@ -10,6 +10,7 @@ from netbbs.auth.users import (
     authenticate_keypair,
     authenticate_password,
     authorize_public_key,
+    clear_verify_key,
     create_user,
     generate_challenge,
     get_user_by_username,
@@ -330,3 +331,40 @@ def test_set_verify_key_refuses_a_key_already_used_by_another_account(db):
 
     # Refused cleanly -- thiesi's own row is untouched, not left half-updated.
     assert get_user_by_username(db, "thiesi").fingerprint is None
+
+
+# -- removing a key from an existing account (dogfood: no removal path) ----
+
+
+def test_clear_verify_key_removes_the_key_from_a_password_and_key_account(db):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    signing_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", password="hunter2", verify_key=signing_key.verify_key)
+    assert thiesi.fingerprint is not None
+
+    updated = clear_verify_key(db, thiesi, changed_by=sysop)
+    assert updated.fingerprint is None
+
+    with pytest.raises(AuthError):
+        authorize_public_key(db, "thiesi", signing_key.verify_key)
+    # The password login the account still has keeps working, unaffected.
+    assert authenticate_password(db, "thiesi", "hunter2") is not None
+
+
+def test_clear_verify_key_refuses_a_key_only_account_with_no_password(db):
+    # GitHub issue #212: removing the only credential a key-only account
+    # has would lock it out of the node entirely (the users table's own
+    # CHECK constraint, password_hash IS NOT NULL OR public_key IS NOT
+    # NULL, exists for exactly this reason) -- must be refused, not
+    # allowed to hit that constraint as a raw sqlite3.IntegrityError.
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    signing_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", verify_key=signing_key.verify_key)
+    assert thiesi.fingerprint is not None
+
+    with pytest.raises(AuthError):
+        clear_verify_key(db, thiesi, changed_by=sysop)
+
+    # Refused cleanly -- the key is still there and still usable.
+    assert get_user_by_username(db, "thiesi").fingerprint is not None
+    authorize_public_key(db, "thiesi", signing_key.verify_key)

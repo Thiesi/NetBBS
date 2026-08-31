@@ -266,6 +266,58 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     assert "already in use" in _written_text(session)
 
 
+def test_profile_ssh_public_key_clear_not_offered_with_no_key_set(db, lane, alice):
+    # GitHub issue #212: the 'clear' keyword only makes sense once a key
+    # actually exists -- shouldn't be advertised (or accepted as a
+    # literal key value) on an account with none set.
+    assert alice.fingerprint is None
+    # Blank read_line response cancels the prompt cleanly, distinct from
+    # the outer field-selection loop's own key read (edit_resource_draft
+    # reads that via read_editor_key, which -- unlike read_key -- blocks
+    # rather than raising once FakeSession's scripted input runs out, so
+    # this needs its own explicit "b" to reach it).
+    session = FakeSession(["k", "", "b"])
+    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    assert "'clear' to remove" not in _written_text(session)
+
+
+def test_profile_ssh_public_key_self_service_clears_the_key(db, lane, alice):
+    # GitHub issue #212: no self-service (or SysOp) way existed to remove
+    # a key once set. Alice also has a password (the `alice` fixture),
+    # so removing the key doesn't lock her account out.
+    import nacl.signing
+
+    from netbbs.auth.users import set_verify_key
+
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    set_verify_key(db, alice, verify_key, changed_by=alice)
+    alice = login_flow.get_user_by_username(db, "alice")
+    assert alice.fingerprint is not None
+
+    session = FakeSession(["k", "clear", "y", "b"])
+    asyncio.run(login_flow._edit_profile(session, lane, alice))
+
+    updated = login_flow.get_user_by_username(db, "alice")
+    assert updated.fingerprint is None
+    assert "SSH public key removed." in _written_text(session)
+
+
+def test_profile_ssh_public_key_self_service_clear_declined_keeps_the_key(db, lane, alice):
+    import nacl.signing
+
+    from netbbs.auth.users import set_verify_key
+
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    set_verify_key(db, alice, verify_key, changed_by=alice)
+    alice = login_flow.get_user_by_username(db, "alice")
+
+    session = FakeSession(["k", "clear", "n", "b"])
+    asyncio.run(login_flow._edit_profile(session, lane, alice))
+
+    updated = login_flow.get_user_by_username(db, "alice")
+    assert updated.fingerprint is not None
+
+
 # -- composing a new post ---------------------------------------------------
 
 

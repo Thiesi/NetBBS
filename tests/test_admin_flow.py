@@ -1054,6 +1054,37 @@ def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
     assert "already in use" in _written_text(session)
 
 
+def test_admin_can_remove_a_public_key_from_a_password_and_key_account(db, lane, sysop):
+    # GitHub issue #212: no SysOp-side (or self-service) way existed to
+    # remove a key once set. Alice has a password too, so removing her
+    # key doesn't lock her account out.
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    alice = create_user(db, "alice", password="hunter2", verify_key=verify_key, user_level=10)
+    assert alice.fingerprint is not None
+
+    session = FakeSession(["u", "e", "0", "1", "k", "clear", "y", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    updated = next(u for u in list_users(db) if u.username == "alice")
+    assert updated.fingerprint is None
+    assert "Public key removed for 'alice'" in _written_text(session)
+
+
+def test_admin_removing_a_public_key_refused_with_no_password_set(db, lane, sysop):
+    # A key-only account clearing its only credential would lock it out
+    # entirely -- must be refused, not silently corrupt the account.
+    verify_key = nacl.signing.SigningKey.generate().verify_key
+    alice = create_user(db, "alice", verify_key=verify_key, user_level=10)
+    assert alice.fingerprint is not None
+
+    session = FakeSession(["u", "e", "0", "1", "k", "clear", "y", "b", "b", "b"])
+    _run(session, lane, sysop)
+
+    updated = next(u for u in list_users(db) if u.username == "alice")
+    assert updated.fingerprint is not None
+    assert "no password set" in _written_text(session)
+
+
 # -- delete -----------------------------------------------------------------
 
 
