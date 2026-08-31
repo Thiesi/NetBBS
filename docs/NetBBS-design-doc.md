@@ -4968,6 +4968,91 @@ concurrency regression proving two simultaneous raids on the same
 target row cannot lose an update. Issue #200 is closed; all of its
 acceptance criteria are met.
 
+### Issue #168 — real-time relay for Link direct chat
+
+**Goal:** decide between the two structurally different designs the issue
+itself poses for live (Noise XX) relay between two mutually-unreachable
+(outgoing-only-to-each-other) nodes: double-hop relay-as-participant
+(the relay terminates one Noise session per leg and re-encrypts between
+them) versus a raw-socket/TCP-level proxy below the Noise layer (the
+relay blindly forwards bytes, never touching the handshake or its keys).
+Not a newly-discovered gap — the design doc already named this as a
+deferred "separate future protocol" (§8.10); this issue is that design
+pass.
+
+**Context that made this tractable now, not a decision in itself:** a
+second, related idea is in discussion — turning ReLink (the project's
+own persistent, internet-reachable test node) into a stable, always-up
+default relay so a home SysOp who can't or won't expose a port has a
+frictionless path onto the mesh, without that being a hard dependency
+(any other willing peer, or a commercial provider for the parallel
+managed-DNS idea under #201, works exactly as well — nothing forces
+ReLink specifically). That product/infrastructure question is real but
+still early and not decided here. What it *does* settle is the async-
+relay model's own objection to the raw-proxy design: `relay_selection.py`'s
+reliability-ranking machinery exists to route around relays that might
+disappear, and a relay explicitly committed to staying up removes the
+need to solve general reliability-ranked live-relay discovery before a
+v1 can ship. The protocol decision below stands on its own regardless of
+who ends up operating such a relay.
+
+**Decision 1 (locked in) — raw-socket/TCP-level proxy, not double-hop.**
+The deciding factor: raw-proxy requires **zero changes** to the already-
+shipped `LinkRealtimeSession`/Noise XX handshake code. Two directly-
+handshaked endpoints run the exact same mutual authentication they'd run
+if actually adjacent; the relay is as invisible to Noise as any ordinary
+router hop, since it never participates in the Diffie-Hellman exchange
+and structurally cannot decrypt anything. That confines all new code to
+connection setup (a small rendezvous exchange — "I want to reach
+fingerprint X" / "I'm X, waiting"), not the confidentiality-critical
+path itself, and it is a well-understood pattern elsewhere (a TURN
+server, an SSH jump host, Tailscale's DERP relays), not a novel design.
+
+A real alternative was considered and rejected for now, not dismissed:
+double-hop can be built as a *hybrid* where the relay stays a genuine
+protocol participant for control-plane frames (subscribe/presence/ping)
+it's fine to see, while chat-content frames carry their own additional
+encryption hop the relay can't read — giving real per-frame-type abuse
+mitigation (raw-proxy can only see bytes/timing, never structure) on top
+of content confidentiality. Rejected for v1 because it's solving a
+structural-abuse-mitigation problem with no evidence yet that it's
+needed, at real cryptographic-design cost paid up front: a second key-
+exchange scheme layered inside the double-hop transport, a new session
+shape (today's `LinkRealtimeSession` assumes exactly one remote
+fingerprint, not a triangulated A-relay-B relationship), and a new frame
+family. If frame-level abuse mitigation becomes a real operational
+problem later, the hybrid design is the documented answer to revisit —
+not re-derived from scratch.
+
+**Trade-off stated plainly:** raw-proxy does not get either design to
+zero metadata exposure — the relay still learns which two fingerprints
+talked, for how long, and roughly how much traffic, same as the hybrid
+double-hop's control-plane visibility would show. Raw-proxy also doesn't
+plug into `relay_selection.py`'s existing reliability-ranking/consent
+model at all — it's a structurally different kind of "relay" than the
+async store-and-forward one, sharing a name but no code or selection
+mechanism. If a fully decentralized *marketplace* of live relays (not
+one well-known anchor) is ever wanted, that discovery/ranking layer
+would need to be built fresh for this model rather than reusing the
+async one — an accepted, deferred cost, not an oversight.
+
+**Still open, not decided here — the issue's other acceptance criteria:**
+
+- New bounded-resource limits for live relay (concurrent bridged-session
+  caps, per-relay bandwidth/rate bounds distinct from existing per-
+  session frame-rate bounds, idle/abandoned-rendezvous timeout policy) —
+  matching every other remotely-influenced NetBBS resource's existing
+  bar, per this issue's own acceptance criteria. Not yet defined.
+- A stated, explicit answer for what two mutually-unreachable nodes
+  experience *today*, before this ships — not silent failure. Not yet
+  decided.
+- The rendezvous protocol's own exact frame shape at the relay (this
+  decision only settles that it stays outside the Noise/session layer
+  entirely, not its concrete design).
+
+Issue #168 stays open for these; only the double-hop-vs-proxy fork is
+resolved by this entry.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
