@@ -1026,18 +1026,19 @@ def test_restrict_login_declining_confirmation_leaves_status_unchanged(db, lane,
 def test_admin_can_attach_a_public_key_to_an_existing_password_account(db, lane, sysop):
     # Dogfood follow-up: a self-registered (password-only) account had no
     # way to ever gain key-based login short of a SysOp deleting and
-    # recreating it. [K]ey on the user detail screen closes that gap.
+    # recreating it. [K]ey on the user detail screen -- now the shared
+    # manage_ssh_keys_screen -- closes that gap.
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     assert alice.fingerprint is None
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["u", "e", "0", "1", "k", raw_b64, "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.fingerprint is not None
-    assert "Public key set for 'alice'" in _written_text(session)
+    assert "Key 'phone' added." in _written_text(session)
 
 
 def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
@@ -1046,28 +1047,30 @@ def test_attaching_a_duplicate_public_key_is_refused(db, lane, sysop):
     create_user(db, "bob", verify_key=verify_key, user_level=10)
     alice = create_user(db, "alice", password="hunter2", user_level=10)
 
-    session = FakeSession(["u", "e", "0", "1", "k", raw_b64, "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "a", "phone", raw_b64, "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.fingerprint is None
-    assert "already in use" in _written_text(session)
+    assert "already registered" in _written_text(session)
 
 
 def test_admin_can_remove_a_public_key_from_a_password_and_key_account(db, lane, sysop):
     # GitHub issue #212: no SysOp-side (or self-service) way existed to
     # remove a key once set. Alice has a password too, so removing her
-    # key doesn't lock her account out.
+    # key doesn't lock her account out. Her only key was set at account
+    # creation, so it's labeled "default" (add_ssh_key/remove_ssh_key's
+    # own convention for an account's first key).
     verify_key = nacl.signing.SigningKey.generate().verify_key
     alice = create_user(db, "alice", password="hunter2", verify_key=verify_key, user_level=10)
     assert alice.fingerprint is not None
 
-    session = FakeSession(["u", "e", "0", "1", "k", "clear", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")
     assert updated.fingerprint is None
-    assert "Public key removed for 'alice'" in _written_text(session)
+    assert "Key 'default' removed." in _written_text(session)
 
 
 def test_admin_removing_a_public_key_refused_with_no_password_set(db, lane, sysop):
@@ -1077,7 +1080,7 @@ def test_admin_removing_a_public_key_refused_with_no_password_set(db, lane, syso
     alice = create_user(db, "alice", verify_key=verify_key, user_level=10)
     assert alice.fingerprint is not None
 
-    session = FakeSession(["u", "e", "0", "1", "k", "clear", "y", "b", "b", "b"])
+    session = FakeSession(["u", "e", "0", "1", "k", "r", "1", "y", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     updated = next(u for u in list_users(db) if u.username == "alice")

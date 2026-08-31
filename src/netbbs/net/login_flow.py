@@ -68,12 +68,11 @@ from netbbs.auth.users import (
     User,
     account_still_active,
     authenticate_password_async,
-    clear_verify_key,
     create_user_async,
     get_user_by_id,
     get_user_by_username,
+    list_ssh_keys,
     list_users,
-    set_verify_key,
 )
 from netbbs.boards import (
     MAX_BODY_BYTES,
@@ -122,7 +121,6 @@ from netbbs.directory import (
 )
 from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.files.categories import get_category_by_id as get_file_area_category_by_id
-from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.link.boards import (
     LinkContext,
     queue_board_post_edit_if_linked,
@@ -190,6 +188,7 @@ from netbbs.net.resource_editor import Draft, FieldSpec, edit_resource_draft, li
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.net.session_registry import ActiveSessionRegistry, SessionSummary
 from netbbs.net.shutdown import NodeControls, SequenceScheduler, format_remaining_seconds
+from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
@@ -1561,7 +1560,15 @@ async def _main_menu(
                 # deleted this same account mid-edit -- `_main_menu`'s
                 # own loop has no other path for "the account I'm
                 # logged in as no longer exists" to unwind through here.
-                user = get_user_by_id(db, user.id) or user
+                #
+                # Code review follow-up (PR #221): this ran get_user_by_id
+                # directly against `db` on the interactive event-loop
+                # coroutine instead of through `lane`, like every other
+                # SQLite access this async UI flow performs -- under
+                # contention or slow storage that blocks every other
+                # Telnet/SSH/web session sharing this node's one
+                # connection, not just this one.
+                user = await lane.run(get_user_by_id, user.id) or user
             else:
                 await session.write_line(
                     colored("Your profile is not available in this context.", fg_color=MUTED_COLOR)
@@ -4215,7 +4222,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         "unicode_style": unicode_style,
         "breadcrumb_collapsed": collapsed,
         "sort_preference_count": len(await lane.run(list_sort_preferences, user)),
-        "ssh_fingerprint": user.fingerprint,
+        "ssh_key_count": len(await lane.run(list_ssh_keys, user)),
     }
 
     async def _bio_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
@@ -4235,54 +4242,24 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
 
     async def _ssh_public_key_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         """Self-service counterpart to `_draw_user_detail`'s SysOp-only
-        `[K]` field (`netbbs.net.admin_flow`) -- lets an account that
-        registered with a password alone later add or replace the
-        public key that enables SSH key-based login, without needing a
-        SysOp to do it for them. Reuses the same `set_verify_key`
-        domain function; `changed_by=user` records the account acting
-        on its own key, distinct in the moderation log from a SysOp
-        doing it on someone else's behalf.
+        `[K]` field (`netbbs.net.admin_flow`) -- both now open the same
+        shared `manage_ssh_keys_screen` (`netbbs.net.ssh_key_screen`),
+        `changed_by=user` here recording the account acting on its own
+        keys, distinct in the moderation log from a SysOp acting on
+        someone else's behalf.
 
-        Dogfood follow-up (GitHub issue #212): typing 'clear' (only
-        offered once a key is actually set) removes it via
-        `clear_verify_key`, after a confirmation -- previously there was
-        no way to remove a key at all, self-service or SysOp-assisted."""
-        await session.write_line("")
-        has_key = bool(draft["ssh_fingerprint"])
-        verb = "Replace" if has_key else "Add"
-        clear_hint = ", 'clear' to remove it" if has_key else ""
-        await session.write(
-            f"{verb} your SSH public key (base64, or an ssh-ed25519 line, blank to cancel{clear_hint}): "
-        )
-        text = (await session.read_line()).strip()
-        if not text:
-            return
-        if has_key and text.lower() == "clear":
-            if not await prompt_yes_no(
-                session, "Remove your SSH public key? You'll only be able to log in with your password.",
-                default=False,
-            ):
-                return
-            try:
-                updated = await lane.run(clear_verify_key, user, changed_by=user)
-            except AuthError as exc:
-                await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
-                return
-            draft["ssh_fingerprint"] = updated.fingerprint
-            await session.write_line(colored("SSH public key removed.", fg_color=MUTED_COLOR))
-            return
-        try:
-            verify_key = parse_verify_key(text)
-        except IdentityError as exc:
-            await session.write_line(colored(f"Could not parse key: {exc}", fg_color=MUTED_COLOR))
-            return
-        try:
-            updated = await lane.run(set_verify_key, user, verify_key, changed_by=user)
-        except AuthError as exc:
-            await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
-            return
-        draft["ssh_fingerprint"] = updated.fingerprint
-        await session.write_line(colored("SSH public key set.", fg_color=MUTED_COLOR))
+        Dogfood report: the old single-key `[K]` field's "add or
+        *replace*" semantics silently revoked whichever key was already
+        on file the moment a second device's key was added -- a second
+        device (a phone, generated fresh because Android's own security
+        model won't let an existing private key be copied over) had no
+        way to gain SSH login without kicking the first device out. Now
+        a real list/add/remove screen backed by `add_ssh_key`/
+        `remove_ssh_key`/`list_ssh_keys`, none of which ever revoke a
+        different key."""
+        nonlocal user
+        user = await manage_ssh_keys_screen(session, lane, user, changed_by=user)
+        draft["ssh_key_count"] = len(await lane.run(list_ssh_keys, user))
 
     def _color_depth_render(d: Draft) -> str:
         value = d["color_depth"]
@@ -4487,16 +4464,19 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         ),
         FieldSpec(
             key="ssh_public_key", hotkey="k", menu_text=menu_key("k", "ey", prefix="SSH public "),
-            label="SSH public key",
-            render=lambda d: d["ssh_fingerprint"] or "(none set)",
+            label="SSH public key(s)",
+            render=lambda d: f"{d['ssh_key_count']} key(s)" if d["ssh_key_count"] else "(none set)",
             prompt=_ssh_public_key_prompt,
-            brief="Add/replace your SSH login key",
+            brief="Manage your SSH login keys",
             help=(
-                "Attaches an SSH public key to this account so you can log in over SSH with "
-                "key-based authentication instead of (or alongside) your password. Paste it "
-                "as base64, or a full 'ssh-ed25519 ...' line. Once a key is set, type 'clear' "
-                "at the prompt to remove it -- only offered if you have a password set, since "
-                "an account needs at least one way to log in."
+                "Opens a screen listing every SSH public key attached to this account, so you "
+                "can log in over SSH with key-based authentication instead of (or alongside) "
+                "your password -- from more than one device at once, each with its own key "
+                "(useful when a device, e.g. a phone, can't have an existing private key "
+                "copied onto it and has to generate its own). [A]dd accepts a key pasted as "
+                "base64, or a full 'ssh-ed25519 ...' line, and never revokes any other key "
+                "already on the account. Removing your last key is only offered if you have a "
+                "password set, since an account needs at least one way to log in."
             ),
         ),
     ]
