@@ -2353,12 +2353,8 @@ def test_link_this_board_flow(db, lane, sysop):
 
     inputs = [
         "m", "m", "l", "0", "1",  # navigate to board detail
-        "l",  # [L]ink this board
-        "", "",  # recommended min read/write level: keep current (0)
-        "",  # recommend moderated? blank = no recommendation
-        "",  # recommended max post age: blank = no recommendation
-        "", "",  # min age / name requirement: keep current (none)
-        "",  # is this a fork of an existing Linked board? blank = no
+        "l",  # [L]ink this board -- opens the draft field-editor screen
+        "s",  # save with every field left at its default recommendation
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -2371,6 +2367,38 @@ def test_link_this_board_flow(db, lane, sysop):
     genesis = link_context.link_node.boards[board.board_id]
     assert genesis.content_id in link_context.link_node.known_event_ids
     assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
+
+
+def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane, sysop):
+    """Regression for the old fixed linear chain's own bug: a mistyped
+    later field (e.g. max post age) used to discard every earlier
+    answer and abort the whole screen outright. The draft-editor
+    conversion (`_link_board_field_specs`) keeps the draft intact and
+    only rejects the one bad field -- proven here by setting Moderated
+    to a real recommendation, then typing garbage into a later field,
+    then saving and confirming the earlier choice survived."""
+    from netbbs.boards.boards import create_board
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+
+    inputs = [
+        "m", "m", "l", "0", "1",  # navigate to board detail
+        "l",  # [L]ink this board
+        "m",  # toggle Moderated -- no recommendation -> yes
+        "x", "not-a-number",  # bad entry on a later, unrelated field
+        "s",  # save anyway
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "Not a number" in text
+    assert "Linked 'General'" in text
+    genesis = link_context.link_node.boards[board.board_id]
+    assert genesis.payload["default_moderated"] is True
+    assert "default_max_post_age_days" not in genesis.payload
 
 
 def test_link_this_board_is_not_offered_once_already_linked(db, lane, sysop):
@@ -2406,11 +2434,8 @@ def test_link_this_file_area_flow(db, lane, sysop):
 
     inputs = [
         "m", "f", "l", "0", "1",  # navigate to file area detail
-        "l",  # [L]ink this file area
-        "", "",  # recommended min read/write level: keep current (0)
-        "",  # recommend moderated? blank = no recommendation
-        "",  # recommended max file age: blank = no recommendation
-        "", "",  # min age / name requirement: keep current (none)
+        "l",  # [L]ink this file area -- opens the draft field-editor screen
+        "s",  # save with every field left at its default recommendation
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)
@@ -2461,9 +2486,8 @@ def test_link_this_channel_flow(db, lane, sysop):
 
     inputs = [
         "m", "n", "l", "0", "1",  # navigate to channel detail
-        "l",  # [L]ink this channel
-        "",  # recommended minimum level: keep current (0)
-        "", "",  # min age / name requirement: keep current (none)
+        "l",  # [L]ink this channel -- opens the draft field-editor screen
+        "s",  # save with every field left at its default recommendation
         "b", "b", "b", "b",
     ]
     session = FakeSession(inputs)

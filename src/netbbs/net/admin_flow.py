@@ -8292,28 +8292,6 @@ async def _prompt_min_age(session: Session, *, current: int | None) -> tuple[int
         return None, False
 
 
-async def _prompt_name_requirement(session: Session, *, current: str | None) -> tuple[str | None, bool]:
-    """Shared name_requirement prompt (design doc §18) --
-    `none` (no gate), `verified` (SysOp can identify but nothing is
-    displayed), or `verified_and_displayed` (shown within this
-    resource's own rendering, design doc)."""
-    label = current or "none"
-    await session.write(
-        f"Name requirement [{label}] (none/verified/verified_and_displayed, blank = keep): "
-    )
-    raw = (await session.read_line()).strip().lower()
-    if not raw:
-        return current, True
-    if raw == "none":
-        return None, True
-    if raw in ("verified", "verified_and_displayed"):
-        return raw, True
-    await session.write_line(
-        colored("Must be none/verified/verified_and_displayed -- cancelled.", fg_color=MUTED_COLOR)
-    )
-    return None, False
-
-
 async def _pick_optional_category(
     session: Session,
     lane: DatabaseLane,
@@ -8451,6 +8429,24 @@ def _optional_int_label(value: int | None, *, none_word: str = "none") -> str:
     return str(value) if value is not None else none_word
 
 
+# Tri-state "recommend this to Link peers" cycle -- `[L]ink this board`/
+# `[L]ink this file area`'s own `default_moderated` field (dogfood
+# report: converting these screens from their old fixed linear prompt
+# chain). Unlike a plain `bool_field`, silence is a real third state
+# here (send no recommendation at all, matching every other `default_*`
+# field's own "blank = no recommendation" convention), not just a
+# "current" value to keep -- so this cycles through it like
+# `_name_requirement_field`'s own three-value set rather than confirming
+# a toggle.
+_LINK_RECOMMENDATION_VALUES: list[bool | None] = [None, True, False]
+
+
+def _link_recommendation_label(value: bool | None) -> str:
+    if value is None:
+        return "no recommendation"
+    return "yes" if value else "no"
+
+
 # -- FieldSpec adapters (design doc, dogfood feature request) --------
 #
 # Thin wrappers turning this module's own existing per-type prompt
@@ -8512,10 +8508,7 @@ def _name_requirement_field(key: str = "name_requirement") -> Callable[[Session,
     """Cycles none -> verified -> verified_and_displayed -> none on
     each hotkey press (dogfood feature request, issue #153) instead of
     requiring the SysOp to type the literal string
-    `verified_and_displayed`. Only this draft-editor field changes --
-    `_prompt_name_requirement` itself stays typed-text for its other
-    (non-draft-editor, "recommend a value for Link" wizard) callers,
-    which weren't part of the reported complaint."""
+    `verified_and_displayed`."""
     return choice_field(key, _NAME_REQUIREMENT_VALUES)
 
 
@@ -9305,6 +9298,108 @@ async def _board_detail_screen(
             await session.write(reject_unhandled_key(choice))
 
 
+def _forked_from_field(
+    board: Board, *, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """`[L]ink this board`'s own optional fork-source picker, as a
+    draft-editor field -- also stashes the chosen board's own name into
+    `draft["forked_from_label"]`, same reasoning as `_community_field`'s
+    own `_label` companion (`render` must stay a pure, synchronous dict
+    read; the name is resolved here, at prompt time, where a `lane`
+    round-trip is already in flight)."""
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        candidates = await lane.run(_linked_boards_excluding, board.id)
+        chosen = await pick_item(
+            session, candidates,
+            name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
+            title="Fork of which message board?", empty_message="No other Linked message boards to fork from.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if chosen is not None:
+            draft["forked_from"] = chosen.board_id
+            draft["forked_from_label"] = chosen.name
+
+    return prompt
+
+
+def _link_board_field_specs(
+    board: Board, *, redraw_in_place: bool = False, unicode_style: bool = False, collapsed: bool = False,
+) -> list[FieldSpec]:
+    """Dogfood report: this used to be a fixed linear chain of six
+    prompts plus a yes/no fork question, no way back -- a mistyped max
+    post age discarded every recommendation already chosen. Now an
+    `edit_resource_draft` field list, same shape as `_board_field_
+    specs`'s own already-converted fields, just recommendations instead
+    of enforced settings."""
+    return [
+        FieldSpec(
+            key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
+            label="Recommended read level",
+            render=lambda d: _optional_int_label(d.get("default_min_read_level")),
+            prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
+        ),
+        FieldSpec(
+            key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
+            label="Recommended write level",
+            render=lambda d: _optional_int_label(d.get("default_min_write_level")),
+            prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
+        ),
+        FieldSpec(
+            key="default_moderated", hotkey="m", menu_text=menu_key("M", "oderated"),
+            label="Recommended moderated",
+            render=lambda d: _link_recommendation_label(d.get("default_moderated")),
+            prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
+            step=choice_step("default_moderated", _LINK_RECOMMENDATION_VALUES),
+            brief="Sent to peers as a default",
+            help="Recommends whether posts should need approval, to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_max_post_age_days", hotkey="x", menu_text=menu_key("X", " post age", prefix="Ma"),
+            label="Recommended max post age",
+            render=lambda d: _optional_int_label(d.get("default_max_post_age_days"), none_word="no recommendation"),
+            prompt=_optional_int_field("default_max_post_age_days", "Recommended max post age in days"),
+            brief="Sent to peers as a default",
+            help="Recommends auto-purging posts older than N days, to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            label="Recommended min age",
+            render=lambda d: _optional_int_label(d.get("default_min_age")),
+            prompt=_min_age_field("default_min_age"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum caller age to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Recommended name requirement",
+            render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
+            prompt=_name_requirement_field("default_name_requirement"),
+            step=_name_requirement_step("default_name_requirement"),
+            brief="Sent to peers as a default",
+            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="forked_from", hotkey="f", menu_text=menu_key("F", "ork of"), label="Fork of",
+            render=lambda d: d.get("forked_from_label") or "(not a fork)",
+            prompt=_forked_from_field(
+                board, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            ),
+            brief="Origin board this forks from",
+            help=(
+                "If this board is a fork of an existing Linked message board, choose it here. "
+                "Leave as-is if it isn't."
+            ),
+        ),
+    ]
+
+
 async def _link_board_screen(
     session: Session, lane: DatabaseLane, actor: User, board: Board, link_context: LinkContext
 ) -> None:
@@ -9317,16 +9412,10 @@ async def _link_board_screen(
     The six `default_*` cascading-scalar-default fields
     are pre-filled from `board`'s own *current* local settings (the
     obvious starting recommendation, matching `_edit_board_screen`'s
-    own prefill-then-edit convention). For the four fields sharing
-    `_prompt_optional_int`/`_prompt_min_age`/`_prompt_name_requirement`
-    with `_edit_board_screen`, blank keeps that prefilled value as the
-    recommendation and typing `none` clears it to send no
-    recommendation at all for that field -- their own existing
-    "blank = keep, 'none' = clear" convention, reused rather than
-    special-cased here. `default_moderated`/`default_max_post_age_days`
-    have no such prior art to reuse (`_edit_board_screen` reads them as
-    plain required fields, never optional) -- blank means no
-    recommendation directly for both.
+    own prefill-then-edit convention) -- except `default_moderated`/
+    `default_max_post_age_days`, which have no such prior art to reuse
+    (`_edit_board_screen` reads them as plain required fields, never
+    optional) and start at "no recommendation" instead.
 
     Building/signing/persisting the genesis is a plain, synchronous
     `db`-first call (`link_board`), dispatched through `lane` like
@@ -9335,78 +9424,62 @@ async def _link_board_screen(
     event loop -- never inside the lane-dispatched call itself (see
     `link_board`'s own docstring for why that split matters: `LinkNode`
     mutation and `DatabaseLane` dispatch must never share a thread).
+
+    Dogfood report: the six fields plus the fork question below used to
+    be a fixed linear chain with no way back -- see `_link_board_field_
+    specs`'s own docstring for the bug this fixes. Unlike `[S]hutdown`/
+    `[D]rain`'s own draft-editor conversion, there is no extra confirm
+    step before `[S]ave` here -- the old linear chain never had one
+    either, and this matches every other `edit_resource_draft` caller's
+    own shape (the field summary itself is the confirmation).
     """
-    await session.write_line(
-        colored("\r\nLink this message board", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    default_min_read_level, ok = await _prompt_optional_int(
-        session, "Recommended minimum read level", current=board.min_read_level
-    )
-    if not ok:
-        return
-    default_min_write_level, ok = await _prompt_optional_int(
-        session, "Recommended minimum write level", current=board.min_write_level
-    )
-    if not ok:
-        return
-    await session.write(f"Recommend moderated? [{'y' if board.moderated else 'N'}/blank=no recommendation]: ")
-    moderated_answer = (await session.read_line()).strip().lower()
-    default_moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else None
-    current_age = board.max_post_age_days if board.max_post_age_days is not None else "unlimited"
-    await session.write(f"Recommended max post age in days [{current_age}] (blank = no recommendation): ")
-    max_age_raw = (await session.read_line()).strip()
-    default_max_post_age_days = None
-    if max_age_raw:
-        try:
-            default_max_post_age_days = int(max_age_raw)
-        except ValueError:
-            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
-            return
-    default_min_age, ok = await _prompt_min_age(session, current=board.min_age)
-    if not ok:
-        return
-    default_name_requirement, ok = await _prompt_name_requirement(session, current=board.name_requirement)
-    if not ok:
-        return
+    draft: dict = {
+        "default_min_read_level": board.min_read_level,
+        "default_min_write_level": board.min_write_level,
+        "default_moderated": None,
+        "default_max_post_age_days": None,
+        "default_min_age": board.min_age,
+        "default_name_requirement": board.name_requirement,
+        "forked_from": None,
+        "forked_from_label": None,
+    }
 
-    forked_from: str | None = None
-    if await prompt_yes_no(session, "Is this a fork of an existing Linked message board?", default=False):
-        candidates = await lane.run(_linked_boards_excluding, board.id)
-        chosen = await pick_item(
-            session, candidates,
-            name_of=lambda b: b.name, stable_id_of=lambda b: b.id,
-            title="Fork of which message board?", empty_message="No other Linked message boards to fork from.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-            unicode_style=await lane.run(unicode_style_enabled, actor),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=await lane.run(effective_header_color_256),
-        )
-        if chosen is not None:
-            forked_from = chosen.board_id
-
-    try:
+    async def save(draft: dict) -> bool:
         genesis = await lane.run(
             link_board,
             board,
             node_identity=link_context.node_identity,
-            default_min_read_level=default_min_read_level,
-            default_min_write_level=default_min_write_level,
-            default_moderated=default_moderated,
-            default_max_post_age_days=default_max_post_age_days,
-            default_min_age=default_min_age,
-            default_name_requirement=default_name_requirement,
-            forked_from=forked_from,
+            default_min_read_level=draft["default_min_read_level"],
+            default_min_write_level=draft["default_min_write_level"],
+            default_moderated=draft["default_moderated"],
+            default_max_post_age_days=draft["default_max_post_age_days"],
+            default_min_age=draft["default_min_age"],
+            default_name_requirement=draft["default_name_requirement"],
+            forked_from=draft["forked_from"],
         )
-    except LinkBoardsError as exc:
-        await session.write_line(colored(f"Could not Link message board: {exc}", fg_color=MUTED_COLOR))
-        return
+        link_context.link_node.boards[board.board_id] = genesis
+        link_context.link_node.known_event_ids.add(genesis.content_id)
+        link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+        await session.write_line(f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+        return True
 
-    link_context.link_node.boards[board.board_id] = genesis
-    link_context.link_node.known_event_ids.add(genesis.content_id)
-    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-
-    await session.write_line(f"Linked {board.name!r} -- it will be pushed to peers on the next sync pass.")
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Link this message board",
+        fields=_link_board_field_specs(
+            board, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        ),
+        draft=draft, save=save, error_type=LinkBoardsError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 def _linked_boards_excluding(db: Database, exclude_board_id: int) -> list[Board]:
@@ -10173,7 +10246,7 @@ async def _area_detail_screen(
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
-            await _link_area_screen(session, lane, area, link_context)
+            await _link_area_screen(session, lane, actor, area, link_context)
             linked = await lane.run(is_area_linked, area)
             await _draw_area_detail(session, lane, area, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         else:
@@ -10235,70 +10308,120 @@ async def _draw_area_detail(
     await session.write("Choice: ")
 
 
-async def _link_area_screen(session: Session, lane: DatabaseLane, area: FileArea, link_context: LinkContext) -> None:
+def _link_area_field_specs() -> list[FieldSpec]:
+    """`_link_board_field_specs`'s own subset -- no `forked_from` (file-
+    area origin succession is not built, design doc §11), and
+    `max_file_age_days` in place of `max_post_age_days`."""
+    return [
+        FieldSpec(
+            key="default_min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"),
+            label="Recommended read level",
+            render=lambda d: _optional_int_label(d.get("default_min_read_level")),
+            prompt=_optional_int_field("default_min_read_level", "Recommended minimum read level"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum read level to peers that don't set their own. 'none' sends no recommendation.",
+        ),
+        FieldSpec(
+            key="default_min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"),
+            label="Recommended write level",
+            render=lambda d: _optional_int_label(d.get("default_min_write_level")),
+            prompt=_optional_int_field("default_min_write_level", "Recommended minimum write level"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum write level to peers that don't set their own. 'none' sends no recommendation.",
+        ),
+        FieldSpec(
+            key="default_moderated", hotkey="m", menu_text=menu_key("M", "oderated"),
+            label="Recommended moderated",
+            render=lambda d: _link_recommendation_label(d.get("default_moderated")),
+            prompt=choice_field("default_moderated", _LINK_RECOMMENDATION_VALUES),
+            step=choice_step("default_moderated", _LINK_RECOMMENDATION_VALUES),
+            brief="Sent to peers as a default",
+            help="Recommends whether uploads should need approval, to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_max_file_age_days", hotkey="x", menu_text=menu_key("X", " file age", prefix="Ma"),
+            label="Recommended max file age",
+            render=lambda d: _optional_int_label(d.get("default_max_file_age_days"), none_word="no recommendation"),
+            prompt=_optional_int_field("default_max_file_age_days", "Recommended max file age in days"),
+            brief="Sent to peers as a default",
+            help="Recommends auto-purging files older than N days, to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            label="Recommended min age",
+            render=lambda d: _optional_int_label(d.get("default_min_age")),
+            prompt=_min_age_field("default_min_age"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum caller age to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Recommended name requirement",
+            render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
+            prompt=_name_requirement_field("default_name_requirement"),
+            step=_name_requirement_step("default_name_requirement"),
+            brief="Sent to peers as a default",
+            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+        ),
+    ]
+
+
+async def _link_area_screen(
+    session: Session, lane: DatabaseLane, actor: User, area: FileArea, link_context: LinkContext
+) -> None:
     """
     `[L]ink this file area` (design doc §11, issue #89 -- previously
     defined by `netbbs.link.files.link_file_area` but, unlike `link_
     board`, never actually reachable from any live UI action; this is
-    that missing call site). Mirrors `_link_board_screen` exactly, minus
-    the fields `FileArea` has no equivalent of (no `forked_from` --
-    file-area origin succession is not built, design doc §11) and with
-    `max_file_age_days` in place of `max_post_age_days`.
-    """
-    await session.write_line(
-        colored("\r\nLink this file area", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    default_min_read_level, ok = await _prompt_optional_int(
-        session, "Recommended minimum read level", current=area.min_read_level
-    )
-    if not ok:
-        return
-    default_min_write_level, ok = await _prompt_optional_int(
-        session, "Recommended minimum write level", current=area.min_write_level
-    )
-    if not ok:
-        return
-    await session.write(f"Recommend moderated? [{'y' if area.moderated else 'N'}/blank=no recommendation]: ")
-    moderated_answer = (await session.read_line()).strip().lower()
-    default_moderated = moderated_answer == "y" if moderated_answer in ("y", "n") else None
-    current_age = area.max_file_age_days if area.max_file_age_days is not None else "unlimited"
-    await session.write(f"Recommended max file age in days [{current_age}] (blank = no recommendation): ")
-    max_age_raw = (await session.read_line()).strip()
-    default_max_file_age_days = None
-    if max_age_raw:
-        try:
-            default_max_file_age_days = int(max_age_raw)
-        except ValueError:
-            await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
-            return
-    default_min_age, ok = await _prompt_min_age(session, current=area.min_age)
-    if not ok:
-        return
-    default_name_requirement, ok = await _prompt_name_requirement(session, current=area.name_requirement)
-    if not ok:
-        return
+    that missing call site). Mirrors `_link_board_screen`'s own field
+    list, minus `forked_from`.
 
-    try:
+    Dogfood report: same fixed-linear-chain bug `_link_board_screen`
+    had, same `edit_resource_draft` fix -- see `_link_board_field_
+    specs`'s own docstring. `actor` is newly required here (it wasn't
+    before): the draft-editor screen needs it to resolve display
+    preferences the old plain-prompt chain never touched.
+    """
+    draft: dict = {
+        "default_min_read_level": area.min_read_level,
+        "default_min_write_level": area.min_write_level,
+        "default_moderated": None,
+        "default_max_file_age_days": None,
+        "default_min_age": area.min_age,
+        "default_name_requirement": area.name_requirement,
+    }
+
+    async def save(draft: dict) -> bool:
         genesis = await lane.run(
             link_file_area,
             area,
             node_identity=link_context.node_identity,
-            default_min_read_level=default_min_read_level,
-            default_min_write_level=default_min_write_level,
-            default_moderated=default_moderated,
-            default_max_file_age_days=default_max_file_age_days,
-            default_min_age=default_min_age,
-            default_name_requirement=default_name_requirement,
+            default_min_read_level=draft["default_min_read_level"],
+            default_min_write_level=draft["default_min_write_level"],
+            default_moderated=draft["default_moderated"],
+            default_max_file_age_days=draft["default_max_file_age_days"],
+            default_min_age=draft["default_min_age"],
+            default_name_requirement=draft["default_name_requirement"],
         )
-    except LinkFilesError as exc:
-        await session.write_line(colored(f"Could not Link file area: {exc}", fg_color=MUTED_COLOR))
-        return
+        link_context.link_node.file_areas[area.area_id] = genesis
+        link_context.link_node.known_event_ids.add(genesis.content_id)
+        link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+        await session.write_line(f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
+        return True
 
-    link_context.link_node.file_areas[area.area_id] = genesis
-    link_context.link_node.known_event_ids.add(genesis.content_id)
-    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-
-    await session.write_line(f"Linked {area.name!r} -- it will be pushed to peers on the next sync pass.")
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Link this file area",
+        fields=_link_area_field_specs(), draft=draft, save=save, error_type=LinkFilesError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 
@@ -11267,7 +11390,7 @@ async def _channel_detail_screen(
             await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
-            await _link_channel_screen(session, lane, channel, link_context)
+            await _link_channel_screen(session, lane, actor, channel, link_context)
             linked = await lane.run(is_channel_linked, channel)
             await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
         else:
@@ -11413,50 +11536,90 @@ async def _channel_restrictions_screen(session: Session, lane: DatabaseLane, act
         await session.write_line(f"Lifted the {selected.kind} on {target_label!r}.")
 
 
-async def _link_channel_screen(session: Session, lane: DatabaseLane, channel: Channel, link_context: LinkContext) -> None:
+def _link_channel_field_specs() -> list[FieldSpec]:
+    """`_link_board_field_specs`'s own subset -- no `default_min_write_
+    level`/`_moderated`/`_max_post_age_days`, no `forked_from` (channel
+    origin succession is reused by reference only, not built, design
+    doc §9.6)."""
+    return [
+        FieldSpec(
+            key="default_min_level", hotkey="l", menu_text=menu_key("L", "evel"),
+            label="Recommended min level",
+            render=lambda d: _optional_int_label(d.get("default_min_level")),
+            prompt=_optional_int_field("default_min_level", "Recommended minimum level"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum level to peers that don't set their own. 'none' sends no recommendation.",
+        ),
+        FieldSpec(
+            key="default_min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"),
+            label="Recommended min age",
+            render=lambda d: _optional_int_label(d.get("default_min_age")),
+            prompt=_min_age_field("default_min_age"),
+            brief="Sent to peers as a default",
+            help="Recommends a minimum caller age to peers that don't set their own.",
+        ),
+        FieldSpec(
+            key="default_name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Recommended name requirement",
+            render=lambda d: _name_requirement_label(d.get("default_name_requirement")),
+            prompt=_name_requirement_field("default_name_requirement"),
+            step=_name_requirement_step("default_name_requirement"),
+            brief="Sent to peers as a default",
+            help=_NAME_REQUIREMENT_HELP + " Recommended to peers that don't set their own.",
+        ),
+    ]
+
+
+async def _link_channel_screen(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, link_context: LinkContext
+) -> None:
     """
     `[L]ink this channel` (design doc §9.6, issue #87 -- previously
     defined by `netbbs.link.channels.link_channel` but, unlike `link_
     board`, never actually reachable from any live UI action; this is
-    that missing call site). Mirrors `_link_board_screen`, minus every
-    field `Channel` has no equivalent setting for (no `default_min_
-    write_level`/`_moderated`/`_max_post_age_days`, no `forked_from` --
-    channel origin succession is reused by reference only, not built,
-    design doc §9.6).
-    """
-    await session.write_line(
-        colored("\r\nLink this chat channel", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    default_min_level, ok = await _prompt_optional_int(
-        session, "Recommended minimum level", current=channel.min_level
-    )
-    if not ok:
-        return
-    default_min_age, ok = await _prompt_min_age(session, current=channel.min_age)
-    if not ok:
-        return
-    default_name_requirement, ok = await _prompt_name_requirement(session, current=channel.name_requirement)
-    if not ok:
-        return
+    that missing call site). Mirrors `_link_board_screen`'s own field
+    list, minus every field `Channel` has no equivalent setting for.
 
-    try:
+    Dogfood report: same fixed-linear-chain bug `_link_board_screen`
+    had, same `edit_resource_draft` fix -- see `_link_board_field_
+    specs`'s own docstring. `actor` is newly required here (it wasn't
+    before): the draft-editor screen needs it to resolve display
+    preferences the old plain-prompt chain never touched.
+    """
+    draft: dict = {
+        "default_min_level": channel.min_level,
+        "default_min_age": channel.min_age,
+        "default_name_requirement": channel.name_requirement,
+    }
+
+    async def save(draft: dict) -> bool:
         genesis = await lane.run(
             link_channel,
             channel,
             node_identity=link_context.node_identity,
-            default_min_level=default_min_level,
-            default_min_age=default_min_age,
-            default_name_requirement=default_name_requirement,
+            default_min_level=draft["default_min_level"],
+            default_min_age=draft["default_min_age"],
+            default_name_requirement=draft["default_name_requirement"],
         )
-    except LinkChannelsError as exc:
-        await session.write_line(colored(f"Could not Link chat channel: {exc}", fg_color=MUTED_COLOR))
-        return
+        link_context.link_node.channels[channel.channel_id] = genesis
+        link_context.link_node.known_event_ids.add(genesis.content_id)
+        link_context.link_node.events[genesis.content_id] = genesis.to_dict()
+        await session.write_line(f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
+        return True
 
-    link_context.link_node.channels[channel.channel_id] = genesis
-    link_context.link_node.known_event_ids.add(genesis.content_id)
-    link_context.link_node.events[genesis.content_id] = genesis.to_dict()
-
-    await session.write_line(f"Linked {channel.name!r} -- it will be pushed to peers on the next sync pass.")
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Link this chat channel",
+        fields=_link_channel_field_specs(), draft=draft, save=save, error_type=LinkChannelsError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 
