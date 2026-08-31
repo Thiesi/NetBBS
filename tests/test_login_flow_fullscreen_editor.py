@@ -338,11 +338,14 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
             session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane
         )
     )
-    text = _written_text(session)
-    # "(none set)" is the field's own render for no key -- must appear
-    # exactly once (the very first visit's pre-key render), not twice
-    # (which would mean the second visit still thought there was no key).
-    assert text.count("(none set)") == 1
+    # "SSH public key(s): (none)" is the field's own render for no key
+    # (the full label, not just "(none)" -- several other fields share
+    # that same empty-value wording now too) -- must appear exactly once
+    # (the very first visit's pre-key render), not twice (which would
+    # mean the second visit still thought there was no key). Label and
+    # value are two separate colored() calls with a reset code between
+    # them, so this needs the ANSI-stripped text, not the raw stream.
+    assert _visible(session).count("SSH public key(s): (none)") == 1
 
 
 # -- composing a new post ---------------------------------------------------

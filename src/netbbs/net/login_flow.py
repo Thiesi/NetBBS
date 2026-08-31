@@ -4284,16 +4284,35 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
         )
         return "\r\n".join(lines)
 
+    # Dogfood report -- Thiesi's own observation that the main menu's
+    # grouped, multi-column layout and this screen's own flat 14-field
+    # list read as wildly different levels of polish. Grouped here into
+    # four sections via FieldSpec's own new `section` (netbbs.net.
+    # resource_editor's own docstring for why this is additive, not a
+    # rewrite of the shared component): IDENTITY (who you are, publicly)
+    # is what a caller usually opens this screen to change; ACCOUNT is
+    # security/data-management, deliberately last, not first, since it's
+    # visited far less often than the fields above it. COMMUNICATION and
+    # DISPLAY split what remains along "affects how others reach you" vs.
+    # "affects how this client renders for you" -- a caller wondering
+    # "why does chat behave this way" and one wondering "why does this
+    # look wrong" land in different, smaller groups instead of one
+    # shared pile. Sections group adjacent fields only (see that same
+    # docstring) -- reordered here to match, not just relabeled in
+    # place. Also normalizes five different "empty" spellings ("(no bio
+    # set)", "(no signature set)", "none saved", "(none set)") down to
+    # one, "(none)", consistently used wherever a field has nothing set.
     fields = [
         FieldSpec(
             key="bio", hotkey="e", menu_text=menu_key("E", "dit bio"), label="Bio",
-            render=lambda d: f"{len(d['bio'].splitlines())} line(s)" if d["bio"] else "(no bio set)",
+            render=lambda d: f"{len(d['bio'].splitlines())} line(s)" if d["bio"] else "(none)",
             prompt=_bio_prompt,
             brief="Change your public bio text",
             help=(
                 "Free-form text shown on your public profile (Directory, Who's online, etc.) "
                 "when Visibility below is public. Supports multiple lines. Blank clears it."
             ),
+            section="Identity",
         ),
         FieldSpec(
             key="bio_visible", hotkey="v", menu_text=menu_key("V", "isibility"), label="Visibility",
@@ -4306,16 +4325,31 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Whether your Bio is shown to other callers at all, independent of what the "
                 "bio text itself says. Private hides it everywhere except from a SysOp."
             ),
+            section="Identity",
         ),
         FieldSpec(
             key="signature", hotkey="g", menu_text=menu_key("g", "nature", prefix="Si"), label="Signature",
-            render=lambda d: f"{len(d['signature'].splitlines())} line(s)" if d["signature"] else "(no signature set)",
+            render=lambda d: f"{len(d['signature'].splitlines())} line(s)" if d["signature"] else "(none)",
             prompt=_signature_prompt,
             brief="Auto-appended to mail and posts you send",
             help=(
                 "Text automatically appended to every message you send from this account -- "
                 "mail, board posts, and channel posts alike. Blank means no signature."
             ),
+            section="Identity",
+        ),
+        FieldSpec(
+            key="identity_details", hotkey="n", menu_text=menu_key("N", "ame & details"),
+            label="Name & details",
+            render=lambda d: "(edit)",
+            prompt=_identity_details_prompt,
+            brief="Display name, location, age",
+            help=(
+                "Opens a separate screen for your display name, location, and birthdate -- "
+                "each independently shown or hidden to other callers, plus your verified-"
+                "badge and Link-attestation-sharing settings."
+            ),
+            section="Identity",
         ),
         FieldSpec(
             key="fullscreen_editor", hotkey="f", menu_text=menu_key("F", "ullscreen editor"),
@@ -4332,6 +4366,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "editor instead -- the safer default for a client that can't reliably position "
                 "the cursor."
             ),
+            section="Communication",
         ),
         FieldSpec(
             key="accepts_dm", hotkey="m", menu_text=menu_key("M", "essages"),
@@ -4347,6 +4382,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Who's online screen. Doesn't affect linked-channel chat -- only direct, "
                 "one-to-one messages."
             ),
+            section="Communication",
         ),
         FieldSpec(
             key="history_name_visible", hotkey="h", menu_text=menu_key("H", "istory visibility"),
@@ -4362,6 +4398,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "Hiding it only affects what ordinary callers see -- a SysOp can always see "
                 "the real name."
             ),
+            section="Communication",
         ),
         FieldSpec(
             key="color_depth", hotkey="c", menu_text=menu_key("C", "olor depth"), label="Color depth",
@@ -4376,6 +4413,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "what your client reports; force 'truecolor' or '256' only if colors render "
                 "wrong -- garbled, or not showing at all -- under auto."
             ),
+            section="Display",
         ),
         FieldSpec(
             key="description_level", hotkey="d", menu_text=menu_key("D", "escriptions"),
@@ -4391,6 +4429,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "most compact; 'brief' adds a one-line hint per option; 'detailed' shows the "
                 "fullest explanation where a field also defines one, like this Ctrl-H text."
             ),
+            section="Display",
         ),
         FieldSpec(
             key="redraw_in_place", hotkey="r", menu_text=menu_key("R", "edraw style"), label="In-place redraw",
@@ -4406,30 +4445,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "save confirmation) disappears immediately. Off is the safer default -- it "
                 "preserves scrollback."
             ),
-        ),
-        FieldSpec(
-            key="identity_details", hotkey="n", menu_text=menu_key("N", "ame & details"),
-            label="Name & details",
-            render=lambda d: "(edit)",
-            prompt=_identity_details_prompt,
-            brief="Display name, location, age",
-            help=(
-                "Opens a separate screen for your display name, location, and birthdate -- "
-                "each independently shown or hidden to other callers, plus your verified-"
-                "badge and Link-attestation-sharing settings."
-            ),
-        ),
-        FieldSpec(
-            key="sort_preferences", hotkey="s", menu_text=menu_key("S", "ort preferences"),
-            label="Sort preferences",
-            render=lambda d: f"{d['sort_preference_count']} saved" if d["sort_preference_count"] else "none saved",
-            prompt=_sort_preferences_prompt,
-            brief="Manage saved sort orders",
-            help=(
-                "Lists the sort preferences you've saved so far (e.g. how boards or file "
-                "areas are ordered) and lets you clear them. These are set implicitly "
-                "wherever you actually pick a sort order, not edited directly here."
-            ),
+            section="Display",
         ),
         FieldSpec(
             key="unicode_style", hotkey="u", menu_text=menu_key("U", "nicode style"),
@@ -4445,6 +4461,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "cleaner look, or fall back to plain ASCII ('/', '[X]', etc.) for a terminal "
                 "that renders Unicode incorrectly."
             ),
+            section="Display",
         ),
         FieldSpec(
             key="breadcrumb_collapsed", hotkey="l", menu_text=menu_key("L", "ocation style"),
@@ -4461,11 +4478,25 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "full path already collapses automatically when it doesn't fit your terminal "
                 "-- this forces the short form even when there's room to spare."
             ),
+            section="Display",
+        ),
+        FieldSpec(
+            key="sort_preferences", hotkey="s", menu_text=menu_key("S", "ort preferences"),
+            label="Sort preferences",
+            render=lambda d: f"{d['sort_preference_count']} saved" if d["sort_preference_count"] else "(none)",
+            prompt=_sort_preferences_prompt,
+            brief="Manage saved sort orders",
+            help=(
+                "Lists the sort preferences you've saved so far (e.g. how boards or file "
+                "areas are ordered) and lets you clear them. These are set implicitly "
+                "wherever you actually pick a sort order, not edited directly here."
+            ),
+            section="Account",
         ),
         FieldSpec(
             key="ssh_public_key", hotkey="k", menu_text=menu_key("k", "ey", prefix="SSH public "),
             label="SSH public key(s)",
-            render=lambda d: f"{d['ssh_key_count']} key(s)" if d["ssh_key_count"] else "(none set)",
+            render=lambda d: f"{d['ssh_key_count']} key(s)" if d["ssh_key_count"] else "(none)",
             prompt=_ssh_public_key_prompt,
             brief="Manage your SSH login keys",
             help=(
@@ -4478,6 +4509,7 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
                 "already on the account. Removing your last key is only offered if you have a "
                 "password set, since an account needs at least one way to log in."
             ),
+            section="Account",
         ),
     ]
 

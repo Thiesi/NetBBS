@@ -37,6 +37,7 @@ from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
     LABEL_COLOR,
+    METADATA_COLOR,
     MUTED_COLOR,
     MenuEntry,
     action_bar,
@@ -56,6 +57,12 @@ from netbbs.storage.execution import DatabaseLane
 # cases itself, only the caller's own `save` closure does (calling
 # create_* vs. update_*).
 Draft = dict[str, Any]
+
+# Distinguishes "no field rendered yet" from "the most recently rendered
+# field's own `section` really is `None`" while walking `fields` in
+# `edit_resource_draft` -- both would otherwise look identical the
+# moment a screen's first field happens to leave `section` unset.
+_NO_SECTION_YET = object()
 
 # One field's own sub-interaction: reads whatever it needs (may span
 # several prompts, e.g. a picker), and mutates `draft[key]` in place.
@@ -106,6 +113,25 @@ class FieldSpec:
     are a silent no-op on a field that doesn't define one (deliberately
     including `bool_field` -- see that function's own docstring for
     why arrow-triggered instant toggling was left out on purpose).
+
+    `section` (dogfood report -- Thiesi's own observation that the main
+    menu's grouped, multi-column `menu_grid` layout and this screen's
+    own flat field list read as wildly different levels of polish for
+    no principled reason), if given, groups this field under a bold,
+    uppercased heading shared with every other field carrying the same
+    `section` string -- both in the current-value list above the menu
+    row and in the hotkey menu row itself (which already routes through
+    `menu_grid`, so it gains real per-section columns, not just a
+    heading). `None` by default, and a screen where every field leaves
+    this unset renders byte-for-byte as before: sectioning only ever
+    activates once a caller actually opts in, so every existing
+    `edit_resource_draft` call site (create/edit forms for boards,
+    channels, file areas, Communities, doors, ...) is unaffected. Fields
+    sharing a section must already be adjacent in `fields` -- this
+    module groups by watching for the section value changing as it
+    walks the list in order, it does not sort or reindex `fields`
+    itself (cursor navigation's own `selected` index has to keep meaning
+    "the Nth field in this list," unchanged by sectioning).
     """
 
     key: str
@@ -117,6 +143,7 @@ class FieldSpec:
     help: str | None = None
     step: Callable[[Draft, int], None] | None = None
     brief: str | None = None
+    section: str | None = None
 
 
 _SAVE_BRIEF = "Write this draft to the database"
@@ -269,7 +296,24 @@ async def edit_resource_draft(
         if preamble_text:
             await session.write_line(preamble_text)
         field_line_count = 0
+        sectioned = any(f.section is not None for f in fields)
+        previous_section = _NO_SECTION_YET
         for i, f in enumerate(fields):
+            if sectioned and f.section != previous_section:
+                # Same "uppercased, bold, METADATA_COLOR" heading
+                # `menu_grid` already uses for its own section titles
+                # (netbbs.rendering.layout.menu_grid), so a field grouped
+                # this way reads as one continuous section rather than
+                # two independently-styled halves of the same group.
+                # Gated on `sectioned`, not just "did the section value
+                # change" -- a screen where every field leaves `section`
+                # unset must render with zero extra lines, byte-for-byte
+                # as before this parameter existed.
+                await session.write_line("")
+                if f.section is not None:
+                    await session.write_line(colored(f.section.upper(), fg_color=METADATA_COLOR, bold=True))
+                field_line_count += 2 if f.section is not None else 1
+                previous_section = f.section
             value = sanitize_text(f.render(draft))
             # One colored() call, not marker/label separately -- two
             # calls would insert an SGR reset between "> " and the
@@ -304,6 +348,27 @@ async def edit_resource_draft(
             menu_entries.append(MenuEntry(label=save_menu_text, brief=_SAVE_BRIEF))
         back_brief = _BACK_BRIEF if save is not None else _BACK_BRIEF_IMMEDIATE
         menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
+        # Grouped into the same sections the value list above just used
+        # (empty title = "no heading," `menu_grid`'s own existing
+        # convention) -- a sectioned screen's menu row gets real
+        # per-section columns from `menu_grid` for free, not just a
+        # heading; an unsectioned screen collapses back to today's
+        # single flat group, identical entries and order. [S]ave/[B]ack
+        # ride along at the end of the *last* group -- the same "trails
+        # the content it acts on" position every other menu row in this
+        # codebase already puts its own exit/commit actions in, not a
+        # section of their own.
+        menu_sections: list[tuple[str, list[MenuEntry]]] = []
+        current_title: object = _NO_SECTION_YET
+        for f, entry in zip(fields, menu_entries):
+            title = f.section if f.section is not None else ""  # menu_grid uppercases its own titles
+            if title != current_title:
+                menu_sections.append((title, []))
+                current_title = title
+            menu_sections[-1][1].append(entry)
+        if not menu_sections:
+            menu_sections.append(("", []))
+        menu_sections[-1][1].extend(menu_entries[len(fields):])
         compact_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
         menu_line = compact_menu_line
         if description_level != "off":
@@ -322,7 +387,7 @@ async def edit_resource_draft(
             # a nice-to-have, being able to see the whole screen is the
             # point.
             descriptive_menu_line = menu_grid(
-                [("", menu_entries)],
+                menu_sections,
                 width=session.terminal_width,
                 height=session.terminal_height,
                 description_level=description_level,

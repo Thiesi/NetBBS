@@ -262,7 +262,11 @@ def test_edit_profile_bio_declining_the_clear_prompt_proceeds_to_edit(tmp_path):
 # -- signature (mirrors bio's own tests above -- same shared editor shape) --
 
 
-def test_edit_profile_signature_shows_no_signature_set_by_default(tmp_path):
+def test_edit_profile_signature_shows_none_by_default(tmp_path):
+    # Dogfood report -- Thiesi's own observation that the Profile
+    # screen's five different "empty" spellings ("(no bio set)", "(no
+    # signature set)", "none saved", "(none set)") read as chaotic --
+    # normalized down to one, "(none)".
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
     user = create_user(db, "alice", password="hunter2", user_level=10)
@@ -270,7 +274,9 @@ def test_edit_profile_signature_shows_no_signature_set_by_default(tmp_path):
 
     asyncio.run(_edit_profile(session, lane, user))
 
-    assert "no signature set" in session.output
+    # Label and value are two separate colored() calls with a reset
+    # code between them -- needs the ANSI-stripped text, not raw.
+    assert "Signature: (none)" in session.visible_output
     lane.close()
     db.close()
 
