@@ -5053,6 +5053,104 @@ async one — an accepted, deferred cost, not an oversight.
 Issue #168 stays open for these; only the double-hop-vs-proxy fork is
 resolved by this entry.
 
+### Issue #201 — managed netbbs.org subdomain + dynamic DNS
+
+**Goal:** since the project controls the `netbbs.org` domain, offer SysOps
+an easy way to publish their board under it (e.g. `myboard.netbbs.org`)
+and, for boards on residential/dynamic IPs, keep that record pointed at
+the node's current address without manual DNS maintenance. Two
+components, not one: a one-time subdomain *registration* (name
+reservation + initial DNS record), and an optional recurring *dynamic-DNS
+updater* (the node periodically checks its own public address and pushes
+a record update when it changes) — a board could plausibly want the
+first without the second (static IP, still wants a friendly subdomain).
+
+**Decision 1 (locked in) — offered via a prominent first-run prompt, not
+a silent default and not a toggle a SysOp has to go discover.** Two
+different concerns were in tension here and both are real: a bare
+opt-in-only design loses most of the feature's actual value (the whole
+pitch is removing first-run friction — a setting nobody discovers might
+as well not exist), but a silent default also isn't right, because this
+makes the node contact and register public presence with project
+infrastructure before the SysOp has decided whether they want that at
+all — a private/test node would get unexpectedly enrolled. This is the
+same *kind* of decision as Link participation itself, which already
+isn't automatic on a fresh node (seeds must be configured before a node
+reaches out and joins the mesh) — for internal consistency, "does my
+node touch external infrastructure and become discoverable" should stay
+an explicit choice here too, just asked at the moment it matters (first
+run) instead of requiring discovery later.
+
+**Decision 2 (locked in) — the managed-service credential is a separate,
+auto-generated, per-registration secret, not the node's own Ed25519 key.**
+Both the self-hosted path (SysOp supplies their own dynamic-DNS
+provider's credentials, no design question) and the managed path stay
+available, not exclusive. For the managed path specifically: reusing the
+node's existing Ed25519 key (the Link protocol trust root — Noise XX
+handshake identity, canonical event signing) was considered and
+rejected. The convenience argument for reuse doesn't actually hold — a
+minted credential, generated at registration and stored transparently by
+the node, gives the identical zero-manual-handling experience reuse
+would. What reuse *would* cost for no real gain: blast-radius coupling
+(a compromised node key would also hijack the SysOp's public DNS name,
+not just Link identity) and coupling any future node-key rotation/
+recovery work to also remember to propagate to DNS. A separate
+credential keeps the two systems', and their compromise/recovery
+stories, fully independent.
+
+**Decision 3 (locked in) — name governance is first-come-first-served
+plus a reserved-word blocklist, no preventive identity vetting.**
+Matches how the project treats registration/content elsewhere (SysOp
+owns the trust decision, best-effort not gatekept) — requiring identity
+verification before registering a subdomain would add real friction
+against the feature's own point, for a comparatively low-stakes
+resource. The blocklist covers only the obvious cases (the project's own
+names, trademarks, slurs) — not a general dispute-avoidance mechanism.
+
+**Decision 4 (locked in) — contested-name disputes are manual and
+complaint-driven, stated as such, not implied automation.** At this
+project's current scale, there is no realistic alternative to a human
+(the project maintainer) reviewing a reported impersonation/abuse claim
+and revoking if warranted. Documented explicitly so this isn't mistaken
+for a more automated process than actually exists.
+
+**Decision 5 (locked in) — abandoned names reclaim automatically; leaving
+voluntarily is instant self-service, no grace period.** Two distinct
+exit paths, deliberately different: a SysOp who chooses to leave the
+managed tier (switch providers, drop DNS entirely) can do so immediately
+at will — nothing security-critical depends on the hostname continuing
+to resolve correctly (see the grounding fact below), so there's no
+reason to gate a voluntary departure. A node that simply disappears
+(no successful liveness/update contact for an operator-chosen inactivity
+window) instead goes inert — not immediately reassignable — and is only
+genuinely released back to the pool after a further grace period,
+standard registrar practice, giving a node recovering from downtime a
+window to reclaim its own name automatically. Exact window/grace-period
+lengths are an implementation-time parameter, not fixed here.
+
+**Grounding fact that de-risks the whole migration/reassignment
+question:** §8.10 already states plainly that "the remote node label,
+endpoint, DNS name, and TCP address are never identity authority" —
+real node identity is verified by the Noise XX handshake against the
+Ed25519-derived key, entirely independent of how a connection was
+dialed. So even a worst-case stale or reassigned DNS name cannot
+impersonate a node at the protocol level; a mismatched handshake simply
+fails. The residual exposure is UX confusion (a plain Telnet/web caller
+following an old bookmark lands somewhere unexpected), not a security
+hole — this is why decisions 4 and 5 above can stay this lightweight.
+
+**Settled without being a real fork:** how this interacts with existing
+Link node addressing — a full peer's descriptor already advertises a
+host/port (`advertised_host`/`advertised_port`) for other nodes to dial;
+a stable managed hostname is exactly what belongs there instead of a raw
+dynamic IP. No new addressing concept, no conflict with fingerprint-
+based node identity, which stays the actual trust root regardless.
+
+**Still open, implementation-time detail, not blocking this decision:**
+which DNS provider(s) the managed path actually runs on and what that
+costs to operate; the exact inactivity/grace-period window lengths for
+Decision 5.
+
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
