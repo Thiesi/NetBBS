@@ -49,6 +49,13 @@ _logger = logging.getLogger(__name__)
 # Every logged event -- console or file -- carries a timestamp (issue
 # #98); `basicConfig`'s own default format has none.
 _LOG_FORMAT = "%(asctime)s %(levelname)s:%(name)s:%(message)s"
+# Dogfood report: `%(asctime)s` defaults to millisecond precision
+# ("2026-08-31 22:51:35,947") with no `datefmt` given -- more
+# granularity than an operator reading these logs actually needs.
+# Second precision is enough to correlate a log line with what a human
+# was doing at the time; the comma-separated milliseconds just add
+# visual noise to every single line.
+_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Issue #114: the default `netbbs.log` this module creates (issue #98)
 # must be self-bounding rather than growing without limit -- the same
@@ -80,7 +87,7 @@ def _create_log_file_handler(log_path: Path) -> logging.Handler:
         backupCount=_LOG_FILE_BACKUP_COUNT,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT))
     return handler
 
 
@@ -861,70 +868,82 @@ async def run(
         _logger.info("NetBBS is ready to accept connections")
         await shutdown_event.wait()
     finally:
-        # GitHub issue #48: cancelling an already-failed task is a
-        # no-op, and awaiting it re-raises the original (non-
-        # cancellation) exception -- which must not be allowed to skip
-        # the listener/database cleanup below. That failure was already
-        # logged by `_log_daybreak_failure` above the moment it
-        # happened, so it's safe to swallow it here.
-        daybreak_task.cancel()
-        try:
-            await daybreak_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-        # Same cancel-await-swallow shape as
-        # daybreak_task, for the same reason (issue #48) -- already
-        # logged by _log_update_check_failure if it failed on its own.
-        update_check_task.cancel()
-        try:
-            await update_check_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
+        # Real-world report: a SysOp's Ctrl+C (an *immediate* shutdown,
+        # which `ShutdownConfig.graceful_delay_seconds`'s own docstring
+        # explicitly promises "skips this wait entirely") still took
+        # about nine minutes to actually exit. Tracing it found two
+        # compounding gaps, not one: `link_sync_task` below already had
+        # *a* bound on its cleanup wait, but the wrong one -- it reused
+        # `graceful_delay_seconds` (60s), a number meant for "how long
+        # does a human get to notice a shutdown warning," not "how long
+        # does a network task get to notice cancellation." Worse,
+        # `daybreak_task`/`update_check_task`/`seed_refresh_task` below
+        # had *no* bound at all -- a bare `.cancel()` then an unbounded
+        # `await`, trusting cancellation to propagate promptly through
+        # whatever each task happened to be doing. It usually does, but
+        # `update_check_task`/`seed_refresh_task` both reach a blocking
+        # `urllib.request.urlopen` call via `asyncio.to_thread` --
+        # cancelling the *awaiting* coroutine there does not stop the
+        # underlying worker thread, which keeps running the blocking
+        # call to completion regardless (Python cannot forcibly abort a
+        # thread), and yet the *cleanup step itself* was directly
+        # awaiting that same task with no ceiling of its own. Every one
+        # of these four cancel-then-await steps now shares one small
+        # helper and one short bound (`background_task_drain_seconds`)
+        # instead of trusting cancellation to always be prompt, or
+        # reusing a number that was never about this.
+        async def _swallow_after(task: asyncio.Task | None) -> None:
+            # GitHub issue #48: awaiting an already-failed task re-
+            # raises its original (non-cancellation) exception --
+            # already logged by that task's own `_log_*_failure` done-
+            # callback the moment it happened, so it's safe to swallow
+            # here without also skipping the cleanup below.
+            if task is None:
+                return
+            try:
+                await asyncio.wait_for(task, timeout=config.shutdown.background_task_drain_seconds)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception:
+                pass
+
+        async def _drain_immediately(task: asyncio.Task | None) -> None:
+            # Cancel now, then give it a short, bounded chance to
+            # actually finish -- there is no "let this one finish
+            # naturally" concept for any of these three tasks the way
+            # `link_sync_task` below has, so an immediate cancel is
+            # correct; the bound only guards against cancellation not
+            # propagating as promptly as expected (see this block's own
+            # opening comment for why that's a real, not hypothetical,
+            # risk here).
+            if task is None:
+                return
+            task.cancel()
+            await _swallow_after(task)
+
+        await _drain_immediately(daybreak_task)
+        await _drain_immediately(update_check_task)
         # Design doc §13.11, issue #60: graceful drain, not an
         # unconditional hard cancel -- an in-flight dial/push otherwise
         # gets torn out of half-done at whatever await happens to be
         # outstanding the instant shutdown fires, unlike every other
-        # task drained below (none of which talk to a Link peer, see
+        # task drained here (none of which talk to a Link peer, see
         # run_link_sync's own stop_event docstring for why only this
-        # one gets this treatment). Setting the event lets run_link_
-        # sync finish its *current* pass normally and exit its own loop
-        # before the next one starts; bounded by the same graceful_
-        # delay_seconds budget user-session shutdown already uses, so a
-        # wedged dial can't hang shutdown indefinitely -- past that
-        # bound, fall back to the same cancel-await-swallow shape as
-        # daybreak_task above (already logged by _log_link_sync_failure
-        # if it failed on its own, so safe to swallow here too).
+        # one gets this treatment). Setting the event lets run_link_sync
+        # finish its *current* pass normally and exit its own loop
+        # before the next one starts -- deliberately *not* cancelled up
+        # front the way the other three are: `_swallow_after` below only
+        # calls `.cancel()` itself, inside `asyncio.wait_for`, once
+        # `background_task_drain_seconds` actually elapses without the
+        # task finishing on its own, which is what actually stops a
+        # wedged dial from hanging shutdown indefinitely without also
+        # tearing out an in-flight one that was about to finish cleanly.
         if link_sync_task is not None:
             link_sync_stop_event.set()
-            try:
-                await asyncio.wait_for(link_sync_task, timeout=config.shutdown.graceful_delay_seconds)
-            except asyncio.TimeoutError:
-                # wait_for already cancelled link_sync_task and awaited
-                # that cancellation through to completion before raising
-                # this -- nothing further to clean up, same end state as
-                # every other task's cancel-await-swallow shape here.
-                pass
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+        await _swallow_after(link_sync_task)
         if link_sync_session is not None:
             await link_sync_session.close()
-        # Same cancel-await-swallow shape, for the
-        # same reason -- already logged by _log_seed_refresh_failure if
-        # it failed on its own.
-        if seed_refresh_task is not None:
-            seed_refresh_task.cancel()
-            try:
-                await seed_refresh_task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+        await _drain_immediately(seed_refresh_task)
         for server in reversed(servers):
             await server.stop()
         # Design doc §8.10.1, issue #148: every live Noise session this
@@ -1016,7 +1035,7 @@ async def main() -> None:
     # Timestamped from the very first line, including a config error
     # raised before the logfile handler below can be attached (which
     # needs config.db_path to know where to put it).
-    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
 
     try:
         config = load_config(sys.argv[1:])
