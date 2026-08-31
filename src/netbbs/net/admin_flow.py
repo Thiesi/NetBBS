@@ -67,14 +67,12 @@ from netbbs.auth.users import (
     count_sysops,
     create_user,
     delete_user,
-    clear_verify_key,
     get_user_by_id,
     get_user_by_username,
     list_users,
     set_can_verify_identity,
     set_user_disabled,
     set_user_level,
-    set_verify_key,
 )
 from netbbs.backup import get_last_backup_summary
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
@@ -255,6 +253,7 @@ from netbbs.net.shutdown import (
     run_drain_sequence,
     run_shutdown_sequence,
 )
+from netbbs.net.ssh_key_screen import manage_ssh_keys_screen
 from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.redraw_preference import (
     redraw_in_place_enabled,
@@ -3307,36 +3306,10 @@ async def _user_detail_screen(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )
         elif choice == "k":
-            await session.write_line("")
-            has_key = bool(target.fingerprint)
-            verb = "Replace" if has_key else "Add"
-            clear_hint = ", 'clear' to remove it" if has_key else ""
-            await session.write(
-                f"{verb} public key (base64, or an ssh-ed25519 line, blank to cancel{clear_hint}): "
-            )
-            text = (await session.read_line()).strip()
-            if has_key and text.lower() == "clear":
-                if await prompt_yes_no(
-                    session, f"Remove {target.username!r}'s SSH public key?", default=False
-                ):
-                    try:
-                        target = await lane.run(clear_verify_key, target, changed_by=actor)
-                    except AuthError as exc:
-                        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
-                    else:
-                        await session.write_line(f"Public key removed for {target.username!r}.")
-            elif text:
-                try:
-                    verify_key = parse_verify_key(text)
-                except IdentityError as exc:
-                    await session.write_line(colored(f"Could not parse key: {exc}", fg_color=MUTED_COLOR))
-                else:
-                    try:
-                        target = await lane.run(set_verify_key, target, verify_key, changed_by=actor)
-                    except AuthError as exc:
-                        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
-                    else:
-                        await session.write_line(f"Public key set for {target.username!r}.")
+            # SysOp-assisted counterpart to the self-service Profile
+            # `[K]` field (`netbbs.net.login_flow`'s own `_edit_profile`)
+            # -- both now open the same shared `manage_ssh_keys_screen`.
+            target = await manage_ssh_keys_screen(session, lane, target, changed_by=actor)
             blocked = await _draw_user_detail(
                 session, lane, target, description_level, redraw_in_place, unicode_style, collapsed, selected=selected,
             )

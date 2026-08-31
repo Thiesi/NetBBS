@@ -217,14 +217,13 @@ def test_profile_unicode_style_toggle_switches_on_and_off(db, lane, alice):
 # -- SSH public key self-service --------------------------------------------
 
 
-def test_profile_ssh_public_key_self_service_sets_the_key(db, lane, alice):
-    """Dogfood follow-up: `set_verify_key` (netbbs.auth.users) existed
-    and was already reachable from a SysOp's own `[K]` field on another
-    account (test_admin_flow.py's
-    test_admin_can_attach_a_public_key_to_an_existing_password_account),
-    but a password-only account had no self-service route of its own to
-    later gain SSH key-based login -- confirms the Profile screen's new
-    `[K]` field closes that gap."""
+def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
+    """Dogfood follow-up: `add_ssh_key` (netbbs.auth.users) was already
+    reachable from a SysOp's own `[K]` field on another account
+    (test_admin_flow.py's own SSH-key management tests), but a
+    password-only account had no self-service route of its own to later
+    gain SSH key-based login -- confirms the Profile screen's `[K]`
+    field, now the shared `manage_ssh_keys_screen`, closes that gap."""
     import base64
 
     import nacl.signing
@@ -233,16 +232,16 @@ def test_profile_ssh_public_key_self_service_sets_the_key(db, lane, alice):
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["k", raw_b64, "b"])
+    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is not None
-    assert "SSH public key set." in _written_text(session)
+    assert "Key 'phone' added." in _written_text(session)
 
 
 def test_profile_ssh_public_key_self_service_rejects_an_unparseable_key(db, lane, alice):
-    session = FakeSession(["k", "not a real key", "b"])
+    session = FakeSession(["k", "a", "phone", "not a real key", "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -261,60 +260,54 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
     create_user(db, "bob", verify_key=verify_key, user_level=10)
 
-    session = FakeSession(["k", raw_b64, "b"])
+    session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is None
-    assert "already in use" in _written_text(session)
+    assert "already registered" in _written_text(session)
 
 
-def test_profile_ssh_public_key_clear_not_offered_with_no_key_set(db, lane, alice):
-    # GitHub issue #212: the 'clear' keyword only makes sense once a key
-    # actually exists -- shouldn't be advertised (or accepted as a
-    # literal key value) on an account with none set.
+def test_profile_ssh_public_key_remove_not_offered_with_no_key_set(db, lane, alice):
+    # The [R]emove option only makes sense once a key actually exists --
+    # shouldn't be advertised on an account with none.
     assert alice.fingerprint is None
-    # Blank read_line response cancels the prompt cleanly, distinct from
-    # the outer field-selection loop's own key read (edit_resource_draft
-    # reads that via read_editor_key, which -- unlike read_key -- blocks
-    # rather than raising once FakeSession's scripted input runs out, so
-    # this needs its own explicit "b" to reach it).
-    session = FakeSession(["k", "", "b"])
+    session = FakeSession(["k", "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
-    assert "'clear' to remove" not in _written_text(session)
+    assert "emove a key" not in _written_text(session)
 
 
-def test_profile_ssh_public_key_self_service_clears_the_key(db, lane, alice):
+def test_profile_ssh_public_key_self_service_removes_the_key(db, lane, alice):
     # GitHub issue #212: no self-service (or SysOp) way existed to remove
     # a key once set. Alice also has a password (the `alice` fixture),
     # so removing the key doesn't lock her account out.
     import nacl.signing
 
-    from netbbs.auth.users import set_verify_key
+    from netbbs.auth.users import add_ssh_key
 
     verify_key = nacl.signing.SigningKey.generate().verify_key
-    set_verify_key(db, alice, verify_key, changed_by=alice)
+    add_ssh_key(db, alice, verify_key, label="phone", changed_by=alice)
     alice = login_flow.get_user_by_username(db, "alice")
     assert alice.fingerprint is not None
 
-    session = FakeSession(["k", "clear", "y", "b"])
+    session = FakeSession(["k", "r", "1", "y", "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is None
-    assert "SSH public key removed." in _written_text(session)
+    assert "Key 'phone' removed." in _written_text(session)
 
 
-def test_profile_ssh_public_key_self_service_clear_declined_keeps_the_key(db, lane, alice):
+def test_profile_ssh_public_key_self_service_remove_declined_keeps_the_key(db, lane, alice):
     import nacl.signing
 
-    from netbbs.auth.users import set_verify_key
+    from netbbs.auth.users import add_ssh_key
 
     verify_key = nacl.signing.SigningKey.generate().verify_key
-    set_verify_key(db, alice, verify_key, changed_by=alice)
+    add_ssh_key(db, alice, verify_key, label="phone", changed_by=alice)
     alice = login_flow.get_user_by_username(db, "alice")
 
-    session = FakeSession(["k", "clear", "n", "b"])
+    session = FakeSession(["k", "r", "1", "n", "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
@@ -339,7 +332,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["p", "k", raw_b64, "b", "p", "b", "l", "y"])
+    session = FakeSession(["p", "k", "a", "phone", raw_b64, "b", "b", "p", "b", "l", "y"])
     asyncio.run(
         login_flow._main_menu(
             session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane

@@ -2485,4 +2485,48 @@ MIGRATIONS = [
         CREATE INDEX idx_doors_community_id ON doors(community_id);
         """,
     ),
+    Migration(
+        description=(
+            "Multiple SSH/public keys per account (dogfood report: a "
+            "second device -- a phone, which can't have an existing "
+            "private key copied onto it, so it generates its own -- had "
+            "no way to gain SSH login without silently revoking every "
+            "other device's key, since `users.public_key`/`fingerprint` "
+            "could only ever hold one). Additive only, deliberately not "
+            "a rebuild of `users` itself: `users` is a foreign-key "
+            "parent for nine-plus other tables (see the 'Hard-delete "
+            "support' migration above), and SQLite's implicit DELETE-"
+            "before-DROP for a table with foreign_keys=ON would cascade "
+            "through every one of them -- rebuilding the parent side of "
+            "that graph is not safe the way rebuilding a child table is. "
+            "`users.public_key`/`fingerprint` therefore stay exactly as "
+            "they are, columns and CHECK constraints untouched, and are "
+            "repurposed as a denormalized pointer to whichever key is "
+            "this account's *primary* one (first registered, or "
+            "promoted on removal) -- kept in sync by "
+            "`netbbs.auth.users.add_ssh_key`/`remove_ssh_key`, the same "
+            "columns every existing reader (`User.fingerprint`, chat "
+            "message authorship, the SysOp user-list/detail display) "
+            "already reads, so none of them need to change. Actual login "
+            "now checks every row here, not just the primary. Backfill "
+            "copies each account's existing single key into its first "
+            "row, labeled 'default'."
+        ),
+        sql="""
+        CREATE TABLE user_ssh_keys (
+            id           INTEGER PRIMARY KEY,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            label        TEXT NOT NULL,
+            public_key   TEXT NOT NULL,
+            fingerprint  TEXT NOT NULL UNIQUE,
+            created_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_user_ssh_keys_user_id ON user_ssh_keys(user_id);
+
+        INSERT INTO user_ssh_keys (user_id, label, public_key, fingerprint, created_at)
+            SELECT id, 'default', public_key, fingerprint, created_at
+            FROM users WHERE public_key IS NOT NULL;
+        """,
+    ),
 ]

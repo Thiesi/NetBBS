@@ -7,14 +7,15 @@ import pytest
 
 from netbbs.auth.users import (
     AuthError,
+    add_ssh_key,
     authenticate_keypair,
     authenticate_password,
     authorize_public_key,
-    clear_verify_key,
     create_user,
     generate_challenge,
     get_user_by_username,
-    set_verify_key,
+    list_ssh_keys,
+    remove_ssh_key,
 )
 from netbbs.storage.database import Database
 
@@ -286,64 +287,86 @@ def test_authorize_public_key_updates_last_login_at(db):
     assert after.last_login_at is not None
 
 
-# -- attaching a key to an existing account (dogfood: SSH surface) ---------
+# -- attaching keys to an existing account (dogfood: SSH surface) ---------
 
 
-def test_set_verify_key_lets_a_password_only_account_then_log_in_with_it(db):
+def test_add_ssh_key_lets_a_password_only_account_then_log_in_with_it(db):
     # Dogfood follow-up: a self-registered (password-only) account had no
     # way to ever gain key-based SSH login short of a SysOp deleting and
-    # recreating it. set_verify_key closes that gap -- prove the key
+    # recreating it. add_ssh_key closes that gap -- prove the key
     # actually becomes usable for login, not just that it's stored.
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     thiesi = create_user(db, "thiesi", password="hunter2")
     assert thiesi.fingerprint is None
     signing_key = nacl.signing.SigningKey.generate()
 
-    updated = set_verify_key(db, thiesi, signing_key.verify_key, changed_by=sysop)
+    updated = add_ssh_key(db, thiesi, signing_key.verify_key, label="phone", changed_by=sysop)
     assert updated.fingerprint is not None
 
     user = authorize_public_key(db, "thiesi", signing_key.verify_key)
     assert user.username == "thiesi"
 
 
-def test_set_verify_key_replaces_an_existing_key(db):
+def test_add_ssh_key_does_not_revoke_a_key_already_on_the_account(db):
+    # The actual bug report this feature exists for: adding a second
+    # device's key (a phone, generated fresh because Android's own
+    # security model won't let an existing private key be copied over)
+    # must not silently kick the first device's key out. The old
+    # set_verify_key ("attach or *replace*") did exactly that.
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
-    old_key = nacl.signing.SigningKey.generate()
-    thiesi = create_user(db, "thiesi", verify_key=old_key.verify_key)
-    new_key = nacl.signing.SigningKey.generate()
+    laptop_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", verify_key=laptop_key.verify_key)
+    phone_key = nacl.signing.SigningKey.generate()
 
-    set_verify_key(db, thiesi, new_key.verify_key, changed_by=sysop)
+    add_ssh_key(db, thiesi, phone_key.verify_key, label="phone", changed_by=sysop)
 
-    with pytest.raises(AuthError):
-        authorize_public_key(db, "thiesi", old_key.verify_key)
-    user = authorize_public_key(db, "thiesi", new_key.verify_key)
-    assert user.username == "thiesi"
+    # Both keys still authorize login -- neither revoked the other.
+    assert authorize_public_key(db, "thiesi", laptop_key.verify_key).username == "thiesi"
+    assert authorize_public_key(db, "thiesi", phone_key.verify_key).username == "thiesi"
 
 
-def test_set_verify_key_refuses_a_key_already_used_by_another_account(db):
+def test_add_ssh_key_refuses_a_key_already_used_by_another_account(db):
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     shared_key = nacl.signing.SigningKey.generate()
     create_user(db, "bob", verify_key=shared_key.verify_key)
     thiesi = create_user(db, "thiesi", password="hunter2")
 
     with pytest.raises(AuthError):
-        set_verify_key(db, thiesi, shared_key.verify_key, changed_by=sysop)
+        add_ssh_key(db, thiesi, shared_key.verify_key, label="shared", changed_by=sysop)
 
     # Refused cleanly -- thiesi's own row is untouched, not left half-updated.
     assert get_user_by_username(db, "thiesi").fingerprint is None
+    assert list_ssh_keys(db, get_user_by_username(db, "thiesi")) == []
+
+
+def test_list_ssh_keys_returns_every_registered_key(db):
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    laptop_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", verify_key=laptop_key.verify_key)
+    laptop_fingerprint = thiesi.fingerprint  # the account's first (primary) key
+    phone_key = nacl.signing.SigningKey.generate()
+    thiesi = add_ssh_key(db, thiesi, phone_key.verify_key, label="phone", changed_by=sysop)
+
+    keys = list_ssh_keys(db, thiesi)
+    assert len(keys) == 2
+    by_label = {key.label: key.fingerprint for key in keys}
+    assert set(by_label) == {"default", "phone"}
+    assert by_label["default"] == laptop_fingerprint
+    assert by_label["phone"] != laptop_fingerprint
 
 
 # -- removing a key from an existing account (dogfood: no removal path) ----
 
 
-def test_clear_verify_key_removes_the_key_from_a_password_and_key_account(db):
+def test_remove_ssh_key_removes_the_key_from_a_password_and_key_account(db):
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     signing_key = nacl.signing.SigningKey.generate()
     thiesi = create_user(db, "thiesi", password="hunter2", verify_key=signing_key.verify_key)
     assert thiesi.fingerprint is not None
 
-    updated = clear_verify_key(db, thiesi, changed_by=sysop)
+    updated = remove_ssh_key(db, thiesi, thiesi.fingerprint, changed_by=sysop)
     assert updated.fingerprint is None
+    assert list_ssh_keys(db, updated) == []
 
     with pytest.raises(AuthError):
         authorize_public_key(db, "thiesi", signing_key.verify_key)
@@ -351,7 +374,29 @@ def test_clear_verify_key_removes_the_key_from_a_password_and_key_account(db):
     assert authenticate_password(db, "thiesi", "hunter2") is not None
 
 
-def test_clear_verify_key_refuses_a_key_only_account_with_no_password(db):
+def test_remove_ssh_key_promotes_another_remaining_key_to_primary(db):
+    # The mirror-column concept (netbbs.storage.migrations' "Multiple
+    # SSH/public keys per account" entry) needs a real answer for what
+    # happens when the *primary* key specifically is removed but others
+    # remain -- confirms one of the survivors is promoted, not left NULL
+    # while the account still has a usable key.
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    laptop_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", verify_key=laptop_key.verify_key)
+    primary_fingerprint = thiesi.fingerprint
+    phone_key = nacl.signing.SigningKey.generate()
+    thiesi = add_ssh_key(db, thiesi, phone_key.verify_key, label="phone", changed_by=sysop)
+
+    updated = remove_ssh_key(db, thiesi, primary_fingerprint, changed_by=sysop)
+
+    assert updated.fingerprint is not None
+    assert updated.fingerprint != primary_fingerprint
+    # The remaining key -- the phone's -- still logs in either way.
+    assert authorize_public_key(db, "thiesi", phone_key.verify_key).username == "thiesi"
+    assert len(list_ssh_keys(db, updated)) == 1
+
+
+def test_remove_ssh_key_refuses_a_key_only_accounts_last_key_with_no_password(db):
     # GitHub issue #212: removing the only credential a key-only account
     # has would lock it out of the node entirely (the users table's own
     # CHECK constraint, password_hash IS NOT NULL OR public_key IS NOT
@@ -363,29 +408,88 @@ def test_clear_verify_key_refuses_a_key_only_account_with_no_password(db):
     assert thiesi.fingerprint is not None
 
     with pytest.raises(AuthError):
-        clear_verify_key(db, thiesi, changed_by=sysop)
+        remove_ssh_key(db, thiesi, thiesi.fingerprint, changed_by=sysop)
 
     # Refused cleanly -- the key is still there and still usable.
     assert get_user_by_username(db, "thiesi").fingerprint is not None
     authorize_public_key(db, "thiesi", signing_key.verify_key)
 
 
-def test_clear_verify_key_preserves_an_existing_block(db):
-    # Code review follow-up (PR #213): block_user keys a block by
-    # fingerprint whenever the target has one at block time -- if
-    # clear_verify_key then removed that fingerprint without migrating
-    # the blocklist entry, is_blocked would stop finding it (it only
-    # checks local_user_id once the account has no fingerprint left),
-    # and a restricted account would read as unblocked on its very next
-    # password login. Confirms the block survives the key removal.
-    from netbbs.moderation.blocklist import block_user, is_blocked
+def test_remove_ssh_key_allows_removing_one_of_several_keys_with_no_password(db):
+    # The "last credential" guard is about the account's *last* key, not
+    # about having more than one -- a key-only account with two keys can
+    # freely drop down to one, still no password required.
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    laptop_key = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", verify_key=laptop_key.verify_key)
+    phone_key = nacl.signing.SigningKey.generate()
+    thiesi = add_ssh_key(db, thiesi, phone_key.verify_key, label="phone", changed_by=sysop)
+
+    # thiesi.fingerprint is the laptop key's -- the account's primary,
+    # since it was the first (and, at creation time, only) key.
+    updated = remove_ssh_key(db, thiesi, thiesi.fingerprint, changed_by=sysop)
+    assert len(list_ssh_keys(db, updated)) == 1
+    assert authorize_public_key(db, "thiesi", phone_key.verify_key).username == "thiesi"
+
+
+def test_remove_ssh_key_preserves_a_legacy_fingerprint_keyed_block(db):
+    # Code review follow-up (PR #213), still honored for pre-existing
+    # data: a blocklist row created before block_user stopped keying
+    # local accounts by fingerprint (see block_user's own docstring)
+    # must still survive its fingerprint being removed -- simulates that
+    # legacy shape directly (a fresh block_user call today never creates
+    # a fingerprint-keyed row for a local account, so this can't be
+    # reproduced by just calling block_user anymore).
+    from netbbs.moderation.blocklist import is_blocked
 
     sysop = create_user(db, "sysop", password="hunter2", user_level=255)
     signing_key = nacl.signing.SigningKey.generate()
     thiesi = create_user(db, "thiesi", password="hunter2", verify_key=signing_key.verify_key)
+    db.connection.execute(
+        "INSERT INTO blocklist (fingerprint, reason, blocked_by_user_id, created_at) VALUES (?, ?, ?, ?)",
+        (thiesi.fingerprint, "legacy block", sysop.id, "2026-01-01T00:00:00.000000Z"),
+    )
+    db.connection.commit()
+    assert is_blocked(db, thiesi) is True
+
+    updated = remove_ssh_key(db, thiesi, thiesi.fingerprint, changed_by=sysop)
+    assert updated.fingerprint is None
+    assert is_blocked(db, updated) is True
+
+
+def test_remove_ssh_key_does_not_lose_a_block_to_a_stale_caller_held_user_object(db):
+    # Code review follow-up (PR #221): the single-key predecessor of
+    # remove_ssh_key (clear_verify_key) read the fingerprint to migrate
+    # off the *caller's own* `target` object rather than re-fetching it
+    # inside the transaction -- if a second session concurrently changed
+    # the account's key and then blocked it (back when block_user could
+    # still key a block by fingerprint), a first session still holding
+    # the pre-change `target` would migrate the wrong (stale) fingerprint
+    # and orphan the real block. Confirms this whole class of bug is now
+    # structurally closed, not narrowly patched: block_user keys every
+    # local block by local_user_id unconditionally (never fingerprint --
+    # see its own docstring), so a block created *after* a stale `target`
+    # was loaded is untouched by anything remove_ssh_key does with that
+    # stale object's fingerprint.
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    key_a = nacl.signing.SigningKey.generate()
+    thiesi = create_user(db, "thiesi", password="hunter2", verify_key=key_a.verify_key)
+    stale_target = thiesi  # what a SysOp's open screen would still be holding
+
+    # Concurrently (from this stale reference's point of view): a second
+    # key is added, and the account gets blocked -- both happen without
+    # `stale_target` ever being refreshed.
+    key_b = nacl.signing.SigningKey.generate()
+    thiesi = add_ssh_key(db, thiesi, key_b.verify_key, label="phone", changed_by=sysop)
+    from netbbs.moderation.blocklist import block_user, is_blocked
+
     block_user(db, thiesi, blocked_by=sysop, reason="testing")
     assert is_blocked(db, thiesi) is True
 
-    updated = clear_verify_key(db, thiesi, changed_by=sysop)
-    assert updated.fingerprint is None
-    assert is_blocked(db, updated) is True
+    # The first session, still holding the stale (pre-block, pre-second-
+    # key) User object, removes the one key it knows about.
+    remove_ssh_key(db, stale_target, stale_target.fingerprint, changed_by=sysop)
+
+    # The block -- created after stale_target was loaded, on an account
+    # local_user_id, never a fingerprint -- survives untouched.
+    assert is_blocked(db, get_user_by_username(db, "thiesi")) is True

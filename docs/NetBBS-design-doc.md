@@ -5108,25 +5108,43 @@ credential keeps the two systems', and their compromise/recovery
 stories, fully independent.
 
 **Decision 3 (locked in) — name governance is first-come-first-served
-plus a reserved-word blocklist, no preventive identity vetting, capped
-at one registration per node.** Matches how the project treats
-registration/content elsewhere (SysOp owns the trust decision,
-best-effort not gatekept) — requiring identity verification before
+plus a reserved-word blocklist and a one-name-per-node cap, but a
+registered name only actually goes live once the node has maintained a
+minimum age of successful contact with the registration service; no
+preventive identity vetting beyond that.** Matches how the project
+treats registration/content elsewhere (SysOp owns the trust decision,
+best-effort not gatekept) — requiring identity *verification* before
 registering a subdomain would add real friction against the feature's
 own point, for a comparatively low-stakes resource. The blocklist covers
 only the obvious cases (the project's own names, trademarks, slurs) —
-not a general dispute-avoidance mechanism. Code review follow-up (PR
-#218): first-come-first-served plus a blocklist bounds *which* names can
-be taken but not *how many* — without a cap, one node could hold
-indefinitely many names, consuming DNS-provider records/cost and
-squatting desirable ones, kept alive for free by the same updater
-contact that already proves liveness for Decision 5. Capped at one name
-per node/registration-credential: this feature's own pitch is "my
-board's name," not a bulk registrar, and a SysOp who genuinely wants to
-rename releases the old one first (subject to Decision 5's cooldown
-below). Attempting a second registration while one is already held fails
-with a clear, visible error naming the existing registration — never a
-silent no-op.
+not a general dispute-avoidance mechanism.
+
+Code review follow-up (PR #218): first-come-first-served plus a
+blocklist bounds *which* names can be taken but not *how many* —
+without a cap, one node could hold indefinitely many names, consuming
+DNS-provider records/cost and squatting desirable ones. A first fix
+attempt (a bare cap of one name per node/registration-credential) was
+itself found insufficient on further Codex review (PR #221): a node
+identity and a registration credential (Decision 2) are both free for a
+remote client to mint — an attacker can generate a fresh node identity
+per desired hostname and hold all of them simultaneously, each
+individually satisfying a "one-per-node" cap.
+
+**The actual fix keeps the one-per-node cap but adds a minimum-age gate
+on when a reservation actually becomes a live DNS record**, deliberately
+decoupled from Decision 1's first-run opt-in: accepting the offer at
+first run (or first SysOp login) still costs nothing and happens
+immediately — that UX stays frictionless — but the node's registration
+*intent* is recorded, not yet published, until the node has maintained a
+minimum period of successful contact with the registration service
+(the same liveness signal the dynamic-DNS updater and Decision 5's
+reclaim window already rely on). This is what actually bounds the
+attack: minting a fresh node identity is free, but keeping one
+*operating and reachable* for the qualifying period is not, and an
+identity that never qualifies never consumes a real DNS record at all —
+Sybil-generated intents simply expire unpublished, at zero ongoing cost
+to the service. Exact qualifying period is an implementation-time
+parameter (see the closing note below), not fixed here.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5135,46 +5153,50 @@ project's current scale, there is no realistic alternative to a human
 and revoking if warranted. Documented explicitly so this isn't mistaken
 for a more automated process than actually exists.
 
-**Decision 5 (revised — see correction below) — both exit paths, voluntary
-release and abandoned-node reclaim, share one grace period before a name
-becomes assignable to a *different* registrant.** Originally designed as
-two deliberately different paths — instant, no-grace-period release for
-a SysOp who chooses to leave, versus a delayed reclaim for a node that
-simply disappears — on the reasoning that nothing security-critical
-depends on hostname continuity (see the superseded grounding fact below,
-kept for the record). A Codex review follow-up on PR #218 correctly
-identified that reasoning as wrong: **releasing or losing a managed name
-is a credential-theft risk, not just a UX inconvenience,** for exactly
-the callers Link's Noise handshake does not cover — Telnet and plain
-HTTP accept plaintext passwords with no protocol-level protection at
-all, and even an HTTPS caller can be handed a convincing fake board
-after the new registrant obtains a legitimate certificate for the name
-they now control. A caller who still has the old hostname bookmarked
-after reassignment can have credentials harvested by whoever holds the
-name now, entirely outside Link's own trust model. Unifying both exit
-paths under one shared cooldown (the same grace period the abandoned-
-node path already used) closes this for voluntary release too: a SysOp
-choosing to leave stops their own renewal and DNS-updater contact
-immediately, but the name itself does not become claimable by a
-*different* registrant until the cooldown elapses — matching standard
-registrar practice, and costing a deliberately-leaving SysOp nothing
-beyond the same short wait an accidentally-lapsed one already accepted.
-Exact cooldown length is an implementation-time parameter, not fixed
-here, but it is now the same parameter for both paths, not two.
+**Decision 5 (locked in) — both exit paths, voluntary release and
+abandoned-node reclaim, share one deliberately generous cooldown before
+a name becomes assignable to a *different* registrant; this is an
+accepted, bounded residual risk, not a solved one.** §8.10 states that
+"the remote node label, endpoint, DNS name, and TCP address are never
+identity authority" — real *Link* node identity is verified by the
+Noise XX handshake against the Ed25519-derived key, independent of how a
+connection was dialed, so a reassigned DNS name cannot impersonate a
+node at the Link protocol level; that fact is why Decision 4's manual,
+complaint-driven dispute process can stay lightweight for
+*impersonation* claims specifically. It does not make reassignment safe
+in general: ordinary Telnet and plain-HTTP callers are never protected
+by that handshake, carry plaintext passwords, and a caller who still has
+the old hostname bookmarked after reassignment can have credentials
+harvested by whoever holds the name now — even an HTTPS caller can be
+handed a convincing fake board once the new registrant obtains a
+legitimate certificate for the name.
 
-**Superseded reasoning, kept for the record (see the correction
-above):** §8.10 states that "the remote node label, endpoint, DNS name,
-and TCP address are never identity authority" — real *Link* node
-identity is verified by the Noise XX handshake against the
-Ed25519-derived key, entirely independent of how a connection was
-dialed, so a reassigned DNS name genuinely cannot impersonate a node at
-the Link protocol level. That fact is still true and still the reason
-Decision 4's manual, complaint-driven dispute process can stay
-lightweight for *impersonation* claims. It is not, however, sufficient
-to make instant reassignment safe overall, because ordinary Telnet/web
-callers are never protected by that handshake in the first place —
-conflating "Link-protocol-safe" with "safe" was the error Decision 5's
-original wording made.
+A Codex review (PR #221) correctly pointed out that a finite cooldown
+only *delays* this exposure, it doesn't bound it to zero — a caller can
+in principle hold a bookmark longer than any cooldown. That observation
+is true but was weighed against the wrong bar: zero residual risk isn't
+the standard any real identifier-reassignment system actually meets.
+Domain registries drop-catch expired names — commonly with *no* grace
+period at all — and telecom carriers recycle phone numbers after a
+dormancy window (typically 90 days to a couple of years), both fully
+aware that a returning party can be phished by whoever holds the
+identifier now; neither treats "never reassign" as the answer. A
+permanent-retirement design was tried in this entry and reverted:
+correct in principle, but strictly more conservative than the
+registries and carriers this project is directly comparable to, and it
+trades a security property nobody else in this space provides for an
+unbounded, ever-growing cost (a permanently-retired name is retired for
+the life of the project, not just until interest fades). **The bounded-
+cooldown design is kept, deliberately set longer than commercial
+practice needs to be** (on the order of 90 days, well past a typical
+registrar's ~30–45-day redemption window) **since NetBBS has no
+commercial pressure to recycle a name quickly and generosity here costs
+nothing.** A SysOp choosing to leave stops their own renewal and DNS-
+updater contact immediately; the name itself does not become claimable
+by a different registrant until the cooldown elapses. Exact cooldown
+length is an implementation-time parameter (see the closing note
+below), not fixed here, but it is the same parameter for both exit
+paths, not two.
 
 **Settled without being a real fork:** how this interacts with existing
 Link node addressing — a full peer's descriptor already advertises a
@@ -5194,14 +5216,22 @@ a real fork" above) describes only the Link HTTP listener — a
 Link-disabled or outgoing-only board has no dialable address there at
 all, so reusing it doesn't by itself deliver on "myboard.netbbs.org" as
 a caller-facing promise. Resolved by convention rather than a new
-protocol: a managed subdomain implies the node's Telnet (23), SSH (22),
-and web (443) listeners sit on their standard ports — the same
-assumption every plain hostname-based BBS address already carries. A
-board that cannot or will not run on standard ports keeps its managed
-DNS record (useful for the dynamic-IP-tracking half of this feature
-alone) but does not get a bare `myboard.netbbs.org` caller address as
-part of it; publishing a nonstandard port remains the SysOp's own
-responsibility to communicate, same as today.
+protocol: a managed subdomain implies the node's Telnet (23) and SSH
+(22) listeners sit on their standard ports, the same assumption every
+plain hostname-based BBS address already carries. Web is the same
+convention with one added, non-optional requirement: `netbbs.net.
+nodeconfig`'s own web listener provides no TLS of its own, only through
+an external TLS-terminating reverse proxy, so "web (443)" specifically
+means that proxy bound to 443 and forwarding to the node's loopback web
+listener — never NetBBS's own listener bound to 443 directly, which
+would silently serve plaintext HTTP (including password entry) on the
+port every caller assumes is HTTPS (code review follow-up, PR #221).
+A board that cannot or will not run on standard ports (web's TLS-proxy
+requirement included) keeps its managed DNS record (useful for the
+dynamic-IP-tracking half of this feature alone) but does not get a bare
+`myboard.netbbs.org` caller address as part of it; publishing a
+nonstandard port remains the SysOp's own responsibility to communicate,
+same as today.
 
 **Decision 7 (locked in) — the managed-DNS credential is in scope for
 node backup/restore, as a future addition to §13.4's contract, not a
@@ -5220,8 +5250,20 @@ itself is not amended now, since the artifact does not exist yet.
 
 **Still open, implementation-time detail, not blocking this decision:**
 which DNS provider(s) the managed path actually runs on and what that
-costs to operate; the exact cooldown length shared by Decision 5's two
-exit paths.
+costs to operate; Decision 3's exact minimum-age qualifying period; and
+Decision 5's exact cooldown length (settled in principle at "on the
+order of 90 days," not pinned to an exact number here). Nothing
+structural remains open in this entry — Decision 3 gained a minimum-age
+gate after Codex review (PR #221) found a bare node-count cap
+insufficient; Decision 5 was revised twice on the same review round,
+first to permanent retirement, then deliberately reverted back to a
+bounded cooldown (Thiesi's own follow-up) after weighing it against how
+domain registries and telecom carriers actually handle identifier
+reassignment — both accept exactly this residual risk with a grace
+period, never "reassign nothing, ever," and permanent retirement was a
+stricter bar than that comparison justified, at a real, unbounded
+ongoing cost this entry doesn't need to pay. The cooldown here is
+already deliberately more generous than commercial practice requires.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

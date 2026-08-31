@@ -289,6 +289,7 @@ def _create_user_with_password_hash(
 
     created_at = utc_now_iso()
 
+    db.connection.execute("BEGIN IMMEDIATE")
     try:
         db.connection.execute(
             """
@@ -298,11 +299,31 @@ def _create_user_with_password_hash(
             """,
             (username, password_hash, public_key_b64, fingerprint, user_level, created_at, int(pending_approval)),
         )
-        db.connection.commit()
+        if verify_key is not None:
+            new_id = db.connection.execute(
+                "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
+            ).fetchone()["id"]
+            # The account's first key, mirrored into `users.public_key`/
+            # `fingerprint` above and also recorded here in
+            # `user_ssh_keys` -- see that table's own migration comment
+            # for why both exist. Every key a caller later adds via
+            # `add_ssh_key` goes only here, never touching the mirror
+            # again once it's already set.
+            db.connection.execute(
+                "INSERT INTO user_ssh_keys (user_id, label, public_key, fingerprint, created_at) "
+                "VALUES (?, 'default', ?, ?, ?)",
+                (new_id, public_key_b64, fingerprint, created_at),
+            )
     except sqlite3.IntegrityError as exc:
+        db.connection.rollback()
         raise AuthError(
             f"could not create account {username!r} — username or fingerprint already in use"
         ) from exc
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
 
     return get_user_by_username(db, username)
 
@@ -469,11 +490,21 @@ def authenticate_keypair(db: Database, username: str, challenge: bytes, signatur
     row = db.connection.execute(
         "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
-    if row is None or row["public_key"] is None:
+    if row is None:
         raise AuthError("login failed")
 
-    stored_key = nacl.signing.VerifyKey(base64.b64decode(row["public_key"]))
-    if not verify_signature(stored_key, challenge, signature):
+    # Any of the account's registered keys may have produced this
+    # signature, not only the primary one mirrored onto `row["public_key"]`
+    # -- see `netbbs.storage.migrations`' "Multiple SSH/public keys per
+    # account" entry. There's no index that maps a signature back to the
+    # key that made it, so this tries each registered key in turn.
+    key_rows = db.connection.execute(
+        "SELECT public_key FROM user_ssh_keys WHERE user_id = ?", (row["id"],)
+    ).fetchall()
+    if not any(
+        verify_signature(nacl.signing.VerifyKey(base64.b64decode(key_row["public_key"])), challenge, signature)
+        for key_row in key_rows
+    ):
         raise AuthError("login failed")
 
     if row["disabled_at"] is not None or row["pending_approval"]:
@@ -504,11 +535,18 @@ def authorize_public_key(db: Database, username: str, verify_key: nacl.signing.V
     row = db.connection.execute(
         "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)
     ).fetchone()
-    if row is None or row["public_key"] is None:
+    if row is None:
         raise AuthError("login failed")
 
-    stored_key = base64.b64decode(row["public_key"])
-    if stored_key != bytes(verify_key):
+    # Any registered key authorizes login, not only the primary one
+    # mirrored onto `row["public_key"]` -- see `netbbs.storage.migrations`'
+    # "Multiple SSH/public keys per account" entry.
+    public_key_b64 = base64.b64encode(bytes(verify_key)).decode("ascii")
+    key_row = db.connection.execute(
+        "SELECT 1 FROM user_ssh_keys WHERE user_id = ? AND public_key = ?",
+        (row["id"], public_key_b64),
+    ).fetchone()
+    if key_row is None:
         raise AuthError("login failed")
 
     if row["disabled_at"] is not None or row["pending_approval"]:
@@ -717,91 +755,156 @@ def approve_pending_user(db: Database, target: User, *, approved_by: User) -> Us
     return _get_user_by_id(db, target.id)
 
 
-def set_verify_key(db: Database, target: User, verify_key: nacl.signing.VerifyKey, *, changed_by: User) -> User:
-    """
-    Attach or replace `target`'s public key after account creation.
+@dataclass(frozen=True)
+class SshKey:
+    id: int
+    label: str
+    fingerprint: str
+    created_at: str
 
-    Dogfood follow-up: `_create_user_screen`'s own `_prompt_optional_pubkey`
-    (`netbbs.net.admin_flow`) could only ever set this at the moment a
-    SysOp manually created a brand-new account -- the overwhelming
-    majority of accounts self-register with a password and had no route
-    at all to later gain key-based SSH login short of a SysOp deleting
-    and recreating the whole account.
+
+def list_ssh_keys(db: Database, target: User) -> list[SshKey]:
+    """Every SSH/public key registered to `target`'s account, oldest
+    first -- the actual list `add_ssh_key`/`remove_ssh_key` manage.
+    `User.fingerprint` only ever names the primary one; this is the
+    source of truth for how many keys an account actually has."""
+    rows = db.connection.execute(
+        "SELECT id, label, fingerprint, created_at FROM user_ssh_keys WHERE user_id = ? ORDER BY created_at",
+        (target.id,),
+    ).fetchall()
+    return [
+        SshKey(id=row["id"], label=row["label"], fingerprint=row["fingerprint"], created_at=row["created_at"])
+        for row in rows
+    ]
+
+
+def add_ssh_key(
+    db: Database, target: User, verify_key: nacl.signing.VerifyKey, *, label: str, changed_by: User
+) -> User:
     """
-    from netbbs.moderation.log import record_action
+    Register an additional SSH/public key on `target`'s account,
+    alongside any it already has.
+
+    Dogfood report: a second device (a phone, generated fresh because
+    Android's own security model won't let an existing private key be
+    copied over) had no way to gain SSH login without the old
+    `set_verify_key`'s "attach or *replace*" semantics silently revoking
+    whichever key was already on file -- one computer's device kicking
+    another's out the moment a phone key was added. `users` now stores
+    the full set in `user_ssh_keys` (`netbbs.storage.migrations`'
+    "Multiple SSH/public keys per account" entry); this only ever adds,
+    never replaces. The very first key an account gets is also mirrored
+    onto `users.public_key`/`fingerprint` (that migration's own
+    "primary key" concept) -- every key added after that goes only into
+    `user_ssh_keys`, leaving the mirror, and everything that still reads
+    it (`User.fingerprint`, chat message authorship, the SysOp user-list
+    display), unaffected.
+    """
+    from netbbs.moderation.log import record_action_without_commit
 
     public_key_b64 = base64.b64encode(bytes(verify_key)).decode("ascii")
     fingerprint = fingerprint_from_verify_key(verify_key)
-    try:
-        db.connection.execute(
-            "UPDATE users SET public_key = ?, fingerprint = ? WHERE id = ?",
-            (public_key_b64, fingerprint, target.id),
-        )
-        db.connection.commit()
-    except sqlite3.IntegrityError as exc:
-        db.connection.rollback()
-        raise AuthError(
-            f"could not set a public key for {target.username!r} — that key is already in use"
-        ) from exc
-    record_action(
-        db, actor=changed_by, action="set_verify_key", target_user_id=target.id,
-        detail=f"fingerprint={fingerprint}",
-    )
-    return _get_user_by_id(db, target.id)
-
-
-def clear_verify_key(db: Database, target: User, *, changed_by: User) -> User:
-    """
-    Remove `target`'s public key, requiring a password already be set on
-    the account.
-
-    Dogfood follow-up: `set_verify_key` above could attach or replace a
-    key, but nothing could ever remove one -- neither self-service
-    (`netbbs.net.login_flow`'s own `[K]` Profile field) nor the SysOp
-    admin console. The `users` table's own CHECK constraint
-    (`password_hash IS NOT NULL OR public_key IS NOT NULL`,
-    `netbbs.storage.migrations`) exists precisely because an account
-    must always keep at least one credential -- clearing a key on an
-    account with no password would either hit that constraint as a raw
-    `sqlite3.IntegrityError`, or (if the constraint were ever loosened)
-    permanently lock the account out with no way back in.
-    `netbbs.admin.__main__`'s own bootstrap flow calls out exactly this
-    "pubkey-only SysOp with no local recovery path" risk. Checked here,
-    with a clear `AuthError`, rather than left to the constraint to
-    reject blindly.
-
-    Code review follow-up (PR #213): the row update, the blocklist
-    re-key (`migrate_blocklist_key_to_local_user` -- see its own
-    docstring for why this must happen, not just the audit-log insert),
-    and the audit-log insert now run inside one `BEGIN IMMEDIATE`
-    transaction, same discipline `set_user_level`/`set_user_disabled`
-    already established -- an audit-insert failure (a concurrently
-    deleted actor, storage exhaustion) used to leave the key permanently
-    removed with no audit trail, since the row update committed on its
-    own before the separately-committing `record_action` ever ran.
-    """
-    from netbbs.moderation.blocklist import migrate_blocklist_key_to_local_user
-    from netbbs.moderation.log import record_action_without_commit
-
-    row = db.connection.execute(
-        "SELECT password_hash FROM users WHERE id = ?", (target.id,)
-    ).fetchone()
-    if row is None or row["password_hash"] is None:
-        raise AuthError(
-            f"cannot remove {target.username!r}'s SSH key -- this account has no password set "
-            "and would be locked out of the node entirely. Set a password first."
-        )
+    label = label.strip() or "unlabeled"
+    created_at = utc_now_iso()
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
         db.connection.execute(
-            "UPDATE users SET public_key = NULL, fingerprint = NULL WHERE id = ?", (target.id,)
+            "INSERT INTO user_ssh_keys (user_id, label, public_key, fingerprint, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (target.id, label, public_key_b64, fingerprint, created_at),
         )
-        if target.fingerprint is not None:
-            migrate_blocklist_key_to_local_user(
-                db, old_fingerprint=target.fingerprint, local_user_id=target.id
+        if target.fingerprint is None:
+            db.connection.execute(
+                "UPDATE users SET public_key = ?, fingerprint = ? WHERE id = ?",
+                (public_key_b64, fingerprint, target.id),
             )
-        record_action_without_commit(db, actor=changed_by, action="clear_verify_key", target_user_id=target.id)
+        record_action_without_commit(
+            db, actor=changed_by, action="add_ssh_key", target_user_id=target.id,
+            detail=f"label={label!r} fingerprint={fingerprint}",
+        )
+    except sqlite3.IntegrityError as exc:
+        db.connection.rollback()
+        raise AuthError(
+            f"could not add a key for {target.username!r} — that key is already registered"
+        ) from exc
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
+    return _get_user_by_id(db, target.id)
+
+
+def remove_ssh_key(db: Database, target: User, fingerprint: str, *, changed_by: User) -> User:
+    """
+    Remove one of `target`'s SSH/public keys by `fingerprint`, refusing
+    to remove the account's *last* remaining credential (key or
+    password) the same way `clear_verify_key` used to for the single-key
+    model -- see that function's own former docstring for why: the
+    `users` table's CHECK constraint
+    (`password_hash IS NOT NULL OR public_key IS NOT NULL`) exists
+    precisely so an account is never left with no way back in, and
+    `netbbs.admin.__main__`'s own bootstrap flow calls out this exact
+    "pubkey-only SysOp with no local recovery path" risk.
+
+    If the removed key was the one mirrored onto `users.public_key`/
+    `fingerprint` ("primary" -- see the `user_ssh_keys` migration
+    comment), another remaining key (if any) is promoted into that
+    mirror; primary-ness beyond "the account has *a* key" carries no
+    real meaning here, since every key is equally valid for login
+    (`authorize_public_key` checks the full set).
+
+    Code review follow-up (PR #213), still honored here: the row
+    changes, the blocklist re-key (`migrate_blocklist_key_to_local_user`
+    -- kept for pre-existing fingerprint-keyed blocklist rows from
+    before `netbbs.moderation.blocklist.block_user` always keyed local
+    accounts by `local_user_id`), and the audit-log insert all run
+    inside one `BEGIN IMMEDIATE` transaction, so an audit-insert failure
+    can't leave the key removed with no audit trail.
+    """
+    from netbbs.moderation.blocklist import migrate_blocklist_key_to_local_user
+    from netbbs.moderation.log import record_action_without_commit
+
+    removed = db.connection.execute(
+        "SELECT id FROM user_ssh_keys WHERE user_id = ? AND fingerprint = ?", (target.id, fingerprint)
+    ).fetchone()
+    if removed is None:
+        raise AuthError(f"{target.username!r} has no SSH key with fingerprint {fingerprint!r}")
+
+    remaining = db.connection.execute(
+        "SELECT public_key, fingerprint FROM user_ssh_keys "
+        "WHERE user_id = ? AND fingerprint != ? ORDER BY created_at LIMIT 1",
+        (target.id, fingerprint),
+    ).fetchone()
+
+    if remaining is None:
+        password_row = db.connection.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (target.id,)
+        ).fetchone()
+        if password_row is None or password_row["password_hash"] is None:
+            raise AuthError(
+                f"cannot remove {target.username!r}'s last SSH key -- this account has no password set "
+                "and would be locked out of the node entirely. Set a password first."
+            )
+
+    db.connection.execute("BEGIN IMMEDIATE")
+    try:
+        db.connection.execute("DELETE FROM user_ssh_keys WHERE id = ?", (removed["id"],))
+        if remaining is not None:
+            db.connection.execute(
+                "UPDATE users SET public_key = ?, fingerprint = ? WHERE id = ?",
+                (remaining["public_key"], remaining["fingerprint"], target.id),
+            )
+        else:
+            db.connection.execute(
+                "UPDATE users SET public_key = NULL, fingerprint = NULL WHERE id = ?", (target.id,)
+            )
+        migrate_blocklist_key_to_local_user(db, old_fingerprint=fingerprint, local_user_id=target.id)
+        record_action_without_commit(
+            db, actor=changed_by, action="remove_ssh_key", target_user_id=target.id,
+            detail=f"fingerprint={fingerprint}",
+        )
     except BaseException:
         db.connection.rollback()
         raise
