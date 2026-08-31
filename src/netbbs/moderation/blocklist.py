@@ -80,9 +80,30 @@ def block_user(db: Database, target: User, *, blocked_by: User, reason: str | No
     still carry pre-existing fingerprint-keyed rows from before this fix
     (see `migrate_blocklist_key_to_local_user`, which still re-keys them
     on removal) -- this function just never *creates* new ones anymore.
+
+    Code review follow-up (PR #223): checks for an existing block under
+    *either* representation before inserting, not just relying on the
+    `local_user_id` unique index catching a duplicate. `idx_blocklist_
+    fingerprint`/`idx_blocklist_local_user_id` are separate partial
+    unique indexes, so a fresh local_user_id-keyed insert never collides
+    with an upgraded database's pre-existing legacy fingerprint-keyed
+    row for the same account -- without this check, that would silently
+    create a second row instead of raising `BlocklistError`, and later
+    removing that fingerprint (`netbbs.auth.users.remove_ssh_key`, via
+    `migrate_blocklist_key_to_local_user`) would then try to re-key the
+    legacy row onto a `local_user_id` the new row already claims,
+    raising an unhandled `sqlite3.IntegrityError` that permanently broke
+    key removal for that account until fixed by hand.
     """
     created_at = utc_now_iso()
+    db.connection.execute("BEGIN IMMEDIATE")
     try:
+        existing = db.connection.execute(
+            "SELECT 1 FROM blocklist WHERE local_user_id = ? OR fingerprint = ?",
+            (target.id, target.fingerprint),
+        ).fetchone()
+        if existing is not None:
+            raise BlocklistError(f"{target.username!r} is already blocked")
         db.connection.execute(
             """
             INSERT INTO blocklist (local_user_id, reason, blocked_by_user_id, created_at)
@@ -90,9 +111,14 @@ def block_user(db: Database, target: User, *, blocked_by: User, reason: str | No
             """,
             (target.id, reason, blocked_by.id, created_at),
         )
-        db.connection.commit()
     except sqlite3.IntegrityError as exc:
+        db.connection.rollback()
         raise BlocklistError(f"{target.username!r} is already blocked") from exc
+    except BaseException:
+        db.connection.rollback()
+        raise
+    else:
+        db.connection.commit()
 
     return _get_entry_for_user(db, target)
 

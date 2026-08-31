@@ -778,12 +778,24 @@ def list_ssh_keys(db: Database, target: User) -> list[SshKey]:
     ]
 
 
+# Code review follow-up (PR #223): with no cap, an authenticated caller
+# could grow their own account's key set without bound -- a remotely-
+# influenced resource this project's own convention requires an explicit
+# limit on (design doc -- "Bound remotely influenced resources"). Every
+# registered key also costs a real signature-verification attempt on
+# each `authenticate_keypair` call, so an unbounded set makes login
+# itself arbitrarily expensive, not just storage. Ten is generous for
+# the actual use case (a handful of real devices) while keeping both
+# costs bounded.
+_MAX_SSH_KEYS_PER_ACCOUNT = 10
+
+
 def add_ssh_key(
     db: Database, target: User, verify_key: nacl.signing.VerifyKey, *, label: str, changed_by: User
 ) -> User:
     """
     Register an additional SSH/public key on `target`'s account,
-    alongside any it already has.
+    alongside any it already has, up to `_MAX_SSH_KEYS_PER_ACCOUNT`.
 
     Dogfood report: a second device (a phone, generated fresh because
     Android's own security model won't let an existing private key be
@@ -799,6 +811,18 @@ def add_ssh_key(
     `user_ssh_keys`, leaving the mirror, and everything that still reads
     it (`User.fingerprint`, chat message authorship, the SysOp user-list
     display), unaffected.
+
+    Code review follow-up (PR #223): both the per-account key count and
+    whether a primary already exists are now read fresh *inside* the
+    `BEGIN IMMEDIATE` transaction, not from the caller-held `target`
+    snapshot or a pre-transaction read -- a `target` loaded before a
+    concurrent session removed the account's primary key would otherwise
+    still show a non-null `target.fingerprint`, skip promoting this new
+    key into the mirror, and leave `users.fingerprint` incorrectly NULL
+    even though a real key now exists (login still works either way,
+    since `authorize_public_key` checks the full set, but every reader
+    of `User.fingerprint` -- authorship, identity display -- would
+    silently treat the account as keyless).
     """
     from netbbs.moderation.log import record_action_without_commit
 
@@ -809,12 +833,23 @@ def add_ssh_key(
 
     db.connection.execute("BEGIN IMMEDIATE")
     try:
+        key_count = db.connection.execute(
+            "SELECT COUNT(*) FROM user_ssh_keys WHERE user_id = ?", (target.id,)
+        ).fetchone()[0]
+        if key_count >= _MAX_SSH_KEYS_PER_ACCOUNT:
+            raise AuthError(
+                f"{target.username!r} already has the maximum of {_MAX_SSH_KEYS_PER_ACCOUNT} "
+                "SSH keys -- remove one before adding another"
+            )
         db.connection.execute(
             "INSERT INTO user_ssh_keys (user_id, label, public_key, fingerprint, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (target.id, label, public_key_b64, fingerprint, created_at),
         )
-        if target.fingerprint is None:
+        current_fingerprint = db.connection.execute(
+            "SELECT fingerprint FROM users WHERE id = ?", (target.id,)
+        ).fetchone()["fingerprint"]
+        if current_fingerprint is None:
             db.connection.execute(
                 "UPDATE users SET public_key = ?, fingerprint = ? WHERE id = ?",
                 (public_key_b64, fingerprint, target.id),
@@ -862,34 +897,48 @@ def remove_ssh_key(db: Database, target: User, fingerprint: str, *, changed_by: 
     accounts by `local_user_id`), and the audit-log insert all run
     inside one `BEGIN IMMEDIATE` transaction, so an audit-insert failure
     can't leave the key removed with no audit trail.
+
+    Code review follow-up (PR #223): the "does a key remain, and if not,
+    is there a password" check now happens *inside* that same
+    transaction too, not before it. A key-only account with exactly two
+    keys, removed by two concurrent callers (the running node and a
+    local admin session, e.g. -- two separate database connections),
+    could otherwise both read "one other key still exists" before either
+    acquired the write lock, both proceed, and leave the account with
+    zero keys and no password: a real, permanent lockout the `users`
+    table's own CHECK constraint would not have caught (each removal
+    individually looked valid against what its own read saw). `BEGIN
+    IMMEDIATE` itself provides the serialization -- the second caller's
+    transaction blocks until the first commits, then re-reads genuinely
+    current state.
     """
     from netbbs.moderation.blocklist import migrate_blocklist_key_to_local_user
     from netbbs.moderation.log import record_action_without_commit
 
-    removed = db.connection.execute(
-        "SELECT id FROM user_ssh_keys WHERE user_id = ? AND fingerprint = ?", (target.id, fingerprint)
-    ).fetchone()
-    if removed is None:
-        raise AuthError(f"{target.username!r} has no SSH key with fingerprint {fingerprint!r}")
-
-    remaining = db.connection.execute(
-        "SELECT public_key, fingerprint FROM user_ssh_keys "
-        "WHERE user_id = ? AND fingerprint != ? ORDER BY created_at LIMIT 1",
-        (target.id, fingerprint),
-    ).fetchone()
-
-    if remaining is None:
-        password_row = db.connection.execute(
-            "SELECT password_hash FROM users WHERE id = ?", (target.id,)
-        ).fetchone()
-        if password_row is None or password_row["password_hash"] is None:
-            raise AuthError(
-                f"cannot remove {target.username!r}'s last SSH key -- this account has no password set "
-                "and would be locked out of the node entirely. Set a password first."
-            )
-
     db.connection.execute("BEGIN IMMEDIATE")
     try:
+        removed = db.connection.execute(
+            "SELECT id FROM user_ssh_keys WHERE user_id = ? AND fingerprint = ?", (target.id, fingerprint)
+        ).fetchone()
+        if removed is None:
+            raise AuthError(f"{target.username!r} has no SSH key with fingerprint {fingerprint!r}")
+
+        remaining = db.connection.execute(
+            "SELECT public_key, fingerprint FROM user_ssh_keys "
+            "WHERE user_id = ? AND fingerprint != ? ORDER BY created_at LIMIT 1",
+            (target.id, fingerprint),
+        ).fetchone()
+
+        if remaining is None:
+            password_row = db.connection.execute(
+                "SELECT password_hash FROM users WHERE id = ?", (target.id,)
+            ).fetchone()
+            if password_row is None or password_row["password_hash"] is None:
+                raise AuthError(
+                    f"cannot remove {target.username!r}'s last SSH key -- this account has no "
+                    "password set and would be locked out of the node entirely. Set a password first."
+                )
+
         db.connection.execute("DELETE FROM user_ssh_keys WHERE id = ?", (removed["id"],))
         if remaining is not None:
             db.connection.execute(

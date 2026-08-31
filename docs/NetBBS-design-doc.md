@@ -517,11 +517,17 @@ the node operator’s responsibility.
 
 #### Personal-key user
 
-An opt-in user keypair provides passwordless login and may later support
-personally signed events. It is one key, not a root/operational hierarchy.
-There is no bespoke recovery mechanism. Losing the key loses that key-based
-identity and reputation continuity; the local account may still use ordinary
-account recovery policy.
+An opt-in user may register one or more keypairs (issue #222 — multiple
+simultaneous personal keys/devices, shipped) for passwordless login, each
+independently valid; none is a root/operational hierarchy the way node
+identity has. Author-identity purposes elsewhere in this design (Link
+event authorship, display) that need exactly one fingerprint per account
+use the account's *primary* key — the first one registered, or another
+automatically promoted if the primary is later removed while other keys
+remain. There is no bespoke recovery mechanism for any individual key.
+Losing every registered key loses key-based identity and reputation
+continuity; the local account may still use ordinary account recovery
+policy.
 
 #### Node identity
 
@@ -5108,10 +5114,12 @@ credential keeps the two systems', and their compromise/recovery
 stories, fully independent.
 
 **Decision 3 (locked in) — name governance is first-come-first-served
-plus a reserved-word blocklist and a one-name-per-node cap, but a
-registered name only actually goes live once the node has maintained a
-minimum age of successful contact with the registration service; no
-preventive identity vetting beyond that.** Matches how the project
+plus a reserved-word blocklist and a one-name-per-node cap; a registered
+name only actually goes live once the node has maintained a minimum age
+of successful contact with the registration service; and new
+registrations service-wide are rate-limited, with anything above that
+rate held for human review — no preventive identity vetting beyond
+that.** Matches how the project
 treats registration/content elsewhere (SysOp owns the trust decision,
 best-effort not gatekept) — requiring identity *verification* before
 registering a subdomain would add real friction against the feature's
@@ -5130,21 +5138,36 @@ remote client to mint — an attacker can generate a fresh node identity
 per desired hostname and hold all of them simultaneously, each
 individually satisfying a "one-per-node" cap.
 
-**The actual fix keeps the one-per-node cap but adds a minimum-age gate
-on when a reservation actually becomes a live DNS record**, deliberately
-decoupled from Decision 1's first-run opt-in: accepting the offer at
-first run (or first SysOp login) still costs nothing and happens
-immediately — that UX stays frictionless — but the node's registration
-*intent* is recorded, not yet published, until the node has maintained a
-minimum period of successful contact with the registration service
-(the same liveness signal the dynamic-DNS updater and Decision 5's
-reclaim window already rely on). This is what actually bounds the
-attack: minting a fresh node identity is free, but keeping one
-*operating and reachable* for the qualifying period is not, and an
-identity that never qualifies never consumes a real DNS record at all —
-Sybil-generated intents simply expire unpublished, at zero ongoing cost
-to the service. Exact qualifying period is an implementation-time
-parameter (see the closing note below), not fixed here.
+**A second fix attempt kept the one-per-node cap and added a minimum-age
+gate** on when a reservation actually becomes a live DNS record,
+deliberately decoupled from Decision 1's first-run opt-in: accepting the
+offer at first run (or first SysOp login) still costs nothing and
+happens immediately, but the node's registration *intent* is recorded,
+not yet published, until the node has maintained a minimum period of
+successful contact with the registration service. **This was itself
+found insufficient on yet another Codex review, same PR (#223):** the
+gate only costs an attacker *wall-clock time*, not *effort per
+identity* — a single process can run a trivial heartbeat for thousands
+of fake node identities in parallel, all maturing simultaneously, at
+essentially zero marginal cost per additional name. The gate delays the
+attack once; it doesn't bound how many names come out the other end of
+that delay, so the DNS-provider cost/squatting problem this decision
+exists to prevent recurs in full once the qualifying period passes.
+
+**The age-gate is kept anyway, as a mild friction layer, but the actual
+bound is a separate, service-enforced admission control layered on
+top: a rate limit on new registrations across the whole managed
+service (not per node/identity — the thing an attacker cannot multiply
+by minting more identities), automatic up to that rate, with anything
+beyond it queued for the project maintainer to review** — the same
+"a human reviews it" shape Decision 4 already uses for contested-name
+disputes, extended from content disputes to registration *volume*.
+This is what actually closes the gap: DNS-provider record cost and
+squatting are bounded by how fast the *service* will create new
+records at all, independent of how many identities a single attacker
+can mint and age in parallel. Exact qualifying period (age-gate) and
+rate-limit threshold are implementation-time parameters (see the
+closing note below), not fixed here.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5250,18 +5273,25 @@ itself is not amended now, since the artifact does not exist yet.
 
 **Still open, implementation-time detail, not blocking this decision:**
 which DNS provider(s) the managed path actually runs on and what that
-costs to operate; Decision 3's exact minimum-age qualifying period; and
-Decision 5's exact cooldown length (settled in principle at "on the
-order of 90 days," not pinned to an exact number here). Nothing
-structural remains open in this entry — Decision 3 gained a minimum-age
-gate after Codex review (PR #221) found a bare node-count cap
-insufficient; Decision 5 was revised twice on the same review round,
-first to permanent retirement, then deliberately reverted back to a
-bounded cooldown (Thiesi's own follow-up) after weighing it against how
-domain registries and telecom carriers actually handle identifier
-reassignment — both accept exactly this residual risk with a grace
-period, never "reassign nothing, ever," and permanent retirement was a
-stricter bar than that comparison justified, at a real, unbounded
+costs to operate; Decision 3's exact minimum-age qualifying period and
+its service-wide registration-rate-limit threshold; and Decision 5's
+exact cooldown length (settled in principle at "on the order of 90
+days," not pinned to an exact number here). Nothing structural remains
+open in this entry — Decision 3 was revised twice: a bare node-count
+cap (found insufficient, Codex review on PR #221), then a minimum-age
+gate alone (found insufficient too, a further Codex review on PR #223 —
+the gate costs an attacker wall-clock time but not per-identity effort,
+so parallel Sybil registration still gets through once the gate's
+period elapses), landing on the age-gate kept as friction *plus* a
+service-wide rate limit with human review above it as the actual bound,
+matching Decision 4's own existing "a human reviews it" shape extended
+from disputes to volume. Decision 5 was revised twice on the same
+review round, first to permanent retirement, then deliberately reverted
+back to a bounded cooldown (Thiesi's own follow-up) after weighing it
+against how domain registries and telecom carriers actually handle
+identifier reassignment — both accept exactly this residual risk with a
+grace period, never "reassign nothing, ever," and permanent retirement
+was a stricter bar than that comparison justified, at a real, unbounded
 ongoing cost this entry doesn't need to pay. The cooldown here is
 already deliberately more generous than commercial practice requires.
 
@@ -5360,7 +5390,6 @@ actually lives.
 ### Deliberately deferred without active issue
 
 - social/M-of-N node-root recovery;
-- multiple simultaneous personal user keys/devices;
 - true client-side Link-mail encryption;
 - schema fingerprinting beyond SQLite `user_version`;
 - Community defaults as mandatory floors/ceilings.

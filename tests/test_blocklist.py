@@ -166,3 +166,32 @@ def test_is_blocked_survives_gaining_a_key_after_being_blocked_password_only(db,
     carol_with_key = add_ssh_key(db, carol, signing_key.verify_key, label="phone", changed_by=sysop)
     assert carol_with_key.fingerprint is not None
     assert is_blocked(db, carol_with_key) is True
+
+
+def test_block_user_refuses_a_duplicate_even_behind_a_legacy_fingerprint_row(db, sysop, bob):
+    # Code review follow-up (PR #223): idx_blocklist_fingerprint and
+    # idx_blocklist_local_user_id are separate partial unique indexes,
+    # so a fresh local_user_id-keyed insert never collides at the schema
+    # level with an upgraded database's pre-existing legacy fingerprint-
+    # keyed row for the same account -- without an explicit check for
+    # both representations, block_user would silently create a second
+    # row instead of raising BlocklistError, and a later remove_ssh_key
+    # migrating that legacy fingerprint onto the same local_user_id the
+    # new row already claims would hit an unhandled IntegrityError.
+    # Simulates the legacy row directly (a fresh block_user call today
+    # never creates a fingerprint-keyed row itself, so this shape can
+    # only come from an old, pre-fix database).
+    db.connection.execute(
+        "INSERT INTO blocklist (fingerprint, reason, blocked_by_user_id, created_at) VALUES (?, ?, ?, ?)",
+        (bob.fingerprint, "legacy block", sysop.id, "2026-01-01T00:00:00.000000Z"),
+    )
+    db.connection.commit()
+
+    with pytest.raises(BlocklistError):
+        block_user(db, bob, blocked_by=sysop)
+
+    rows = db.connection.execute(
+        "SELECT COUNT(*) FROM blocklist WHERE local_user_id = ? OR fingerprint = ?",
+        (bob.id, bob.fingerprint),
+    ).fetchone()[0]
+    assert rows == 1

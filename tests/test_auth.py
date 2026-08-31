@@ -507,7 +507,18 @@ def test_multi_key_migration_backfills_an_existing_single_key_account(tmp_path, 
     from netbbs.storage.migrations import MIGRATIONS
 
     db_path = tmp_path / "pre-multi-key.db"
-    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    # Found by description rather than MIGRATIONS[:-1] -- this migration
+    # is not guaranteed to stay the last one in the list once a later
+    # migration is appended after it (code review follow-up, PR #224:
+    # MIGRATIONS[:-1] would then include this migration itself, running
+    # its own backfill against an empty users table before the manual
+    # INSERT below ever runs, leaving list_ssh_keys empty on reopen --
+    # same fragility test_activity.py's own arrival_id-backfill tests
+    # already document and avoid this same way).
+    multi_key_migration_index = next(
+        i for i, m in enumerate(MIGRATIONS) if "Multiple SSH/public keys per account" in m.description
+    )
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:multi_key_migration_index])
     old_db = Database(db_path)
     # create_user can't be used here -- its current code always also
     # inserts into user_ssh_keys when given a verify_key, which doesn't
@@ -544,3 +555,132 @@ def test_multi_key_migration_backfills_an_existing_single_key_account(tmp_path, 
         assert authorize_public_key(upgraded, "thiesi", signing_key.verify_key).username == "thiesi"
     finally:
         upgraded.close()
+
+
+def test_add_ssh_key_refuses_past_the_per_account_cap(db):
+    # Code review follow-up (PR #223): with no cap, an authenticated
+    # caller could grow their own account's key set without bound --
+    # both a storage cost and a real signature-verification cost on
+    # every authenticate_keypair call thereafter. Adds up to the cap,
+    # confirms the next one is refused with a clear AuthError rather
+    # than silently accepted or a raw constraint failure, and confirms
+    # the account still has exactly the cap's worth of keys afterward
+    # (the refused attempt left nothing half-added).
+    from netbbs.auth.users import _MAX_SSH_KEYS_PER_ACCOUNT
+
+    sysop = create_user(db, "sysop", password="hunter2", user_level=255)
+    thiesi = create_user(db, "thiesi", password="hunter2")
+    for i in range(_MAX_SSH_KEYS_PER_ACCOUNT):
+        key = nacl.signing.SigningKey.generate()
+        thiesi = add_ssh_key(db, thiesi, key.verify_key, label=f"key-{i}", changed_by=sysop)
+    assert len(list_ssh_keys(db, thiesi)) == _MAX_SSH_KEYS_PER_ACCOUNT
+
+    one_too_many = nacl.signing.SigningKey.generate()
+    with pytest.raises(AuthError):
+        add_ssh_key(db, thiesi, one_too_many.verify_key, label="one too many", changed_by=sysop)
+
+    assert len(list_ssh_keys(db, thiesi)) == _MAX_SSH_KEYS_PER_ACCOUNT
+
+
+def test_concurrent_remove_ssh_key_cannot_leave_a_key_only_account_locked_out(tmp_path, monkeypatch):
+    # Code review follow-up (PR #223): a key-only account (no password)
+    # with exactly two keys, removed by two independent connections
+    # (the running node and a local admin session, e.g.) concurrently,
+    # used to let both reads of "does another key remain" happen before
+    # either acquired BEGIN IMMEDIATE's write lock -- both would see the
+    # other key still present, both would proceed, and the account would
+    # end up with zero keys and no password: a real, permanent lockout.
+    # Same real-thread/real-independent-connection technique
+    # test_user_management_concurrency.py's own `_race_two_removals`
+    # already established for proving BEGIN IMMEDIATE genuinely
+    # serializes two connections, not just that the fix "looks" correct
+    # by inspection -- record_action_without_commit is paused on
+    # whichever thread's transaction reaches it first (remove_ssh_key's
+    # own last step before commit), forcing the other thread's BEGIN
+    # IMMEDIATE to demonstrably block until the first resolves.
+    import threading
+
+    from netbbs.moderation import log as log_module
+
+    db_path = tmp_path / "node.db"
+    setup_db = Database(db_path)
+    signing_key_a = nacl.signing.SigningKey.generate()
+    signing_key_b = nacl.signing.SigningKey.generate()
+    thiesi = create_user(setup_db, "thiesi", verify_key=signing_key_a.verify_key, user_level=10)
+    fingerprint_a = thiesi.fingerprint
+    thiesi = add_ssh_key(setup_db, thiesi, signing_key_b.verify_key, label="b", changed_by=thiesi)
+    fingerprint_b = next(k.fingerprint for k in list_ssh_keys(setup_db, thiesi) if k.label == "b")
+    setup_db.close()
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_record = log_module.record_action_without_commit
+    called = threading.Event()
+
+    def paused_record(db, **kwargs):
+        if not called.is_set():
+            called.set()
+            reached.set()
+            release.wait(timeout=5)
+        return real_record(db, **kwargs)
+
+    monkeypatch.setattr(log_module, "record_action_without_commit", paused_record)
+
+    results: dict[str, object] = {}
+
+    def run_a() -> None:
+        db_a = Database(db_path)
+        try:
+            user_a = get_user_by_username(db_a, "thiesi")
+            try:
+                results["a"] = remove_ssh_key(db_a, user_a, fingerprint_a, changed_by=user_a)
+            except Exception as exc:  # noqa: BLE001 -- captured for the test's own assertions
+                results["a"] = exc
+        finally:
+            db_a.close()
+
+    def run_b() -> None:
+        assert reached.wait(timeout=5), "thread A never reached its pause point"
+        db_b = Database(db_path)
+        try:
+            user_b = get_user_by_username(db_b, "thiesi")
+            try:
+                results["b"] = remove_ssh_key(db_b, user_b, fingerprint_b, changed_by=user_b)
+            except Exception as exc:  # noqa: BLE001
+                results["b"] = exc
+        finally:
+            db_b.close()
+
+    thread_a = threading.Thread(target=run_a)
+    thread_b = threading.Thread(target=run_b)
+
+    thread_a.start()
+    assert reached.wait(timeout=5), "thread A never reached its pause point"
+
+    thread_b.start()
+    thread_b.join(timeout=0.3)
+    assert thread_b.is_alive(), (
+        "thread B finished before thread A released its transaction -- "
+        "BEGIN IMMEDIATE did not actually serialize the two connections"
+    )
+
+    release.set()
+    thread_a.join(timeout=5)
+    thread_b.join(timeout=5)
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+
+    outcomes = list(results.values())
+    successes = [r for r in outcomes if not isinstance(r, Exception)]
+    failures = [r for r in outcomes if isinstance(r, Exception)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], AuthError)
+
+    final_db = Database(db_path)
+    try:
+        final_user = get_user_by_username(final_db, "thiesi")
+        assert len(list_ssh_keys(final_db, final_user)) == 1
+        assert final_user.fingerprint is not None
+    finally:
+        final_db.close()
