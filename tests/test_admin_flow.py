@@ -5562,6 +5562,41 @@ def test_settings_panel_reflects_a_changed_node_name(db, lane, sysop):
     assert "Node name: Roanoke" in text
 
 
+# -- condensed status line on nested screens (issue #206) --------------------
+
+
+def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
+    # GitHub issue #206's "broader scope" half: screens nested deeper than
+    # the five top-level submenus don't have node_controls/link_context
+    # available to show the richer full panel those already have, so they
+    # get this lighter "Backup: ...  Update: ..." line instead -- confirms
+    # a Shape-A site (the function already had `lane` in scope, so the line
+    # is computed and written inline, no caller threading needed).
+    from netbbs.backup import create_backup
+
+    identity_dir = db.path.parent / "netbbs_identity"
+    create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
+
+    link_context = _link_context()
+    session = FakeSession(["s", "l", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+    text = _visible(_written_text(session))
+    assert "Backup: " in text
+    assert "Update: not checked" in text
+
+
+def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
+    # A Shape-B site: _draw_door_menu takes no `lane` of its own -- the
+    # line is computed once in _door_menu (which has `lane`) and threaded
+    # through as a new `status_line` parameter, same as every other
+    # _draw_*_menu/_draw_*_detail/_draw_*_action screen in this rollout.
+    session = FakeSession(["c", "d", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Backup: never" in text
+    assert "Update: not checked" in text
+
+
 # -- node-wide timestamp display format/timezone ----------------------------
 
 
