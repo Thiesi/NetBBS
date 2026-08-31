@@ -493,3 +493,54 @@ def test_remove_ssh_key_does_not_lose_a_block_to_a_stale_caller_held_user_object
     # The block -- created after stale_target was loaded, on an account
     # local_user_id, never a fingerprint -- survives untouched.
     assert is_blocked(db, get_user_by_username(db, "thiesi")) is True
+
+
+def test_multi_key_migration_backfills_an_existing_single_key_account(tmp_path, monkeypatch):
+    # GitHub issue #222's own acceptance criteria: an existing (pre-
+    # migration) single-key account must keep working with no manual
+    # intervention -- its one key becomes the first row in the new
+    # user_ssh_keys table. Same technique test_link_trust.py's own
+    # test_append_only_trust_migration_preserves_existing_link_data
+    # already established for testing a migration's backfill against a
+    # simulated pre-existing database, not just inspection.
+    from netbbs.storage import database as database_module
+    from netbbs.storage.migrations import MIGRATIONS
+
+    db_path = tmp_path / "pre-multi-key.db"
+    monkeypatch.setattr(database_module, "MIGRATIONS", MIGRATIONS[:-1])
+    old_db = Database(db_path)
+    # create_user can't be used here -- its current code always also
+    # inserts into user_ssh_keys when given a verify_key, which doesn't
+    # exist yet on this deliberately-pre-migration schema. Insert
+    # directly, matching exactly what a real account looked like before
+    # this migration ever ran.
+    signing_key = nacl.signing.SigningKey.generate()
+    import base64
+
+    from netbbs.identity.keys import fingerprint_from_verify_key
+
+    public_key_b64 = base64.b64encode(bytes(signing_key.verify_key)).decode("ascii")
+    fingerprint = fingerprint_from_verify_key(signing_key.verify_key)
+    old_db.connection.execute(
+        "INSERT INTO users (username, password_hash, public_key, fingerprint, user_level, created_at) "
+        "VALUES ('thiesi', NULL, ?, ?, 10, '2026-01-01T00:00:00.000000Z')",
+        (public_key_b64, fingerprint),
+    )
+    old_db.connection.commit()
+    old_db.close()
+    monkeypatch.undo()
+
+    upgraded = Database(db_path)
+    try:
+        thiesi = get_user_by_username(upgraded, "thiesi")
+        assert thiesi.fingerprint == fingerprint
+
+        keys = list_ssh_keys(upgraded, thiesi)
+        assert len(keys) == 1
+        assert keys[0].label == "default"
+        assert keys[0].fingerprint == fingerprint
+
+        # The backfilled key actually works for login, not just present.
+        assert authorize_public_key(upgraded, "thiesi", signing_key.verify_key).username == "thiesi"
+    finally:
+        upgraded.close()
