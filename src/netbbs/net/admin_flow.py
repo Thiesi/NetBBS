@@ -9243,6 +9243,7 @@ def _board_field_specs(
             prompt=text_field("name", required=True),
             brief="The board's display name",
             help="The board's display name, shown wherever it's listed. Must be non-blank.",
+            section="Identity",
         ),
         FieldSpec(
             key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
@@ -9250,6 +9251,7 @@ def _board_field_specs(
             prompt=text_field("description"),
             brief="Shown when browsing the board",
             help="A short explanation of what this board is for, shown when browsing/selecting it.",
+            section="Identity",
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
@@ -9261,6 +9263,7 @@ def _board_field_specs(
                 "the parent Community's own default read level if it has one set, or falls "
                 "back to no gate."
             ),
+            section="Access",
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
@@ -9272,6 +9275,29 @@ def _board_field_specs(
                 "parent Community's own default write level if it has one set, or falls "
                 "back to no gate."
             ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            render=lambda d: _optional_int_label(d.get("min_age")),
+            prompt=_min_age_field(),
+            brief="Minimum caller age required",
+            help=(
+                "The minimum caller age required to read or post here, checked against a "
+                "caller's own birthdate (Your profile › Name & details) even if they've "
+                "chosen not to show it publicly. 'none' means no age gate."
+            ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Name requirement",
+            render=lambda d: _name_requirement_label(d.get("name_requirement")),
+            prompt=_name_requirement_field(),
+            step=_name_requirement_step(),
+            help=_NAME_REQUIREMENT_HELP,
+            brief="How posters must be identified",
+            section="Access",
         ),
         FieldSpec(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
@@ -9285,6 +9311,7 @@ def _board_field_specs(
                 "can inherit its default read/write/age/name-requirement settings instead of "
                 "each needing its own. 'none' keeps this board outside every Community."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
@@ -9299,6 +9326,7 @@ def _board_field_specs(
                 "Where this board is grouped when browsing listings -- purely organizational, "
                 "has no effect on who can read or post."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
@@ -9306,6 +9334,7 @@ def _board_field_specs(
             prompt=bool_field("pinned", "Pinned?"),
             brief="Shown at the top of listings",
             help="Shown at the top of board listings, above unpinned boards, regardless of sort order.",
+            section="Organization",
         ),
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
@@ -9313,6 +9342,7 @@ def _board_field_specs(
             prompt=bool_field("moderated", "Moderated (posts need approval)?"),
             brief="New posts need approval first",
             help="New posts need a moderator or SysOp to approve them before anyone else can see them.",
+            section="Moderation",
         ),
         FieldSpec(
             key="max_post_age_days", hotkey="x", menu_text=menu_key("X", " post age", prefix="Ma"),
@@ -9321,26 +9351,7 @@ def _board_field_specs(
             prompt=_optional_int_field("max_post_age_days", "Max post age in days"),
             brief="Auto-purge posts after N days",
             help="Posts older than this are automatically purged. 'unlimited' keeps every post indefinitely.",
-        ),
-        FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
-            brief="Minimum caller age required",
-            help=(
-                "The minimum caller age required to read or post here, checked against a "
-                "caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
-            ),
-        ),
-        FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
-            label="Name requirement",
-            render=lambda d: _name_requirement_label(d.get("name_requirement")),
-            prompt=_name_requirement_field(),
-            step=_name_requirement_step(),
-            help=_NAME_REQUIREMENT_HELP,
-            brief="How posters must be identified",
+            section="Moderation",
         ),
     ]
 
@@ -10261,6 +10272,7 @@ def _area_field_specs(
             prompt=text_field("name", required=True),
             brief="The area's display name",
             help="The file area's display name, shown wherever it's listed. Must be non-blank.",
+            section="Identity",
         ),
         FieldSpec(
             key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
@@ -10268,6 +10280,7 @@ def _area_field_specs(
             prompt=text_field("description"),
             brief="Shown when browsing the area",
             help="A short explanation of what this file area is for, shown when browsing/selecting it.",
+            section="Identity",
         ),
         FieldSpec(
             key="min_read_level", hotkey="r", menu_text=menu_key("R", "ead level"), label="Min read level",
@@ -10279,6 +10292,7 @@ def _area_field_specs(
                 "'none' inherits the parent Community's own default read level if it has "
                 "one set, or falls back to no gate."
             ),
+            section="Access",
         ),
         FieldSpec(
             key="min_write_level", hotkey="w", menu_text=menu_key("W", "rite level"), label="Min write level",
@@ -10290,6 +10304,29 @@ def _area_field_specs(
                 "parent Community's own default write level if it has one set, or falls "
                 "back to no gate."
             ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            render=lambda d: _optional_int_label(d.get("min_age")),
+            prompt=_min_age_field(),
+            brief="Minimum caller age required",
+            help=(
+                "The minimum caller age required to browse or upload here, checked against "
+                "a caller's own birthdate (Your profile › Name & details) even if they've "
+                "chosen not to show it publicly. 'none' means no age gate."
+            ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Name requirement",
+            render=lambda d: _name_requirement_label(d.get("name_requirement")),
+            prompt=_name_requirement_field(),
+            step=_name_requirement_step(),
+            help=_NAME_REQUIREMENT_HELP,
+            brief="How uploaders must be identified",
+            section="Access",
         ),
         FieldSpec(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
@@ -10303,6 +10340,7 @@ def _area_field_specs(
                 "Community can inherit its default read/write/age/name-requirement settings "
                 "instead of each needing its own. 'none' keeps it outside every Community."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
@@ -10317,6 +10355,7 @@ def _area_field_specs(
                 "Where this file area is grouped when browsing listings -- purely "
                 "organizational, has no effect on who can browse or upload."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
@@ -10324,6 +10363,7 @@ def _area_field_specs(
             prompt=bool_field("pinned", "Pinned?"),
             brief="Shown at the top of listings",
             help="Shown at the top of file-area listings, above unpinned areas, regardless of sort order.",
+            section="Organization",
         ),
         FieldSpec(
             key="moderated", hotkey="m", menu_text=menu_key("M", "oderated"), label="Moderated",
@@ -10331,6 +10371,7 @@ def _area_field_specs(
             prompt=bool_field("moderated", "Moderated (uploads need approval)?"),
             brief="New uploads need approval first",
             help="New uploads need a moderator or SysOp to approve them before anyone else can download them.",
+            section="Moderation",
         ),
         FieldSpec(
             key="max_file_age_days", hotkey="x", menu_text=menu_key("X", " file age", prefix="Ma"),
@@ -10339,26 +10380,7 @@ def _area_field_specs(
             prompt=_optional_int_field("max_file_age_days", "Max file age in days"),
             brief="Auto-purge files after N days",
             help="Files older than this are automatically purged. 'unlimited' keeps every file indefinitely.",
-        ),
-        FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
-            brief="Minimum caller age required",
-            help=(
-                "The minimum caller age required to browse or upload here, checked against "
-                "a caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
-            ),
-        ),
-        FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
-            label="Name requirement",
-            render=lambda d: _name_requirement_label(d.get("name_requirement")),
-            prompt=_name_requirement_field(),
-            step=_name_requirement_step(),
-            help=_NAME_REQUIREMENT_HELP,
-            brief="How uploaders must be identified",
+            section="Moderation",
         ),
     ]
 
@@ -11419,6 +11441,7 @@ def _channel_field_specs(
             prompt=text_field("name", required=True),
             brief="The channel's display name",
             help="The channel's display name, shown wherever it's listed. Must be non-blank.",
+            section="Identity",
         ),
         FieldSpec(
             key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
@@ -11426,6 +11449,7 @@ def _channel_field_specs(
             prompt=text_field("description"),
             brief="Shown when browsing channels",
             help="A short explanation of what this channel is for, shown when browsing/selecting it.",
+            section="Identity",
         ),
         FieldSpec(
             key="min_level", hotkey="l", menu_text=menu_key("L", "evel"), label="Min level",
@@ -11437,6 +11461,29 @@ def _channel_field_specs(
                 "file areas, a channel's own level never inherits from its Community -- "
                 "always a plain number, 0 meaning no gate."
             ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
+            render=lambda d: _optional_int_label(d.get("min_age")),
+            prompt=_min_age_field(),
+            brief="Minimum caller age required",
+            help=(
+                "The minimum caller age required to join this channel, checked against a "
+                "caller's own birthdate (Your profile › Name & details) even if they've "
+                "chosen not to show it publicly. 'none' means no age gate."
+            ),
+            section="Access",
+        ),
+        FieldSpec(
+            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
+            label="Name requirement",
+            render=lambda d: _name_requirement_label(d.get("name_requirement")),
+            prompt=_name_requirement_field(),
+            step=_name_requirement_step(),
+            help=_NAME_REQUIREMENT_HELP,
+            brief="How chatters must be identified",
+            section="Access",
         ),
         FieldSpec(
             key="community_id", hotkey="u", menu_text=menu_key("U", "nity", prefix="Comm"), label="Community",
@@ -11450,6 +11497,7 @@ def _channel_field_specs(
                 "Community can inherit its default age/name-requirement settings instead of "
                 "each needing its own. 'none' keeps it outside every Community."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="category_id", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
@@ -11464,6 +11512,7 @@ def _channel_field_specs(
                 "Where this channel is grouped when browsing listings -- purely "
                 "organizational, has no effect on who can join."
             ),
+            section="Organization",
         ),
         FieldSpec(
             key="pinned", hotkey="p", menu_text=menu_key("P", "inned"), label="Pinned",
@@ -11471,6 +11520,7 @@ def _channel_field_specs(
             prompt=bool_field("pinned", "Pinned?"),
             brief="Shown at the top of listings",
             help="Shown at the top of channel listings, above unpinned channels, regardless of sort order.",
+            section="Organization",
         ),
         FieldSpec(
             key="hidden", hotkey="h", menu_text=menu_key("H", "idden"), label="Hidden",
@@ -11482,6 +11532,7 @@ def _channel_field_specs(
                 "who already know about it (or are invited) can still join and use it "
                 "normally -- this only affects whether it shows up when browsing."
             ),
+            section="Membership",
         ),
         FieldSpec(
             key="members_only", hotkey="m", menu_text=menu_key("M", "embers-only"), label="Members-only",
@@ -11489,6 +11540,7 @@ def _channel_field_specs(
             prompt=bool_field("members_only", "Members-only (invite-only access)?"),
             brief="Only invited members may join",
             help="When on, a caller can only join via an invite from an existing member -- browsing to it isn't enough.",
+            section="Membership",
         ),
         FieldSpec(
             key="allow_member_invites", hotkey="i", menu_text=menu_key("I", "nvites"),
@@ -11501,26 +11553,7 @@ def _channel_field_specs(
                 "SysOp. Most relevant when Members-only is also on, since that's the only "
                 "way new members can join at all."
             ),
-        ),
-        FieldSpec(
-            key="min_age", hotkey="g", menu_text=menu_key("G", "e", prefix="Min a"), label="Min age",
-            render=lambda d: _optional_int_label(d.get("min_age")),
-            prompt=_min_age_field(),
-            brief="Minimum caller age required",
-            help=(
-                "The minimum caller age required to join this channel, checked against a "
-                "caller's own birthdate (Your profile › Name & details) even if they've "
-                "chosen not to show it publicly. 'none' means no age gate."
-            ),
-        ),
-        FieldSpec(
-            key="name_requirement", hotkey="q", menu_text=menu_key("q", "uirement", prefix="Name re"),
-            label="Name requirement",
-            render=lambda d: _name_requirement_label(d.get("name_requirement")),
-            prompt=_name_requirement_field(),
-            step=_name_requirement_step(),
-            help=_NAME_REQUIREMENT_HELP,
-            brief="How chatters must be identified",
+            section="Membership",
         ),
     ]
 
