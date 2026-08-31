@@ -524,8 +524,29 @@ identity has. Author-identity purposes elsewhere in this design (Link
 event authorship, display) that need exactly one fingerprint per account
 use the account's *primary* key — the first one registered, or another
 automatically promoted if the primary is later removed while other keys
-remain. There is no bespoke recovery mechanism for any individual key.
-Losing every registered key loses key-based identity and reputation
+remain.
+
+**Promotion is a mechanical fallback, not an identity claim (code review
+follow-up, PR #225).** There is no signed key-transition chain linking a
+newly-promoted key to the one it replaced — unlike node identity, whose
+root key signs each operational-key transition specifically so remote
+peers can verify continuity across a rotation. A promoted personal key
+is, from every remote Link peer's point of view, simply a different,
+unrelated fingerprint: content authored after a promotion is *not*
+cryptographically provable as continuing the same reputation history as
+content authored before it, even though the local account is unchanged.
+This is the same limitation the single-key model already accepted below
+("losing the key loses that key-based identity and reputation
+continuity"), now reachable as a side effect of removing one key among
+several rather than only by losing your one and only key — a real,
+disclosed gap, not a hidden one, and one this feature does not attempt
+to close (a signed personal-key transition chain, mirroring node
+identity's, is a real future option if reputation continuity across a
+personal key change ever becomes a stated goal — not built now, not
+implied by anything here).
+
+There is no bespoke recovery mechanism for any individual key. Losing
+every registered key loses key-based identity and reputation
 continuity; the local account may still use ordinary account recovery
 policy.
 
@@ -5116,10 +5137,12 @@ stories, fully independent.
 **Decision 3 (locked in) — name governance is first-come-first-served
 plus a reserved-word blocklist and a one-name-per-node cap; a registered
 name only actually goes live once the node has maintained a minimum age
-of successful contact with the registration service; and new
-registrations service-wide are rate-limited, with anything above that
-rate held for human review — no preventive identity vetting beyond
-that.** Matches how the project
+of successful contact with the registration service; new registrations
+service-wide are rate-limited, with anything above that rate held in a
+capacity-bounded review queue for a human, rejected outright once that
+queue is full; and total active managed registrations are capped by a
+separate cumulative ceiling, refused once reached — no preventive
+identity vetting beyond that.** Matches how the project
 treats registration/content elsewhere (SysOp owns the trust decision,
 best-effort not gatekept) — requiring identity *verification* before
 registering a subdomain would add real friction against the feature's
@@ -5165,9 +5188,43 @@ disputes, extended from content disputes to registration *volume*.
 This is what actually closes the gap: DNS-provider record cost and
 squatting are bounded by how fast the *service* will create new
 records at all, independent of how many identities a single attacker
-can mint and age in parallel. Exact qualifying period (age-gate) and
-rate-limit threshold are implementation-time parameters (see the
-closing note below), not fixed here.
+can mint and age in parallel.
+
+Two further Codex findings, same PR (#225), both about resources this
+rate limit itself introduces or leaves unbounded, not about the rate
+limit's own logic:
+
+- **The review queue needs its own explicit bound.** "Queued for
+  review" is itself a remotely-influenced resource — this project's
+  own standing convention already requires "queues, transfers, retained
+  events, retries, and mailboxes" to have explicit limits and visible
+  failure behavior, and a Sybil attacker submitting past the rate limit
+  can otherwise fill that queue without limit, exhausting storage or
+  maintainer workload even though every individual *record* stays
+  rate-limited. Fixed by specifying a finite queue capacity with clear
+  admission behavior once full: reject new above-threshold requests
+  outright (visible to the caller, not silently dropped) rather than
+  growing the queue further, matching the "bounded, not silently
+  unbounded" shape this project already uses for relay mailboxes and
+  similar structures.
+- **A rate limit bounds speed, not total count.** An attacker patient
+  enough to always submit exactly at (never over) the threshold, and to
+  keep every registered node's dynamic-DNS updater contact alive
+  indefinitely so nothing qualifies as abandoned, can still accumulate
+  an unbounded number of active records over a long enough time —
+  nothing in a pure rate limit ever says "no more, full." This needs a
+  second, independent ceiling: a cumulative cap on total *active*
+  managed registrations service-wide, refused (not queued) once
+  reached, freed only as existing registrations are voluntarily
+  released or genuinely abandoned (Decision 5). The rate limit still
+  matters on its own — it prevents a single burst from consuming the
+  service's entire remaining capacity at once — but does not by itself
+  stand in for a real total ceiling.
+
+Exact qualifying period (age-gate), rate-limit threshold, review-queue
+capacity, and cumulative active-registration ceiling are all
+implementation-time parameters (see the closing note below), not fixed
+here.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5273,27 +5330,31 @@ itself is not amended now, since the artifact does not exist yet.
 
 **Still open, implementation-time detail, not blocking this decision:**
 which DNS provider(s) the managed path actually runs on and what that
-costs to operate; Decision 3's exact minimum-age qualifying period and
-its service-wide registration-rate-limit threshold; and Decision 5's
-exact cooldown length (settled in principle at "on the order of 90
-days," not pinned to an exact number here). Nothing structural remains
-open in this entry — Decision 3 was revised twice: a bare node-count
-cap (found insufficient, Codex review on PR #221), then a minimum-age
-gate alone (found insufficient too, a further Codex review on PR #223 —
-the gate costs an attacker wall-clock time but not per-identity effort,
-so parallel Sybil registration still gets through once the gate's
-period elapses), landing on the age-gate kept as friction *plus* a
-service-wide rate limit with human review above it as the actual bound,
-matching Decision 4's own existing "a human reviews it" shape extended
-from disputes to volume. Decision 5 was revised twice on the same
-review round, first to permanent retirement, then deliberately reverted
-back to a bounded cooldown (Thiesi's own follow-up) after weighing it
-against how domain registries and telecom carriers actually handle
-identifier reassignment — both accept exactly this residual risk with a
-grace period, never "reassign nothing, ever," and permanent retirement
-was a stricter bar than that comparison justified, at a real, unbounded
-ongoing cost this entry doesn't need to pay. The cooldown here is
-already deliberately more generous than commercial practice requires.
+costs to operate; Decision 3's exact minimum-age qualifying period,
+service-wide registration-rate-limit threshold, review-queue capacity,
+and cumulative active-registration ceiling; and Decision 5's exact
+cooldown length (settled in principle at "on the order of 90 days," not
+pinned to an exact number here). Nothing structural remains open in
+this entry — Decision 3 was revised three times: a bare node-count cap
+(found insufficient, Codex review on PR #221), then a minimum-age gate
+alone (found insufficient too, a further Codex review on PR #223 — the
+gate costs an attacker wall-clock time but not per-identity effort, so
+parallel Sybil registration still gets through once the gate's period
+elapses), then a rate limit with human review layered on top of the
+age-gate (still not itself a total ceiling — a further Codex review on
+PR #225 pointed out both that the review queue itself needed a bound,
+and that a rate limit alone caps *speed*, not *count*), landing on the
+age-gate plus rate limit plus a bounded review queue plus a cumulative
+active-registration ceiling together. Decision 5 was revised twice on
+the same review round, first to permanent retirement, then deliberately
+reverted back to a bounded cooldown (Thiesi's own follow-up) after
+weighing it against how domain registries and telecom carriers actually
+handle identifier reassignment — both accept exactly this residual risk
+with a grace period, never "reassign nothing, ever," and permanent
+retirement was a stricter bar than that comparison justified, at a
+real, unbounded ongoing cost this entry doesn't need to pay. The
+cooldown here is already deliberately more generous than commercial
+practice requires.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

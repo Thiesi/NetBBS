@@ -56,6 +56,7 @@ import shlex
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Sequence
+from zoneinfo import available_timezones
 
 import nacl.signing
 
@@ -3758,6 +3759,17 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
     fmt, tz_name = await lane.run(resolve_display_preferences)
     draft: dict = {"format": fmt, "timezone": tz_name}
 
+    # Hoisted here, once, rather than re-fetched inside _timezone_field
+    # below -- it needs these same values to open the timezone picker,
+    # and they're already computed fresh for edit_resource_draft's own
+    # call at the bottom of this function anyway.
+    description_level = await lane.run(menu_description_level, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
+
     async def _format_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
         await session.write(f"New format [{draft['format']!r}] (blank to leave unchanged): ")
         new_fmt = (await session.read_line()).strip()
@@ -3776,21 +3788,49 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             draft["format"] = new_fmt
 
     async def _timezone_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
-        await session.write(f"New timezone [{draft['timezone']}] (blank to leave unchanged): ")
-        new_tz = (await session.read_line()).strip()
-        if not new_tz:
+        # Dogfood feature request ("Can we get a timezone selector for
+        # the SysOp console?"): this used to be a bare free-text prompt
+        # -- a SysOp had to already know and correctly type an exact
+        # IANA identifier ('Europe/Berlin'), with `is_valid_timezone`
+        # only catching a typo after the fact. `pick_item` (the same
+        # searchable/paginated browse-and-select component every other
+        # "choose one of many named things" screen in this module
+        # already uses) makes this an actual picker instead -- substring
+        # search and Tab completion come for free. `zoneinfo.available_
+        # timezones()` is a flat set of strings with no natural integer
+        # id of its own (unlike every other pick_item caller's DB-backed
+        # rows), so `_zone_ids` below synthesizes one: a fixed index
+        # into a sorted, one-time-computed list, stable for exactly as
+        # long as this screen visit lasts, which is all `pick_item`
+        # itself needs.
+        zones = sorted(available_timezones())
+        zone_ids = {name: index for index, name in enumerate(zones)}
+        selected = await pick_item(
+            session, zones,
+            name_of=lambda tz: tz,
+            stable_id_of=lambda tz: zone_ids[tz],
+            title="Timezone",
+            breadcrumb=("Settings", "Timestamp display"),
+            empty_message="No timezones available.",
+            redraw_in_place=redraw_in_place,
+            unicode_style=unicode_style,
+            collapsed=collapsed,
+            accent_color=accent_color,
+            header_color=header_color,
+        )
+        if selected is None:
             return
 
         def _apply(db: Database) -> None:
-            set_display_timezone(db, new_tz)
-            record_action(db, actor=actor, action="set_display_timezone", detail=new_tz)
+            set_display_timezone(db, selected)
+            record_action(db, actor=actor, action="set_display_timezone", detail=selected)
 
         try:
             await lane.run(_apply)
         except ValueError as exc:
             await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
         else:
-            draft["timezone"] = new_tz
+            draft["timezone"] = selected
 
     fields = [
         FieldSpec(
@@ -3806,10 +3846,10 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
             key="timezone", hotkey="z", menu_text=menu_key("z", "one", prefix="Time"), label="Timezone",
             render=lambda d: d["timezone"], prompt=_timezone_field,
             help=(
-                "An IANA timezone name (e.g. 'Europe/Berlin', 'America/New_York') "
-                "controlling *which instant* every displayed timestamp shows, node-wide. "
-                "Getting this wrong leaves every timestamp reshaped but still pointing at "
-                "the wrong wall-clock time."
+                "Opens a searchable list of every IANA timezone (e.g. 'Europe/Berlin', "
+                "'America/New_York') controlling *which instant* every displayed timestamp "
+                "shows, node-wide. Getting this wrong leaves every timestamp reshaped but "
+                "still pointing at the wrong wall-clock time."
             ),
         ),
     ]
@@ -3819,12 +3859,12 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
         fields=fields,
         draft=draft, save=None,
         back_menu_text=menu_key("B", "ack"),
-        description_level=await lane.run(menu_description_level, actor),
-        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-        unicode_style=await lane.run(unicode_style_enabled, actor),
-        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
+        description_level=description_level,
+        redraw_in_place=redraw_in_place,
+        unicode_style=unicode_style,
+        collapsed=collapsed,
+        accent_color=accent_color,
+        header_color=header_color,
     )
 
 
