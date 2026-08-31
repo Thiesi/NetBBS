@@ -328,6 +328,37 @@ def test_quit_without_editing_returns_none_with_no_prompt(tmp_path):
     assert result is None
 
 
+def test_ctrl_g_shows_help_and_returns_to_a_working_editor(tmp_path):
+    # GitHub issue #209 (2026-08-31 ReLink dogfood): this editor had no
+    # online help and advertised no help hotkey at all. Ctrl+G was kept
+    # reserved since v1 specifically for this (module docstring), same
+    # binding the prose editor already uses.
+    async def scenario():
+        session = FakeSession(["CTRL+G", " ", "A", "CTRL+O"])
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+
+    result = asyncio.run(scenario())
+    buf = _buffer_from(result)
+    assert buf.get_cell(0, 0).char == "A"
+
+
+def test_ctrl_g_help_text_is_actually_shown(tmp_path):
+    session = FakeSession(["CTRL+G", " ", "CTRL+X"])
+
+    async def scenario():
+        return await edit_ansi_art(
+            session, initial_bytes=None, draft_path=tmp_path / "d.draft", autosave_interval_seconds=9999
+        )
+
+    result = asyncio.run(scenario())
+    assert result is None
+    text = _written_text(session)
+    assert "Fullscreen editor keys" in text
+    assert "Ctrl+G" in text
+
+
 def test_bare_escape_no_longer_quits(tmp_path):
     """Nano keybindings: Esc is a Meta-combo prefix in
     nano, not "exit" -- Ctrl+X owns quit now, so a standalone Esc press

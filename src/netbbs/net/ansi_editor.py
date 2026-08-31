@@ -19,13 +19,20 @@ line/box-drawing tools, no canvas resize -- a real, planned later
 phase, not abandoned.
 
 Ctrl-key bindings deliberately follow nano's scheme wherever nano has
-an equivalent action (Ctrl+O save, Ctrl+X quit), shared with the
-prose editor for one consistent muscle-memory set across
-both fullscreen editors. Ctrl+G (nano's Help) and Ctrl+S (legacy
-terminal XOFF) were both avoided for exactly that reason -- glyph
-picking uses Ctrl+T instead. Foreground/background color picking
-(Ctrl+P/Ctrl+B) has no nano equivalent to defer to, so those keys were
-kept as originally chosen.
+an equivalent action (Ctrl+O save, Ctrl+X quit, Ctrl+G help), shared
+with the prose editor for one consistent muscle-memory set across
+both fullscreen editors. Ctrl+S (legacy terminal XOFF) was avoided for
+the same reason; glyph picking uses Ctrl+T instead. Foreground/
+background color picking (Ctrl+P/Ctrl+B) has no nano equivalent to
+defer to, so those keys were kept as originally chosen.
+
+Online help (dogfood-reported gap, GitHub issue #209: this editor had
+no help at all, unlike the prose editor's Ctrl+G or the plain field
+editor's Ctrl-H) was wired up after the fact via `netbbs.net.
+help_overlay.show_help`, the same shared primitive the prose editor
+already used -- Ctrl+G was free specifically because it had been kept
+reserved for this since v1 (the glyph-picker choice above), not a new
+key needing a fresh collision check.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from pathlib import Path
 
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.confirm import prompt_yes_no
+from netbbs.net.help_overlay import show_help
 from netbbs.net.picker import pick_item
 from netbbs.net.session import Session, SessionClosedError
 from netbbs.rendering import (
@@ -198,6 +206,45 @@ async def edit_ansi_art(
                 _delete_draft(draft_path)
                 return result
 
+            if key.kind == EditorKeyKind.CTRL and key.char == "g":
+                # help_overlay's own docstring contract for a cursor-
+                # addressed caller: clear first, full-redraw afterward --
+                # same fix `prose_editor`'s identical Ctrl+G handler
+                # already needed, for the same reason (show_help's plain
+                # session.write_line calls aren't tracked by the diff
+                # machinery, so an incremental _redraw() can't erase them).
+                await session.write(clear_screen())
+                await show_help(
+                    session,
+                    "Fullscreen editor keys",
+                    [
+                        "  Arrows         move the cursor",
+                        "  Home / End     start / end of the current row",
+                        "  Page Up/Down   jump to the top / bottom row",
+                        "  Enter          move to the start of the next row",
+                        "  Backspace/Del  clear before / at the cursor",
+                        "  Ctrl+T         pick a CP437 block/line-drawing glyph",
+                        "  Ctrl+P         pick the foreground color",
+                        "  Ctrl+B         pick the background color",
+                        "  Ctrl+O         save and finish",
+                        "  Ctrl+X         quit -- Save, Discard, or Cancel",
+                        "  Ctrl+G         this help",
+                        "",
+                        "Typing a normal character paints it at the cursor with the",
+                        "current foreground/background, then advances to the next",
+                        "cell, wrapping to the next row like a typewriter.",
+                        "",
+                        "Work is autosaved periodically -- a dropped connection or",
+                        "crash offers to resume the draft the next time this same",
+                        "target is opened for editing.",
+                    ],
+                    unicode_style=unicode_style,
+                )
+                previous = buffer.snapshot()
+                await session.write(full_render_ansi(previous))
+                await _flush(session, state)
+                continue
+
             if key.kind == EditorKeyKind.CTRL and key.char == "t":
                 # A chosen glyph is painted immediately, like a typed
                 # character would be -- CP437's block/line-drawing
@@ -338,7 +385,7 @@ async def _flush(session: Session, state: _EditorState) -> None:
     status = (
         f"Row {state.row + 1}/{state.buffer.height}  Col {state.col + 1}/{state.buffer.width}  "
         f"fg={fg_label} bg={bg_label}  "
-        f"Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+O save  Ctrl+X quit"
+        f"Ctrl+T glyph  Ctrl+P fg  Ctrl+B bg  Ctrl+O save  Ctrl+X quit  Ctrl+G help"
     )
     # Must never exceed the canvas width: a status line long enough to
     # wrap (the palette names alone push this well past 80 columns,
