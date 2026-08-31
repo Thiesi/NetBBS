@@ -18,8 +18,12 @@ from __future__ import annotations
 
 from netbbs.rendering.ansi import BOLD, RESET
 from netbbs.rendering.ansi import bg as ansi_bg
+from netbbs.rendering.ansi import bg_rgb as ansi_bg_rgb
 from netbbs.rendering.ansi import fg as ansi_fg
+from netbbs.rendering.ansi import fg_rgb as ansi_fg_rgb
 from netbbs.rendering.screen_buffer import ScreenBuffer
+
+_Color = int | tuple[int, int, int]
 
 
 def decode_ansi_bytes(data: bytes) -> str:
@@ -58,7 +62,7 @@ def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
     character-mode clients.
     """
     parts: list[str] = []
-    current_style: tuple[int | None, int | None, bool] | None = None
+    current_style: tuple[_Color | None, _Color | None, bool] | None = None
     for row in buffer.snapshot():
         for cell in row:
             style = (cell.fg, cell.bg, cell.bold)
@@ -67,9 +71,9 @@ def encode_ansi_bytes(buffer: ScreenBuffer) -> bytes:
                 if style[2]:
                     parts.append(BOLD)
                 if style[0] is not None:
-                    parts.append(ansi_fg(style[0]))
+                    parts.append(ansi_fg_rgb(*style[0]) if isinstance(style[0], tuple) else ansi_fg(style[0]))
                 if style[1] is not None:
-                    parts.append(ansi_bg(style[1]))
+                    parts.append(ansi_bg_rgb(*style[1]) if isinstance(style[1], tuple) else ansi_bg(style[1]))
                 current_style = style
             parts.append(cell.char)
         parts.append("\r\n")

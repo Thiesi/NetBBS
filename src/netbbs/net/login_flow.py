@@ -2435,16 +2435,20 @@ def _has_visible_communities(db: Database, user: User) -> bool:
 
 def _has_uncategorized_resources(db: Database, user: User) -> bool:
     """Whether `user` can currently see at least one Uncategorized
-    board, channel, or file area -- gates the main menu's `[U]ncategorized`
-    entry the same "only offer what currently applies" way `[I]nvitations`
-    already does. `community_id=None, community_scoped=True` filters
-    each resource type to exactly its Uncategorized members -- see
-    `_browse_boards_in_category`'s docstring for why `None` needs no
-    special-casing here."""
+    board, channel, file area, or door -- gates the main menu's
+    `[U]ncategorized` entry the same "only offer what currently applies"
+    way `[I]nvitations` already does. `community_id=None,
+    community_scoped=True` filters each resource type to exactly its
+    Uncategorized members -- see `_browse_boards_in_category`'s docstring
+    for why `None` needs no special-casing here. Must stay in sync with
+    `_resource_type_menu`'s own `show_doors` check below (dogfood-reported
+    bug, GitHub issue #204: a lone uncategorized door game didn't surface
+    this entry at all, even though the door was reachable once inside)."""
     return (
         _has_visible_boards(db, user, community_id=None, community_scoped=True)
         or has_visible_channels(db, user, community_id=None, community_scoped=True)
         or has_visible_areas(db, user, community_id=None, community_scoped=True)
+        or has_visible_doors(db, user, community_id=None, community_scoped=True)
     )
 
 
