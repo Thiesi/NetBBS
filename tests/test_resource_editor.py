@@ -1353,6 +1353,31 @@ def test_sectioned_fields_show_bold_uppercase_headers_in_order():
     assert identity_index < text.index("Name: lobby") < display_index < text.index("Pinned: yes")
 
 
+def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
+    # At the real default (description_level "off"), the menu row never
+    # reaches the descriptive menu_grid branch at all -- it's built
+    # straight from the compact fallback below. Confirms that fallback
+    # groups by section too instead of silently losing the grouping the
+    # value list above it still has (the exact "chaos" reported against
+    # the Profile screen once its value list got sectioned but its
+    # hotkey row hadn't caught up yet).
+    session = FakeSession(["b"])
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=_sectioned_fields(), draft={"name": "lobby", "pinned": True},
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    # Once in the value list above, once as the compact menu row's own heading.
+    assert text.count("IDENTITY") == 2
+    assert text.count("DISPLAY") == 2
+    identity_menu_index = text.rindex("IDENTITY")
+    display_menu_index = text.rindex("DISPLAY")
+    assert identity_menu_index < text.index("[N]ame") < display_menu_index < text.index("[P]inned")
+
+
 def test_sectioned_fields_group_the_descriptive_menu_row_too():
     # The hotkey menu row already routed through menu_grid before this
     # feature existed -- confirms a sectioned screen gets real per-

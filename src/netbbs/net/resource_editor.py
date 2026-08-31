@@ -369,7 +369,27 @@ async def edit_resource_draft(
         if not menu_sections:
             menu_sections.append(("", []))
         menu_sections[-1][1].extend(menu_entries[len(fields):])
-        compact_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
+        # Dogfood report: on an ordinary terminal, this screen's own
+        # sectioned value list above already leaves no height budget for
+        # the *descriptive* menu_grid form below to fit (see that
+        # form's own height-fit check) -- meaning a sectioned screen's
+        # menu row fell all the way back to this compact one, which had
+        # no grouping concept at all: exactly the "chaotic options list"
+        # complaint that prompted sectioning in the first place, just
+        # moved from the value list down to here. Built from the same
+        # `menu_sections` the descriptive form uses instead of one flat
+        # `action_bar` call whenever there's more than one real group --
+        # an unsectioned screen (`len(menu_sections) == 1`) renders
+        # byte-for-byte as before.
+        if len(menu_sections) > 1:
+            compact_lines: list[str] = []
+            for title, entries in menu_sections:
+                if title:
+                    compact_lines.append(colored(title.upper(), fg_color=METADATA_COLOR, bold=True))
+                compact_lines.append(action_bar([e.label for e in entries], width=session.terminal_width))
+            compact_menu_line = "\r\n".join(compact_lines)
+        else:
+            compact_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
         menu_line = compact_menu_line
         if description_level != "off":
             # `menu_grid` always renders one entry per line, even with
