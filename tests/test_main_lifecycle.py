@@ -572,11 +572,20 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
     trailing `asyncio.sleep(sync_interval_seconds)` to run to
     completion regardless, which meant shutdown would silently wait out
     however much of a five-minute default interval remained (routinely
-    longer than `graceful_delay_seconds` itself) before ever falling
-    back to a hard cancel. `sync_interval_seconds` here is deliberately
-    far longer than `graceful_delay_seconds` -- if shutdown were still
-    waiting out that sleep, this test's own generous ceiling below
-    would catch it."""
+    longer than `background_task_drain_seconds` itself) before ever
+    falling back to a hard cancel. `sync_interval_seconds` here is
+    deliberately far longer than `background_task_drain_seconds` -- if
+    shutdown were still waiting out that sleep, this test's own
+    generous ceiling below would catch it.
+
+    Code review follow-up: a real-world report traced shutdown taking
+    about nine minutes to the drain bound reusing `graceful_delay_
+    seconds` (60s, meant for "how long does a human get to notice a
+    shutdown warning," not this) instead of its own dedicated,
+    deliberately short `background_task_drain_seconds` -- this test
+    (and its hard-cancel sibling below) now configures that field
+    instead, the same behavior it always meant to prove, just pointed
+    at the field that's actually read."""
     async def scenario():
         config = _config(
             tmp_path,
@@ -585,7 +594,7 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
                 enabled=True, host="127.0.0.1", port=12410,
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
             ),
-            shutdown=ShutdownConfig(graceful_delay_seconds=20.0),
+            shutdown=ShutdownConfig(background_task_drain_seconds=20.0),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
@@ -604,7 +613,7 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
                 shutdown_event.set()
                 await task
 
-        # Well under both graceful_delay_seconds (20s) and
+        # Well under both background_task_drain_seconds (20s) and
         # sync_interval_seconds (120s) -- the sleep was woken early, not
         # waited out.
         assert elapsed < 2.0
@@ -615,7 +624,7 @@ def test_link_sync_task_is_drained_promptly_on_shutdown_even_mid_sleep(tmp_path)
 def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(tmp_path, monkeypatch):
     """The fallback half of the same graceful-drain piece: a pass that
     never returns on its own (a wedged dial) must still not hang
-    shutdown forever -- past `graceful_delay_seconds`, today's
+    shutdown forever -- past `background_task_drain_seconds`, today's
     unconditional hard `.cancel()` remains the backstop."""
     import netbbs.link.sync as sync_module
 
@@ -632,7 +641,7 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
                 enabled=True, host="127.0.0.1", port=12412,
                 seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
             ),
-            shutdown=ShutdownConfig(graceful_delay_seconds=0.3),
+            shutdown=ShutdownConfig(background_task_drain_seconds=0.3),
         )
         shutdown_event = asyncio.Event()
         task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
@@ -661,6 +670,61 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
         # The point of the lower bound is only "not an instant cancel,"
         # not pinning down sub-10ms scheduler jitter.
         assert 0.3 - 0.05 <= elapsed < 8.0
+
+    asyncio.run(scenario())
+
+
+def test_seed_refresh_task_hard_cancelled_if_its_fetch_hangs_past_the_grace_period(tmp_path, monkeypatch):
+    """Code review follow-up: `daybreak_task`/`update_check_task`/
+    `seed_refresh_task` used to be cancelled and awaited with *no*
+    bound at all in `run()`'s own teardown -- unlike `link_sync_task`
+    above, which at least had one (the wrong one, fixed separately).
+    Two of the three reach a blocking `urllib.request.urlopen` call via
+    `asyncio.to_thread`, where cancelling the *awaiting* coroutine does
+    not stop the underlying worker thread -- an unbounded await on that
+    coroutine was a real, not hypothetical, way for one of these to hang
+    shutdown indefinitely. `seed_refresh_task` stands in for both (the
+    other, `update_check_task`, shares the identical `_default_fetch`-
+    via-`to_thread` shape in a different module) -- same real-run,
+    real-hang-simulation approach as `link_sync_task`'s own hard-cancel
+    test above, not just a unit test of the drain logic in isolation."""
+    import netbbs.link.seedlist as seedlist_module
+
+    async def _hang_forever(*args, **kwargs):
+        await asyncio.sleep(999)
+
+    monkeypatch.setattr(seedlist_module, "fetch_supplementary_seeds", _hang_forever)
+
+    async def scenario():
+        config = _config(
+            tmp_path,
+            telnet=TransportConfig(True, "127.0.0.1", 12413),
+            link=LinkConfig(
+                enabled=True, host="127.0.0.1", port=12414,
+                seeds=["http://127.0.0.1:1"], sync_interval_seconds=120.0,
+            ),
+            shutdown=ShutdownConfig(background_task_drain_seconds=0.3),
+        )
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        try:
+            await _open_connection_when_ready("127.0.0.1", 12413)
+            await asyncio.sleep(0.1)  # into the now-hanging seed-refresh fetch
+
+            start = asyncio.get_event_loop().time()
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=10.0)
+            elapsed = asyncio.get_event_loop().time() - start
+        finally:
+            if not task.done():
+                shutdown_event.set()
+                await task
+
+        # Bounded by background_task_drain_seconds (0.3s), not left to
+        # hang on the wedged fetch indefinitely -- the generous upper
+        # bound (well under the old, unbounded behavior this replaces)
+        # is what actually distinguishes "bounded" from "unbounded" here.
+        assert elapsed < 8.0
 
     asyncio.run(scenario())
 

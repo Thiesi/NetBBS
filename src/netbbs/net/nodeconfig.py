@@ -260,6 +260,32 @@ class ShutdownConfig:
     `[throttle]`'s precedent."""
 
     graceful_delay_seconds: float = 60.0
+    # Real-world report: an operator's Ctrl+C (an *immediate*, SIGINT
+    # shutdown, which this field's own sibling above explicitly promises
+    # "skips this wait entirely") took about nine minutes to actually
+    # exit. Tracing it found `netbbs.__main__.run`'s own teardown
+    # `finally` block bounding its four background tasks' cancellation
+    # inconsistently: `link_sync_task` had *a* bound, but the wrong
+    # one -- reusing `graceful_delay_seconds` (60s), conflating two
+    # unrelated concerns that happened to share one config value: how
+    # long a *human* gets to notice a shutdown warning (already fully
+    # spent by the time teardown starts -- a graceful shutdown's own
+    # countdown already finished before `disconnect_all()`, and an
+    # immediate shutdown never had one to spend), versus how long a
+    # *background task* gets to notice cancellation before teardown
+    # gives up on it and moves on. The other three tasks
+    # (`daybreak_task`/`update_check_task`/`seed_refresh_task`) had *no*
+    # bound at all -- a bare `.cancel()` then an unbounded `await`,
+    # which cancellation usually satisfies promptly but isn't
+    # guaranteed to (two of the three reach a blocking `urllib.request.
+    # urlopen` call via `asyncio.to_thread`; cancelling the *awaiting*
+    # coroutine there does not stop the underlying worker thread, which
+    # keeps running to completion regardless). All four cancellation
+    # waits now share this one short, deliberately generic bound
+    # instead -- not Link-specific despite the historical name of the
+    # design-doc entry ("graceful drain of Link work") this field's
+    # value first existed for.
+    background_task_drain_seconds: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -391,6 +417,12 @@ class NodeConfig:
             raise ConfigError(
                 "shutdown.graceful_delay_seconds must be greater than 0, got "
                 f"{self.shutdown.graceful_delay_seconds}"
+            )
+
+        if self.shutdown.background_task_drain_seconds <= 0:
+            raise ConfigError(
+                "shutdown.background_task_drain_seconds must be greater than 0, got "
+                f"{self.shutdown.background_task_drain_seconds}"
             )
 
         if not self.telnet.enabled and not self.ssh.enabled and not self.web.enabled:

@@ -178,9 +178,15 @@ supervisor to background and restart it, which both example units do.
 Graceful shutdown: sending `SIGTERM` (what `systemctl stop`/`service
 ... stop` both do) warns any connected users, waits up to
 `shutdown.graceful_delay_seconds` (60s default), then disconnects and
-exits cleanly — not an abrupt kill. Give your supervisor's own stop
-timeout enough headroom above that value (the example systemd unit
-sets `TimeoutStopSec=90`).
+exits cleanly — not an abrupt kill. A separate, much shorter
+`shutdown.background_task_drain_seconds` (5s default) then bounds how
+long teardown itself waits for each of a few internal background tasks
+to notice cancellation, worst case a few times that value, not
+`graceful_delay_seconds` again -- an *immediate* shutdown (Ctrl+C in an
+attended terminal) skips the warning wait entirely but still pays this
+smaller, unavoidable teardown cost. Give your supervisor's own stop
+timeout enough headroom above `graceful_delay_seconds` plus that
+worst case (the example systemd unit sets `TimeoutStopSec=90`).
 
 ## 4. Persistent state
 
