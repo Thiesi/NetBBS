@@ -270,10 +270,27 @@ def test_profile_screen_toggles_session_history_name_visibility(tmp_path):
 
 
 def test_profile_shows_color_capability_provenance(tmp_path):
+    # Profile pagination follow-up: Color depth lives on DISPLAY,
+    # Profile's 3rd page (of 4) once its 14 fields no longer fit
+    # unpaginated at a real 80x24 terminal -- not visible on the
+    # initial (Identity) render this test used to check directly. This
+    # FakeSession has no `read_editor_key` at all (falls back to plain
+    # single-character `read_key()`), so it can't script a `PAGE_DOWN`
+    # press -- the only way here to reach the Display page is a
+    # hotkey. Uses `r` (In-place redraw), a *different* Display-section
+    # field, not `c` (Color depth) itself: activating any field's
+    # hotkey also marks it cursor-nav-selected on the next redraw
+    # (bold/accent-colored, a different string than this test's own
+    # assertion expects), so jumping via Color depth's own hotkey would
+    # change the very text being checked. `redraw_in_place`'s prompt
+    # (`live_choice_field`, same as Color depth's) cycles and persists
+    # immediately, no separate sub-screen to back out of first, so `r`
+    # both jumps to the Display page *and* redraws showing it, with
+    # Color depth itself still rendered unselected.
     database = db_(tmp_path)
     lane = DatabaseLane(database.path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    session = FakeSession(["p", "b", "l", "y"])
+    session = FakeSession(["p", "r", "b", "l", "y"])
     session.truecolor_diagnostic = "SSH client did not forward COLORTERM; using 256-color"
 
     asyncio.run(_run_main_menu(session, database, alice, lane=lane))

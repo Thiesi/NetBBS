@@ -4151,6 +4151,23 @@ from issue #83's real-user dogfood feedback before foundation issue #127:
   screen SSH ever gets before the protocol-level handshake either
   succeeds into the authenticated session or fails.
 
+- sectioned, paginated create/edit screens (dogfood report: the main menu's
+  grouped, multi-column layout and the Profile/Board/Area/Channel screens'
+  own flat field lists read as wildly different levels of polish) —
+  implemented: `edit_resource_draft`'s `FieldSpec.section` groups a screen's
+  fields under bold uppercase headings in both the value list and the
+  hotkey/menu row, opt-in per screen (Profile, Board, File area, Channel;
+  every other screen renders byte-for-byte as before). A dense, sectioned
+  screen that still doesn't fit the caller's terminal even at its most
+  compact menu tier paginates by section — `Page Up`/`Page Down` cycle
+  between them, wrapping at either end, while every field's own hotkey
+  keeps working regardless of which page is showing (jumping straight to
+  it, switching pages to match) and `[S]ave`/`[B]ack` stay reachable from
+  every page. An unsectioned screen has no natural page boundary and keeps
+  today's behavior unchanged if it doesn't fit. Profile (14 fields across 4
+  sections, plus a bio-preview/transport-diagnostic preamble) is the first
+  real screen dense enough to exercise pagination in practice.
+
 This interleave does not change Phase 4's security dependencies or public-
 readiness gate. It applies the standing cadence between meaningful foundation
 work and complete user-visible slices; #127 resumes after this batch.

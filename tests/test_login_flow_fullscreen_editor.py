@@ -137,6 +137,34 @@ def _type(text: str) -> list[str]:
 # -- Profile screen toggle ------------------------------------------------
 
 
+def test_profile_fits_a_real_80x24_terminal_on_every_page(db, lane, alice):
+    # The concrete problem this whole pagination mechanism exists to
+    # solve: Profile's 14 fields across 4 sections (Identity/
+    # Communication/Display/Account), plus its own bio-preview/
+    # transport-diagnostic preamble, rendered 32 rows unpaginated at a
+    # real 80x24 terminal -- already 4 over budget with the field list
+    # and menu row alone, before a single byte of preamble content.
+    # Confirms every one of the 4 pages -- not just the first -- now
+    # actually fits, by navigating PAGE_DOWN through all of them.
+    # Reaching page N always redraws pages 1..N along the way (each
+    # PAGE_DOWN triggers its own full redraw before the next key is
+    # read), and every one of those redraws accumulates in the same
+    # session log -- so this isolates *just* the final, page-N segment
+    # (split on the screen's own title line, the marker each redraw
+    # starts with) rather than checking the whole accumulated scroll.
+    for page_downs in range(4):
+        session = FakeSession(["PAGE_DOWN"] * page_downs + ["b"])
+        asyncio.run(login_flow._edit_profile(session, lane, alice))
+        text = _visible(session)
+        last_page_text = text.rsplit("NetBBS › Your profile", 1)[-1]
+        real_rows = last_page_text.rstrip("\r\n").split("\r\n")
+        assert len(real_rows) <= session.terminal_height, (
+            f"page {page_downs + 1} of 4 rendered {len(real_rows)} rows, "
+            f"terminal only has {session.terminal_height}"
+        )
+        assert f"Section {page_downs + 1} of 4" in last_page_text
+
+
 def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # Dogfood feature request: "Your profile"'s 14 fields previously had
     # no help= authored at all, so Ctrl-H was a discoverable dead end
@@ -325,6 +353,19 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
     # fingerprint` before any key is touched, see _edit_profile's own
     # draft-construction) already shows the key set on the *first*
     # visit, rather than seeding from the stale pre-edit `None` again.
+    #
+    # Profile pagination follow-up: at a real 80x24 terminal, Profile's
+    # 14 fields across 4 sections (Identity/Communication/Display/
+    # Account) no longer fit unpaginated, so `edit_resource_draft` now
+    # pages by section -- SSH public key(s) lives on ACCOUNT, the 4th
+    # page, not visible on either visit's initial (Identity) render.
+    # `PAGE_DOWN` x3 reaches it explicitly, same as a real caller would;
+    # `k` itself would also jump straight there (every hotkey works
+    # regardless of current page), but that launches the key-management
+    # sub-screen directly rather than re-rendering Profile's own value
+    # list first -- paging there deliberately, instead, is what actually
+    # exercises this test's real target: the *Profile screen's own*
+    # rendered field value, not the sub-screen's separate text.
     import base64
 
     import nacl.signing
@@ -332,7 +373,12 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
     verify_key = nacl.signing.SigningKey.generate().verify_key
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
-    session = FakeSession(["p", "k", "a", "phone", raw_b64, "b", "b", "p", "b", "l", "y"])
+    session = FakeSession(
+        [
+            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "k", "a", "phone", raw_b64, "b", "b",
+            "p", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b", "l", "y",
+        ]
+    )
     asyncio.run(
         login_flow._main_menu(
             session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane

@@ -143,9 +143,22 @@ def test_category_scoped_preference_shows_the_categorys_real_name(db, lane, alic
 
 
 def test_profile_screen_shows_the_saved_preference_count_and_offers_the_menu_option(db, lane, alice):
+    # Profile pagination follow-up: Sort preferences lives on ACCOUNT,
+    # Profile's 4th page (of 4) once its 14 fields no longer fit
+    # unpaginated at a real 80x24 terminal -- not visible on the
+    # initial (Identity) render this test used to check directly. This
+    # FakeSession's own `read_editor_key` isn't implemented (falls back
+    # to plain single-character `read_key()`), so it can't script a
+    # `PAGE_DOWN` press the way a full navigable session could -- the
+    # only way to reach the Account page here is a hotkey jump (every
+    # hotkey works regardless of current page, by design), so this
+    # presses [S]ort preferences itself (which also opens its own
+    # picker screen), backs out of that picker, and checks the
+    # resulting Profile re-render -- now sitting on the Account page --
+    # instead of the very first, pre-navigation one.
     set_sort_preference(db, alice, "channel", "alphabetical")
     set_sort_preference(db, alice, "board", "volume")
-    session = FakeSession(["b"])
+    session = FakeSession(["s", "b", "b"])
     asyncio.run(login_flow._edit_profile(session, lane, alice))
     text = _visible_text(session)
     assert "Sort preferences: 2 saved" in text

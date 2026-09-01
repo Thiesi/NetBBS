@@ -2490,6 +2490,23 @@ def test_create_channel_screen_fits_a_real_80x24_terminal(db, lane, sysop):
     )
 
 
+def test_board_area_channel_screens_do_not_paginate_at_a_real_80x24_terminal(db, lane, sysop):
+    # Pagination follow-up (issue tracked alongside Profile's own
+    # overflow): Board/Area/Channel already fit exactly within 24 rows
+    # unpaginated (the three tests above) after dropping the blank
+    # line before each section heading -- confirms they still take
+    # that path, not the newer pagination one, now that both exist.
+    # Only a screen the *un*paginated fit-check actually rejects should
+    # ever show the "Section N of M" hint.
+    from netbbs.net.admin_flow import _area_screen, _board_screen, _channel_screen
+
+    for screen in (_board_screen, _area_screen, _channel_screen):
+        session = FakeSession(["b"])
+        asyncio.run(screen(session, lane, sysop, existing=None))
+        text = _visible(_written_text(session))
+        assert "PgUp/PgDn" not in text, f"{screen.__name__} unexpectedly paginated"
+
+
 def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane, sysop):
     """Regression for the old fixed linear chain's own bug: a mistyped
     later field (e.g. max post age) used to discard every earlier
