@@ -69,6 +69,7 @@ import json
 import os
 import random
 import re
+import select
 import sqlite3
 import sys
 import textwrap
@@ -176,11 +177,38 @@ def read_key() -> str:
     return data.decode("ascii", errors="replace")
 
 
+# Codex review (PR #240): a standalone Escape press is a legitimate,
+# ordinary way to dismiss "Press any key to continue..." -- but the
+# fixed-PR#239 lookahead below unconditionally did a second *blocking*
+# read_key() after any ESC byte, to check for the rest of a CSI arrow-
+# key sequence. For a standalone Escape there is no second byte coming,
+# so that blocking read just sat waiting for the caller's *next* real
+# keystroke and silently consumed it as if it might be "[" -- the
+# caller's actual next menu choice vanished. A real CSI sequence's
+# remaining bytes arrive in the same terminal write as the leading ESC,
+# so they're already sitting in the OS input buffer by the time this
+# runs; `select()` distinguishes "more bytes already here" from
+# "nothing else coming" without blocking on the latter. A short but
+# nonzero timeout, not 0, gives a few milliseconds of slack for network
+# jitter (telnet/SSH) between the ESC and '[' bytes actually arriving.
+_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS = 0.1
+
+
+def _stdin_has_pending_byte(timeout: float) -> bool:
+    """Whether another byte is already available on stdin, without
+    blocking to find out. Kept as its own function (rather than inlined
+    into `press_any_key`) so a test double can stub the readiness check
+    itself -- a scripted FakeSession's `stdin` isn't a real, selectable
+    file descriptor the way this door's actual raw terminal stream is."""
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    return bool(ready)
+
+
 def press_any_key(p: Palette) -> None:
     out_line()
     out(f"  {p.muted}Press any key to continue...{RESET}")
     key = read_key()
-    if key == ESC:
+    if key == ESC and _stdin_has_pending_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS):
         # Codex review (PR #239): an arrow key sends a multi-byte `ESC [
         # <letter>` CSI sequence -- consuming only the leading ESC here
         # left the rest sitting in the input buffer for the *next*
@@ -190,7 +218,8 @@ def press_any_key(p: Palette) -> None:
         # Crew Recruit the caller never chose. Mirrors voidrunner.py's
         # own `read_line_raw`, this codebase's already-established
         # pattern for swallowing a CSI sequence whole rather than
-        # leaking its tail bytes.
+        # leaking its tail bytes -- reached only once the readiness
+        # check above has confirmed there really is a next byte to read.
         nxt = read_key()
         if nxt == "[":
             while True:
@@ -926,6 +955,24 @@ def draw_help(p: Palette, w: int) -> None:
     # hand-wrapped every line assuming a fixed ~78-column terminal,
     # overflowing into extra rows at exactly the narrow widths (`main()`
     # supports down to 40 columns) where a one-page screen matters most.
+    #
+    # Codex review (PR #240): making the Heat/Rank paragraphs accurate
+    # (above) made them longer, and that pushed the *standard* 80-column
+    # case (w=78) from 22 rows -- fitting a real 24-row terminal with
+    # press_any_key()'s own two rows -- to 27, no longer fitting even
+    # there. Every paragraph below is deliberately terser now, chosen by
+    # re-measuring against a real render at 40/60/78 (this door's full
+    # supported width range) until w=78 -- the 80-column terminal case,
+    # by far the common one for a telnet/SSH BBS client -- was back at
+    # its original ~22-row budget, fitting a real 24-row screen exactly
+    # once more. At the narrower supported widths (60, and especially
+    # the 40-column floor) the same wrapped text still runs well past
+    # one page even after this trim; closing that gap for good would
+    # need either real pagination or a genuinely different, denser
+    # writing style, either well beyond a wording pass for a screen this
+    # door deliberately keeps to plain single-keystroke reads with no
+    # navigation model of its own. Left as a known, accepted floor-width
+    # limitation rather than chased further here.
     inner = max(20, w - 4)  # 2-space margin each side
 
     def para(text: str) -> None:
@@ -938,10 +985,9 @@ def draw_help(p: Palette, w: int) -> None:
                            f"{p.border}{BOLD}║{RESET}", w))
     out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
     para(
-        "You're a hacker, and you and your crew dial into rival boards for cash, "
-        "respect, and control of the scene's ten shared phone exchanges. Every "
-        "caller on this node shares the same world -- what you do to a rival "
-        "really happens, online or not."
+        "You're a hacker, and with your crew you dial rival boards for cash, "
+        "respect, and control of the scene's ten exchanges -- one live world "
+        "everyone shares."
     )
     out_line()
     actions_suffix = f"({TURNS_PER_DAY} turns/day, one per action):"
@@ -961,7 +1007,7 @@ def draw_help(p: Palette, w: int) -> None:
         (f"{p.gold}[C]{RESET}rew Recruit", "[C]rew Recruit", f"pay ${RECRUIT_COST}, +1 crew member."),
         (f"{p.gold}[J]{RESET}ob", "[J]ob", "bigger risk, bigger payout."),
         (f"{p.gold}[R]{RESET}aid", "[R]aid", "hit a rival crew, steal their cash."),
-        (f"Root E{p.gold}[x]{RESET}change", "Root E[x]change", "seize a shared exchange for hourly income."),
+        (f"Root E{p.gold}[x]{RESET}change", "Root E[x]change", "seize an exchange for hourly income."),
     ):
         combined = f"{label_plain}  {desc}"
         if _dlen(combined) <= inner - 4:
@@ -972,17 +1018,15 @@ def draw_help(p: Palette, w: int) -> None:
                 out_line(f"      {p.muted}{line}{RESET}")
     out_line()
     para(
-        f"Heat rises with every risky move; cross {int(HEAT_BUST_THRESHOLD)} and each "
-        f"further point adds a rising chance of getting caught -- risk it too long and "
-        f"you get busted: gear and crew scattered, Heat reset. It also decays on its "
-        f"own, so cooling off between sessions helps."
+        f"Heat rises with risky moves; past {int(HEAT_BUST_THRESHOLD)}, each extra "
+        f"point adds a rising bust chance -- gear and crew scattered, Heat reset. It "
+        f"decays over time too."
     )
     out_line()
     para(
-        f"Rank only ever climbs within a season (built from what you've ever done, "
-        f"not what you currently hold, so a bust can't knock it back) -- but a new "
-        f"season, every {SEASON.days} days, resets cash, crew, Heat, and every one of "
-        f"those lifetime totals for everyone. Nothing carries over."
+        f"Rank only ever climbs this season (lifetime totals, immune to busts) -- "
+        f"every {SEASON.days} days it wipes cash, crew, Heat, and those totals for "
+        f"everyone."
     )
     out_line()
     para("[B]oard is always free. Press [?] any time to see this again.")

@@ -3,9 +3,9 @@ bundled.war_dialer) -- deliberately narrow, unlike test_war_dialer_
 domain.py's broad domain-formula coverage. This door has no other
 presentation-layer tests (matches Retro Trivia's own established
 boundary: domain logic gets real regression coverage, the terminal-
-driving `main()`/rendering glue doesn't) -- these two exist specifically
-because both pin a real bug Codex caught on PR #239, not a routine
-rendering check.
+driving `main()`/rendering glue doesn't) -- these exist specifically
+because each pins a real bug Codex caught on PR #239 or its own PR #240
+follow-up review, not a routine rendering check.
 
 Loaded directly from its file path, same reasoning as test_war_dialer_
 domain.py: this is the exact file NetBBS launches as a standalone
@@ -82,8 +82,15 @@ def test_press_any_key_consumes_a_full_arrow_key_sequence():
 
     session = _FakeSession()
     original_read_key = wd.read_key
+    original_has_pending = wd._stdin_has_pending_byte
     try:
         wd.read_key = session.read
+        # A real CSI sequence's bytes are already sitting in the input
+        # buffer by the time press_any_key() checks (PR #240 fix below)
+        # -- true here since this FakeSession's whole sequence is
+        # scripted up front, not arriving byte-by-byte from a real
+        # socket.
+        wd._stdin_has_pending_byte = lambda timeout: True
         written: list[str] = []
         original_out = wd.out
         try:
@@ -93,9 +100,51 @@ def test_press_any_key_consumes_a_full_arrow_key_sequence():
             wd.out = original_out
     finally:
         wd.read_key = original_read_key
+        wd._stdin_has_pending_byte = original_has_pending
 
     # The whole 3-byte sequence (ESC, '[', 'C') must be consumed by
     # press_any_key() itself -- exactly 3 read_key() calls, leaving the
     # 4th scripted byte ('b') untouched for whatever reads next, not
     # already silently consumed as if it were a menu choice.
     assert session.calls == 3
+
+
+def test_press_any_key_does_not_block_on_a_standalone_escape():
+    # Codex review (PR #240), a real bug in the PR #239 fix above: a
+    # standalone Escape press is an ordinary way to dismiss "Press any
+    # key to continue..." -- but the unconditional second read_key()
+    # call that fix added blocked waiting for a byte that was never
+    # coming, then silently consumed whatever the caller typed *next*
+    # (their real following menu choice) as if it might be the '[' of a
+    # CSI sequence. Confirms the fix: when no further byte is available
+    # (_stdin_has_pending_byte stubbed False, matching a real standalone
+    # Escape with nothing queued behind it), press_any_key() must return
+    # after exactly one read_key() call, never attempting a second.
+    inputs = iter([wd.ESC])
+
+    class _FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self):
+            self.calls += 1
+            return next(inputs)
+
+    session = _FakeSession()
+    original_read_key = wd.read_key
+    original_has_pending = wd._stdin_has_pending_byte
+    try:
+        wd.read_key = session.read
+        wd._stdin_has_pending_byte = lambda timeout: False
+        written: list[str] = []
+        original_out = wd.out
+        try:
+            wd.out = written.append
+            wd.press_any_key(wd.Palette(truecolor=False))
+        finally:
+            wd.out = original_out
+    finally:
+        wd.read_key = original_read_key
+        wd._stdin_has_pending_byte = original_has_pending
+
+    assert session.calls == 1
