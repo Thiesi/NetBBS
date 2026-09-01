@@ -1,7 +1,7 @@
 """
 Integration tests for the user directory/profile screens in
-netbbs.net.login_flow (design doc §13) — distinct
-from tests/test_directory.py, which tests netbbs.directory in
+netbbs.net.directory_flow/netbbs.net.login_flow (design doc §13) —
+distinct from tests/test_directory.py, which tests netbbs.directory in
 isolation. Same lightweight duck-typed FakeSession as
 tests/test_board_pagination_ui.py (no need to subclass the Session
 ABC — these functions only ever call the methods they actually use).
@@ -14,7 +14,8 @@ import re
 
 from netbbs.auth.users import create_user
 from netbbs.directory import get_bio, is_bio_visible, set_bio, set_bio_visible
-from netbbs.net.login_flow import _browse_directory, _edit_profile
+from netbbs.net.directory_flow import _browse_directory
+from netbbs.net.login_flow import _edit_profile
 from netbbs.rendering import LABEL_COLOR, MUTED_COLOR, VALUE_COLOR, colored
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane

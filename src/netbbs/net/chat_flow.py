@@ -1697,7 +1697,7 @@ async def _write_vcard_detail(session: Session, lane: DatabaseLane, vcard: VCard
         # Dogfood follow-up: this used to write the sanitized bio
         # straight to the terminal with no `reflow()` call, unlike the
         # Directory/Profile screens' identical field
-        # (`login_flow._show_vcard`/`_render_profile`) -- the same bio
+        # (`directory_flow._show_vcard`/`_render_profile`) -- the same bio
         # rendered inconsistently depending on whether it was looked up
         # here or there (a deliberate line break collapsed into one
         # paragraph in one place; a long unbroken line never wrapped to
@@ -4162,7 +4162,7 @@ async def run_direct_chat_invite_flow(
     Send a mutual direct-chat invite to `target` and run the whole
     handshake to its conclusion, on `session`'s own behalf (design doc
     §6.3) -- shared by the Who screen's own `[I]nvite to chat` action
-    (`netbbs.net.login_flow._caller_who_screen`) and `/dm` (this
+    (`netbbs.net.directory_flow._caller_who_screen`) and `/dm` (this
     module's own `_handle_dm`), so the two entry points can never drift
     on behavior.
 
