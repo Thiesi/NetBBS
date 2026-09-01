@@ -159,13 +159,15 @@ work, not further code-level validation.
 Phase 5 (real-time Link chat) is active. Shipped: Noise XX transport
 authentication and the first real-time linked-channel chat vertical (issue
 #148) — direct sessions and one linked channel, live; node-wide presence and
-per-message trust-filtered scrollback (issue #164, v5.3.0). Not yet built:
-multiple simultaneous channel memberships with background/unread delivery
-(investigated and deliberately deferred — no observable benefit over the
-existing durable unread-count model), Link-wide live private chat and
-real-time multi-hop relay (issue #168, a real distributed-systems/crypto
-design fork, not sized for casual pickup), and trusted scrollback-on-join
-(issue #194, scoped but not yet implemented).
+per-message trust-filtered scrollback (issue #164, v5.3.0); trusted
+scrollback-on-join (issue #194) — a freshly-subscribing peer gets a bounded,
+ephemeral catch-up snapshot of the origin's own recent scrollback alongside
+the existing presence snapshot. Not yet built: multiple simultaneous channel
+memberships with background/unread delivery (investigated and deliberately
+deferred — no observable benefit over the existing durable unread-count
+model), and Link-wide live private chat and real-time multi-hop relay (issue
+#168, a real distributed-systems/crypto design fork, not sized for casual
+pickup).
 
 Phase 7's first vertical (issue #172, closed — supersedes #63/#167, both
 closed) shipped in v5.4.0: a native door-game execution model (subprocess

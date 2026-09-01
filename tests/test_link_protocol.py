@@ -51,6 +51,7 @@ from netbbs.link.protocol import (
     build_node_presence_snapshot_frame,
     build_presence_delta_frame,
     build_presence_snapshot_frame,
+    build_scrollback_snapshot_frame,
     build_subscribe_frame,
     build_unsubscribe_frame,
     validate_realtime_frame_payload,
@@ -129,6 +130,10 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
         build_node_presence_snapshot_frame([{"user_id": "u1", "display_label": "Alice"}]),
         build_node_presence_delta_frame("join", "u1", "Alice"),
         build_channel_message_frame("channel-1", "u1", "Alice", "hello", "2026-01-01T00:00:00+00:00"),
+        build_scrollback_snapshot_frame(
+            "channel-1",
+            [{"kind": "message", "author_label": "Alice", "body": "hi", "created_at": "2026-01-01T00:00:00+00:00"}],
+        ),
         build_ping_frame(),
         build_pong_frame(),
         build_error_frame("bad_thing", "detail"),
@@ -179,6 +184,51 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
                 "body": "x" * 4001, "created_at": "2026-01-01T00:00:00+00:00",
             },
         ),
+        ("scrollback_snapshot", {"channel_id": "c1"}),
+        ("scrollback_snapshot", {"channel_id": "c1", "entries": "not-a-list"}),
+        (
+            "scrollback_snapshot",
+            {"channel_id": "c1", "entries": [{"kind": "message", "author_label": "A", "body": "hi"}]},
+        ),  # missing created_at
+        (
+            "scrollback_snapshot",
+            {
+                "channel_id": "c1",
+                "entries": [
+                    {"kind": "not-a-real-kind", "author_label": "A", "body": "hi",
+                     "created_at": "2026-01-01T00:00:00+00:00"}
+                ],
+            },
+        ),
+        (
+            "scrollback_snapshot",
+            {
+                "channel_id": "c1",
+                "entries": [
+                    {"kind": "message", "author_label": "A", "body": "hi", "created_at": "not-a-timestamp"}
+                ],
+            },
+        ),
+        (
+            "scrollback_snapshot",
+            {
+                "channel_id": "c1",
+                "entries": [
+                    {"kind": "message", "author_label": "A", "body": "x" * 401,
+                     "created_at": "2026-01-01T00:00:00+00:00"}
+                ],
+            },
+        ),
+        (
+            "scrollback_snapshot",
+            {
+                "channel_id": "c1",
+                "entries": [
+                    {"kind": "message", "author_label": "A", "body": "hi",
+                     "created_at": "2026-01-01T00:00:00+00:00"}
+                ] * 21,
+            },
+        ),
         ("ping", {"unexpected": True}),
         ("pong", {"unexpected": True}),
         ("error", {"code": "bad"}),
@@ -191,6 +241,37 @@ def test_realtime_frame_payload_validator_rejects_malformed_typed_payloads(frame
 
     with pytest.raises(LinkProtocolError):
         validate_realtime_frame_payload(frame)
+
+
+def test_scrollback_snapshot_allows_a_daybreak_entry_with_no_author_or_body():
+    """Issue #194: a "daybreak" event (design doc) has no author at all
+    -- unlike every other kind, its entry's author_label carries no
+    real meaning, and body is None the same as "join"/"leave"."""
+    frame = build_scrollback_snapshot_frame(
+        "channel-1",
+        [{"kind": "daybreak", "author_label": "", "body": None, "created_at": "2026-01-01T00:00:00+00:00"}],
+    )
+    validate_realtime_frame_payload(frame)  # must not raise
+    assert RealtimeFrame.from_json_bytes(frame.to_json_bytes()) == frame
+
+
+def test_scrollback_snapshot_worst_case_entries_stay_under_the_frame_size_limit():
+    """The bound choices in protocol.py (entry count and per-entry body
+    size) exist specifically so a full, maximally-sized snapshot never
+    hits to_json_bytes' own 16 KiB ceiling -- proven directly here rather
+    than only trusted as arithmetic, since realtime_channels.py's send
+    side must never raise when building one of these."""
+    entries = [
+        {
+            "kind": "message",
+            "author_label": "a" * 256,
+            "body": "b" * 400,
+            "created_at": "2026-01-01T00:00:00.123456+00:00",
+        }
+        for _ in range(20)
+    ]
+    frame = build_scrollback_snapshot_frame("c" * 128, entries)
+    assert len(frame.to_json_bytes()) < 16 * 1024
 
 
 def test_realtime_replay_window_detects_duplicates_and_evicts_oldest_once_full():

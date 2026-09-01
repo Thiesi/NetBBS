@@ -1791,6 +1791,56 @@ directly, which would silently pass every linked message as "untrusted
 author unknown" or worse, appear to work for local messages while doing
 nothing for the linked ones a filter is actually meant to catch.
 
+### Scrollback-on-join is a race against `ensure_live_subscription`'s own no-reply-wait contract (issue #194)
+
+`ensure_live_subscription` sends `subscribe` and returns as soon as that send
+completes -- it never waits for any reply frame (design doc §8.10.1:
+"message-passing, not request/response"). Both `presence_snapshot` and
+`scrollback_snapshot` arrive later, asynchronously, via the live session's own
+background frame reader. A caller that wants to *render* the scrollback
+snapshot (unlike presence, which is read on demand by `/who` and tolerates
+arriving whenever) must therefore poll for it after subscribing rather than
+assume it is already there -- `_deliver_remote_scrollback_snapshot`
+(`netbbs.net.chat_flow`) does a short bounded poll (~2 seconds,
+`_REMOTE_SCROLLBACK_POLL_ATTEMPTS` x `_REMOTE_SCROLLBACK_POLL_INTERVAL_
+SECONDS`) against `LiveChannelBridge.pop_channel_scrollback`, then gives up
+silently. Giving up is correct, not a degraded failure mode: the existing
+async catch-up path (issue #85) still fills in anything missed, on its own
+schedule, exactly as it already does for a caller that gets no live
+subscription at all.
+
+`pop_channel_scrollback` *pops*, not merely reads -- rendered exactly once
+per design doc §16 Decision 2, never durably stored on the subscribing side.
+A stale, never-picked-up snapshot is cleared on session close
+(`_untrack_on_close`, mirroring `_remote_channel_presence`'s own per-source
+cleanup) rather than left to answer a later, unrelated subscribe for the same
+`channel_id`.
+
+**A frame bundling many entries needs much tighter per-entry bounds than a
+frame carrying exactly one.** `channel_message`'s single-message body bound
+(4000 bytes) would blow `scrollback_snapshot`'s 16 KiB frame ceiling many
+times over if reused per-entry across up to
+`_REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES` (20) bundled entries --
+`protocol.py` gives the bundled case its own, much smaller per-entry body
+bound (400 bytes) chosen so a fully worst-case snapshot (every entry at its
+max size) still lands comfortably under the ceiling, verified directly
+(`test_scrollback_snapshot_worst_case_entries_stay_under_the_frame_size_
+limit`) rather than only trusted as arithmetic. A long message truncated in
+this ephemeral catch-up view is not data loss: the same content's real,
+untruncated durable copy is already independently in flight through the
+existing async path.
+
+**A scrollback entry's `author_label` is carried through verbatim, not
+recomposed.** `build_channel_message_frame`'s live-message payload only
+carries a bare `user_id`, which the *receiving* side reconstructs into
+`f"{user_id}@{session.remote_fingerprint}"` -- correct there because a live
+channel_message is always freshly authored by the peer relaying it. A
+scrollback entry's source is `get_scrollback`, whose `author_label` may
+already be a fully-resolved third-node identity string for a materialized/
+carried message; re-wrapping that with the immediate peer's own fingerprint
+would double-append and produce a wrong label. `scrollback_snapshot` entries
+therefore send/receive `author_label` as an opaque, already-complete string.
+
 ### Current distribution limit
 
 Configured-seed sync currently sends the complete supported outbound event set
