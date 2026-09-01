@@ -1,6 +1,6 @@
 """
 Tests for the "Your sort preferences" review/clear screen
-(`netbbs.net.login_flow._sort_preferences_screen`, reached from
+(`netbbs.net.profile_flow._sort_preferences_screen`, reached from
 `_edit_profile`'s own `[S]ort preferences` option) -- design doc,
 dogfood feature request: the discoverability half of the `[O]rder`
 command, so a saved override is never a silent, forgotten surprise.
@@ -15,7 +15,7 @@ import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.communities import create_community
-from netbbs.net import login_flow
+from netbbs.net import profile_flow
 from netbbs.net.session import Session
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
@@ -94,7 +94,7 @@ def lane(db):
 
 def test_no_preferences_shows_a_friendly_empty_message(db, lane, alice):
     session = FakeSession([])
-    asyncio.run(login_flow._sort_preferences_screen(session, lane, alice))
+    asyncio.run(profile_flow._sort_preferences_screen(session, lane, alice))
     text = _written_text(session)
     assert "no saved sort preferences" in text
 
@@ -105,7 +105,7 @@ def test_global_preference_is_listed_and_can_be_cleared(db, lane, alice):
     # mode wouldn't let clearing be observed against the fallback.
     set_sort_preference(db, alice, "board", "alphabetical")
     session = FakeSession(["0", "1", "y"])
-    asyncio.run(login_flow._sort_preferences_screen(session, lane, alice))
+    asyncio.run(profile_flow._sort_preferences_screen(session, lane, alice))
     text = _written_text(session)
     assert "Message boards" in text
     assert "Global default" in text
@@ -118,7 +118,7 @@ def test_declining_the_clear_confirmation_leaves_the_preference_intact(db, lane,
     # preference is still there to show) -- "b" backs out of that
     # second pass.
     session = FakeSession(["0", "1", "n", "b"])
-    asyncio.run(login_flow._sort_preferences_screen(session, lane, alice))
+    asyncio.run(profile_flow._sort_preferences_screen(session, lane, alice))
     assert get_effective_sort_mode(db, alice, "board") == "alphabetical"  # not cleared
 
 
@@ -126,7 +126,7 @@ def test_community_scoped_preference_shows_the_communitys_real_name(db, lane, al
     community = create_community(db, "Retro Computing", creator=alice)
     set_sort_preference(db, alice, "board", "volume", community_id=community.id)
     session = FakeSession(["b"])
-    asyncio.run(login_flow._sort_preferences_screen(session, lane, alice))
+    asyncio.run(profile_flow._sort_preferences_screen(session, lane, alice))
     text = _written_text(session)
     assert "Community: Retro Computing" in text
 
@@ -137,7 +137,7 @@ def test_category_scoped_preference_shows_the_categorys_real_name(db, lane, alic
     category = create_category(db, "Amiga", created_by=alice)
     set_sort_preference(db, alice, "board", "recent", category_id=category.id)
     session = FakeSession(["b"])
-    asyncio.run(login_flow._sort_preferences_screen(session, lane, alice))
+    asyncio.run(profile_flow._sort_preferences_screen(session, lane, alice))
     text = _written_text(session)
     assert "Category: Amiga" in text
 
@@ -159,7 +159,7 @@ def test_profile_screen_shows_the_saved_preference_count_and_offers_the_menu_opt
     set_sort_preference(db, alice, "channel", "alphabetical")
     set_sort_preference(db, alice, "board", "volume")
     session = FakeSession(["s", "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible_text(session)
     assert "Sort preferences: 2 saved" in text
     assert "ort preferences" in text  # the [S]ort preferences menu option itself

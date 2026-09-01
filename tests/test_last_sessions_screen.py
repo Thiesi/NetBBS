@@ -1,6 +1,6 @@
 """
 Tests for the caller-facing [H]istory screen (issue #100) --
-`netbbs.net.login_flow._last_sessions_screen`, backed by the persisted
+`netbbs.net.profile_flow._last_sessions_screen`, backed by the persisted
 `netbbs.session_history` table (covered at the library level in
 tests/test_session_history.py). These drive the real `_main_menu` entry
 point and the profile screen's own visibility toggle.

@@ -1,6 +1,6 @@
 """
 Integration tests for the fullscreen-prose-editor wiring in
-netbbs.net.login_flow: the
+netbbs.net.profile_flow/netbbs.net.board_flow: the
 Profile screen's on/off toggle, and that composing a post / editing a
 bio actually routes through netbbs.net.prose_editor.edit_prose once a
 user has opted in, instead of the plain read_line() flow every account
@@ -22,7 +22,7 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.directory import get_bio
-from netbbs.net import board_flow, login_flow
+from netbbs.net import board_flow, login_flow, profile_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind, InputHistory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.session import Session
@@ -154,7 +154,7 @@ def test_profile_fits_a_real_80x24_terminal_on_every_page(db, lane, alice):
     # starts with) rather than checking the whole accumulated scroll.
     for page_downs in range(4):
         session = FakeSession(["PAGE_DOWN"] * page_downs + ["b"])
-        asyncio.run(login_flow._edit_profile(session, lane, alice))
+        asyncio.run(profile_flow._edit_profile(session, lane, alice))
         text = _visible(session)
         last_page_text = text.rsplit("NetBBS › Your profile", 1)[-1]
         real_rows = last_page_text.rstrip("\r\n").split("\r\n")
@@ -179,7 +179,7 @@ def test_profile_fits_a_real_80x24_terminal_with_a_max_length_bio(db, lane, alic
 
     set_bio(db, alice, "x" * 2000)
     session = FakeSession(["b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     real_rows = text.rstrip("\r\n").split("\r\n")
     assert len(real_rows) <= session.terminal_height, (
@@ -195,7 +195,7 @@ def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # despite cursor-nav being wired in ("No help is available ... yet"
     # for every one of them).
     session = FakeSession(["CTRL+h", " ", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text
     assert "supports multiple lines" in text.lower()
@@ -205,7 +205,7 @@ def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
 
 def test_profile_toggle_switches_the_preference_on_and_off(db, lane, alice):
     session = FakeSession(["f", "f", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     # First "f" turns it on, second turns it back off.
     assert fullscreen_editor_enabled(db, alice) is False
     text = _visible(session)
@@ -217,7 +217,7 @@ def test_profile_color_depth_toggle_cycles_auto_truecolor_256(db, lane, alice):
     from netbbs.net.color_depth_preference import color_depth_override
 
     session = FakeSession(["c", "c", "c", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "Color depth: truecolor (forced)" in text
     assert "Color depth: 256 (forced)" in text
@@ -231,7 +231,7 @@ def test_profile_menu_descriptions_toggle_cycles_off_brief_detailed(db, lane, al
 
     assert menu_description_level(db, alice) == "brief"  # default
     session = FakeSession(["d", "d", "d", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     text = _visible(session)
     assert "Menu descriptions: detailed" in text
     assert "Menu descriptions: off" in text
@@ -245,7 +245,7 @@ def test_profile_redraw_in_place_toggle_switches_on_and_off(db, lane, alice):
 
     assert redraw_in_place_enabled(db, alice) is False  # default
     session = FakeSession(["r", "r", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     # First "r" turns it on, second turns it back off.
     assert redraw_in_place_enabled(db, alice) is False
     text = _visible(session)
@@ -258,7 +258,7 @@ def test_profile_unicode_style_toggle_switches_on_and_off(db, lane, alice):
 
     assert unicode_style_enabled(db, alice) is True  # default
     session = FakeSession(["u", "u", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     # First "u" turns it off, second turns it back on.
     assert unicode_style_enabled(db, alice) is True
     text = _visible(session)
@@ -285,7 +285,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
     raw_b64 = base64.b64encode(bytes(verify_key)).decode()
 
     session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is not None
@@ -294,7 +294,7 @@ def test_profile_ssh_public_key_self_service_adds_a_key(db, lane, alice):
 
 def test_profile_ssh_public_key_self_service_rejects_an_unparseable_key(db, lane, alice):
     session = FakeSession(["k", "a", "phone", "not a real key", "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is None
@@ -313,7 +313,7 @@ def test_profile_ssh_public_key_self_service_refuses_a_key_already_in_use(db, la
     create_user(db, "bob", verify_key=verify_key, user_level=10)
 
     session = FakeSession(["k", "a", "phone", raw_b64, "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is None
@@ -325,7 +325,7 @@ def test_profile_ssh_public_key_remove_not_offered_with_no_key_set(db, lane, ali
     # shouldn't be advertised on an account with none.
     assert alice.fingerprint is None
     session = FakeSession(["k", "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert "emove a key" not in _written_text(session)
 
 
@@ -343,7 +343,7 @@ def test_profile_ssh_public_key_self_service_removes_the_key(db, lane, alice):
     assert alice.fingerprint is not None
 
     session = FakeSession(["k", "r", "1", "y", "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is None
@@ -360,7 +360,7 @@ def test_profile_ssh_public_key_self_service_remove_declined_keeps_the_key(db, l
     alice = login_flow.get_user_by_username(db, "alice")
 
     session = FakeSession(["k", "r", "1", "n", "b", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
 
     updated = login_flow.get_user_by_username(db, "alice")
     assert updated.fingerprint is not None
@@ -661,7 +661,7 @@ def test_tombstone_existing_post_cancelled_leaves_it_unchanged(db, alice):
 def test_edit_bio_uses_fullscreen_editor_once_opted_in(db, lane, alice):
     set_fullscreen_editor_enabled(db, alice, True)
     session = FakeSession(["e"] + _type("My new bio") + ["CTRL+O", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_bio(db, alice) == "My new bio"
     assert "Bio updated" in _written_text(session)
 
@@ -672,7 +672,7 @@ def test_edit_bio_prefills_the_fullscreen_editor_with_the_current_bio(db, lane, 
     set_bio(db, alice, "Original bio")
     set_fullscreen_editor_enabled(db, alice, True)
     session = FakeSession(["e", "END"] + _type(" - updated") + ["CTRL+O", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_bio(db, alice) == "Original bio - updated"
 
 
@@ -681,7 +681,7 @@ def test_edit_signature_uses_fullscreen_editor_once_opted_in(db, lane, alice):
 
     set_fullscreen_editor_enabled(db, alice, True)
     session = FakeSession(["g"] + _type("Alice") + ["CTRL+O", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_signature(db, alice) == "Alice"
     assert "Signature updated" in _written_text(session)
 
@@ -692,5 +692,5 @@ def test_edit_signature_prefills_the_fullscreen_editor_with_the_current_signatur
     set_signature(db, alice, "Original signature")
     set_fullscreen_editor_enabled(db, alice, True)
     session = FakeSession(["g", "END"] + _type(" - updated") + ["CTRL+O", "b"])
-    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    asyncio.run(profile_flow._edit_profile(session, lane, alice))
     assert get_signature(db, alice) == "Original signature - updated"
