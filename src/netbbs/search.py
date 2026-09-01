@@ -19,7 +19,7 @@ no edit chain). `channel_message_search` is pruned in lockstep with
 never surface a message already gone from scrollback.
 
 Query-time authorization reuses the exact same visibility gates normal
-browsing already enforces (`netbbs.net.login_flow._new_scan_screen`'s own
+browsing already enforces (`netbbs.net.scan_and_find._new_scan_screen`'s own
 pattern) -- a level/age/community gate for boards and file areas,
 `netbbs.net.chat_flow.list_visible_channels_for` for channels -- so
 search can never be a side-channel revealing a restricted resource's
@@ -99,7 +99,7 @@ def _match_expression(query: str) -> str | None:
     exactly the "never interpreted as FTS5 syntax" behavior this
     function's docstring already documents as intentional, not a bug.
     The caller-facing UI hint for that specific case lives in
-    `netbbs.net.login_flow._looks_like_attempted_boolean_syntax`, not
+    `netbbs.net.scan_and_find._looks_like_attempted_boolean_syntax`, not
     here -- this function's own contract (never special-case any word)
     is correct and shouldn't grow an exception for "OR"/"AND"/"NOT".
     """

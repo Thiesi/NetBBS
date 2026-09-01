@@ -1099,7 +1099,7 @@ capability from the item picker's simple, per-call substring name match
   (rate limits, query exposure, opt-in) — never an implied consequence of
   local search existing;
 - **UI**: a new, always-shown `[F]ind` main-menu entry (`netbbs.net.
-  login_flow._find_screen`), alongside `[N]ew scan` — prompts for one
+  scan_and_find._find_screen`), alongside `[N]ew scan` — prompts for one
   free-text query, matches it against all three content types at once, and
   jumps straight to a selected hit: a post/file lands on the exact matched
   item (`netbbs.search.post_jump_cursor`/`file_jump_cursor` compute the
