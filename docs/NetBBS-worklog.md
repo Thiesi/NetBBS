@@ -1110,6 +1110,33 @@ sync`'s `stop_event` parameter does this: it lets its own 5-minute-default
 `sync_interval_seconds` sleep be woken early, while still letting an
 in-flight dial/push pass finish untouched.
 
+Bounding `asyncio.wait_for(task, timeout=...)` on a task that reaches a
+blocking synchronous call via `asyncio.to_thread`/`loop.run_in_executor`
+bounds *that await*, not the underlying OS thread — cancellation cannot
+stop a thread already inside a blocking call (`urllib.request.urlopen`,
+raw socket I/O, etc.), which runs to its own completion (or its own
+`timeout=` kwarg, if it has one) regardless. Verified by direct repro:
+`asyncio.run(main())` itself still blocks for the thread's full duration
+even when `main()`'s own coroutine returns immediately after giving up on
+its bounded wait — `asyncio.run`'s cleanup phase (`shutdown_default_
+executor`) joins the default executor's outstanding work, and separately,
+Python's interpreter-exit machinery (`concurrent.futures.thread`'s
+`atexit` hook) joins every thread any `ThreadPoolExecutor` in the process
+has ever spawned, independent of any asyncio-level bookkeeping. A task's
+own bounded cancellation-await (see `netbbs.__main__`'s shutdown teardown,
+`background_task_drain_seconds`) makes *that step* return promptly; it
+does not, by itself, make the *process* exit promptly if a thread is still
+running when it fires. Two verified mitigations, neither applied yet
+(design doc §13.11, "Known residual gap"): give the blocking call its own
+`timeout=` (already true for every real `urlopen` call in this codebase,
+capping the actual worst case at that timeout rather than indefinitely);
+or have the shutdown path call `os._exit()` once its own bounded waits are
+exhausted, which repro confirms fully bypasses both the executor-shutdown
+join and the interpreter-exit thread join — at the cost of skipping every
+other kind of cleanup (stdio flushes, other `atexit` handlers, any other
+still-pending async work) along with it, a real tradeoff that needs a
+deliberate decision, not a reflexive fix.
+
 ---
 
 ## 9. Link protocol invariants
