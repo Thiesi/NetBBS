@@ -6639,7 +6639,7 @@ def test_menu_shows_notice_when_a_telemetry_panel_forces_descriptions_off(db, la
     """`_degrade_description_level` can force `description_level` to
     `"off"` on its own (a telemetry panel's height budget leaving no
     room for descriptions) before `menu_grid` -- which has its own,
-    separate "Descriptions hidden" notice -- ever runs; `_menu_row`
+    separate "Descriptions hidden" notice -- ever runs; `menu_row`
     takes the `action_bar` branch once the level is already `"off"`, so
     `menu_grid`'s notice logic was unreachable and a SysOp who asked for
     descriptions saw them silently vanish with no explanation (Codex

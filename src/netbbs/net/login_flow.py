@@ -216,6 +216,7 @@ from netbbs.rendering import (
     field_row,
     menu_grid,
     menu_key,
+    menu_row,
     reflow,
     sanitize_text,
     screen_title,
@@ -2473,17 +2474,6 @@ def _has_uncategorized_resources(db: Database, user: User) -> bool:
     )
 
 
-def _menu_row(entries: list[MenuEntry], *, width: int, height: int, description_level: str) -> str:
-    """Compact `action_bar` packing when descriptions are off, `menu_grid`'s
-    taller one-entry-per-line layout once the caller has opted into "brief"/
-    "detailed" (issue #160's rollout) -- see `netbbs.net.resource_editor.
-    edit_resource_draft`'s identical branch for why `menu_grid` alone isn't a
-    byte-for-byte substitute for `action_bar`'s packed row at the off level."""
-    if description_level == "off":
-        return action_bar([e.label for e in entries], width=width)
-    return menu_grid([("", entries)], width=width, height=height, description_level=description_level)
-
-
 async def _resource_type_menu(
     session: Session,
     db: Database,
@@ -2563,7 +2553,7 @@ async def _resource_type_menu(
         node_name_gradient=session.node_name_gradient)
         await session.write_line(f"\r\n{heading}")
         await session.write_line(
-            f"\r\n{_menu_row(option_list, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+            f"\r\n{menu_row(option_list, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
         )
         await session.write("Choice: ")
 
@@ -3040,7 +3030,7 @@ async def _render_board_page(
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     await session.write_line(
-        f"\r\n{_menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
+        f"\r\n{menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
     await session.write("Choice: ")
 
@@ -3289,7 +3279,7 @@ async def _show_board(
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"),
             ]
             await session.write_line(
-                "\r\n" + _menu_row(
+                "\r\n" + menu_row(
                     options, width=session.terminal_width, height=session.terminal_height,
                     description_level=description_level,
                 )
@@ -3925,7 +3915,7 @@ async def _caller_who_screen(
         options.append(MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
     await session.write_line(
-        _menu_row(
+        menu_row(
             options, width=session.terminal_width, height=session.terminal_height,
             description_level=menu_description_level(db, user),
         )
