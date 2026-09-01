@@ -481,7 +481,22 @@ async def edit_resource_draft(
         if preamble_text:
             await session.write_line(preamble_text)
 
-        sectioned = any(f.section is not None for f in fields)
+        # Codex review (PR #236): pagination specifically (not the
+        # value-list/menu-row *headings*, which still use `any()` inside
+        # `_field_value_lines`/`_build_menu_line` and render correctly
+        # for a partially-sectioned screen) requires *every* field to
+        # carry a `section` -- a field left unsectioned has no page it
+        # could ever belong to (`page_fields` filters by exact section-
+        # name match, and `None` was never added to `section_names`),
+        # so a mixed screen jumping to that field's own hotkey would set
+        # `current_page = None` and crash the next redraw at
+        # `section_names.index(None)`. No real caller mixes the two
+        # today (confirmed: Board/Area/Channel/Profile all section every
+        # field), so this changes nothing for any screen that exists --
+        # it only prevents a hypothetical future mixed screen from
+        # crashing, falling back to today's un-paginated "may scroll"
+        # behavior instead, the same as a screen with no sections at all.
+        fully_sectioned = bool(fields) and all(f.section is not None for f in fields)
         selected_field = fields[selected] if selected is not None else None
         back_brief = _BACK_BRIEF if save is not None else _BACK_BRIEF_IMMEDIATE
         # Everything on screen except the field values and the menu row
@@ -528,7 +543,7 @@ async def edit_resource_draft(
         # exactly today's behavior (the top of the screen scrolls off);
         # see this function's own docstring for why that's an accepted,
         # unchanged limitation rather than something this also fixes.
-        paginated = sectioned and not fits
+        paginated = fully_sectioned and not fits
 
         if not paginated:
             value_lines = full_lines
@@ -685,13 +700,26 @@ async def edit_resource_draft(
             await session.write(reject_unhandled_key(choice))
             continue
         selected = field_index
-        if paginated and fields[field_index].section != current_page:
+        if fields[field_index].section is not None and fields[field_index].section != current_page:
             # Every hotkey keeps working regardless of which page is
             # currently shown (cursor-nav's own established "purely
             # additive, nothing existing stops working" precedent) --
             # jump to the field's own page too, or the caller would type
             # a real hotkey, watch a field they can't see get edited, and
             # see no visible change on the next redraw.
+            #
+            # Codex review (PR #236): deliberately *not* gated on this
+            # redraw's own `paginated` value -- the screen might fit
+            # right now (nothing to jump to a page *for* yet) but stop
+            # fitting by the time this field's own prompt returns (a
+            # live terminal resize mid-interaction is the real case:
+            # NAWS renegotiates while the caller is still typing into
+            # the sub-prompt this hotkey just opened). Priming
+            # `current_page` unconditionally means that if pagination
+            # *does* newly activate on the very next redraw, it already
+            # shows the field just edited instead of the stale default
+            # (`section_names[0]`) -- harmless when it stays unpaginated,
+            # since `current_page` is never consulted in that branch.
             current_page = fields[field_index].section
         await session.write_line("")
         await fields[field_index].prompt(session, lane, draft)
