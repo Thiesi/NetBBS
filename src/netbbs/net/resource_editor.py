@@ -309,10 +309,21 @@ async def edit_resource_draft(
                 # change" -- a screen where every field leaves `section`
                 # unset must render with zero extra lines, byte-for-byte
                 # as before this parameter existed.
-                await session.write_line("")
+                #
+                # Codex review (PR #230): no blank line before the
+                # heading (dropped here, was its own `write_line("")`
+                # call) -- on a real 11-field, 4-section screen like
+                # Board/Area/Channel at 80x24, that line alone was
+                # enough to push the value list past the terminal's own
+                # height, leaving no budget for *any* menu row content
+                # underneath, however compact -- the exact "top of the
+                # field list scrolls off" regression this whole
+                # height-budget system exists to prevent. The bold
+                # uppercase heading is still a strong enough visual
+                # break on its own without it.
                 if f.section is not None:
                     await session.write_line(colored(f.section.upper(), fg_color=METADATA_COLOR, bold=True))
-                field_line_count += 2 if f.section is not None else 1
+                    field_line_count += 1
                 previous_section = f.section
             value = sanitize_text(f.render(draft))
             # One colored() call, not marker/label separately -- two

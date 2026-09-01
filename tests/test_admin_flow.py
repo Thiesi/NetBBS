@@ -2436,6 +2436,60 @@ def test_link_this_board_flow(db, lane, sysop):
     assert genesis.payload["origin_fingerprint"] == link_context.node_identity.fingerprint
 
 
+def test_create_board_screen_fits_a_real_80x24_terminal(db, lane, sysop):
+    # Codex review (PR #230): the sectioned Board screen's compact
+    # menu-row fallback was verified to fit its own height budget --
+    # but that budget itself was never checked against the *actual*
+    # rendered output. At a real 80x24 terminal, Board's own 11 fields
+    # across 4 sections rendered 27 total lines before this fix (the
+    # value list's section headers alone already consumed the entire
+    # budget, leaving nothing for the compact menu row underneath,
+    # however short) -- the exact "top of the field list scrolls off"
+    # regression this whole height-budget system exists to prevent.
+    # End-to-end through the real screen and real field specs, not a
+    # synthetic proxy, so a future field added to `_board_field_specs`
+    # that pushes this over budget again fails here immediately.
+    from netbbs.net.admin_flow import _board_screen
+
+    session = FakeSession(["b"])
+    asyncio.run(_board_screen(session, lane, sysop, existing=None))
+    text = _visible(_written_text(session))
+    real_rows = text.rstrip("\r\n").split("\r\n")
+    assert len(real_rows) <= session.terminal_height, (
+        f"rendered {len(real_rows)} rows, terminal only has {session.terminal_height}"
+    )
+
+
+def test_create_file_area_screen_fits_a_real_80x24_terminal(db, lane, sysop):
+    # Same regression as test_create_board_screen_fits_a_real_80x24_
+    # terminal above -- _area_field_specs is "identical shape" to
+    # _board_field_specs (that module's own docstring), so it hit the
+    # exact same overflow.
+    from netbbs.net.admin_flow import _area_screen
+
+    session = FakeSession(["b"])
+    asyncio.run(_area_screen(session, lane, sysop, existing=None))
+    text = _visible(_written_text(session))
+    real_rows = text.rstrip("\r\n").split("\r\n")
+    assert len(real_rows) <= session.terminal_height, (
+        f"rendered {len(real_rows)} rows, terminal only has {session.terminal_height}"
+    )
+
+
+def test_create_channel_screen_fits_a_real_80x24_terminal(db, lane, sysop):
+    # Same regression as test_create_board_screen_fits_a_real_80x24_
+    # terminal above, for the third dense sectioned screen.
+    from netbbs.net.admin_flow import _channel_screen
+
+    session = FakeSession(["b"])
+    asyncio.run(_channel_screen(session, lane, sysop, existing=None))
+    text = _visible(_written_text(session))
+    real_rows = text.rstrip("\r\n").split("\r\n")
+    assert len(real_rows) <= session.terminal_height, (
+        f"rendered {len(real_rows)} rows, terminal only has {session.terminal_height}"
+    )
+
+
 def test_link_this_board_screen_keeps_the_draft_after_a_bad_field_entry(db, lane, sysop):
     """Regression for the old fixed linear chain's own bug: a mistyped
     later field (e.g. max post age) used to discard every earlier
