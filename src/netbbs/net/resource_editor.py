@@ -657,6 +657,18 @@ async def edit_resource_draft(
                 # rejected hotkey gets.
                 await session.write("\a")
                 continue
+            # Codex review (PR #238): the hotkey-dispatch branch below
+            # primes `current_page` unconditionally before invoking a
+            # field's prompt, for the live-resize case where pagination
+            # newly activates while that prompt is still running -- but
+            # cursor-nav's own Enter/Space activation is a second,
+            # separate path to the exact same `prompt()` call, and had
+            # no equivalent priming. Without it, an Enter/Space-activated
+            # field on a page that only *becomes* current after a
+            # mid-prompt resize would still show the stale page on the
+            # next redraw, same bug as the hotkey path already fixed.
+            if fields[selected].section is not None and fields[selected].section != current_page:
+                current_page = fields[selected].section
             await session.write_line("")
             await fields[selected].prompt(session, lane, draft)
             continue

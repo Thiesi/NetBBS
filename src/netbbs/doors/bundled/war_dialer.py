@@ -71,6 +71,7 @@ import random
 import re
 import sqlite3
 import sys
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -178,7 +179,24 @@ def read_key() -> str:
 def press_any_key(p: Palette) -> None:
     out_line()
     out(f"  {p.muted}Press any key to continue...{RESET}")
-    read_key()
+    key = read_key()
+    if key == ESC:
+        # Codex review (PR #239): an arrow key sends a multi-byte `ESC [
+        # <letter>` CSI sequence -- consuming only the leading ESC here
+        # left the rest sitting in the input buffer for the *next*
+        # read_menu_choice() call. That loop silently ignores an
+        # unrecognized `[`, then accepts the trailing letter as a real
+        # hotkey -- right-arrow's trailing 'C' spent cash and a turn on
+        # Crew Recruit the caller never chose. Mirrors voidrunner.py's
+        # own `read_line_raw`, this codebase's already-established
+        # pattern for swallowing a CSI sequence whole rather than
+        # leaking its tail bytes.
+        nxt = read_key()
+        if nxt == "[":
+            while True:
+                b = read_key()
+                if b.isalpha() or b == "~":
+                    break
     out_line()
 
 
@@ -202,6 +220,19 @@ def _center_line(left: str, content: str, right: str, width: int) -> str:
     pad_total = max(0, target_inner - _dlen(content))
     pad_left = pad_total // 2
     return f"{left}{' ' * pad_left}{content}{' ' * (pad_total - pad_left)}{right}"
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Word-wraps a *plain* (no ANSI) string to `width` display columns.
+    Codex review (PR #239): `draw_help`'s body text used to be hand-
+    wrapped assuming a fixed ~78-column width, overflowing into extra
+    rows exactly at the narrow terminals (`main()` supports down to 40
+    columns) where a one-page screen matters most. `textwrap.wrap`
+    operates on raw character count, which is safe here specifically
+    because every caller passes already-plain text and applies color
+    only afterward, per already-wrapped line -- never to text `textwrap`
+    itself has to measure."""
+    return textwrap.wrap(text, width=max(20, width)) or [""]
 
 
 LETTERS = "ABCDEFGHIJ"
@@ -881,41 +912,80 @@ def draw_help(p: Palette, w: int) -> None:
     # HEAT_BUST_THRESHOLD/SEASON are interpolated from the real balance
     # constants above rather than hand-typed, so this can never quietly
     # drift out of sync with a future tuning pass the way a second,
-    # copy-pasted set of numbers could. Kept deliberately tight
-    # (~23 lines, box through the closing "press any key"): a first
-    # draft ran to 32, well past what "one page" means on an ordinary
-    # terminal.
+    # copy-pasted set of numbers could.
+    #
+    # Codex review (PR #239), two real inaccuracies fixed here: crossing
+    # HEAT_BUST_THRESHOLD does not bust immediately -- apply_heat() only
+    # *starts* a rising-chance roll (2%/point over the threshold, capped
+    # at 40%) -- and a season reset wipes cash/crew/Heat/turns and every
+    # lifetime counter Rank is built from, not just "the board" as the
+    # first draft implied; a player relying on this screen could
+    # reasonably expect their holdings to survive a season otherwise.
+    #
+    # Also width-aware now (`_wrap`, same review round): the first draft
+    # hand-wrapped every line assuming a fixed ~78-column terminal,
+    # overflowing into extra rows at exactly the narrow widths (`main()`
+    # supports down to 40 columns) where a one-page screen matters most.
+    inner = max(20, w - 4)  # 2-space margin each side
+
+    def para(text: str) -> None:
+        for line in _wrap(text, inner):
+            out_line(f"  {p.white}{line}{RESET}")
+
     out_line()
     out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
     out_line(_center_line(f"{p.border}{BOLD}║{RESET}", f"{p.gold}{BOLD}HOW TO PLAY{RESET}",
                            f"{p.border}{BOLD}║{RESET}", w))
     out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
-    out_line(f"  {p.white}You're a hacker, and you and your crew dial into rival boards for{RESET}")
-    out_line(f"  {p.white}cash, respect, and control of the scene's ten shared phone{RESET}")
-    out_line(f"  {p.white}exchanges. Every caller on this node shares the same world --{RESET}")
-    out_line(f"  {p.white}what you do to a rival really happens, online or not.{RESET}")
-    out_line()
-    out_line(f"  {p.accent}{BOLD}Actions{RESET} {p.muted}({TURNS_PER_DAY} turns/day, one per action):{RESET}")
-    out_line(f"    {p.gold}[T]{RESET}rade Warez    {p.muted}quick, low-risk cash.{RESET}")
-    out_line(f"    {p.gold}[C]{RESET}rew Recruit   {p.muted}pay ${RECRUIT_COST}, +1 crew member.{RESET}")
-    out_line(f"    {p.gold}[J]{RESET}ob             {p.muted}bigger risk, bigger payout.{RESET}")
-    out_line(f"    {p.gold}[R]{RESET}aid             {p.muted}hit a rival crew, steal their cash.{RESET}")
-    out_line(f"    Root E{p.gold}[x]{RESET}change   {p.muted}seize a shared exchange for hourly income.{RESET}")
-    out_line()
-    out_line(
-        f"  {p.white}Heat rises with every risky move; cross {int(HEAT_BUST_THRESHOLD)} and you're "
-        f"{p.bad}{BOLD}BUSTED{RESET}"
+    para(
+        "You're a hacker, and you and your crew dial into rival boards for cash, "
+        "respect, and control of the scene's ten shared phone exchanges. Every "
+        "caller on this node shares the same world -- what you do to a rival "
+        "really happens, online or not."
     )
-    out_line(f"  {p.white}-- gear and crew scattered. It decays on its own, so cooling off helps.{RESET}")
-    out_line(
-        f"  {p.white}Rank only ever climbs within a season (lifetime totals, not current{RESET}"
-    )
-    out_line(f"  {p.white}holdings) -- resets every {SEASON.days} days.{RESET}")
     out_line()
-    out_line(
-        f"  {p.gold}[B]{RESET}oard {p.muted}is always free. Press{RESET} {p.gold}[?]{RESET} "
-        f"{p.muted}any time to see this again.{RESET}"
+    actions_suffix = f"({TURNS_PER_DAY} turns/day, one per action):"
+    if _dlen(f"Actions {actions_suffix}") <= inner:
+        out_line(f"  {p.accent}{BOLD}Actions{RESET} {p.muted}{actions_suffix}{RESET}")
+    else:
+        # Narrow-terminal fallback (Codex review, PR #239): the header
+        # itself needs wrapping room too, not just the paragraphs below
+        # it -- this is the one heading line that isn't routed through
+        # `para()`, since "Actions" stays bold/accent-colored while the
+        # rest is muted.
+        out_line(f"  {p.accent}{BOLD}Actions{RESET}")
+        for line in _wrap(actions_suffix, inner - 2):
+            out_line(f"    {p.muted}{line}{RESET}")
+    for label_colored, label_plain, desc in (
+        (f"{p.gold}[T]{RESET}rade Warez", "[T]rade Warez", "quick, low-risk cash."),
+        (f"{p.gold}[C]{RESET}rew Recruit", "[C]rew Recruit", f"pay ${RECRUIT_COST}, +1 crew member."),
+        (f"{p.gold}[J]{RESET}ob", "[J]ob", "bigger risk, bigger payout."),
+        (f"{p.gold}[R]{RESET}aid", "[R]aid", "hit a rival crew, steal their cash."),
+        (f"Root E{p.gold}[x]{RESET}change", "Root E[x]change", "seize a shared exchange for hourly income."),
+    ):
+        combined = f"{label_plain}  {desc}"
+        if _dlen(combined) <= inner - 4:
+            out_line(f"    {label_colored}  {p.muted}{desc}{RESET}")
+        else:
+            out_line(f"    {label_colored}")
+            for line in _wrap(desc, inner - 6):
+                out_line(f"      {p.muted}{line}{RESET}")
+    out_line()
+    para(
+        f"Heat rises with every risky move; cross {int(HEAT_BUST_THRESHOLD)} and each "
+        f"further point adds a rising chance of getting caught -- risk it too long and "
+        f"you get busted: gear and crew scattered, Heat reset. It also decays on its "
+        f"own, so cooling off between sessions helps."
     )
+    out_line()
+    para(
+        f"Rank only ever climbs within a season (built from what you've ever done, "
+        f"not what you currently hold, so a bust can't knock it back) -- but a new "
+        f"season, every {SEASON.days} days, resets cash, crew, Heat, and every one of "
+        f"those lifetime totals for everyone. Nothing carries over."
+    )
+    out_line()
+    para("[B]oard is always free. Press [?] any time to see this again.")
 
 
 def read_menu_choice(valid: str) -> str:
