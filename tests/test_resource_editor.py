@@ -72,6 +72,8 @@ _EDITOR_KEY_SENTINELS: dict[str, EditorKeyKind] = {
     "RIGHT": EditorKeyKind.RIGHT,
     "BACKSPACE": EditorKeyKind.BACKSPACE,
     "ESCAPE": EditorKeyKind.ESCAPE,
+    "PAGE_UP": EditorKeyKind.PAGE_UP,
+    "PAGE_DOWN": EditorKeyKind.PAGE_DOWN,
 }
 
 
@@ -1397,6 +1399,31 @@ def _many_sectioned_fields() -> list[FieldSpec]:
     return fields
 
 
+def _many_single_field_sections() -> list[FieldSpec]:
+    """Six sections, one field each -- unlike `_many_sectioned_fields`
+    (two fields per section, deliberately dense enough to also trigger
+    pagination once that existed), this isolates the sectioned-compact
+    menu row's own flat fallback: few enough total fields that the
+    *value list* comfortably fits a real terminal, while still enough
+    distinct sections that the compact menu row's own per-section
+    headings don't -- exercising that fallback without pagination also
+    kicking in and changing what's on screen underneath it."""
+    fields = []
+    for i in range(6):
+        key = f"f{i}"
+        hotkey = chr(ord("a") + i)
+        fields.append(
+            FieldSpec(
+                key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
+                label=f"Field {i}",
+                render=lambda draft, key=key: draft.get(key) or "(blank)",
+                prompt=text_field(key),
+                section=f"Group{i}",
+            )
+        )
+    return fields
+
+
 def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
     # Codex review (PR #229): a sectioned compact menu row grows with
     # the section count (a heading plus a packed action row per
@@ -1406,9 +1433,19 @@ def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
     # bust that budget, so the row must fall all the way back to one
     # flat, ungrouped action_bar line -- which always fits, the same
     # guarantee the pre-#229 form always gave.
+    #
+    # Uses `_many_single_field_sections`, not `_many_sectioned_fields`
+    # (this test's original fixture) -- once pagination existed,
+    # `_many_sectioned_fields`'s 12 fields no longer fit *at all* at
+    # this height, so the scenario paginated instead of exercising the
+    # flat-fallback mechanism this test is actually about; the
+    # assertion below still happened to pass (page 1's own heading
+    # renders exactly once too) for the wrong reason. This fixture's
+    # value list fits comfortably on its own, isolating the one thing
+    # under test.
     session = FakeSession(["b"])
-    session.terminal_height = 15
-    fields = _many_sectioned_fields()
+    session.terminal_height = 18
+    fields = _many_single_field_sections()
     draft = {f.key: "" for f in fields}
     asyncio.run(
         edit_resource_draft(
@@ -1418,6 +1455,7 @@ def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
         )
     )
     text = _visible(_written_text(session))
+    assert "PgUp/PgDn" not in text  # confirms this scenario genuinely isn't paginated
     # Once (the value list's own heading) rather than twice (heading
     # repeated as the sectioned menu row's own group title) confirms
     # the menu row fell back to the flat form instead.
@@ -1446,3 +1484,170 @@ def test_sectioned_fields_group_the_descriptive_menu_row_too():
     # Once in the value list above, once as the menu row's own heading.
     assert text.count("IDENTITY") == 2
     assert text.count("DISPLAY") == 2
+
+
+# -- pagination (a sectioned screen dense enough it doesn't fit at all) -----
+
+
+def test_dense_sectioned_screen_paginates_instead_of_scrolling_off():
+    # `_many_sectioned_fields` (6 sections x 2 fields = 12 fields) is
+    # dense enough that, at this height, even the flat menu fallback
+    # doesn't leave the *value list* fitting on its own -- confirmed by
+    # `test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_
+    # not_fit`'s own history: this exact fixture, at this exact height,
+    # used to (wrongly) exercise that test before pagination existed.
+    # Now it should paginate instead of letting the top of the field
+    # list scroll off.
+    session = FakeSession(["b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "Section 1 of 6 -- PgUp/PgDn to switch" in text
+    # Only page 1's own two fields/section render -- not all twelve.
+    assert "GROUP0" in text
+    assert "GROUP1" not in text
+    real_rows = text.rstrip("\r\n").split("\r\n")
+    assert len(real_rows) <= session.terminal_height
+
+
+def test_pagination_wraps_at_both_ends():
+    session = NavigableFakeSession(["PAGE_UP", "b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    # PAGE_UP from page 1 wraps to the last page (6), not page 0.
+    assert "Section 6 of 6" in text
+    assert "GROUP5" in text
+
+    session = NavigableFakeSession(["PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    # Five PAGE_DOWNs from page 1 reaches page 6, a sixth would wrap
+    # back to page 1 -- confirmed separately below.
+    assert "Section 6 of 6" in text
+
+
+def test_pagination_page_down_from_the_last_page_wraps_to_the_first():
+    session = NavigableFakeSession(["PAGE_DOWN"] * 6 + ["b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "Section 1 of 6" in text
+
+
+def test_hotkey_for_a_field_on_another_page_jumps_there():
+    # Every hotkey keeps working regardless of which page is currently
+    # shown -- typing a field's own letter jumps straight to it *and*
+    # switches to its page, so the caller sees what they just changed
+    # rather than a screen that silently looks unchanged.
+    session = FakeSession(["h", "typed value", "b"])  # "h" = Group3's second field (f3_1)
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "Section 4 of 6" in text
+    assert draft["f3_1"] == "typed value"
+
+
+def test_save_and_back_reachable_from_any_page_while_paginated():
+    saved = {}
+
+    async def save(draft):
+        saved.update(draft)
+        return "ok"
+
+    session = NavigableFakeSession(["PAGE_DOWN", "PAGE_DOWN", "PAGE_DOWN", "s"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    result = asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=save, save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    assert "Section 4 of 6" in text
+    assert "[S]ave" in text  # reachable from page 4, not just page 1
+    assert result == "ok"
+    assert saved == draft
+
+
+def test_up_down_cursor_nav_stays_within_the_current_page_while_paginated():
+    session = NavigableFakeSession(["DOWN", "DOWN", "DOWN", "ENTER", "typed", "b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    # Page 1 has exactly 2 fields (f0_0, f0_1) -- DOWN, DOWN, DOWN from
+    # unselected wraps: unselected->f0_0->f0_1->f0_0, landing back on
+    # the *first* field of page 1, never reaching a field on another
+    # page even though there are 12 fields in the full list.
+    assert draft["f0_0"] == "typed"
+    assert draft["f0_1"] == ""
+
+
+def test_page_up_down_bell_rejects_when_not_paginated():
+    # Confirms zero collision risk / zero behavior change on a screen
+    # that never paginates: PAGE_UP/PAGE_DOWN fall through to the same
+    # catch-all bell-reject every other unrecognized non-echoed key
+    # (Backspace, Home, End, ...) already gets.
+    session = NavigableFakeSession(["PAGE_UP", "PAGE_DOWN", "b"])
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=[_name_field(), _pinned_field()],
+            draft={"name": "", "pinned": False},
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _written_text(session)
+    assert text.count("\a") == 2
+    assert "PgUp/PgDn" not in _visible(text)

@@ -862,6 +862,52 @@ was itself an unresolved Tab — every other keystroke (including ones that
 change nothing, like Left then Right) must clear that flag before its own
 handling runs.
 
+### `edit_resource_draft` section-based pagination
+
+A sectioned screen (`FieldSpec.section` set) whose full field list, at
+whichever menu-row tier the existing descriptive/sectioned-compact/flat
+fallback lands on, doesn't fit `session.terminal_height` paginates by
+section rather than letting the top of the field list scroll off. The
+fit-check is computed fresh every redraw (never cached), the same way
+the pre-existing menu-tier upgrades already treat `terminal_width`/
+`height` as live values -- a mid-session terminal resize can un-paginate
+or re-paginate a screen correctly rather than sticking with whatever
+was decided on first paint.
+
+`_field_value_lines` (the pure, no-I/O value-list renderer both the
+fit-check and the real per-page render call) matches its `selected`
+parameter by **identity** (`f is selected`), not position index -- a
+page-scoped call and a full-list call have different valid index
+ranges for "the currently highlighted field," so identity is the only
+primitive that works correctly for both without the caller
+reinterpreting what a given index means depending on which list it's
+indexing into.
+
+Hotkey dispatch (typing a field's own letter) always searches the
+*full* field list regardless of which page is currently shown --
+paginating never breaks "every hotkey keeps working exactly as
+before," this component's own repeated design philosophy since cursor-
+nav was added. Activating a field on a different page also switches
+`current_page` to match, so the caller sees what they just changed
+rather than a screen that looks unchanged. This has a real test-writing
+consequence: activating *any* field's hotkey also marks it cursor-nav-
+selected on the next redraw (a different `colored()` string --
+accent-colored/bold with a `> ` marker -- than its unselected
+rendering), so a test asserting an *exact* colored-string match against
+a field that must stay unselected (not just a plain-text substring
+search, which the marker prefix doesn't break) needs to reach that
+field's page via a *different* field's hotkey, not the one under test.
+`Page Up`/`Page Down` navigate without selecting anything, avoiding
+this entirely, but many of this suite's lighter-weight `Session` test
+doubles don't implement `read_editor_key` at all (or don't map
+`"PAGE_UP"`/`"PAGE_DOWN"` sentinels even when they do) -- check which
+`FakeSession` a given test file actually uses before assuming a
+`PAGE_DOWN` press can be scripted there; where it can't, activating an
+*adjacent* field on the target page (one with an immediate, no-sub-
+screen `prompt` like `live_choice_field`, so no extra keystrokes are
+needed to back out again) is the workaround, not the field the
+assertion is actually about.
+
 ### Picker line width
 
 `netbbs.net.picker.pick_item` truncates each rendered row to terminal width

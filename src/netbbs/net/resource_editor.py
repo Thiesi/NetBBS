@@ -151,6 +151,171 @@ _BACK_BRIEF = "Discard the draft, nothing saved"
 _BACK_BRIEF_IMMEDIATE = "Nothing pending -- already saved"
 
 
+def _field_value_lines(
+    fields: list[FieldSpec], draft: Draft, *, selected: FieldSpec | None, accent_color: int, terminal_width: int,
+) -> list[str]:
+    """Pure rendering of one field-value block -- no I/O, so the exact
+    same logic can compute both a dry-run line count (deciding whether
+    the *full* field list fits before committing to rendering it,
+    `edit_resource_draft`'s own pagination fit-check) and the real
+    lines actually written, for either the whole field list or a single
+    page's worth, without the two ever disagreeing on height.
+
+    `selected` is matched by identity (`f is selected`), not position --
+    a page-scoped call and a full-list call have different valid index
+    ranges for "the selected field," so identity is the only primitive
+    that works correctly for both without the caller reinterpreting an
+    index per call."""
+    lines: list[str] = []
+    sectioned = any(f.section is not None for f in fields)
+    previous_section = _NO_SECTION_YET
+    for f in fields:
+        if sectioned and f.section != previous_section:
+            # Same "uppercased, bold, METADATA_COLOR" heading `menu_grid`
+            # already uses for its own section titles, so a field
+            # grouped this way reads as one continuous section rather
+            # than two independently-styled halves of the same group.
+            # No blank line before it (Codex review, PR #230): on a
+            # real dense, sectioned screen at 80x24, that line alone was
+            # enough to push the value list past the terminal's own
+            # height on its own, before any menu content was even
+            # considered. The bold uppercase heading is still a strong
+            # enough visual break on its own without it.
+            if f.section is not None:
+                lines.append(colored(f.section.upper(), fg_color=METADATA_COLOR, bold=True))
+            previous_section = f.section
+        value = sanitize_text(f.render(draft))
+        is_selected = f is selected
+        # One colored() call, not marker/label separately -- two calls
+        # would insert an SGR reset between "> " and the label text,
+        # splitting what should read as one contiguous highlighted run.
+        marker = "> " if is_selected else "  "
+        prefix = colored(
+            f"{marker}{f.label}", fg_color=accent_color if is_selected else LABEL_COLOR, bold=is_selected,
+        )
+        # Dogfood report: a long field value (a free-text description,
+        # most often) used to print as one raw unwrapped line regardless
+        # of terminal width. Wrapped here, hanging-indented to align
+        # under where the value starts on line one, rather than every
+        # field growing an unconditional second "Label:\nvalue" line the
+        # way a mail body's own reflow block does -- this screen is
+        # dozens of short one-line fields for every one that's ever
+        # actually long, and forcing every field onto two lines would
+        # double this screen's height for no reason.
+        label_width = display_width(f"{marker}{f.label}: ")
+        available = max(1, terminal_width - label_width)
+        value_lines = wrap_to_width(value, available) or [""]
+        val_color = 252 if is_selected else MUTED_COLOR
+        lines.append(f"{prefix}: {colored(value_lines[0], fg_color=val_color)}")
+        indent = " " * label_width
+        for continuation in value_lines[1:]:
+            lines.append(f"{indent}{colored(continuation, fg_color=val_color)}")
+    return lines
+
+
+def _build_menu_line(
+    fields: list[FieldSpec],
+    *,
+    save: Callable[[Draft], Awaitable[Any]] | None,
+    save_menu_text: str | None,
+    back_menu_text: str,
+    back_brief: str,
+    description_level: str,
+    session: Session,
+    fixed_lines: int,
+) -> str:
+    """Builds the hotkey/menu row for one field subset (the whole
+    screen, or one page's worth once `edit_resource_draft` has
+    paginated) -- the same three-tier descriptive/sectioned-compact/
+    flat fallback this screen has always used, extracted into its own
+    function so the fit-check that decides whether to paginate at all
+    and the real render can never disagree about what the menu row
+    actually looks like.
+
+    `fixed_lines` is everything else already committed to on screen
+    (title/preamble/field values/Ctrl-H hint/prompt line, plus the
+    page-position hint once paginated) -- this function only ever
+    budgets its own height against what's left, it never recomputes
+    anyone else's."""
+    menu_entries = [MenuEntry(label=f.menu_text, brief=f.brief, detailed=f.help) for f in fields]
+    if save is not None:
+        menu_entries.append(MenuEntry(label=save_menu_text, brief=_SAVE_BRIEF))
+    menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
+    # Grouped into the same sections the value list above just used
+    # (empty title = "no heading," `menu_grid`'s own existing
+    # convention) -- a sectioned screen's menu row gets real per-section
+    # columns from `menu_grid` for free, not just a heading; an
+    # unsectioned screen collapses back to today's single flat group,
+    # identical entries and order. [S]ave/[B]ack ride along at the end
+    # of the *last* group -- the same "trails the content it acts on"
+    # position every other menu row in this codebase already puts its
+    # own exit/commit actions in, not a section of their own.
+    menu_sections: list[tuple[str, list[MenuEntry]]] = []
+    current_title: object = _NO_SECTION_YET
+    for f, entry in zip(fields, menu_entries):
+        section_title = f.section if f.section is not None else ""  # menu_grid uppercases its own titles
+        if section_title != current_title:
+            menu_sections.append((section_title, []))
+            current_title = section_title
+        menu_sections[-1][1].append(entry)
+    if not menu_sections:
+        menu_sections.append(("", []))
+    menu_sections[-1][1].extend(menu_entries[len(fields):])
+    # Dogfood report: on an ordinary terminal, this screen's own
+    # sectioned value list above already leaves no height budget for
+    # the *descriptive* menu_grid form below to fit (see that form's
+    # own height-fit check) -- meaning a sectioned screen's menu row
+    # fell all the way back to this compact one, which had no grouping
+    # concept at all: exactly the "chaotic options list" complaint that
+    # prompted sectioning in the first place, just moved from the value
+    # list down to here. Built from the same `menu_sections` the
+    # descriptive form uses instead of one flat `action_bar` call
+    # whenever there's more than one real group -- an unsectioned
+    # screen (`len(menu_sections) == 1`) renders byte-for-byte as
+    # before.
+    flat_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
+    menu_line = flat_menu_line
+    if len(menu_sections) > 1:
+        compact_lines: list[str] = []
+        for section_title, entries in menu_sections:
+            if section_title:
+                compact_lines.append(colored(section_title.upper(), fg_color=METADATA_COLOR, bold=True))
+            compact_lines.append(action_bar([e.label for e in entries], width=session.terminal_width))
+        sectioned_compact_menu_line = "\r\n".join(compact_lines)
+        # Codex review (PR #229): unlike the old always-one-line flat
+        # form, a sectioned compact row grows with the section count --
+        # easily enough on its own to push a real 24-row terminal's
+        # field list off the top before `Choice:` ever appears, the
+        # exact scroll-off regression the descriptive-form check below
+        # already guards against. Reuses that same budget rather than a
+        # separate one -- if even the sectioned compact row doesn't
+        # fit, fall all the way back to the flat one line. (If *that*
+        # doesn't fit either, `edit_resource_draft`'s own caller-side
+        # fit-check is what catches it and paginates instead -- this
+        # function itself has no further fallback below flat.)
+        sectioned_compact_lines = sectioned_compact_menu_line.count("\r\n") + 1
+        if fixed_lines + sectioned_compact_lines <= session.terminal_height:
+            menu_line = sectioned_compact_menu_line
+    if description_level != "off":
+        # `menu_grid` always renders one entry per line, even with
+        # descriptions off -- unlike `action_bar`'s packed single-line
+        # row, that's not a byte-for-byte-compatible substitute at this
+        # level. Falls back to the compact row, regardless of
+        # preference, whenever the descriptive form wouldn't fit this
+        # terminal at all -- descriptions are a nice-to-have, being able
+        # to see the whole screen is the point.
+        descriptive_menu_line = menu_grid(
+            menu_sections,
+            width=session.terminal_width,
+            height=session.terminal_height,
+            description_level=description_level,
+        )
+        descriptive_lines = descriptive_menu_line.count("\r\n") + 1
+        if fixed_lines + descriptive_lines <= session.terminal_height:
+            menu_line = descriptive_menu_line
+    return menu_line
+
+
 async def edit_resource_draft(
     session: Session,
     lane: DatabaseLane,
@@ -223,13 +388,27 @@ async def edit_resource_draft(
     cancellation timing elsewhere in this rollout). Field rows render
     through `menu_grid` with each `FieldSpec.brief`/`.help` as the
     description text; a field with neither shows only its hotkey label,
-    identical to `description_level="off"`. Unlike the paginated picker
-    screens, this one has no fallback if the whole thing doesn't fit --
-    every field's current-value line plus the (now much taller,
-    descriptive) menu row must all be visible at once, or the top of
-    the screen scrolls off (dogfood-reported regression). The menu row
-    falls back to the compact form, regardless of preference, whenever
-    the descriptive form wouldn't fit this terminal at all.
+    identical to `description_level="off"`. The menu row falls back to
+    the compact form, regardless of preference, whenever the
+    descriptive form wouldn't fit this terminal at all.
+
+    Codex-review-prompted (a dense, sectioned screen genuinely doesn't
+    fit a real 24-row terminal no matter how the menu row degrades):
+    when the *full* field list, at whichever menu-row tier it lands on,
+    doesn't fit `session.terminal_height`, a *sectioned* screen
+    (`FieldSpec.section` set) paginates -- one section per page, `Page
+    Up`/`Page Down` (already fully decoded by `read_editor_key`, and
+    previously dead-ending here at the plain-key bell-reject) cycling
+    between them and wrapping at either end, same convention as
+    cursor-nav Up/Down. Every hotkey keeps working regardless of which
+    page is currently shown -- typing a field's own letter always jumps
+    straight to it (and switches to its page so the caller sees what
+    they just changed), the same "every hotkey keeps working exactly as
+    before" guarantee cursor-nav itself already established. `[S]ave`/
+    `[B]ack` stay reachable from every page, not gated behind reaching a
+    particular one. An *unsectioned* screen has no natural page
+    boundary and keeps exactly today's behavior: if it doesn't fit, the
+    top of the screen scrolls off, same as always.
 
     `redraw_in_place` (dogfood feature request, `netbbs.net.
     redraw_preference`) clears the terminal on every redraw instead of
@@ -285,6 +464,12 @@ async def edit_resource_draft(
     initial_draft = dict(draft)
     selected: int | None = None
     redraw_count = 0
+    # Computed once -- doesn't depend on `draft`. Order-preserving dedup
+    # (`dict.fromkeys`) rather than `set()`: page order must match the
+    # order sections first appear in `fields`, the same order the value
+    # list and menu row already group by.
+    section_names: list[str] = list(dict.fromkeys(f.section for f in fields if f.section is not None))
+    current_page: str | None = section_names[0] if section_names else None
     while True:
         await session.write_line(
             "\r\n" + screen_title(
@@ -295,159 +480,76 @@ async def edit_resource_draft(
         preamble_text = preamble(draft) if callable(preamble) else preamble
         if preamble_text:
             await session.write_line(preamble_text)
-        field_line_count = 0
+
         sectioned = any(f.section is not None for f in fields)
-        previous_section = _NO_SECTION_YET
-        for i, f in enumerate(fields):
-            if sectioned and f.section != previous_section:
-                # Same "uppercased, bold, METADATA_COLOR" heading
-                # `menu_grid` already uses for its own section titles
-                # (netbbs.rendering.layout.menu_grid), so a field grouped
-                # this way reads as one continuous section rather than
-                # two independently-styled halves of the same group.
-                # Gated on `sectioned`, not just "did the section value
-                # change" -- a screen where every field leaves `section`
-                # unset must render with zero extra lines, byte-for-byte
-                # as before this parameter existed.
-                #
-                # Codex review (PR #230): no blank line before the
-                # heading (dropped here, was its own `write_line("")`
-                # call) -- on a real 11-field, 4-section screen like
-                # Board/Area/Channel at 80x24, that line alone was
-                # enough to push the value list past the terminal's own
-                # height, leaving no budget for *any* menu row content
-                # underneath, however compact -- the exact "top of the
-                # field list scrolls off" regression this whole
-                # height-budget system exists to prevent. The bold
-                # uppercase heading is still a strong enough visual
-                # break on its own without it.
-                if f.section is not None:
-                    await session.write_line(colored(f.section.upper(), fg_color=METADATA_COLOR, bold=True))
-                    field_line_count += 1
-                previous_section = f.section
-            value = sanitize_text(f.render(draft))
-            # One colored() call, not marker/label separately -- two
-            # calls would insert an SGR reset between "> " and the
-            # label text, splitting what should read as one contiguous
-            # highlighted run.
-            marker = "> " if i == selected else "  "
-            prefix = colored(
-                f"{marker}{f.label}", fg_color=accent_color if i == selected else LABEL_COLOR,
-                bold=(i == selected),
-            )
-            # Dogfood report: a long field value (a free-text
-            # description, most often) used to print as one raw
-            # unwrapped line regardless of terminal width. Wrapped here,
-            # hanging-indented to align under where the value starts on
-            # line one, rather than every field growing an unconditional
-            # second "Label:\nvalue" line the way a mail body's own
-            # reflow block does -- this screen is dozens of short
-            # one-line fields for every one that's ever actually long,
-            # and forcing every field onto two lines would double this
-            # screen's height for no reason.
-            label_width = display_width(f"{marker}{f.label}: ")
-            available = max(1, session.terminal_width - label_width)
-            value_lines = wrap_to_width(value, available) or [""]
-            field_line_count += len(value_lines)
-            val_color = 252 if i == selected else MUTED_COLOR
-            await session.write_line(f"{prefix}: {colored(value_lines[0], fg_color=val_color)}")
-            indent = " " * label_width
-            for continuation in value_lines[1:]:
-                await session.write_line(f"{indent}{colored(continuation, fg_color=val_color)}")
-        menu_entries = [MenuEntry(label=f.menu_text, brief=f.brief, detailed=f.help) for f in fields]
-        if save is not None:
-            menu_entries.append(MenuEntry(label=save_menu_text, brief=_SAVE_BRIEF))
+        selected_field = fields[selected] if selected is not None else None
         back_brief = _BACK_BRIEF if save is not None else _BACK_BRIEF_IMMEDIATE
-        menu_entries.append(MenuEntry(label=back_menu_text, brief=back_brief))
-        # Grouped into the same sections the value list above just used
-        # (empty title = "no heading," `menu_grid`'s own existing
-        # convention) -- a sectioned screen's menu row gets real
-        # per-section columns from `menu_grid` for free, not just a
-        # heading; an unsectioned screen collapses back to today's
-        # single flat group, identical entries and order. [S]ave/[B]ack
-        # ride along at the end of the *last* group -- the same "trails
-        # the content it acts on" position every other menu row in this
-        # codebase already puts its own exit/commit actions in, not a
-        # section of their own.
-        menu_sections: list[tuple[str, list[MenuEntry]]] = []
-        current_title: object = _NO_SECTION_YET
-        for f, entry in zip(fields, menu_entries):
-            title = f.section if f.section is not None else ""  # menu_grid uppercases its own titles
-            if title != current_title:
-                menu_sections.append((title, []))
-                current_title = title
-            menu_sections[-1][1].append(entry)
-        if not menu_sections:
-            menu_sections.append(("", []))
-        menu_sections[-1][1].extend(menu_entries[len(fields):])
-        # Every other budget below measures against this same total --
-        # `menu_description_level`'s real default is "brief", not "off"
-        # (every caller who hasn't touched the setting already has it
-        # on), and this screen has no pagination to fall back on the
-        # way picker.py does -- the *whole* field list plus whichever
-        # menu row is chosen must fit, or the top of the field list
-        # scrolls off (dogfood-reported regression).
-        fixed_lines = (
+        # Everything on screen except the field values and the menu row
+        # itself -- both vary depending on whether this redraw ends up
+        # paginated, everything here doesn't. The Ctrl-H hint is gated
+        # on the *full* `fields` list even once paginated (not the
+        # current page's own fields): Ctrl-H's own help screen always
+        # covers every field regardless of page (see `_show_field_help`
+        # below), so gating the hint on a per-page subset would make it
+        # flicker on/off across pages for no reason a caller could
+        # predict, and Ctrl-H itself would still work fine even on a
+        # page whose hint is hidden.
+        base_fixed_lines = (
             (3 if subtitle else 2)  # screen_title: title [+ subtitle] + underline
             + (preamble_text.count("\r\n") + 1 if preamble_text else 0)
-            + field_line_count  # every field's own value lines, wrapped ones included
             + 1  # blank line before the menu row
             + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
             + 1  # "Choice: " prompt line
         )
-        # Dogfood report: on an ordinary terminal, this screen's own
-        # sectioned value list above already leaves no height budget for
-        # the *descriptive* menu_grid form below to fit (see that
-        # form's own height-fit check) -- meaning a sectioned screen's
-        # menu row fell all the way back to this compact one, which had
-        # no grouping concept at all: exactly the "chaotic options list"
-        # complaint that prompted sectioning in the first place, just
-        # moved from the value list down to here. Built from the same
-        # `menu_sections` the descriptive form uses instead of one flat
-        # `action_bar` call whenever there's more than one real group --
-        # an unsectioned screen (`len(menu_sections) == 1`) renders
-        # byte-for-byte as before.
-        flat_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
-        menu_line = flat_menu_line
-        if len(menu_sections) > 1:
-            compact_lines: list[str] = []
-            for title, entries in menu_sections:
-                if title:
-                    compact_lines.append(colored(title.upper(), fg_color=METADATA_COLOR, bold=True))
-                compact_lines.append(action_bar([e.label for e in entries], width=session.terminal_width))
-            sectioned_compact_menu_line = "\r\n".join(compact_lines)
-            # Codex review (PR #229): unlike the old always-one-line flat
-            # form, a sectioned compact row grows with the section count
-            # -- Board/Area/Channel's four sections add a heading plus a
-            # packed row each, easily enough on its own to push a real
-            # 24-row terminal's field list off the top before `Choice:`
-            # ever appears, the exact scroll-off regression the
-            # descriptive-form check below already guards against.
-            # Reuses that same budget rather than a separate one -- if
-            # even the sectioned compact row doesn't fit, fall all the
-            # way back to the flat one line, which always did (and still
-            # does) fit within it.
-            sectioned_compact_lines = sectioned_compact_menu_line.count("\r\n") + 1
-            if fixed_lines + sectioned_compact_lines <= session.terminal_height:
-                menu_line = sectioned_compact_menu_line
-        if description_level != "off":
-            # `menu_grid` always renders one entry per line, even with
-            # descriptions off -- unlike `action_bar`'s packed single-
-            # line row, that's not a byte-for-byte-compatible
-            # substitute at this level. Falls back to the compact row,
-            # regardless of preference, whenever the descriptive form
-            # wouldn't fit this terminal at all -- descriptions are a
-            # nice-to-have, being able to see the whole screen is the
-            # point.
-            descriptive_menu_line = menu_grid(
-                menu_sections,
-                width=session.terminal_width,
-                height=session.terminal_height,
-                description_level=description_level,
+
+        # The "full" candidate is computed unconditionally every redraw
+        # -- not cached -- so a mid-session terminal resize (NAWS
+        # renegotiation) can un-paginate a screen that no longer needs
+        # it, or paginate one that now does, the same way this screen's
+        # existing menu-tier upgrades already treat terminal_width/
+        # height as live values throughout. Cost is negligible (at most
+        # a few dozen fields, pure, no I/O) and, in the common case
+        # (still fits), these are exactly the values rendered below --
+        # no separate/duplicate computation, no risk of the fit check
+        # and the real render ever disagreeing.
+        full_lines = _field_value_lines(
+            fields, draft, selected=selected_field, accent_color=accent_color, terminal_width=session.terminal_width,
+        )
+        full_menu_line = _build_menu_line(
+            fields, save=save, save_menu_text=save_menu_text, back_menu_text=back_menu_text, back_brief=back_brief,
+            description_level=description_level, session=session,
+            fixed_lines=base_fixed_lines + len(full_lines),
+        )
+        fits = (
+            base_fixed_lines + len(full_lines) + (full_menu_line.count("\r\n") + 1) <= session.terminal_height
+        )
+        # Only a *sectioned* screen has a natural page boundary to fall
+        # back to -- an unsectioned screen that doesn't fit keeps
+        # exactly today's behavior (the top of the screen scrolls off);
+        # see this function's own docstring for why that's an accepted,
+        # unchanged limitation rather than something this also fixes.
+        paginated = sectioned and not fits
+
+        if not paginated:
+            value_lines = full_lines
+            menu_line = full_menu_line
+            page_hint: str | None = None
+        else:
+            page_fields = [f for f in fields if f.section == current_page]
+            value_lines = _field_value_lines(
+                page_fields, draft, selected=selected_field, accent_color=accent_color,
+                terminal_width=session.terminal_width,
             )
-            descriptive_lines = descriptive_menu_line.count("\r\n") + 1
-            if fixed_lines + descriptive_lines <= session.terminal_height:
-                menu_line = descriptive_menu_line
+            page_number = section_names.index(current_page) + 1
+            page_hint = f"(Section {page_number} of {len(section_names)} -- PgUp/PgDn to switch)"
+            menu_line = _build_menu_line(
+                page_fields, save=save, save_menu_text=save_menu_text, back_menu_text=back_menu_text,
+                back_brief=back_brief, description_level=description_level, session=session,
+                fixed_lines=base_fixed_lines + len(value_lines) + 1,  # +1: page_hint's own line
+            )
+
+        for line in value_lines:
+            await session.write_line(line)
         await session.write_line(f"\r\n{menu_line}")
         if any(f.help for f in fields):
             # Only hinted when at least one field actually has help
@@ -456,6 +558,8 @@ async def edit_resource_draft(
             # "does not need to cover every existing feature on day
             # one" scope extends to which screens mention it at all).
             await session.write_line(colored("(Ctrl-H for help on these fields)", fg_color=MUTED_COLOR))
+        if page_hint is not None:
+            await session.write_line(colored(page_hint, fg_color=MUTED_COLOR))
         if redraw_hint and redraw_count >= 1:
             await session.write_line(
                 colored(
@@ -467,10 +571,30 @@ async def edit_resource_draft(
         key = await _read_navigable_key(session)
 
         if key.kind == EditorKeyKind.UP:
-            selected = len(fields) - 1 if selected is None else (selected - 1) % len(fields)
+            if paginated:
+                page_indices = [i for i, f in enumerate(fields) if f.section == current_page]
+                pos = page_indices.index(selected) if selected in page_indices else len(page_indices)
+                selected = page_indices[(pos - 1) % len(page_indices)]
+            else:
+                selected = len(fields) - 1 if selected is None else (selected - 1) % len(fields)
             continue
         if key.kind == EditorKeyKind.DOWN:
-            selected = 0 if selected is None else (selected + 1) % len(fields)
+            if paginated:
+                page_indices = [i for i, f in enumerate(fields) if f.section == current_page]
+                pos = page_indices.index(selected) if selected in page_indices else -1
+                selected = page_indices[(pos + 1) % len(page_indices)]
+            else:
+                selected = 0 if selected is None else (selected + 1) % len(fields)
+            continue
+        if paginated and key.kind in (EditorKeyKind.PAGE_UP, EditorKeyKind.PAGE_DOWN):
+            page_pos = section_names.index(current_page)
+            step = 1 if key.kind == EditorKeyKind.PAGE_DOWN else -1
+            current_page = section_names[(page_pos + step) % len(section_names)]
+            # Same "any working-set change drops the highlight" precedent
+            # netbbs.net.picker.pick_item's own paging already established
+            # -- a `selected` index into the *previous* page's fields has
+            # no meaningful counterpart on the new one.
+            selected = None
             continue
         if key.kind in (EditorKeyKind.LEFT, EditorKeyKind.RIGHT):
             # Deliberately silent, not a bell-and-reject: pressing
@@ -522,8 +646,11 @@ async def edit_resource_draft(
             await fields[selected].prompt(session, lane, draft)
             continue
         if key.kind != EditorKeyKind.CHAR or key.char is None:
-            # Backspace/Delete/Tab/Escape/Home/End/Page Up/Page Down --
-            # nothing was echoed for these either.
+            # Backspace/Delete/Tab/Escape/Home/End -- nothing was echoed
+            # for these either. Page Up/Page Down reach here too, still
+            # a no-op, whenever this redraw isn't paginated (the branch
+            # above only intercepts them when it is) -- an unsectioned
+            # or already-fitting screen has no page to switch to.
             await session.write("\a")
             continue
 
@@ -558,6 +685,14 @@ async def edit_resource_draft(
             await session.write(reject_unhandled_key(choice))
             continue
         selected = field_index
+        if paginated and fields[field_index].section != current_page:
+            # Every hotkey keeps working regardless of which page is
+            # currently shown (cursor-nav's own established "purely
+            # additive, nothing existing stops working" precedent) --
+            # jump to the field's own page too, or the caller would type
+            # a real hotkey, watch a field they can't see get edited, and
+            # see no visible change on the next redraw.
+            current_page = fields[field_index].section
         await session.write_line("")
         await fields[field_index].prompt(session, lane, draft)
 
