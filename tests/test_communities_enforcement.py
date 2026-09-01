@@ -27,7 +27,7 @@ from netbbs.communities import create_community, get_effective_min_write_level
 from netbbs.files.areas import create_file_area
 from netbbs.net.chat_flow import _authorize_channel_entry
 from netbbs.net.file_flow import has_visible_areas
-from netbbs.net.login_flow import _has_visible_boards
+from netbbs.net.board_flow import _has_visible_boards
 from netbbs.storage.database import Database
 
 

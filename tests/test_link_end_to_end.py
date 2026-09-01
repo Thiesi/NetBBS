@@ -1058,7 +1058,7 @@ def test_linked_channel_message_sent_via_the_live_interactive_chat_path_reaches_
     remote node still materializes/displays the message after an ordinary
     sync pass. The dialer's own `_chat_loop` call is given a real
     `link_context`, so a plain typed line queues its own `channel_message`
-    the same way `netbbs.net.login_flow._compose_new_post`'s board-post
+    the same way `netbbs.net.board_flow._compose_new_post`'s board-post
     path already does for boards."""
     dialer_identity = bootstrap_node_identity("dialer")
     seed_node = LinkNode(identity=bootstrap_node_identity("seed"))

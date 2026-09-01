@@ -34,7 +34,7 @@ from netbbs.net.chat_flow import (
     _render_scrollback_message,
 )
 from netbbs.net.file_flow import _show_area
-from netbbs.net.login_flow import _show_board
+from netbbs.net.board_flow import _show_board
 from netbbs.net.picker import pick_item
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
