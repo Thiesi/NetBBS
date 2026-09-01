@@ -4,7 +4,7 @@ domain.py's broad domain-formula coverage. This door has no other
 presentation-layer tests (matches Retro Trivia's own established
 boundary: domain logic gets real regression coverage, the terminal-
 driving `main()`/rendering glue doesn't) -- these exist specifically
-because each pins a real bug Codex caught across PR #239/#240/#241's
+because each pins a real bug Codex caught across PR #239/#240/#241/#242's
 review rounds, not a routine rendering check.
 
 Loaded directly from its file path, same reasoning as test_war_dialer_
@@ -15,12 +15,11 @@ subprocess, not an ordinarily-imported library module.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import re
 import sys
 from pathlib import Path
-
-import pytest
 
 _WAR_DIALER_PATH = (
     Path(__file__).resolve().parent.parent / "src" / "netbbs" / "doors" / "bundled" / "war_dialer.py"
@@ -39,6 +38,19 @@ def _load_war_dialer():
 
 
 wd = _load_war_dialer()
+
+
+def _buffered_stdin(read_fd: int) -> io.TextIOWrapper:
+    """Wraps a raw pipe fd the same way real `sys.stdin` is wrapped
+    (TextIOWrapper over a BufferedReader over a FileIO), not a bare
+    unbuffered FileIO. Codex review (PR #242): a bare unbuffered FileIO
+    has no `.buffer` attribute, so a test built on one would fail with
+    an unrelated `AttributeError` -- not a meaningful assertion failure
+    -- if `read_key()` ever regressed back to `sys.stdin.buffer.read(1)`
+    (the exact PR #241 bug these tests exist to guard against). Using
+    the same layered shape as production stdin means a regression there
+    still fails these tests for the right reason."""
+    return io.TextIOWrapper(io.BufferedReader(io.FileIO(read_fd, closefd=False)))
 
 
 def test_draw_help_never_overflows_its_own_declared_width():
@@ -85,15 +97,16 @@ def test_press_any_key_consumes_a_full_arrow_key_sequence():
 
     session = _FakeSession()
     original_read_key = wd.read_key
-    original_has_pending = wd._stdin_has_pending_byte
+    original_lookahead = wd._read_key_with_timeout
     try:
         wd.read_key = session.read
         # A real CSI sequence's bytes are already sitting in the input
         # buffer by the time press_any_key() checks (PR #240 fix below)
         # -- true here since this FakeSession's whole sequence is
         # scripted up front, not arriving byte-by-byte from a real
-        # socket.
-        wd._stdin_has_pending_byte = lambda timeout: True
+        # socket, so the lookahead always finds the next byte
+        # immediately.
+        wd._read_key_with_timeout = lambda timeout: session.read()
         written: list[str] = []
         original_out = wd.out
         try:
@@ -103,7 +116,7 @@ def test_press_any_key_consumes_a_full_arrow_key_sequence():
             wd.out = original_out
     finally:
         wd.read_key = original_read_key
-        wd._stdin_has_pending_byte = original_has_pending
+        wd._read_key_with_timeout = original_lookahead
 
     # The whole 3-byte sequence (ESC, '[', 'C') must be consumed by
     # press_any_key() itself -- exactly 3 read_key() calls, leaving the
@@ -120,25 +133,28 @@ def test_press_any_key_does_not_block_on_a_standalone_escape():
     # coming, then silently consumed whatever the caller typed *next*
     # (their real following menu choice) as if it might be the '[' of a
     # CSI sequence. Confirms the fix: when no further byte is available
-    # (_stdin_has_pending_byte stubbed False, matching a real standalone
-    # Escape with nothing queued behind it), press_any_key() must return
-    # after exactly one read_key() call, never attempting a second.
-    inputs = iter([wd.ESC])
+    # (_read_key_with_timeout stubbed to return None, matching a real
+    # standalone Escape with nothing queued behind it), press_any_key()
+    # must return after exactly one read_key() call, never attempting a
+    # second.
+    key_calls = 0
+    lookahead_calls = 0
 
-    class _FakeSession:
-        def __init__(self):
-            self.calls = 0
+    def _read_key():
+        nonlocal key_calls
+        key_calls += 1
+        return wd.ESC
 
-        def read(self):
-            self.calls += 1
-            return next(inputs)
+    def _lookahead(timeout):
+        nonlocal lookahead_calls
+        lookahead_calls += 1
+        return None
 
-    session = _FakeSession()
     original_read_key = wd.read_key
-    original_has_pending = wd._stdin_has_pending_byte
+    original_lookahead = wd._read_key_with_timeout
     try:
-        wd.read_key = session.read
-        wd._stdin_has_pending_byte = lambda timeout: False
+        wd.read_key = _read_key
+        wd._read_key_with_timeout = _lookahead
         written: list[str] = []
         original_out = wd.out
         try:
@@ -148,9 +164,10 @@ def test_press_any_key_does_not_block_on_a_standalone_escape():
             wd.out = original_out
     finally:
         wd.read_key = original_read_key
-        wd._stdin_has_pending_byte = original_has_pending
+        wd._read_key_with_timeout = original_lookahead
 
-    assert session.calls == 1
+    assert key_calls == 1
+    assert lookahead_calls == 1
 
 
 def test_read_key_does_not_over_consume_from_a_real_pipe():
@@ -158,19 +175,24 @@ def test_read_key_does_not_over_consume_from_a_real_pipe():
     # above: the *previous* read_key() went through sys.stdin.buffer
     # (a BufferedReader), which can pull more than the one requested
     # byte from the OS pipe into its own internal buffer -- invisible
-    # to select()-based readiness checks, which only see the raw fd.
-    # This is what the stubbed-readiness tests above can't catch (Codex
-    # called that out specifically): they prove press_any_key()'s own
-    # branching logic is right, but not that read_key() itself leaves
-    # unread bytes actually unread. Exercises the real read_key()
-    # against a real OS pipe -- unlike select(), os.pipe()/os.read()
-    # behave the same on Windows and POSIX, so this test needs no
-    # platform guard.
+    # to a readiness check that only sees the raw fd. This is what the
+    # stubbed-lookahead tests above can't catch (Codex called that out
+    # specifically): they prove press_any_key()'s own branching logic is
+    # right, but not that read_key() itself leaves unread bytes actually
+    # unread. Exercises the real read_key() against a real OS pipe,
+    # wrapped the same layered (buffered) way real stdin is -- Codex's
+    # own follow-up finding on the *previous* version of this test: a
+    # bare unbuffered fixture can't actually demonstrate the prefetch
+    # bug this test exists to guard against, since `read_key()`
+    # regressing to `sys.stdin.buffer.read(1)` would just crash with an
+    # unrelated AttributeError instead of failing the real assertion
+    # below. os.pipe()/os.read() behave the same on Windows and POSIX,
+    # so this test needs no platform guard.
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"AB")
     real_stdin = sys.stdin
     try:
-        sys.stdin = os.fdopen(read_fd, "rb", buffering=0, closefd=False)
+        sys.stdin = _buffered_stdin(read_fd)
         key = wd.read_key()
     finally:
         sys.stdin = real_stdin
@@ -184,50 +206,80 @@ def test_read_key_does_not_over_consume_from_a_real_pipe():
     assert remaining == b"B"
 
 
-def test_stdin_has_pending_byte_survives_a_windows_style_oserror():
-    # Codex review (PR #241), a real bug: select.select() only accepts
-    # sockets on Windows, not the pipe/console handle sys.stdin actually
-    # is for this door -- raising OSError there instead of just failing
-    # to detect readiness, which used to crash the whole door the moment
-    # a caller dismissed a pause with a standalone Escape. Confirms the
+def test_read_key_with_timeout_survives_a_windows_style_oserror():
+    # Codex review (PR #241): select.select() only accepts sockets on
+    # Windows, not the pipe/console handle sys.stdin actually is for
+    # this door -- raising OSError there instead of just failing to
+    # detect readiness, which used to crash the whole door the moment a
+    # caller dismissed a pause with a standalone Escape. Confirms the
     # guard: with select.select() forced to behave the way it really
-    # does on Windows, _stdin_has_pending_byte() must return False
-    # (never propagate the exception), not fail the caller's own read.
+    # does on Windows, _read_key_with_timeout() must fall through to its
+    # own Windows poll path (not propagate the exception) and still find
+    # a byte that's genuinely there to read.
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"X")
+
     def _raise(*args, **kwargs):
         raise OSError("select() only accepts sockets on Windows")
 
     original_select = wd.select.select
+    real_stdin = sys.stdin
     try:
         wd.select.select = _raise
-        assert wd._stdin_has_pending_byte(0.01) is False
+        sys.stdin = _buffered_stdin(read_fd)
+        result = wd._read_key_with_timeout(1.0)
     finally:
         wd.select.select = original_select
+        sys.stdin = real_stdin
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert result == "X"
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason=(
-        "select.select() only accepts sockets on Windows, not a real pipe -- "
-        "this test exercises exactly the POSIX-only readiness check "
-        "_stdin_has_pending_byte() falls back to False without on Windows "
-        "(see test_stdin_has_pending_byte_survives_a_windows_style_oserror "
-        "above), so it cannot pass there by construction, not by a bug."
-    ),
-)
+def test_read_key_with_timeout_returns_none_when_nothing_arrives():
+    # Companion to the above: with select() forced to fail the same way
+    # (simulating Windows) and genuinely nothing written to the pipe,
+    # the Windows poll fallback must give up after its own timeout
+    # budget and return None -- not block forever, and not raise.
+    read_fd, write_fd = os.pipe()
+
+    def _raise(*args, **kwargs):
+        raise OSError("select() only accepts sockets on Windows")
+
+    original_select = wd.select.select
+    real_stdin = sys.stdin
+    try:
+        wd.select.select = _raise
+        sys.stdin = _buffered_stdin(read_fd)
+        result = wd._read_key_with_timeout(0.05)
+    finally:
+        wd.select.select = original_select
+        sys.stdin = real_stdin
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert result is None
+
+
 def test_press_any_key_consumes_full_csi_sequence_over_a_real_pipe():
-    # Codex review (PR #241): the strongest form of this regression
+    # Codex review (PR #241/#242): the strongest form of this regression
     # test -- exercises the REAL read_key() and REAL
-    # _stdin_has_pending_byte() together (no stubbing at all) against a
+    # _read_key_with_timeout() together (no stubbing at all) against a
     # real OS pipe, with a full right-arrow CSI sequence written in one
     # shot the way an actual terminal delivers it. This is the only way
-    # to actually catch a mismatch between what select() reports ready
-    # on the raw fd and what read_key() has already consumed -- the
-    # exact gap the previous (BufferedReader-based) read_key() had.
+    # to actually catch a mismatch between what the readiness check
+    # reports and what read_key() has already consumed -- the exact gap
+    # the previous (BufferedReader-based) read_key() had. Runs
+    # unconditionally, including on Windows: _read_key_with_timeout()'s
+    # own Windows poll fallback (verified directly against a real
+    # Windows pipe fd) means this no longer needs a platform skip the
+    # way its select()-only predecessor did.
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"\x1b[Cb")  # right-arrow, then a real next keystroke
     real_stdin = sys.stdin
     try:
-        sys.stdin = os.fdopen(read_fd, "rb", buffering=0, closefd=False)
+        sys.stdin = _buffered_stdin(read_fd)
         written: list[str] = []
         original_out = wd.out
         try:
