@@ -4292,17 +4292,29 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
             # bio is never touched, still fully readable (and editable)
             # via [E]dit bio.
             bio_lines = reflow(sanitize_text(d["bio"], allow_newlines=True), width=session.terminal_width).split("\n")
+            # Codex review (PR #238): resource_editor.py's height budget
+            # counts `preamble_text.count("\r\n")` -- entries joined at
+            # the *outer* "\r\n".join(lines) below -- not physical
+            # display rows. A bare "\n" joining several rows into one
+            # `lines` entry (as this used to do for both the preview
+            # itself and its truncation marker) is normalized to a real
+            # CRLF at the telnet transport boundary (see telnet.py's own
+            # write()), so it still *renders* as multiple rows on
+            # screen, but the budget math undercounts it as one. Every
+            # physical row is therefore its own top-level `lines` entry
+            # here, never joined internally with "\n" -- the only way
+            # the count stays honest regardless of how many rows a
+            # preview or its marker end up taking.
             if len(bio_lines) > _MAX_BIO_PREVIEW_LINES:
                 hidden = len(bio_lines) - _MAX_BIO_PREVIEW_LINES
-                lines.append("\n".join(bio_lines[:_MAX_BIO_PREVIEW_LINES]))
-                lines.append(
-                    colored(
-                        f"...({hidden} more line{'' if hidden == 1 else 's'} -- [E]dit bio to see the rest)",
-                        fg_color=MUTED_COLOR,
-                    )
-                )
+                lines.extend(bio_lines[:_MAX_BIO_PREVIEW_LINES])
+                marker_lines = reflow(
+                    f"...({hidden} more line{'' if hidden == 1 else 's'} -- [E]dit bio to see the rest)",
+                    width=session.terminal_width,
+                ).split("\n")
+                lines.extend(colored(line, fg_color=MUTED_COLOR) for line in marker_lines)
             else:
-                lines.append("\n".join(bio_lines))
+                lines.extend(bio_lines)
         else:
             lines.append(colored("(no bio set)", fg_color=MUTED_COLOR))
         lines.append("")
