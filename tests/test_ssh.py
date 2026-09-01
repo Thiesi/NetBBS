@@ -497,6 +497,49 @@ def test_ssh_pre_auth_banner_contains_no_ansi_escapes(db):
     assert "\x1b" not in banner
 
 
+def test_ssh_pre_auth_banner_strips_a_custom_ans_banners_full_escape_syntax(db):
+    # Codex review (PR #232): a SysOp's own custom `.ans` welcome
+    # banner is loaded verbatim and reaches this same pre-auth call
+    # site -- an earlier version of `strip_ansi` only handled the
+    # digit/`;`-parameter CSI sequences and bare cursor save/restore
+    # this codebase's own primitives happen to emit, missing classic
+    # ANSI-art constructs (private-mode CSI like cursor-hide, charset
+    # selection for box-drawing glyphs, OSC) real `.ans` files commonly
+    # use -- exactly the content most likely to need this fix, left
+    # unfixed by that narrower pattern.
+    from netbbs.net.welcome_banner import banner_path, set_welcome_banner_enabled
+
+    banner_path(db).write_bytes(
+        "\x1b[?25l\x1b(0custom banner\x1b(B\x1b]0;title\x07 art\x1b[m".encode("utf-8")
+    )
+    set_welcome_banner_enabled(db, True)
+    create_user(db, "alice", password="hunter2", user_level=10)
+    client = _BannerCapturingClient()
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(db, handler)
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                server.port,
+                username="alice",
+                password="hunter2",
+                known_hosts=None,
+                client_factory=lambda: client,
+            ):
+                pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    banner = "\n".join(client.banners)
+    assert "\x1b" not in banner
+    assert "custom banner art" in banner
+
+
 def test_ssh_pre_auth_banner_omits_the_registration_hint_when_registration_is_closed(db):
     from netbbs.config import RegistrationMode, set_registration_mode
 

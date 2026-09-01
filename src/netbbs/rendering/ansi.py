@@ -208,26 +208,41 @@ def reject_keystroke(count: int = 1) -> str:
     return ("\b \b" * count) + "\a"
 
 
-# Matches every sequence shape this module's own primitives can ever
-# emit: CSI ... final-byte (colored/fg/bg/BOLD/UNDERLINE/REVERSE/RESET/
-# clear_screen/clear_line/move_cursor/set_scroll_region/reset_scroll_
-# region all end in one letter after an optional numeric/`;`-separated
-# parameter list), and the two bare ESC+letter forms (save_cursor/
-# restore_cursor). Not a general-purpose ANSI parser (no charset-select
-# handling, unlike the similar private regex duplicated in
-# netbbs.doors.bundled's two door games, which parse arbitrary door
-# output rather than this module's own known-shape sequences) --
-# narrower on purpose, since stripping here only ever needs to undo
-# what this module itself can produce.
-_ANSI_ESCAPE_RE = re.compile(rf"{re.escape(CSI)}[0-9;]*[A-Za-z]|{re.escape(ESC)}[78]")
+# Codex review (PR #232): an earlier, narrower version of this pattern
+# only matched digit/semicolon-parameter CSI sequences and the bare
+# save/restore-cursor pair -- correct for everything this module's own
+# primitives can emit, but the real call site (a SysOp's own custom
+# `.ans` welcome/registration banner, loaded verbatim and passed
+# through this function too) can contain much richer classic ANSI-art
+# syntax that narrower pattern let straight through as literal bytes,
+# defeating the exact problem stripping exists to solve. Now a general
+# ECMA-48-shaped escape-sequence matcher, covering every form real
+# ANSI-art tooling (SyncTERM, TheDraw, ACiDDraw, ...) actually emits:
+#   - CSI ... final-byte, including private-mode markers like `?25l`
+#     (cursor hide/show) and colon-form parameters -- `[0-?]` covers
+#     the full parameter-byte range (digits, `;`, `:`, `<=>?`), not
+#     just digits/`;`;
+#   - OSC ... terminated by BEL or ST (window title, hyperlinks);
+#   - charset selection (`ESC ( 0` for DEC special graphics/box-drawing
+#     glyphs, `ESC ( B` back to ASCII, and the `)`/`*`/`+` G1-G3
+#     variants) -- extremely common in real ANSI art for line-drawing
+#     characters;
+#   - every other bare ESC+single-character form (save/restore cursor,
+#     RIS reset, index/reverse-index, ...), a catch-all rather than an
+#     enumerated list since the three cases above are already matched
+#     first by alternation order, leaving no ambiguity about what a
+#     bare ESC+printable-char pair remaining at this point could be.
+_ANSI_ESCAPE_RE = re.compile(
+    ESC + r"(?:\[[0-?]*[ -/]*[@-~]" r"|\][^\x07\x1b]*(?:\x07|\x1b\\)" r"|[()*+][A-Za-z0-9]" r"|[\x20-\x7e])"
+)
 
 
 def strip_ansi(text: str) -> str:
     """
-    Remove every ANSI/VT100 escape sequence this module's own
-    primitives can produce, leaving plain text -- for trusted,
-    already-composed output (e.g. a `colored()`/`gradient_text()`
-    banner) that needs to reach a display context which can't reliably
+    Remove every ANSI/VT100 escape sequence, leaving plain text -- for
+    trusted, already-composed output (e.g. a `colored()`/
+    `gradient_text()` banner, or a SysOp's own custom `.ans`-file
+    content) that needs to reach a display context which can't reliably
     render escape sequences at all, such as an SSH pre-auth banner
     (`SSH_MSG_USERAUTH_BANNER`, shown before any pty/terminal channel
     exists -- many clients route it through a display path that never
@@ -237,11 +252,11 @@ def strip_ansi(text: str) -> str:
     A different concern from `netbbs.rendering.sanitize.sanitize_text`,
     which defuses *untrusted* text by stripping only the introducing
     ESC byte -- enough to prevent untrusted content from ever forming a
-    sequence, but which would leave one of this module's own trusted
-    sequences as inert bracket-and-letter noise (`[38;5;208m`) rather
-    than clean text. Never apply this to untrusted text expecting it to
-    sanitize anything; it has no such guarantee for content this module
-    didn't produce.
+    sequence, but which would leave a real sequence as inert bracket-
+    and-letter noise (`[38;5;208m`) rather than clean text. Never apply
+    this to untrusted text expecting it to sanitize anything; it has no
+    such guarantee (it only ever removes complete, well-formed escape
+    sequences, not the injection risk a lone/malformed ESC byte poses).
     """
     return _ANSI_ESCAPE_RE.sub("", text)
 

@@ -4135,12 +4135,21 @@ from issue #83's real-user dogfood feedback before foundation issue #127:
   completes -- Telnet's can precede NEW-ENVIRON, and SSH's own pre-auth
   banner (asyncssh's `send_auth_banner`, sent from `begin_auth` before any
   session channel, and therefore any forwarded environment, exists at all)
-  has no client capability to read yet either -- so both always render the
-  same welcome-banner content at the safe 256-color depth; the later
-  profile diagnostic reports the real, negotiated result once available.
-  SSH shows this same pre-auth banner content regardless of authentication
-  outcome, since it is the only screen SSH ever gets before the protocol-
-  level handshake either succeeds into the authenticated session or fails.
+  has no client capability to read yet either. Telnet's pre-login banner
+  renders the same welcome-banner content at the safe 256-color depth; the
+  later profile diagnostic reports the real, negotiated result once
+  available. SSH's pre-auth banner (issue #203, dogfood report) sends the
+  same content as plain text with every ANSI/VT100 escape sequence
+  stripped instead -- `SSH_MSG_USERAUTH_BANNER` is shown during
+  authentication itself, and real clients (PuTTY confirmed) commonly route
+  it through a display path that never runs an ANSI parser over it at
+  all, dumping literal escape bytes rather than color regardless of depth
+  chosen; no color depth fixes a client that never interprets escapes at
+  this stage. SSH's own *post-auth* welcome screen is unaffected and
+  keeps full negotiated color, same as Telnet/web. SSH's pre-auth banner
+  is shown regardless of authentication outcome, since it is the only
+  screen SSH ever gets before the protocol-level handshake either
+  succeeds into the authenticated session or fails.
 
 This interleave does not change Phase 4's security dependencies or public-
 readiness gate. It applies the standing cadence between meaningful foundation
