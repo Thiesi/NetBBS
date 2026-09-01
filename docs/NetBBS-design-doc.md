@@ -3810,89 +3810,66 @@ concern in `netbbs.link.protocol` rather than folded into `netbbs.
 selfupdate`, which stays exactly as protocol-agnostic as its own docstring
 already declares.
 
-**4. Graceful drain of Link work during shutdown.** Today, `netbbs.__main__`
-tears down `link_sync_task` with a bare `.cancel()` the instant shutdown
-begins — no grace period at all, the one asymmetry with ordinary user-
-session shutdown, which already warns and waits before disconnecting
-anyone. A `SIGTERM` landing squarely mid-pass, mid-HTTP-call, aborts that
-specific request against whatever peer is on the other end with no chance
-to complete — a real (if narrow) asymmetry between how this project treats
-its own users and how it treats the peers it talks to. `run_link_sync`
-gains an optional `stop_event: asyncio.Event | None`, checked once at the
-top of the outer loop (before starting a new pass, not mid-pass —
-deliberately simple: passes are normally sub-second, so the value of
-checking more granularly inside one is marginal against the complexity of
-doing so) so a currently in-flight pass, including whatever HTTP call it's
-in the middle of, is always allowed to finish naturally. Shutdown sets the
-event, then `asyncio.wait_for`s the task against a bound — falling back
-to the pre-existing hard `.cancel()` only if that bound is exceeded (a
-pass stuck on an unreachable seed's own connect timeout, say), never
-removing the fallback, only making it the last resort instead of the
-first.
+**4. Graceful drain of Link work during shutdown.** `run_link_sync` accepts
+an optional `stop_event: asyncio.Event | None`, checked once at the top of
+the outer loop (before starting a new pass, not mid-pass — deliberately
+simple: passes are normally sub-second, so the value of checking more
+granularly inside one is marginal against the complexity of doing so) so a
+currently in-flight pass, including whatever HTTP call it's in the middle
+of, finishes naturally rather than being aborted mid-request against
+whatever peer is on the other end — the one asymmetry ordinary user-session
+shutdown didn't have, since that path already warns and waits before
+disconnecting anyone. Shutdown sets the event, then `asyncio.wait_for`s the
+task against `ShutdownConfig.background_task_drain_seconds` (5s default,
+a dedicated timer — not `graceful_delay_seconds`, which answers a
+different question, "how long does a *human* get to notice a shutdown
+warning before disconnection," and is already fully spent by the time
+teardown starts), falling back to a hard `.cancel()` only if that bound is
+exceeded (a pass stuck on an unreachable seed's own connect timeout, say).
 
-**Correction (real-world report, Codex-review-adjacent code review
-follow-up): that bound was originally `ShutdownConfig.graceful_delay_
-seconds` (60s default), reusing the one "how long is a graceful
-shutdown allowed to take" operator-facing number rather than adding a
-second timer — this was wrong, not just imprecise. `graceful_delay_
-seconds` answers a different question ("how long does a *human* get to
-notice a shutdown warning before disconnection"), already fully spent
-by the time teardown starts (a graceful shutdown's own countdown
-already ran to completion before `disconnect_all()`; an immediate
-shutdown never had one to spend at all, directly contradicting
-`ShutdownConfig`'s own documented "an immediate shutdown skips this
-wait entirely"). An operator's real Ctrl+C took about nine minutes to
-actually exit — traced to this reused 60s bound *and*, worse, to
-`daybreak_task`/`update_check_task`/`seed_refresh_task` below having no
-bound on their own cancellation-await at all (see the correction to
-"Explicitly out of scope" below). All four now share one dedicated,
-deliberately short `ShutdownConfig.background_task_drain_seconds` (5s
-default) instead.
+The loop's own trailing `await asyncio.sleep(interval_seconds)` is
+interruptible the same way: `stop_event`-provided callers wait on
+`stop_event.wait()` bounded by `asyncio.wait_for(..., timeout=
+interval_seconds)` in place of the plain sleep, waking immediately once
+shutdown signals rather than waiting out however much of
+`sync_interval_seconds` (default 300s) remains — an idle sleep has no
+in-flight work to protect, so cutting it short costs nothing the way
+interrupting a live HTTP call would. Callers that don't pass a
+`stop_event` (`None`, the default) still get the original unconditional
+`asyncio.sleep`, unchanged.
 
-The loop's own trailing `await asyncio.sleep(interval_seconds)` turned out
-to need the same treatment, contrary to this bullet's original assumption
-above that an immediate cancel there is harmless — harmless to *correctness*,
-yes, but not to shutdown *latency*: `sync_interval_seconds` defaults to
-300s, routinely dwarfing `background_task_drain_seconds` itself, and the
-node spends most of its time asleep between passes, not mid-pass. Leaving
-that sleep uninterrupted would have meant an ordinary shutdown — almost
-always landing during the sleep, not during a pass — silently waited out
-however much of the interval remained, then hard-cancelled anyway once
-`background_task_drain_seconds` ran out regardless, delivering neither a
-graceful finish nor a prompt exit. `stop_event`-provided callers now wait on `stop_
-event.wait()` bounded by `asyncio.wait_for(..., timeout=interval_seconds)`
-in place of the plain sleep, waking immediately once shutdown signals
-rather than waiting out the full interval; an idle sleep has no in-flight
-work to protect, so cutting it short costs nothing the way interrupting a
-live HTTP call would. Callers that don't pass a `stop_event` (`None`, the
-default) still get the original unconditional `asyncio.sleep`, unchanged.
-
-**Explicitly out of scope for this bullet**: `seed_refresh_task` (fetches
+`daybreak_task`/`update_check_task`/`seed_refresh_task` get a narrower
+treatment: none of them talks to a Link peer (`seed_refresh_task` fetches
 this project's own trusted release-hosting infrastructure, not a peer's
-Link endpoint — an abrupt cut has no peer-visible consequence and already
-retries on its own next-scheduled, forgiving 24h cadence) and `daybreak_
-task`/`update_check_task` (neither talks to a Link peer at all). Extending
-*graceful* draining (letting current work finish rather than aborting it)
-to those would be solving a problem none of them actually have — that
-part of this reasoning still holds.
-
-**Correction (same real-world report as above):** "no graceful-drain
-need" is not the same claim as "no bound needed on the cancellation
-wait," and the original text conflated them. All three of these tasks
-are still cancelled immediately, exactly as before — but `update_check_
-task`/`seed_refresh_task` both reach a blocking `urllib.request.urlopen`
-call via `asyncio.to_thread`, and cancelling the *awaiting* coroutine
-does not stop that underlying worker thread, which keeps running the
-blocking call to completion regardless (Python cannot forcibly abort a
-thread) — the shutdown teardown step that then directly `await`s the
-cancelled task had no ceiling of its own, so an unresponsive fetch there
-was a real, not hypothetical, way to hang shutdown independent of
-anything `link_sync_task` does. All three now share the same
-`background_task_drain_seconds` bound `link_sync_task` uses above, just
+Link endpoint, and already retries on its own forgiving 24h cadence), so
+*graceful* draining — letting current work finish rather than aborting
+it — would be solving a problem none of them actually has; all three are
+still cancelled immediately, exactly as before. But `update_check_task`/
+`seed_refresh_task` both reach a blocking `urllib.request.urlopen` call via
+`asyncio.to_thread`, and cancelling the *awaiting* coroutine does not stop
+that underlying worker thread, which keeps running the blocking call to
+completion regardless (Python cannot forcibly abort a thread) — the
+shutdown teardown step that then directly `await`s the cancelled task
+needs its own ceiling, or an unresponsive fetch there hangs shutdown
+independent of anything `link_sync_task` does. All three now share the
+same `background_task_drain_seconds` bound `link_sync_task` uses above,
 applied to the cancellation-*await* rather than to "let it finish
 first" — `daybreak_task` never needed this in practice (a bare
-`asyncio.sleep` always cancels promptly), but gets the same treatment
-for consistency, at zero real cost.
+`asyncio.sleep` always cancels promptly), but gets the same treatment for
+consistency, at zero real cost.
+
+**Known residual gap (Codex review, PR #228):** the bound above only
+covers `netbbs.__main__.run`'s own await of the task. The worker thread
+itself is not owned by asyncio and cannot be cancelled — verified by
+direct repro, it keeps running (bounded by `urlopen`'s own `timeout=30`,
+so tens of seconds, not indefinitely) even after teardown gives up
+waiting on it, and Python's interpreter-exit machinery
+(`concurrent.futures.thread`'s `atexit` hook) still joins every
+outstanding `ThreadPoolExecutor` worker before the process actually
+exits, regardless of this bound. A shutdown that looks prompt in the logs
+is not yet a guarantee the OS process has actually exited. See
+`docs/NetBBS-worklog.md` for the fuller mechanism and candidate fixes;
+unresolved as of this writing.
 
 **Closes issue #60.** Every acceptance criterion that issue names is now
 either implemented (this slice; §13.4/§13.7/§13.9/§13.10 before it) or an
