@@ -5113,10 +5113,108 @@ one well-known anchor) is ever wanted, that discovery/ranking layer
 would need to be built fresh for this model rather than reusing the
 async one — an accepted, deferred cost, not an oversight.
 
-Only the double-hop-vs-proxy fork is resolved by this entry — issue #168
-itself carries the remaining open acceptance criteria (bounded-resource
-limits, the pre-ship fallback experience, the rendezvous frame shape) and
-stays open for them.
+**Decision 2 (locked in) — bounded resource limits for live relay.** Modeled
+on, but distinct from, the two existing bound families this touches: each
+leg of a bridge is an ordinary `LinkRealtimeSession` (`netbbs.link.
+transport`), already governed by its own `REALTIME_DEFAULT_*` bounds
+(64-frame outbound queue, 100 frames per 10s window, 45s heartbeat lease,
+5 protocol strikes); the async relay mailbox (`relay_mailbox.py`) already
+bounds *its* resource at 50 envelopes per recipient. Neither transfers
+as-is, because raw-proxy's actual cost shape is different from both:
+
+- **Concurrent bridged-pair limit.** A relay running one bridge is a real
+  third participant holding *two* live Noise sessions (one to each chat
+  party) for that pair's entire conversation — meaningfully more
+  standing cost per pair than either a single direct session or an
+  at-rest mailbox entry. A new node-level `max_concurrent_relayed_pairs`
+  limit (SysOp-configurable, same `nodeconfig.py` dataclass-field-plus-
+  validation shape `ShutdownConfig` already uses) caps this directly,
+  independent of the per-session frame-rate bound above, which caps a
+  *single* session's chattiness, not how many a relay carries at once.
+- **Per-pair byte-rate bound, not a frame-rate one.** `max_frames_per_
+  window` counts discrete parsed frames — meaningless for raw-proxied
+  bytes, which the relay by design never frames or parses at all. A
+  bridge needs a bytes/second ceiling instead; exceeding it closes the
+  bridge, the same "drop rather than silently degrade" precedent
+  `LinkRealtimeSession.send()`'s existing slow-consumer handling already
+  sets for a full outbound queue.
+- **Idle-bridge timeout is protocol-agnostic, unlike the existing
+  heartbeat lease.** `LinkRealtimeSession`'s own dead-peer detection
+  inspects real ping/pong frames — raw-proxy structurally cannot do
+  that, since the relay never sees frame semantics, only opaque
+  ciphertext bytes. A bridge instead needs a dumb "zero bytes observed
+  in either direction for N seconds" timer: the two actual endpoints'
+  own (relay-invisible, encrypted) heartbeat traffic keeps a genuinely
+  live bridge from ever tripping it, with no frame-aware logic required
+  on the relay's side at all.
+- **Bounded, timed-out pending-rendezvous table.** A node that shows up
+  first, before its counterpart, waits — bounded in count (a cap on
+  simultaneous pending requests per relay, the same "bound remotely
+  influenced resources" principle `MAX_MAILBOX_ENVELOPES_PER_RECIPIENT`
+  already applies to the async mailbox) and in time (a lone request
+  that waits past its own timeout expires and is reported back to the
+  requester as an explicit failure — CLAUDE.md's "fail clearly," not a
+  request silently forgotten).
+- **The existing slow-consumer-drops-the-session behavior composes
+  across two hops for free, unneeding any new logic of its own**: each
+  leg is its own ordinary `LinkRealtimeSession` with its own existing
+  bound: a slow leg drops only that one session exactly as today, and
+  the relay tears down the other leg in response (a bridge with only
+  one live end isn't a bridge) — no bespoke two-hop-aware queue ever
+  needs writing.
+
+**Decision 3 (locked in) — v1 fallback UX for two mutually-unreachable
+nodes.** Extends this project's own already-shipped local convention
+rather than inventing a new one: `netbbs.net.chat_flow`'s `/msg`/
+`/private` already require the recipient currently online, refusing
+plainly ("X is not currently online.") when they aren't, with local mail
+as the standing async alternative. The cross-node case gets the identical
+shape: attempting live Link direct chat with a peer whose node can't
+currently be bridged (no relay reachable, the relay's own pending-
+rendezvous request times out, or the concurrent-pair cap above is full)
+produces an explicit, never-silent refusal naming the situation plainly
+(e.g. "<user> can't be reached for live chat right now.") and points at
+Link mail (`link_message`/`relay_mailbox.py`, the *already-shipped* async
+cross-node messaging path — not a new mechanism) as the immediate
+alternative. The caller-facing message deliberately does not distinguish
+*which* of the possible reasons applied — offline peer, no relay, relay
+at capacity, rendezvous timeout — mirroring this project's existing
+stance elsewhere (design doc §12) that such operational detail about a
+*remote* node is not something a caller needs and could leak more than
+intended about the other side's situation.
+
+**Decision 4 (locked in) — rendezvous frame shape.** New frame types
+added to the existing `REALTIME_FRAME_TYPES` set (`netbbs.link.
+protocol`), not a new protocol version or frame family: extending that
+frozenset without bumping `REALTIME_PROTOCOL_VERSION` is already this
+file's own established pattern (e.g. the presence frames joined the
+original subscribe/channel_message set the same way), and an old peer
+encountering an unrecognized new type already fails cleanly via the
+existing "unsupported real-time frame type" rejection — no separate
+negotiation needed. Rides over the *requesting* node's own already-
+authenticated `LinkRealtimeSession` to the relay (the ordinary session
+that already exists from `relaying_for`/relay-consent setup) — no new
+authentication mechanism, matching raw-proxy's own core premise of
+confining new code to connection setup, never the confidentiality-
+critical path:
+
+- `relay_request` `{target_fingerprint}` — sent by either party wanting
+  to reach the other through this relay.
+- `relay_waiting` — the relay's reply when only this side has shown up
+  so far (bounded by the pending-rendezvous timeout, Decision 2).
+- `relay_ready` — sent to *both* sides once the counterpart has also
+  shown up; raw-proxy byte-pumping between the two begins immediately
+  after.
+- `relay_reject` `{reason}` — the relay declines outright (pending-table
+  full, no `relaying_for` relationship covering this pair, concurrent-
+  pair cap reached) — explicit, matching Decision 3's fail-clearly
+  requirement, never a silent drop.
+
+This closes every acceptance criterion issue #168 named. Implementation
+(the four decisions above, plus the resource-limit values themselves,
+still unpicked here — this locks in their *shape*, not their exact
+numbers) is separate, future, tracked work, not part of this design
+pass.
 
 ### Issue #201 — managed netbbs.org subdomain + dynamic DNS
 
