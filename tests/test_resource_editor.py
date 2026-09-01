@@ -1489,6 +1489,86 @@ def test_sectioned_fields_group_the_descriptive_menu_row_too():
 # -- pagination (a sectioned screen dense enough it doesn't fit at all) -----
 
 
+def test_mixed_sectioned_and_unsectioned_fields_never_paginate_or_crash():
+    # Codex review (PR #236): pagination filters pages by exact section-
+    # name match, and `None` was never added to `section_names` -- a
+    # field left unsectioned has no page it could ever belong to. Jumping
+    # to it via its own hotkey (every hotkey works regardless of current
+    # page, by design) used to set `current_page = None` and crash the
+    # *next* redraw at `section_names.index(None)`. No real caller mixes
+    # sectioned and unsectioned fields today (Board/Area/Channel/Profile
+    # all section every field) -- this fixture deliberately does, to
+    # prove a screen that *did* wouldn't paginate at all (falling back to
+    # today's un-paginated "may scroll" behavior) rather than crash.
+    fields = _many_sectioned_fields()  # 6 sections x 2 fields, dense enough alone to paginate
+    fields.append(
+        FieldSpec(
+            key="unsectioned", hotkey="z", menu_text=menu_key("Z", ""), label="Unsectioned",
+            render=lambda draft: draft.get("unsectioned") or "(blank)",
+            prompt=text_field("unsectioned"),
+            section=None,
+        )
+    )
+    session = FakeSession(["z", "typed", "b"])
+    session.terminal_height = 15
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )  # must not raise
+    text = _visible(_written_text(session))
+    assert "PgUp/PgDn" not in text
+    assert draft["unsectioned"] == "typed"
+
+
+def test_hotkey_jump_primes_current_page_even_when_not_yet_paginated():
+    # Codex review (PR #236): the page-jump on hotkey activation used to
+    # be gated on *this redraw's own* `paginated` value -- if the screen
+    # currently fit (nothing to jump to a page for, yet), `current_page`
+    # was left at its stale default. If the terminal then shrinks while
+    # that field's own sub-prompt is open (a live NAWS resize mid-
+    # interaction), the *next* redraw newly needs to paginate but shows
+    # the stale section instead of the one the caller just edited --
+    # hiding both the selected field and the change just made. Fixed by
+    # priming `current_page` unconditionally on every hotkey activation,
+    # not just while already paginated.
+    fields = _many_sectioned_fields()
+
+    class ShrinkingSession(NavigableFakeSession):
+        """Starts tall enough that everything fits unpaginated; shrinks
+        the instant a field's own prompt reads input, simulating a
+        terminal resize that happens mid-interaction."""
+
+        def __init__(self, inputs):
+            super().__init__(inputs)
+            self.terminal_height = 60
+
+        async def read_line(self, echo=True, history=None, completer=None):
+            self.terminal_height = 15
+            return await super().read_line(echo=echo, history=history, completer=completer)
+
+    # "g" = Group3's first field (f3_0, see _many_sectioned_fields's own
+    # a-through-l hotkey layout) -- pressed while everything still fits.
+    session = ShrinkingSession(["g", "typed", "b"])
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    # The redraw right after typing (now paginated, since the terminal
+    # shrank) must show GROUP3 -- the field just edited -- not GROUP0,
+    # section_names[0]'s stale default.
+    assert "Section 4 of 6" in text
+    assert "Section 1 of 6" not in text
+
+
 def test_dense_sectioned_screen_paginates_instead_of_scrolling_off():
     # `_many_sectioned_fields` (6 sections x 2 fields = 12 fields) is
     # dense enough that, at this height, even the flat menu fallback

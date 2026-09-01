@@ -4181,6 +4181,12 @@ def _profile_field(label: str, value: str, *, value_color: int = VALUE_COLOR) ->
     )
 
 
+# Bounds the bio preview `_edit_profile`'s own preamble shows -- see
+# that function's `_preamble` closure for why an unbounded preview is a
+# real, Codex-caught problem now that this screen can paginate.
+_MAX_BIO_PREVIEW_LINES = 3
+
+
 async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> None:
     """
     Edit your own vCard and caller preferences (design doc) --
@@ -4271,7 +4277,32 @@ async def _edit_profile(session: Session, lane: DatabaseLane, user: User) -> Non
     def _preamble(d: Draft) -> str:
         lines = [colored("BIO", fg_color=METADATA_COLOR, bold=True)]
         if d["bio"]:
-            lines.append(reflow(sanitize_text(d["bio"], allow_newlines=True), width=session.terminal_width))
+            # Codex review (PR #236): a bio can be up to MAX_BIO_BYTES
+            # (2000) with no embedded newlines at all -- well under
+            # MAX_BIO_LINES (6), which counts newline-separated lines,
+            # not rendered height -- so `reflow` alone could still wrap
+            # it to ~25 rows at 80 columns. That's shown on *every*
+            # page once this screen paginates (the preamble sits above
+            # the paginated field list, not part of it), so it can blow
+            # the whole screen's height budget entirely on its own,
+            # regardless of how few fields a given page shows -- the one
+            # piece of genuinely unbounded-length content on this
+            # screen, everything else being short, fixed-shape status
+            # strings. Capped here to a fixed preview instead; the full
+            # bio is never touched, still fully readable (and editable)
+            # via [E]dit bio.
+            bio_lines = reflow(sanitize_text(d["bio"], allow_newlines=True), width=session.terminal_width).split("\n")
+            if len(bio_lines) > _MAX_BIO_PREVIEW_LINES:
+                hidden = len(bio_lines) - _MAX_BIO_PREVIEW_LINES
+                lines.append("\n".join(bio_lines[:_MAX_BIO_PREVIEW_LINES]))
+                lines.append(
+                    colored(
+                        f"...({hidden} more line{'' if hidden == 1 else 's'} -- [E]dit bio to see the rest)",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+            else:
+                lines.append("\n".join(bio_lines))
         else:
             lines.append(colored("(no bio set)", fg_color=MUTED_COLOR))
         lines.append("")

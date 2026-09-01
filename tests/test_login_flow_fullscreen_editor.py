@@ -165,6 +165,30 @@ def test_profile_fits_a_real_80x24_terminal_on_every_page(db, lane, alice):
         assert f"Section {page_downs + 1} of 4" in last_page_text
 
 
+def test_profile_fits_a_real_80x24_terminal_with_a_max_length_bio(db, lane, alice):
+    # Codex review (PR #236): a bio can be up to MAX_BIO_BYTES (2000)
+    # with zero embedded newlines -- well under MAX_BIO_LINES (6),
+    # which counts newline-separated lines, not rendered height -- so
+    # reflowing it at 80 columns alone produces ~25 rows. Confirmed by
+    # direct repro before this fix: the preamble sits *above* the
+    # paginated field list, shown identically on every page, so that
+    # alone blew the whole screen's budget regardless of which section
+    # a given page showed. Fixed by capping the bio preview itself,
+    # independent of pagination.
+    from netbbs.directory import set_bio
+
+    set_bio(db, alice, "x" * 2000)
+    session = FakeSession(["b"])
+    asyncio.run(login_flow._edit_profile(session, lane, alice))
+    text = _visible(session)
+    real_rows = text.rstrip("\r\n").split("\r\n")
+    assert len(real_rows) <= session.terminal_height, (
+        f"rendered {len(real_rows)} rows with a max-length bio, terminal only has {session.terminal_height}"
+    )
+    assert "more line" in text  # the truncation indicator fired
+    assert "[E]dit bio to see the rest" in text
+
+
 def test_profile_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # Dogfood feature request: "Your profile"'s 14 fields previously had
     # no help= authored at all, so Ctrl-H was a discoverable dead end
