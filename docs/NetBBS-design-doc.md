@@ -4579,7 +4579,7 @@ reserved for a still-`'pending'` post's rejection.
 moderator_edit` reach real interactive call sites this issue — a `[C]lose`
 option on the board admin screen (`netbbs.net.admin_flow`, gated the same way
 `[T]ransfer origin` already is: origin only, board not already closed), and
-the existing `[E]dit` flow (`netbbs.net.login_flow._edit_existing_post`)
+the existing `[E]dit` flow (`netbbs.net.board_flow._edit_existing_post`)
 building a moderator-edit event instead of a self-authored one whenever
 `edited_by` isn't the post's own author and this node is the board's origin.
 `board_post_tombstone` did not have any existing "delete an approved,
@@ -4633,7 +4633,7 @@ issue #92.
 
 Closes the gap issue #87's own §16 entry named: `netbbs.net.chat_flow._chat_
 loop`'s message-send path now threads an optional `link_context` (mirroring
-`netbbs.net.login_flow._show_board`'s own parameter for board posts exactly)
+`netbbs.net.board_flow._show_board`'s own parameter for board posts exactly)
 down from `browse_channels`, and calls `netbbs.link.channels.queue_channel_
 message_if_linked` right after a self-authored message is locally recorded,
 whenever `channel` is Linked. Fire-and-forget, no separate success/failure

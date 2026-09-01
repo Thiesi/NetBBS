@@ -528,7 +528,7 @@ messages.
 ### Signature auto-append: idempotency, not a "first compose only" flag
 
 `netbbs.signature.append_signature` is called on every successful board-
-post/mail compose (`netbbs.net.login_flow._compose_new_post`/`netbbs.net.
+post/mail compose (`netbbs.net.board_flow._compose_new_post`/`netbbs.net.
 mail_flow._compose_mail`), not gated by "is this the first attempt" —
 that heuristic was tried first and is wrong. A board post's `/exit`-then-
 resume draft cycle can hand back a `body` that either never got the
@@ -3001,11 +3001,11 @@ established sessions/connections were authenticated using it.
 **A caller-facing "resume a saved draft?" prompt must consume (delete) the
 draft file before handing its text to the editor as `initial_text`, or the
 editor's own crash-recovery check double-prompts for the same file.**
-Issue #149's board-entry prompt (`login_flow._offer_saved_draft_if_any`) and
+Issue #149's board-entry prompt (`board_flow._offer_saved_draft_if_any`) and
 both editors' pre-existing crash-recovery offer
 (`edit_line_body`/`edit_prose`'s own `draft_path.exists()` check, via
 `netbbs.net.draft_storage.offer_draft_recovery`) read the *same* file
-convention (`login_flow._post_draft_path`) for two genuinely different
+convention (`board_flow._post_draft_path`) for two genuinely different
 purposes -- proactively announcing an intentional `/exit`/"Keep draft &
 exit" the moment the board is entered, versus recovering from a connection
 that simply dropped mid-edit. Both fire from the identical trigger
