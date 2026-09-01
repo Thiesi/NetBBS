@@ -2,7 +2,7 @@
 End-to-end tests for the mutual invite/accept 1:1 direct chat feature
 (design doc §6.3) -- `netbbs.chat.direct_invites.DirectChatInvites`'s own
 unit tests live in tests/test_direct_invites.py; this file instead drives
-the real `netbbs.net.login_flow._main_menu` read/invite race,
+the real `netbbs.net.main_menu._main_menu` read/invite race,
 `netbbs.net.chat_flow.run_direct_chat_invite_flow`/`run_direct_chat_loop`,
 and `/dm`, using genuinely concurrent asyncio tasks over a shared
 `ChatHub`/`DirectChatInvites`/`ActiveSessionRegistry` the same way
@@ -27,7 +27,7 @@ import re
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import create_channel
-from netbbs.net import chat_flow, login_flow
+from netbbs.net import chat_flow, main_menu
 from netbbs.net.char_input import EditorKey, EditorKeyKind, InputHistory
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session import Session
@@ -122,7 +122,7 @@ def _node_controls() -> NodeControls:
 
 
 async def _run_main_menu(session, database, user, node_controls, *, hub, presence, lane, direct_invites):
-    await login_flow._main_menu(
+    await main_menu._main_menu(
         session, database, hub, presence, MessageMailbox(), InputHistory(), user,
         node_controls=node_controls, lane=lane, direct_invites=direct_invites,
     )

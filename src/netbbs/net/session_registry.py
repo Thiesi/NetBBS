@@ -257,7 +257,7 @@ class ActiveSessionRegistry:
         task's cancellation. Pass the *acting* SysOp's own session here
         when they might be targeting their own account, so their
         current session keeps running (the cross-process revalidation
-        boundary in `netbbs.net.login_flow._main_menu` is what actually
+        boundary in `netbbs.net.main_menu._main_menu` is what actually
         ends it, at the next safe checkpoint, rather than this method
         pretending it safely can).
 

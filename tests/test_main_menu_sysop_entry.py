@@ -15,7 +15,7 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _draw_main_menu, _main_menu
+from netbbs.net.main_menu import _draw_main_menu, _main_menu
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session_registry import ActiveSessionRegistry
 from netbbs.net.shutdown import NodeControls

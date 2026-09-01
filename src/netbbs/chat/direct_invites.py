@@ -90,7 +90,7 @@ class DirectChatInvites:
 
     def arrival_event(self, session: object) -> asyncio.Event:
         """A persistent, per-session event that `_main_menu`'s own read/
-        invite race (`netbbs.net.login_flow._main_menu`) waits on --
+        invite race (`netbbs.net.main_menu._main_menu`) waits on --
         created lazily on first use and reused for every subsequent
         invite that session ever receives, rather than minted fresh per
         invite. This is what lets that race cover both agreed behaviors

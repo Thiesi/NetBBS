@@ -806,7 +806,7 @@ disproportionate to the value.
 `rendering.layout.screen_title(clear=True)` prepends its own `clear_screen()`
 *inside the string it returns* — the clear-and-home sequence is not a separate
 step a caller can order independently. A screen that needs to show something
-above the title/breadcrumb itself (e.g. `login_flow._draw_main_menu`'s
+above the title/breadcrumb itself (e.g. `main_menu._draw_main_menu`'s
 optional main-menu masthead, issue #161) cannot just write that content before
 calling `screen_title(clear=True)`: the embedded `clear_screen()` fires when
 the title string is later written, wiping anything already-written first. Pass

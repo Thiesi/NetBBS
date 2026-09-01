@@ -14,7 +14,7 @@ import re
 from netbbs.auth.users import SYSOP_LEVEL, create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _main_menu
+from netbbs.net.main_menu import _main_menu
 from netbbs.rendering import (
     ACCENT_COLOR,
     LABEL_COLOR,

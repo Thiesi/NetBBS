@@ -347,7 +347,7 @@ def account_still_active(db: Database, user: User) -> bool:
 
     The one shared authoritative revalidation check every long-running
     authenticated loop must call at its own natural per-iteration
-    boundary — originally local to `netbbs.net.login_flow._main_menu`
+    boundary — originally local to `netbbs.net.main_menu._main_menu`
     (the only such boundary that existed at the time), reopened and
     moved here once a second one (`netbbs.net.chat_flow`'s send loop)
     needed the identical policy: a single shared place for "is this

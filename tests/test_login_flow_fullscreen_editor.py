@@ -22,7 +22,7 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.directory import get_bio
-from netbbs.net import board_flow, login_flow, profile_flow
+from netbbs.net import board_flow, login_flow, main_menu, profile_flow
 from netbbs.net.char_input import EditorKey, EditorKeyKind, InputHistory
 from netbbs.net.editor_preference import fullscreen_editor_enabled, set_fullscreen_editor_enabled
 from netbbs.net.session import Session
@@ -404,7 +404,7 @@ def test_main_menu_refreshes_the_session_user_after_a_profile_key_change(db, lan
         ]
     )
     asyncio.run(
-        login_flow._main_menu(
+        main_menu._main_menu(
             session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice, lane=lane
         )
     )

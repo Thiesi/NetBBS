@@ -3373,7 +3373,7 @@ async def _chat_loop(
 
                         if not await lane.run(account_still_active, user):
                             # GitHub issue #29 (reopened): the same cross-process
-                            # revalidation netbbs.net.login_flow._main_menu already
+                            # revalidation netbbs.net.main_menu._main_menu already
                             # does at its own boundary -- a session that stays in
                             # chat (or any other long-running submenu) never
                             # returns to that menu to pick up a disable/delete made

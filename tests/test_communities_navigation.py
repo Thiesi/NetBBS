@@ -24,7 +24,7 @@ from netbbs.communities import create_community
 from netbbs.doors.registry import create_door
 from netbbs.files.areas import create_file_area
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _main_menu
+from netbbs.net.main_menu import _main_menu
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 

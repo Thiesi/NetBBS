@@ -303,7 +303,7 @@ def test_online_private_message_is_prefixed_for_an_opted_in_recipient(db, lane, 
 
 def test_mailbox_queued_private_message_carries_a_timestamp(lane, hub, presence, alice, bob, channel):
     """Offline delivery doesn't render anything itself (that happens at
-    netbbs.net.login_flow._draw_main_menu's next flush, covered in
+    netbbs.net.main_menu._draw_main_menu's next flush, covered in
     tests/test_login_mailbox_flush.py) -- this just confirms the queued
     tuple actually carries a real timestamp through `/msg`, not a
     placeholder."""
