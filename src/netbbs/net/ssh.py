@@ -54,6 +54,7 @@ from netbbs.net.new_account_banner_before import load_new_account_banner_before
 from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
+from netbbs.rendering import strip_ansi
 from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
@@ -307,9 +308,7 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # with a later pty-req/session-channel request *after* auth
         # succeeds, so it's genuinely unavailable this early. The exact
         # same "capability negotiation hasn't completed yet" problem
-        # Telnet's own pre-login banner has (design doc: "Telnet's
-        # initial banner can precede completion of NEW-ENVIRON
-        # negotiation, so it uses the safe fallback") -- same fix here.
+        # Telnet's own pre-login banner has.
         assert self._conn is not None  # connection_made always runs first
         lines = [load_welcome_banner(self._db, truecolor=False)]
         registration_open = get_registration_mode(self._db) != RegistrationMode.CLOSED
@@ -325,13 +324,31 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         # banner` here, not the kbdint challenge's own `instruction`
         # field below -- this is the exact same proven mechanism
         # `load_welcome_banner` above already uses for real multi-line
-        # ANSI content pre-auth, unlike a kbdint instruction string whose
+        # content pre-auth, unlike a kbdint instruction string whose
         # rendering is more client-dependent.
         if registration_open and username.strip().lower() == NEW_ACCOUNT_SENTINEL:
             before_banner = load_new_account_banner_before(self._db)
             if before_banner:
                 lines.append(before_banner)
-        self._conn.send_auth_banner("\r\n".join(lines) + "\r\n")
+        # Dogfood report, issue #203: `truecolor=False` above only
+        # covers *color depth* -- it doesn't help at all, because
+        # `SSH_MSG_USERAUTH_BANNER` (this method's whole mechanism) is
+        # shown during authentication, before any pty/terminal channel
+        # exists. Plenty of real clients (PuTTY among them) render this
+        # specific banner through a display path that never runs an
+        # ANSI parser over it at all -- not a color-depth problem, so no
+        # color depth fixes it; the observed symptom was literal escape
+        # bytes on screen. `strip_ansi` removes every sequence this
+        # banner's own content can contain (the built-in banner's
+        # `colored()`/`gradient_text()` output, or a SysOp's own custom
+        # `.ans`-file/before-banner text) so every client sees readable
+        # plain text here instead -- the one call site in the app where
+        # dropping color entirely is the *more* reliable choice, not a
+        # downgrade. `load_welcome_banner`'s and `load_new_account_
+        # banner_before`'s colored renderings remain exactly as they
+        # were for every other caller (Telnet/web pre-login, and SSH's
+        # own post-auth welcome screen).
+        self._conn.send_auth_banner(strip_ansi("\r\n".join(lines)) + "\r\n")
         return True
 
     def password_auth_supported(self) -> bool:

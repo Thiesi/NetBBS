@@ -28,6 +28,7 @@ from netbbs.rendering.ansi import (
     restore_cursor,
     save_cursor,
     set_scroll_region,
+    strip_ansi,
 )
 from netbbs.rendering.ansi_art import decode_ansi_bytes, encode_ansi_bytes
 from netbbs.rendering.ansi_parse import parse_ansi_into_buffer
@@ -110,6 +111,7 @@ __all__ = [
     "restore_cursor",
     "save_cursor",
     "set_scroll_region",
+    "strip_ansi",
     "menu_key",
     "DEFAULT_WIDTH",
     "SegmentColor",

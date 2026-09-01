@@ -423,7 +423,15 @@ def test_ssh_pre_auth_banner_is_the_real_welcome_banner_not_a_bare_literal(db):
     # Proves the real banner content -- the double-frame border and
     # tagline that only `load_welcome_banner` produces -- reaches a real
     # SSH client pre-auth, not just the word "NetBBS" on its own.
+    # Compared as plain text (`strip_ansi`), not the raw
+    # `DEFAULT_WELCOME_BANNER` constant verbatim -- issue #203's fix
+    # strips every ANSI sequence from this specific pre-auth banner
+    # before sending it, so the colored constant is no longer a literal
+    # substring of what a client actually receives; see the dedicated
+    # `test_ssh_pre_auth_banner_contains_no_ansi_escapes` below for that
+    # stripping itself.
     from netbbs.net.welcome_banner import DEFAULT_WELCOME_BANNER
+    from netbbs.rendering import strip_ansi
 
     create_user(db, "alice", password="hunter2", user_level=10)
     client = _BannerCapturingClient()
@@ -450,7 +458,43 @@ def test_ssh_pre_auth_banner_is_the_real_welcome_banner_not_a_bare_literal(db):
     banner = "\n".join(client.banners)
     assert "conversations across independent nodes" in banner
     assert "╔" in banner and "╝" in banner
-    assert DEFAULT_WELCOME_BANNER in banner
+    assert strip_ansi(DEFAULT_WELCOME_BANNER) in banner
+
+
+def test_ssh_pre_auth_banner_contains_no_ansi_escapes(db):
+    # Dogfood report, issue #203: a real client showed literal escape
+    # bytes instead of rendered color -- SSH_MSG_USERAUTH_BANNER is sent
+    # during authentication, before any pty/terminal channel exists, and
+    # plenty of real clients (PuTTY among them) route it through a
+    # display path that never runs an ANSI parser over it at all.
+    # `truecolor=False` alone never addressed this (a color-depth
+    # choice, not a "can this client interpret escapes here at all"
+    # one) -- this is the one call site in the app where dropping color
+    # entirely is the more reliable choice.
+    create_user(db, "alice", password="hunter2", user_level=10)
+    client = _BannerCapturingClient()
+
+    async def handler(session: Session):
+        pass
+
+    async def scenario():
+        server = await _run_server(db, handler)
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                server.port,
+                username="alice",
+                password="hunter2",
+                known_hosts=None,
+                client_factory=lambda: client,
+            ):
+                pass
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    banner = "\n".join(client.banners)
+    assert "\x1b" not in banner
 
 
 def test_ssh_pre_auth_banner_omits_the_registration_hint_when_registration_is_closed(db):
