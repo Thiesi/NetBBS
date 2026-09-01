@@ -1,6 +1,6 @@
 """
 Tests for the "Name & details" screen
-(`netbbs.net.login_flow._identity_details_screen`, reached from
+(`netbbs.net.profile_flow._identity_details_screen`, reached from
 `_edit_profile`'s own `[N]ame & details` option) -- previously
 untested; converted onto `edit_resource_draft` alongside the profile
 screen itself (issue #160's cursor-nav follow-up).
@@ -28,7 +28,7 @@ from netbbs.attestation import (
 )
 from netbbs.attestation import get_attestation
 from netbbs.auth.users import create_user
-from netbbs.net import login_flow
+from netbbs.net import profile_flow
 from netbbs.net.char_input import HELP_KEY
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
@@ -107,7 +107,7 @@ def lane(db):
 
 def test_shows_current_state_with_nothing_set(db, lane, alice):
     session = FakeSession(["b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "Display name: (not set) (private)" in text
     assert "Location: (not set) (private)" in text
@@ -121,7 +121,7 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
     # no help= authored at all, so Ctrl-H was a discoverable dead end
     # ("No help is available for ... yet" for every one of them).
     session = FakeSession([HELP_KEY, " ", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     text = _visible(session)
     assert "No help is available" not in text
     assert "self-reported and unverified" in text.lower()
@@ -131,7 +131,7 @@ def test_ctrl_h_shows_real_help_text_for_every_field(db, lane, alice):
 
 def test_display_name_edit_sets_value_and_visibility(db, lane, alice):
     session = FakeSession(["d", "Alice W", "y", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_display_name(db, alice) == "Alice W"
     assert is_display_name_visible(db, alice) is True
     assert "Display name: Alice W (public)" in _visible(session)
@@ -139,7 +139,7 @@ def test_display_name_edit_sets_value_and_visibility(db, lane, alice):
 
 def test_location_edit_sets_value_and_visibility(db, lane, alice):
     session = FakeSession(["l", "Retro City", "n", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_location(db, alice) == "Retro City"
     assert is_location_visible(db, alice) is False
     assert "Location: Retro City (private)" in _visible(session)
@@ -147,7 +147,7 @@ def test_location_edit_sets_value_and_visibility(db, lane, alice):
 
 def test_birthdate_edit_sets_value_age_and_visibility(db, lane, alice):
     session = FakeSession(["a", "2000-01-01", "y", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_birthdate(db, alice) == date(2000, 1, 1)
     assert is_birthdate_visible(db, alice) is True
     text = _visible(session)
@@ -157,7 +157,7 @@ def test_birthdate_edit_sets_value_age_and_visibility(db, lane, alice):
 
 def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):
     session = FakeSession(["a", "not-a-date", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_birthdate(db, alice) is None
     assert "Not a valid date" in _written_text(session)
 
@@ -165,7 +165,7 @@ def test_birthdate_rejects_an_invalid_date_format(db, lane, alice):
 def test_verified_badge_visibility_toggles(db, lane, alice):
     assert is_verified_badge_visible(db, alice) is False  # default
     session = FakeSession(["v", "v", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     # Two presses of a bool toggle return to the starting state.
     assert is_verified_badge_visible(db, alice) is False
 
@@ -174,13 +174,13 @@ def test_verified_summary_shows_attested_attributes(db, lane, alice):
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_age(db, alice, date(1990, 5, 1), verifier=verifier)
     session = FakeSession(["b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert "Verified: age" in _visible(session)
 
 
 def test_remote_sharing_rejects_an_attribute_with_no_attestation(db, lane, alice):
     session = FakeSession(["r", "a", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert "No age attestation exists." in _written_text(session)
 
 
@@ -188,6 +188,6 @@ def test_remote_sharing_can_be_enabled_for_an_attested_attribute(db, lane, alice
     verifier = create_user(db, "sysop", password="hunter2", user_level=255)
     attest_name(db, alice, "Alice Wonderland", verifier=verifier)
     session = FakeSession(["r", "n", "y", "b"])
-    asyncio.run(login_flow._identity_details_screen(session, lane, alice))
+    asyncio.run(profile_flow._identity_details_screen(session, lane, alice))
     assert get_attestation(db, alice, "name").link_visible is True
     assert "Link attestation sharing: name" in _visible(session)

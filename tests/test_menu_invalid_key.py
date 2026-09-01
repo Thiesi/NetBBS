@@ -1,7 +1,7 @@
 """
 Exact-write-sequence regression tests for "bell only, nothing else" on
 an invalid single-keystroke menu choice --
-`netbbs.net.login_flow._main_menu` and `_show_board`.
+`netbbs.net.login_flow._main_menu` and `netbbs.net.board_flow._show_board`.
 `netbbs.net.picker.pick_item`'s equivalent behavior is already covered
 precisely in `tests/test_picker.py`
 (`test_repeated_invalid_keys_produce_nothing_but_an_echo_and_a_bell`);

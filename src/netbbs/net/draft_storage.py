@@ -6,7 +6,7 @@ Shared plain-text draft persistence (dogfood feature request, issue
 `netbbs.net.composition`'s line editor can offer the identical
 recovery/`/exit`-and-resume experience without duplicating it. Callers
 own the path convention (`netbbs.net.board_flow._post_draft_path`/
-`netbbs.net.login_flow._bio_draft_path`, both built on this module's
+`netbbs.net.profile_flow._bio_draft_path`, both built on this module's
 own `drafts_directory`)
 and the UX around *when* to offer recovery, delete, or leave a draft in
 place -- this module has no opinion on any of that, only on reading,
@@ -48,7 +48,7 @@ def drafts_directory(db: Database) -> Path:
     needs to be more than one slot here, one per in-progress
     composition/edit, so this is a subdirectory rather than a single
     flat sibling file. Single source of truth for the convention
-    `netbbs.net.board_flow._post_draft_path`/`netbbs.net.login_flow.
+    `netbbs.net.board_flow._post_draft_path`/`netbbs.net.profile_flow.
     _bio_draft_path` and `prune_stale_drafts` below all build on."""
     directory = db.path.parent / f"{db.path.name}_drafts"
     directory.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,7 @@ against whichever `User` the caller supplies, regardless of which
 entry point that came from.
 
 Follows the submenu shape already established by
-`netbbs.net.login_flow._edit_profile`: a redraw-on-real-change-only
+`netbbs.net.profile_flow._edit_profile`: a redraw-on-real-change-only
 draw function, a bell-only-on-invalid-key dispatch loop (design doc),
 and `netbbs.net.picker.pick_item` for target selection.
 
