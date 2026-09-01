@@ -934,6 +934,65 @@ def _render_all_scrollback(db: Database, channel: Channel, user: User, messages:
     return [_render_scrollback_message(db, channel, user, message) for message in messages]
 
 
+async def _deliver_remote_scrollback_snapshot(
+    deliver: Callable[[str], Awaitable[None]],
+    lane: DatabaseLane,
+    channel: Channel,
+    user: User,
+    bridge: "LiveChannelBridge",
+    *,
+    unicode_style: bool,
+    truecolor: bool,
+    terminal_width: int,
+) -> None:
+    """
+    Issue #194: once `_subscribe_live`'s live subscription comes up, give
+    the origin's `scrollback_snapshot` (sent by its own `_handle_
+    subscribe`, right alongside the `presence_snapshot` that subscription
+    already waits on) a short bounded window to actually arrive via this
+    session's own background frame reader before giving up --
+    `ensure_live_subscription` itself never waits for any reply frame
+    (design doc §8.10.1: "message-passing, not request/response"), so
+    there is an inherent, ordinary async race between "subscribe sent"
+    and "reply frames land." A caller who doesn't get one in time still
+    has the existing async catch-up path (design doc §16) -- this only
+    ever shrinks that window, it never is the only path.
+
+    Rendered through the same `_render_all_scrollback`/`_render_
+    scrollback_message` path (issue #64) local join-time history already
+    uses just above, for a matching look and feel -- but unlike that
+    call, this never invokes `record_channel_seen` (none of these
+    entries carry a real local row id to mark seen) and the received
+    entries are never durably stored anywhere (design doc §16 Decision 2:
+    "rendered once, never durably stored on the subscribing side" --
+    `bridge.pop_channel_scrollback` already enforces the "once" half by
+    popping rather than merely reading).
+    """
+    for _ in range(_REMOTE_SCROLLBACK_POLL_ATTEMPTS):
+        messages = bridge.pop_channel_scrollback(channel.channel_id)
+        if messages:
+            break
+        await asyncio.sleep(_REMOTE_SCROLLBACK_POLL_INTERVAL_SECONDS)
+    else:
+        return
+    rendered = await lane.run(_render_all_scrollback, channel, user, messages)
+    await deliver(
+        f"{badge('HISTORY')} "
+        + colored("Recent activity from this channel's origin", fg_color=MUTED_COLOR)
+    )
+    for line in rendered:
+        await deliver(line)
+    await deliver(
+        colored(
+            f"{len(rendered)} recent event{'s' if len(rendered) != 1 else ''} from the origin",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    rule_char = "─" if unicode_style else "-"
+    divider_color = 238 if truecolor else MUTED_COLOR
+    await deliver(colored(rule_char * min(terminal_width, 78), fg_color=divider_color))
+
+
 # -- command dispatch (design doc §13) ------------------------
 
 
@@ -2506,6 +2565,15 @@ _PINNED_UI_MIN_HEIGHT = 4
 # Issue #183: styled input prompt with accent coloring and Unicode/ASCII fallback.
 _INPUT_PROMPT = "> "
 
+# Issue #194: how long _subscribe_live waits for a scrollback_snapshot
+# frame to arrive via the live session's own background reader after
+# subscribing, before giving up -- see _deliver_remote_scrollback_
+# snapshot's own docstring for why this race exists at all. ~2 seconds
+# total, generous for any real network round trip without leaving a
+# caller staring at a live channel view that looks stalled.
+_REMOTE_SCROLLBACK_POLL_INTERVAL_SECONDS = 0.1
+_REMOTE_SCROLLBACK_POLL_ATTEMPTS = 20
+
 
 def _input_prompt(accent_color: int = ACCENT_COLOR, unicode_style: bool = False) -> str:
     glyph = "❯ " if unicode_style else "> "
@@ -3639,6 +3707,10 @@ async def _chat_loop(
                 await deliver(
                     f"{status_badge('LIVE', tone='success', unicode_style=unicode_style)} "
                     + colored("Real-time link to this channel's origin is up.", fg_color=MUTED_COLOR)
+                )
+                await _deliver_remote_scrollback_snapshot(
+                    deliver, lane, channel, user, link_context.realtime_bridge,
+                    unicode_style=unicode_style, truecolor=truecolor, terminal_width=session.terminal_width,
                 )
                 await live.closed.wait()
                 await deliver(

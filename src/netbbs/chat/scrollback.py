@@ -5,10 +5,12 @@ Revisits the earlier "chat isn't persisted"
 decision, scoped specifically to the *local* problem of a channel looking
 empty after a node restart — not the separate question of a node
 live-subscribing to a linked channel getting recent scrollback from its
-origin, scoped by issue #194 (this module's own `get_scrollback` is that
-decision's chosen source, reused as-is, not a new mechanism). Bounded by
-message count rather than a time window: predictable storage size
-and scrollback length regardless of how chatty a given channel is.
+origin. That question is issue #194: `get_scrollback` is its chosen
+source too, reused as-is by `netbbs.link.realtime_channels._handle_
+subscribe` to build a `scrollback_snapshot` frame for a freshly-
+subscribing peer, no new storage or filtering mechanism of its own.
+Bounded by message count rather than a time window: predictable storage
+size and scrollback length regardless of how chatty a given channel is.
 
 Join/leave presence events are recorded here too, not just chat text —
 without them, a replayed message from someone who left the channel long

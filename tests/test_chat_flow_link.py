@@ -21,6 +21,7 @@ from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
+from netbbs.chat.scrollback import ChannelMessage as LocalChannelMessage
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import link_channel, materialize_carried_channel
@@ -487,3 +488,92 @@ def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
 
     written = "\n".join(session.written)
     assert "was lost" in written
+
+
+def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_up(
+    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+):
+    """Issue #194: `_subscribe_live` picks up whatever `LiveChannelBridge.
+    pop_channel_scrollback` already has waiting for this channel right
+    after the LIVE badge, renders it once, and pops it -- proven here at
+    the `_chat_loop` level (the bridge's own send/receive mechanics are
+    already covered end-to-end in tests/test_link_realtime_channels.py).
+    Pre-populated directly rather than sent over a real/fake session,
+    same "reach into the bridge's own state" convention `test_local_
+    interest_reference_counts_holders_per_channel` already uses -- the
+    poll's first attempt finds it immediately, so this doesn't race
+    the scripted `/quit`'s own near-instant cleanup."""
+    link_channel(db, channel, node_identity=node_identity)
+
+    class _FakeSession:
+        def __init__(self):
+            self.closed = asyncio.Event()
+
+        async def send(self, frame):
+            pass
+
+    async def fake_ensure_live_subscription(**kwargs):
+        return _FakeSession()
+
+    monkeypatch.setattr(
+        "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
+    )
+
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    bridge._remote_channel_scrollback[channel.channel_id] = [
+        LocalChannelMessage(
+            id=-1, channel_id=channel.id, kind="message", author_label="remote-alice",
+            author_fingerprint=None, body="catch me up", created_at="2026-01-01T00:00:00+00:00",
+        ),
+    ]
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["hello", "/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "Real-time link to this channel's origin is up" in written
+    assert "Recent activity from this channel's origin" in written
+    assert "remote-alice" in written
+    assert "catch me up" in written
+    # Popped, not merely read -- nothing left pending afterward.
+    assert channel.channel_id not in bridge._remote_channel_scrollback
+
+
+def test_chat_loop_shows_no_scrollback_catch_up_when_nothing_is_pending(
+    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+):
+    """The ordinary case -- an empty local scrollback at the origin means
+    `_handle_subscribe` never sends a `scrollback_snapshot` frame at all
+    (tests/test_link_realtime_channels.py::test_no_scrollback_snapshot_
+    is_sent_for_a_channel_with_empty_local_scrollback), so nothing is
+    ever pending here to pop -- the catch-up section must not appear."""
+    link_channel(db, channel, node_identity=node_identity)
+
+    class _FakeSession:
+        def __init__(self):
+            self.closed = asyncio.Event()
+
+        async def send(self, frame):
+            pass
+
+    async def fake_ensure_live_subscription(**kwargs):
+        return _FakeSession()
+
+    monkeypatch.setattr(
+        "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
+    )
+
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["hello", "/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "Real-time link to this channel's origin is up" in written
+    assert "Recent activity from this channel's origin" not in written

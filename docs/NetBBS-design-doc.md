@@ -1866,15 +1866,19 @@ alongside local sessions: since Link-wide live private chat doesn't exist yet
 (§8.10 above), selecting a remote entry states that plainly rather than
 silently failing or offering an action that doesn't work.
 
-The first vertical does not offer shared recent scrollback (§16, issue
-#194's scoping decision), real-time private chat, multiple background
-channel subscriptions per caller (issue #159, closed — decided against,
-not a gap), or real-time multi-hop relay (issue #168). A disconnect does
-not queue or replay live frames. Callers see `connecting`, `live`, and
-`offline/degraded` state plus an honest notice that live traffic may
-have been missed; asynchronous signed linked-channel events remain the
-durable catch-up mechanism until a later decision changes that product
-model.
+A freshly-subscribing peer also receives a bounded, ephemeral
+`scrollback_snapshot` of the origin's own recent local scrollback,
+rendered once and never durably stored on the subscribing side (§16,
+issue #194) — a shrunk window before the existing async catch-up path
+below fills in what a live-only subscribe would otherwise miss, not a
+new durability promise. The first vertical still does not offer
+real-time private chat, multiple background channel subscriptions per
+caller (issue #159, closed — decided against, not a gap), or real-time
+multi-hop relay (issue #168). A disconnect does not queue or replay live
+frames. Callers see `connecting`, `live`, and `offline/degraded` state
+plus an honest notice that live traffic may have been missed;
+asynchronous signed linked-channel events remain the durable catch-up
+mechanism until a later decision changes that product model.
 
 That asynchronous catch-up path (issue #164) now enforces the identical
 author-trust-state visibility linked board posts already do: a linked
@@ -4888,7 +4892,7 @@ whether/how a SysOp can disable one misbehaving bridge without touching
 MRC node-wide. This scoping pass answers architecture and trust-boundary
 questions; it does not itself authorize implementation to begin.
 
-### Issue #194 — trusted scrollback-on-join scoping
+### Issue #194 — trusted scrollback-on-join — closed
 
 **Goal:** decide whether/how a node gets recent scrollback the instant it
 live-subscribes to a linked channel. Today it gets presence plus

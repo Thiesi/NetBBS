@@ -18,7 +18,11 @@ from netbbs.chat.scrollback import record_message
 from netbbs.link.channels import link_channel, materialize_carried_channel
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode, RealtimeFrame, build_error_frame, build_subscribe_frame
-from netbbs.link.realtime_channels import LiveChannelBridge, ensure_live_subscription
+from netbbs.link.realtime_channels import (
+    LiveChannelBridge,
+    _MAX_SCROLLBACK_SNAPSHOT_ENTRIES,
+    ensure_live_subscription,
+)
 from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, set_trust_override
 from netbbs.link.enforcement import ensure_node_subject
 from netbbs.link.transport import (
@@ -705,6 +709,207 @@ def test_remote_channel_presence_is_populated_from_the_origins_initial_snapshot(
                 lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) == {}
             )
             assert subscriber.bridge.remote_channel_origin_fingerprint(subscriber_channel.channel_id) is None
+        finally:
+            await server.stop()
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+# -- scrollback-on-join (issue #194) ------------------------------------
+
+
+def test_scrollback_snapshot_is_delivered_once_from_the_origins_recent_scrollback(tmp_path):
+    """Design doc §16, issue #194 Decision 1/2: a `scrollback_snapshot`
+    arrives as a sibling of the presence_snapshot `test_remote_channel_
+    presence_is_populated_from_the_origins_initial_snapshot` above already
+    proves, sourced from the origin's own `get_scrollback`, entries
+    carried through with `author_label` verbatim (never recomposed with a
+    fingerprint the way a live channel_message is) and `author_
+    fingerprint` always `None` on the receiving side (never treated as
+    locally verified) -- and popped exactly once."""
+    async def scenario():
+        origin = _Node(tmp_path, "origin-scrollback")
+        subscriber = _Node(tmp_path, "subscriber-scrollback")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="history-room")
+
+        record_message(origin.db, origin_channel, kind="message", author_label="alice", body="first message")
+        record_message(origin.db, origin_channel, kind="join", author_label="bob")
+        record_message(origin.db, origin_channel, kind="message", author_label="alice", body="second message")
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            _establish_trust(origin.db, subscriber.identity.fingerprint)
+            _establish_trust(subscriber.db, origin.identity.fingerprint)
+            origin_hello = origin.link_node.build_hello(
+                addresses=[
+                    {"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": server.port}
+                ],
+                outgoing_only=False, created_at=utc_now_iso(),
+            )
+            subscriber.link_node.handle_hello(origin_hello)
+
+            session = await ensure_live_subscription(
+                channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
+                lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
+            )
+            assert session is not None
+
+            assert await _wait_until(
+                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+            )
+            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id)
+            assert [(entry.kind, entry.author_label, entry.body) for entry in entries] == [
+                ("message", "alice", "first message"),
+                ("join", "bob", None),
+                ("message", "alice", "second message"),
+            ]
+            assert all(entry.id == -1 for entry in entries)
+            assert all(entry.author_fingerprint is None for entry in entries)
+
+            # One-time pickup -- a second pop for the same channel is empty,
+            # not a repeat of the same snapshot.
+            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id) == []
+        finally:
+            await server.stop()
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_caps_at_the_most_recent_entries(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-scrollback-cap")
+        subscriber = _Node(tmp_path, "subscriber-scrollback-cap")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="chatty-room")
+
+        total = _MAX_SCROLLBACK_SNAPSHOT_ENTRIES + 5
+        for index in range(total):
+            record_message(origin.db, origin_channel, kind="message", author_label="alice", body=f"message {index}")
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            _establish_trust(origin.db, subscriber.identity.fingerprint)
+            _establish_trust(subscriber.db, origin.identity.fingerprint)
+            origin_hello = origin.link_node.build_hello(
+                addresses=[
+                    {"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": server.port}
+                ],
+                outgoing_only=False, created_at=utc_now_iso(),
+            )
+            subscriber.link_node.handle_hello(origin_hello)
+
+            session = await ensure_live_subscription(
+                channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
+                lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
+            )
+            assert session is not None
+
+            assert await _wait_until(
+                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+            )
+            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id)
+            assert len(entries) == _MAX_SCROLLBACK_SNAPSHOT_ENTRIES
+            # Most-recent bias: the tail of what was sent matches the tail
+            # of what was recorded, not the oldest entries.
+            assert entries[-1].body == f"message {total - 1}"
+            assert entries[0].body == f"message {total - _MAX_SCROLLBACK_SNAPSHOT_ENTRIES}"
+        finally:
+            await server.stop()
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_no_scrollback_snapshot_is_sent_for_a_channel_with_empty_local_scrollback(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-scrollback-empty")
+        subscriber = _Node(tmp_path, "subscriber-scrollback-empty")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="quiet-room")
+        assert origin_channel  # never posted to -- empty local scrollback
+
+        received: list[RealtimeFrame] = []
+
+        async def on_frame_subscriber(session, frame):
+            received.append(frame)
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            _establish_trust(origin.db, subscriber.identity.fingerprint)
+            session = await dial_realtime_session(
+                "127.0.0.1", server.port, subscriber.identity, on_frame=on_frame_subscriber,
+                registry=subscriber.registry,
+            )
+            await session.send(build_subscribe_frame(subscriber_channel.channel_id))
+            assert await _wait_until(lambda: any(frame.type == "presence_snapshot" for frame in received))
+            await asyncio.sleep(0.1)  # give a wrongly-sent snapshot a chance to arrive
+            assert not any(frame.type == "scrollback_snapshot" for frame in received)
+        finally:
+            await server.stop()
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_is_cleared_on_disconnect_before_pickup(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-scrollback-disconnect")
+        subscriber = _Node(tmp_path, "subscriber-scrollback-disconnect")
+        origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="fleeting-room")
+        record_message(origin.db, origin_channel, kind="message", author_label="alice", body="hello")
+
+        server = LinkRealtimeServer(
+            host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
+            on_frame=origin.bridge.on_frame, lane=origin.lane, enforce_trust_policy=True,
+        )
+        await server.start()
+        try:
+            _establish_trust(origin.db, subscriber.identity.fingerprint)
+            # Subscriber's own _handle_scrollback_snapshot re-checks
+            # authorization against *its own* db for the sending peer
+            # (origin) -- same requirement _handle_channel_message/
+            # _handle_presence_delta already have (see
+            # test_live_channel_message_and_presence_reach_a_locally_
+            # connected_participant above), needs origin trusted there
+            # too, not just origin trusting subscriber.
+            _establish_trust(subscriber.db, origin.identity.fingerprint)
+            session = await dial_realtime_session(
+                "127.0.0.1", server.port, subscriber.identity, on_frame=subscriber.bridge.on_frame,
+                registry=subscriber.registry,
+            )
+            # ensure_live_subscription (the real production path) always
+            # calls this itself right after dialing -- needed here too,
+            # since this test dials directly, for subscriber.bridge's own
+            # _untrack_on_close watcher to actually be watching this
+            # session at all.
+            await subscriber.bridge.track_session(session)
+            await session.send(build_subscribe_frame(subscriber_channel.channel_id))
+            assert await _wait_until(
+                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+            )
+
+            await session.close(reason="test_done_before_pickup")
+
+            assert await _wait_until(
+                lambda: subscriber_channel.channel_id not in subscriber.bridge._remote_channel_scrollback
+            )
+            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id) == []
         finally:
             await server.stop()
             await origin.teardown()

@@ -166,7 +166,7 @@ REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
 REALTIME_FRAME_TYPES = frozenset(
     {"subscribe", "unsubscribe", "presence_snapshot", "presence_delta",
      "node_presence_snapshot", "node_presence_delta",
-     "channel_message", "ping", "pong", "error", "close"}
+     "channel_message", "scrollback_snapshot", "ping", "pong", "error", "close"}
 )
 _REALTIME_MAX_MESSAGE_ID_BYTES = 64
 _JSON_SAFE_INTEGER = (1 << 53) - 1
@@ -182,6 +182,24 @@ _REALTIME_MAX_ERROR_DETAIL_BYTES = 500
 _REALTIME_MAX_CLOSE_REASON_BYTES = 200
 _REALTIME_MAX_PRESENCE_ENTRIES = 500
 _REALTIME_PRESENCE_CHANGES = frozenset({"join", "leave"})
+
+# Issue #194: a scrollback_snapshot bundles up to this many entries in one
+# frame (unlike channel_message, which is always exactly one message), so
+# its per-entry bounds must be much tighter than channel_message's own --
+# chosen so _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES entries at their
+# worst-case size still land comfortably under REALTIME_MAX_PLAINTEXT_BYTES.
+# This is a "catch-up" glance, not a substitute for the full durable copy
+# already on its way through the existing async materialization path
+# (design doc §16, issue #194 Decision 2) -- a long message showing
+# truncated here is not data loss.
+_REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES = 20
+_REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
+# Must stay in sync with netbbs.chat.scrollback.MessageKind's Literal
+# values -- duplicated here rather than imported since this module stays
+# decoupled from netbbs.chat's domain layer (see module docstring).
+_REALTIME_SCROLLBACK_ENTRY_KINDS = frozenset(
+    {"message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action", "nick", "daybreak"}
+)
 
 # design doc §8.10.1: "IDs are bounded strings and deduplicated within a
 # bounded per-session replay window."
@@ -552,6 +570,40 @@ def _validate_channel_message_payload(payload: dict, *, path: str) -> None:
     _parse_aware_timestamp(payload["created_at"], field_name=f"{path}.created_at")
 
 
+def _validate_scrollback_entry(entry: object, *, path: str) -> None:
+    if not isinstance(entry, dict) or set(entry) != {"kind", "author_label", "body", "created_at"}:
+        raise LinkProtocolError(f"{path} must contain exactly kind, author_label, body, and created_at")
+    if entry["kind"] not in _REALTIME_SCROLLBACK_ENTRY_KINDS:
+        raise LinkProtocolError(f"{path}.kind is not a recognized scrollback event kind")
+    # author_label is the origin's own already-resolved display string for
+    # this event (passed through as-is, never decomposed/reassembled here
+    # -- see build_scrollback_snapshot_frame), so it's allowed to be empty
+    # for a "daybreak" event, which has no author at all.
+    _validate_bounded_text(
+        entry["author_label"], path=f"{path}.author_label", max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES
+    )
+    if entry["body"] is not None:
+        _validate_bounded_text(
+            entry["body"], path=f"{path}.body", max_bytes=_REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES
+        )
+    if not isinstance(entry["created_at"], str):
+        raise LinkProtocolError(f"{path}.created_at must be a string")
+    _parse_aware_timestamp(entry["created_at"], field_name=f"{path}.created_at")
+
+
+def _validate_scrollback_snapshot_payload(payload: dict, *, path: str) -> None:
+    if set(payload) != {"channel_id", "entries"}:
+        raise LinkProtocolError(f"{path} must contain exactly channel_id and entries")
+    _validate_bounded_id(payload["channel_id"], path=f"{path}.channel_id")
+    entries = payload["entries"]
+    if not isinstance(entries, list):
+        raise LinkProtocolError(f"{path}.entries must be a list")
+    if len(entries) > _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:
+        raise LinkProtocolError(f"{path}.entries exceeds {_REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES} entries")
+    for index, entry in enumerate(entries):
+        _validate_scrollback_entry(entry, path=f"{path}.entries[{index}]")
+
+
 def _validate_empty_payload(payload: dict, *, path: str) -> None:
     if payload != {}:
         raise LinkProtocolError(f"{path} must be an empty object")
@@ -578,6 +630,7 @@ _REALTIME_PAYLOAD_VALIDATORS = {
     "node_presence_snapshot": _validate_node_presence_snapshot_payload,
     "node_presence_delta": _validate_node_presence_delta_payload,
     "channel_message": _validate_channel_message_payload,
+    "scrollback_snapshot": _validate_scrollback_snapshot_payload,
     "ping": _validate_empty_payload,
     "pong": _validate_empty_payload,
     "error": _validate_error_payload,
@@ -674,6 +727,28 @@ def build_channel_message_frame(
             "channel_id": channel_id, "user_id": user_id, "display_label": display_label,
             "body": body, "created_at": created_at,
         },
+    )
+    validate_realtime_frame_payload(frame)
+    return frame
+
+
+def build_scrollback_snapshot_frame(
+    channel_id: str, entries: list[dict], *, message_id: str | None = None
+) -> RealtimeFrame:
+    """Issue #194: `entries` are already-shaped
+    `{"kind", "author_label", "body", "created_at"}` dicts -- the sender's
+    job (see `netbbs.link.realtime_channels._handle_subscribe`), not this
+    function's. `author_label` is carried through verbatim, never
+    decomposed into a separate user_id/fingerprint pair the way
+    `build_channel_message_frame`'s `display_label` is on receive: a
+    scrollback entry's `author_label` may already be a fully-resolved
+    identity string from a third node (a materialized/carried message),
+    and re-wrapping it with this session's own peer fingerprint would be
+    wrong."""
+    frame = RealtimeFrame(
+        type="scrollback_snapshot",
+        message_id=message_id or new_realtime_message_id(),
+        payload={"channel_id": channel_id, "entries": list(entries)},
     )
     validate_realtime_frame_payload(frame)
     return frame
