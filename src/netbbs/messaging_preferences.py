@@ -1,7 +1,7 @@
 """
 Per-user preference for whether other callers may send an unsolicited
 one-off direct message via the caller-facing Who's-online screen
-(issue #99, `netbbs.net.login_flow._caller_who_screen`).
+(issue #99, `netbbs.net.directory_flow._caller_who_screen`).
 
 Thin wrapper over `netbbs.user_preferences`'s generic store, the same
 pattern `netbbs.directory`'s bio-visibility preference already

@@ -1,6 +1,6 @@
 """
 Tests for the caller-facing [W]ho's online screen (issue #99) --
-`netbbs.net.login_flow._caller_who_screen`, reached from the main menu.
+`netbbs.net.directory_flow._caller_who_screen`, reached from the main menu.
 
 Distinct from the SysOp `[N]ode` menu's own `[W]ho` screen (covered in
 tests/test_admin_flow.py): no disconnect action, no peer addresses,

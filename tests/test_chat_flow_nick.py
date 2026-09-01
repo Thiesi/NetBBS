@@ -273,7 +273,7 @@ def test_finger_reflows_a_bio_the_same_way_the_directory_and_profile_screens_do(
 ):
     # Dogfood follow-up: `/finger`/`/whois` wrote the sanitized bio
     # straight to the terminal with no `reflow()` call at all, unlike
-    # `login_flow._show_vcard`/`_render_profile` -- the same bio
+    # `directory_flow._show_vcard`/`_render_profile` -- the same bio
     # rendered differently depending on where it was looked up. A
     # single long unbroken line must wrap to terminal width here too,
     # not just in the Directory/Profile screens.
