@@ -244,3 +244,19 @@ def test_strip_ansi_handles_realistic_ansi_art_composition():
     # charset select, OSC, and ordinary SGR color all together.
     sample = "\x1b[?25l\x1b(0Hello\x1b(B\x1b]0;title\x07 world\x1b[m"
     assert strip_ansi(sample) == "Hello world"
+
+
+def test_strip_ansi_fully_consumes_multi_byte_bare_escape_sequences():
+    # Codex review (PR #233): the previous version treated every bare
+    # (non-CSI, non-OSC) escape as exactly two bytes -- ESC plus one
+    # printable character -- which is only true for the zero-
+    # intermediate-byte case (save/restore cursor, etc.). A sequence
+    # with a real intermediate byte before its final one, like DECALN
+    # (`ESC # 8`, used by some ANSI-art tooling for screen-alignment
+    # test patterns) or UTF-8 character-set selection (`ESC % G`), only
+    # had its intermediate byte (`#`/`%`) consumed, leaving the final
+    # byte (`8`/`G`) as visible garbage in the supposedly plain-text
+    # output -- confirmed by direct repro before this fix:
+    # strip_ansi("\x1b#8visible") returned "8visible", not "visible".
+    assert strip_ansi("\x1b#8visible") == "visible"
+    assert strip_ansi("\x1b%Gvisible") == "visible"

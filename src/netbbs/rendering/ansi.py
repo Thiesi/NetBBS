@@ -208,14 +208,21 @@ def reject_keystroke(count: int = 1) -> str:
     return ("\b \b" * count) + "\a"
 
 
-# Codex review (PR #232): an earlier, narrower version of this pattern
-# only matched digit/semicolon-parameter CSI sequences and the bare
-# save/restore-cursor pair -- correct for everything this module's own
-# primitives can emit, but the real call site (a SysOp's own custom
-# `.ans` welcome/registration banner, loaded verbatim and passed
-# through this function too) can contain much richer classic ANSI-art
-# syntax that narrower pattern let straight through as literal bytes,
-# defeating the exact problem stripping exists to solve. Now a general
+# Codex review (PR #232, then #233): an earlier version of this
+# pattern only matched digit/semicolon-parameter CSI sequences and the
+# bare save/restore-cursor pair -- correct for everything this
+# module's own primitives can emit, but the real call site (a SysOp's
+# own custom `.ans` welcome/registration banner, loaded verbatim and
+# passed through this function too) can contain much richer classic
+# ANSI-art syntax that narrower pattern let straight through as
+# literal bytes, defeating the exact problem stripping exists to
+# solve. A second round added a dedicated charset-select branch
+# (`[()*+][A-Za-z0-9]`) plus a single-byte catch-all for everything
+# else -- still wrong for any *other* bare ESC sequence with an
+# intermediate byte before its final one (DECALN `ESC # 8`, UTF-8
+# selection `ESC % G`, ...): the catch-all consumed only the
+# intermediate (`#`/`%`), leaving the final byte (`8`/`G`) as visible
+# garbage in the supposedly plain-text output. Now a general
 # ECMA-48-shaped escape-sequence matcher, covering every form real
 # ANSI-art tooling (SyncTERM, TheDraw, ACiDDraw, ...) actually emits:
 #   - CSI ... final-byte, including private-mode markers like `?25l`
@@ -223,17 +230,20 @@ def reject_keystroke(count: int = 1) -> str:
 #     the full parameter-byte range (digits, `;`, `:`, `<=>?`), not
 #     just digits/`;`;
 #   - OSC ... terminated by BEL or ST (window title, hyperlinks);
-#   - charset selection (`ESC ( 0` for DEC special graphics/box-drawing
-#     glyphs, `ESC ( B` back to ASCII, and the `)`/`*`/`+` G1-G3
-#     variants) -- extremely common in real ANSI art for line-drawing
-#     characters;
-#   - every other bare ESC+single-character form (save/restore cursor,
-#     RIS reset, index/reverse-index, ...), a catch-all rather than an
-#     enumerated list since the three cases above are already matched
-#     first by alternation order, leaving no ambiguity about what a
-#     bare ESC+printable-char pair remaining at this point could be.
+#   - every other escape sequence's real grammar (ECMA-48 6.3.7):
+#     zero or more intermediate bytes (0x20-0x2f) followed by exactly
+#     one final byte (0x30-0x7e) -- this single branch already covers
+#     charset selection (`ESC ( 0` for DEC special graphics/box-
+#     drawing glyphs: `(` is an intermediate, `0` the final byte),
+#     multi-intermediate forms like the two examples above, and every
+#     bare single-final-byte form (save/restore cursor `ESC 7`/`ESC 8`,
+#     RIS reset, index/reverse-index, ...) as the zero-intermediates
+#     case, with no separate enumeration needed. Tried after CSI/OSC
+#     in alternation order, so a literal `[`/`]` immediately after ESC
+#     is never mistaken for this branch's own final byte -- CSI/OSC's
+#     dedicated branches already claim that position first.
 _ANSI_ESCAPE_RE = re.compile(
-    ESC + r"(?:\[[0-?]*[ -/]*[@-~]" r"|\][^\x07\x1b]*(?:\x07|\x1b\\)" r"|[()*+][A-Za-z0-9]" r"|[\x20-\x7e])"
+    ESC + r"(?:\[[0-?]*[ -/]*[@-~]" r"|\][^\x07\x1b]*(?:\x07|\x1b\\)" r"|[\x20-\x2f]*[\x30-\x7e])"
 )
 
 
