@@ -1,5 +1,5 @@
 """Integration tests for the board-list masthead (GitHub issue #176)
-actually being prepended by `netbbs.net.login_flow._browse_boards_in_
+actually being prepended by `netbbs.net.board_flow._browse_boards_in_
 category` -- distinct from tests/test_board_list_banner.py's own
 isolated loader/status tests.
 
@@ -21,7 +21,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.categories import create_category
-from netbbs.net import login_flow
+from netbbs.net import board_flow
 from netbbs.net.board_list_banner import board_list_banner_path, set_board_list_banner_enabled
 from netbbs.net.session import Session
 from netbbs.rendering.ansi import clear_screen
@@ -84,7 +84,7 @@ def alice(db):
 def test_disabled_masthead_leaves_board_list_byte_for_byte_unchanged(db, alice):
     create_board(db, "general", creator=alice)
     with_module = FakeSession(["b"])
-    asyncio.run(login_flow._browse_boards(with_module, db, alice))
+    asyncio.run(board_flow._browse_boards(with_module, db, alice))
 
     # A second, otherwise-identical run confirms the module existing at
     # all (imported, wired in) doesn't change a single byte when unset --
@@ -92,7 +92,7 @@ def test_disabled_masthead_leaves_board_list_byte_for_byte_unchanged(db, alice):
     # directly here, so this instead pins today's own output as the
     # contract: it must not vary run to run with the masthead untouched.
     without_reference = FakeSession(["b"])
-    asyncio.run(login_flow._browse_boards(without_reference, db, alice))
+    asyncio.run(board_flow._browse_boards(without_reference, db, alice))
     assert _written_text(with_module) == _written_text(without_reference)
     assert "MY CUSTOM BOARD MASTHEAD" not in _written_text(with_module)
 
@@ -103,7 +103,7 @@ def test_masthead_shown_above_the_top_level_board_list(db, alice):
     set_board_list_banner_enabled(db, True)
 
     session = FakeSession(["b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _written_text(session)
     assert "MY CUSTOM BOARD MASTHEAD" in text
     assert text.index("MY CUSTOM BOARD MASTHEAD") < text.index("Available message boards")
@@ -119,7 +119,7 @@ def test_masthead_also_shown_when_drilling_into_a_category(db, alice):
     # selection) picks the (sole) category from the top-level mixed
     # list; "b" then backs out of the category's own flat board list.
     session = FakeSession(["0", "1", "b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _written_text(session)
     assert text.count("MY CUSTOM BOARD MASTHEAD") == 2
 
@@ -133,7 +133,7 @@ def test_masthead_with_redraw_in_place_clears_before_the_masthead_not_after(db, 
     set_redraw_in_place_enabled(db, alice, True)
 
     session = FakeSession(["b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _written_text(session)
     assert text.index(clear_screen()) < text.index("MY CUSTOM BOARD MASTHEAD")
     assert text.count(clear_screen()) == 1

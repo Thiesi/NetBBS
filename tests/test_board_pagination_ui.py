@@ -1,6 +1,6 @@
 """
 Integration tests for the interactive board post-pagination navigation
-in netbbs.net.login_flow._show_board (issue #10)
+in netbbs.net.board_flow._show_board (issue #10)
 -- distinct from tests/test_post_pagination.py, which tests
 list_posts_page in isolation. These drive the real _show_board loop
 with a FakeSession to confirm the Older/Newer/Recent keys actually
@@ -18,7 +18,7 @@ from netbbs.auth.users import create_user
 from netbbs.boards import posts as posts_module
 from netbbs.boards.boards import create_board
 from netbbs.boards.posts import create_post, edit_post
-from netbbs.net.login_flow import _show_board
+from netbbs.net.board_flow import _show_board
 from netbbs.storage.database import Database
 
 _PAGE_SIZE = posts_module._DEFAULT_PAGE_SIZE

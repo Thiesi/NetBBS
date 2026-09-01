@@ -71,7 +71,7 @@ class Post:
     # materialized Link-carried post's remote author naturally takes:
     # no local account is implied or required by carrying content.
     # Every reader of this field already treats it as optional in
-    # practice (netbbs.net.login_flow._author_display_name/get_user_by_id
+    # practice (netbbs.net.board_flow._author_display_name/get_user_by_id
     # degrade to author_label correctly for either case) -- this only
     # makes the type honest about behavior that already existed.
     author_user_id: int | None

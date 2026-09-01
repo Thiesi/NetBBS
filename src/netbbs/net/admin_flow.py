@@ -8532,7 +8532,7 @@ async def _pick_optional_category(
 
     `community_id`/`resources` (design doc §16's category
     leak-prevention, admin-side half -- see
-    `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
+    `netbbs.net.board_flow._browse_boards_in_category`'s docstring for
     the browse-side half, which this mirrors) narrow the offered
     categories to those already used by ≥1 same-type resource in this
     Community, but only once a Community was actually just assigned

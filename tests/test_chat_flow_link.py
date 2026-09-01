@@ -2,7 +2,7 @@
 Tests for wiring linked-channel messages into the live interactive chat
 send path (design doc, issue #91) -- `netbbs.net.chat_flow._chat_loop`
 queuing a `channel_message` Link event for a self-authored message sent
-in a Linked channel, mirroring `netbbs.net.login_flow._compose_new_post`'s
+in a Linked channel, mirroring `netbbs.net.board_flow._compose_new_post`'s
 own `queue_board_post_if_linked` call exactly.
 
 Driven through the real `_chat_loop` dispatcher, same harness

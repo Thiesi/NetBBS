@@ -267,7 +267,7 @@ async def browse_channels(
     narrow every picker re-entry in this loop -- not just the
     initial pick -- to the same Community/Uncategorized/unfiltered
     scope the caller entered with; see
-    `netbbs.net.login_flow._browse_boards_in_category`'s docstring for
+    `netbbs.net.board_flow._browse_boards_in_category`'s docstring for
     the full reasoning, identical here.
 
     `link_context` (design doc, issue #91), if given, is passed straight
@@ -275,7 +275,7 @@ async def browse_channels(
     for a self-authored message sent in a Linked channel -- `None`
     (Link disabled on this node, or a direct test/CLI call site) simply
     means a message sent here never propagates over Link, the same
-    degrade-gracefully shape `netbbs.net.login_flow._show_board`'s own
+    degrade-gracefully shape `netbbs.net.board_flow._show_board`'s own
     `link_context` parameter already has for board posts.
     """
     channel = initial_channel or await _pick_channel(
@@ -422,7 +422,7 @@ async def _pick_channel(
     """
     Browse channels within a category (or the top level) and return
     whichever one the user picks, or `None` if they back out — mirrors
-    `netbbs.net.login_flow._browse_boards_in_category` exactly — same
+    `netbbs.net.board_flow._browse_boards_in_category` exactly — same
     reasoning, same two-level cap, same category/item ID-namespace
     disambiguation trick (negated category IDs), and the same
     `community_id`/`community_scoped`/`title_prefix` Community-filter
@@ -522,7 +522,7 @@ async def _pick_channel(
     # below (flat and mixed-with-categories) -- shows at every level of
     # channel browsing this recursive function reaches (top level, a
     # category, a Community/Uncategorized scope), matching
-    # `login_flow._browse_boards_in_category`'s own identical wiring.
+    # `board_flow._browse_boards_in_category`'s own identical wiring.
     # Never the inside of a live channel -- see chat_channel_picker_
     # banner's own module docstring for why that's a categorically
     # different rendering model, not just one level deeper.
@@ -3094,7 +3094,7 @@ async def _chat_loop(
     is recorded (`send_loop`'s own `record_message` call), queues a
     `channel_message` Link event for it via `netbbs.link.channels.
     queue_channel_message_if_linked` when `channel` is Linked — mirrors
-    `netbbs.net.login_flow._compose_new_post`'s own `queue_board_post_
+    `netbbs.net.board_flow._compose_new_post`'s own `queue_board_post_
     if_linked` call exactly: fire-and-forget, no separate success/failure
     message shown to the user (the local send already got its own
     confirmation), the actual outbound push/its own failure handling

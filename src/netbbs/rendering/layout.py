@@ -686,3 +686,24 @@ def menu_grid(
         ]
         result = f"{result}\r\n\r\n" + "\r\n".join(notice_lines)
     return result
+
+
+def menu_row(entries: list[MenuEntry], *, width: int, height: int, description_level: str) -> str:
+    """Compact `action_bar` packing when descriptions are off,
+    `menu_grid`'s taller one-entry-per-line layout once the caller has
+    opted into "brief"/"detailed" (issue #160's rollout) -- see
+    `netbbs.net.resource_editor.edit_resource_draft`'s identical branch
+    for why `menu_grid` alone isn't a byte-for-byte substitute for
+    `action_bar`'s packed row at the off level.
+
+    Moved here from `netbbs.net.login_flow` (login_flow.py maintenance
+    split): a thin dispatcher between two functions that already live
+    in this module, not something specific to any one interactive
+    screen -- every one of its original callers (main menu, board
+    browsing, the caller directory) needed it, so it belongs at the
+    rendering layer both share rather than in whichever screen module
+    happened to define it first.
+    """
+    if description_level == "off":
+        return action_bar([e.label for e in entries], width=width)
+    return menu_grid([("", entries)], width=width, height=height, description_level=description_level)

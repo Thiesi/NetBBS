@@ -1,7 +1,7 @@
 """
 An optional SysOp-authored masthead shown above the board list (GitHub
 issue #176) -- extends the main-menu masthead pattern (issue #161) to
-`netbbs.net.login_flow._browse_boards_in_category`, the shared
+`netbbs.net.board_flow._browse_boards_in_category`, the shared
 implementation every board-browsing view (the unfiltered top level,
 category drill-down, and Community/Uncategorized-scoped browsing) routes
 through via `netbbs.net.picker.pick_item`. Shows at every one of those

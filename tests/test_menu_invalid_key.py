@@ -28,7 +28,8 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _main_menu, _show_board
+from netbbs.net.board_flow import _show_board
+from netbbs.net.login_flow import _main_menu
 from netbbs.storage.database import Database
 
 

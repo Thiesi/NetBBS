@@ -18,7 +18,7 @@ import pytest
 from netbbs.auth.users import create_user
 from netbbs.boards.boards import create_board
 from netbbs.boards.categories import create_category
-from netbbs.net import login_flow
+from netbbs.net import board_flow
 from netbbs.net.session import Session
 from netbbs.sort_preferences import get_effective_sort_mode
 from netbbs.storage.database import Database
@@ -89,7 +89,7 @@ def _set_created_at(db, board_name, iso_timestamp):
 def test_picker_shows_the_current_sort_mode_by_default(db, alice):
     create_board(db, "general", creator=alice)
     session = FakeSession(["b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     # Boards default to "activity" -- unlike channels, this is safe:
     # real, persisted, Link-synced post/creation timestamps every node
     # agrees on (see DEFAULT_SORT_MODE_BY_KIND's own comment).
@@ -105,7 +105,7 @@ def test_order_command_resorts_the_flat_board_list_and_persists_globally(db, ali
     # Default ("activity", falling back to created_at with no posts):
     # zebra first. Switch to alphabetical: apple first instead.
     session = FakeSession(["o", "l", "g", "b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
     assert "Sort: Alphabetical" in text
     assert re.search(r"01\.\s*\(#\d+\)\s*apple", text)
@@ -119,7 +119,7 @@ def test_order_command_choosing_just_this_time_does_not_persist(db, alice):
     _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
 
     session = FakeSession(["o", "l", "j", "b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     assert get_effective_sort_mode(db, alice, "board") == "activity"  # unchanged
 
 
@@ -131,7 +131,7 @@ def test_order_command_in_the_mixed_categories_view_only_reorders_boards(db, ali
     _set_created_at(db, "zebra", "2026-01-02T00:00:00.000000Z")
 
     session = FakeSession(["o", "l", "j", "b"])
-    asyncio.run(login_flow._browse_boards(session, db, alice))
+    asyncio.run(board_flow._browse_boards(session, db, alice))
     text = _visible_text(session)
     assert re.search(r"01\.\s*\(#-?\d+\)\s*\[Vintage\]", text)
 
@@ -150,7 +150,7 @@ def test_community_scoped_order_offers_a_whole_community_save_option(db, alice):
 
     session = FakeSession(["o", "l", "w", "b"])
     asyncio.run(
-        login_flow._browse_boards(session, db, alice, community_id=community.id, community_scoped=True)
+        board_flow._browse_boards(session, db, alice, community_id=community.id, community_scoped=True)
     )
     text = _written_text(session)
     assert "hole Community (Retro Computing)" in text

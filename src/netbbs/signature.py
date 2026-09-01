@@ -78,7 +78,7 @@ def append_signature(body: str, signature: str) -> str:
     ends with exactly this signature block is returned unchanged rather
     than appended to a second time, deliberately, not just as a safety
     net: a board post's saved-draft/resume cycle (`netbbs.net.
-    login_flow._compose_new_post`'s `initial_body`) can hand back a
+    board_flow._compose_new_post`'s `initial_body`) can hand back a
     `body` that already has the signature in it (saved mid-review,
     after a first successful compose already appended one) or one that
     never got it (saved via `/exit` before compose ever completed) --

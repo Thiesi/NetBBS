@@ -206,7 +206,7 @@ async def _browse_areas_in_category(
 ) -> None:
     """
     Browse file areas within a category (or the top level), mirroring
-    `netbbs.net.login_flow._browse_boards_in_category` exactly — same
+    `netbbs.net.board_flow._browse_boards_in_category` exactly — same
     reasoning, same two-level cap, same category/item ID-namespace
     disambiguation trick (negated category IDs), and the same
     `community_id`/`community_scoped`/`title_prefix` Community-filter
@@ -227,7 +227,7 @@ async def _browse_areas_in_category(
     def _load(db: Database, order_by: str) -> tuple[list[FileArea], list[FileAreaCategory], str | None, str | None]:
         # name_requirement deliberately does not gate reading here --
         # same participation-vs-content-restriction split as
-        # netbbs.net.login_flow._browse_boards_in_category (design doc
+        # netbbs.net.board_flow._browse_boards_in_category (design doc
         # §18); see the upload check in _show_area for where it
         # actually applies. Bundled into one function so a single
         # lane.run() call does the filtering on the worker thread,
@@ -273,7 +273,7 @@ async def _browse_areas_in_category(
     # below (flat and mixed-with-categories) -- shows at every level of
     # file-area browsing this recursive function reaches (top level, a
     # category, a Community/Uncategorized scope), matching
-    # `login_flow._browse_boards_in_category`'s own identical wiring.
+    # `board_flow._browse_boards_in_category`'s own identical wiring.
     area_masthead = await lane.run(load_file_area_banner)
     mode_box = {"mode": current_mode}
 
@@ -548,7 +548,7 @@ async def _show_area(
     """
     Show `area`, one bounded page of files at a time (design doc,
     issue #10's file-area follow-up to the board-post pagination) —
-    mirrors `netbbs.net.login_flow._show_board`'s
+    mirrors `netbbs.net.board_flow._show_board`'s
     pagination *semantics* exactly: same newest-first default, same
     `[O]lder`/`[N]ewer`/`[R]ecent`/`[B]ack` options, same reasoning for
     both (see that function's docstring, not repeated here) — including
@@ -955,7 +955,7 @@ async def _fetch_remote_file(
 
 def _uploader_display_name(db: Database, entry, *, name_requirement: str | None) -> str:
     """The uploader label to render for one file entry (design doc §18)
-    -- mirrors `netbbs.net.login_flow._author_display_name`
+    -- mirrors `netbbs.net.board_flow._author_display_name`
     exactly: only looks up the live account when the area actually
     requires `verified_and_displayed` names, otherwise renders the
     plain historical `uploader_label` unchanged, for the identical
