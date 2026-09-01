@@ -70,7 +70,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
 from netbbs.activity import record_channel_seen
 from netbbs.attestation import (
@@ -139,7 +139,6 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
-from netbbs.link.realtime_channels import LiveChannelBridge
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -190,6 +189,21 @@ from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from netbbs.timeutil import format_for_display, resolve_display_preferences, utc_now_iso
+
+if TYPE_CHECKING:
+    # Deferred to type-checking only (GitHub issue #245): this module is
+    # imported unconditionally on every node, including one with no
+    # `aiohttp` installed (an optional extra, `pip install netbbs[web]`)
+    # -- `netbbs.link.realtime_channels` (and, through it, `netbbs.link.
+    # transport`) must never be imported at this module's own top level.
+    # `LiveChannelBridge` is used only as a dataclass field annotation
+    # below (`ChatCommandContext.realtime_bridge`), never at runtime --
+    # safe as a deferred/string annotation because `from __future__
+    # import annotations` above (PEP 563) means it's never evaluated.
+    # The one place this module actually needs the real class at
+    # runtime already imports it lazily, right where it's used -- see
+    # that call site's own comment for why.
+    from netbbs.link.realtime_channels import LiveChannelBridge
 
 
 async def browse_channels(
