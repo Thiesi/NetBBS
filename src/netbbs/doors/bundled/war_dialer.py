@@ -869,8 +869,53 @@ def draw_menu(p: Palette, has_turns: bool) -> None:
                   f"{p.gold}[R]{RESET}aid   Root E{p.gold}[x]{RESET}change")
     else:
         out_line(f"  {p.muted}Out of turns for today.{RESET}")
-    out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[Q]{RESET}uit")
+    out_line(f"  {p.gold}[B]{RESET}oard (exchanges/leaderboard)   {p.gold}[?]{RESET}Help   {p.gold}[Q]{RESET}uit")
     out(f"  {p.accent}>{RESET} ")
+
+
+def draw_help(p: Palette, w: int) -> None:
+    # One page, at most (Thiesi's own ask) -- a returning player can
+    # call this up free from the main menu ([?], never costs a turn),
+    # and a brand-new one sees it once, automatically, before their
+    # very first menu (see `main`). RECRUIT_COST/TURNS_PER_DAY/
+    # HEAT_BUST_THRESHOLD/SEASON are interpolated from the real balance
+    # constants above rather than hand-typed, so this can never quietly
+    # drift out of sync with a future tuning pass the way a second,
+    # copy-pasted set of numbers could. Kept deliberately tight
+    # (~23 lines, box through the closing "press any key"): a first
+    # draft ran to 32, well past what "one page" means on an ordinary
+    # terminal.
+    out_line()
+    out_line(f"{p.border}{BOLD}╔{'═' * (w - 2)}╗{RESET}")
+    out_line(_center_line(f"{p.border}{BOLD}║{RESET}", f"{p.gold}{BOLD}HOW TO PLAY{RESET}",
+                           f"{p.border}{BOLD}║{RESET}", w))
+    out_line(f"{p.border}{BOLD}╚{'═' * (w - 2)}╝{RESET}")
+    out_line(f"  {p.white}You're a hacker, and you and your crew dial into rival boards for{RESET}")
+    out_line(f"  {p.white}cash, respect, and control of the scene's ten shared phone{RESET}")
+    out_line(f"  {p.white}exchanges. Every caller on this node shares the same world --{RESET}")
+    out_line(f"  {p.white}what you do to a rival really happens, online or not.{RESET}")
+    out_line()
+    out_line(f"  {p.accent}{BOLD}Actions{RESET} {p.muted}({TURNS_PER_DAY} turns/day, one per action):{RESET}")
+    out_line(f"    {p.gold}[T]{RESET}rade Warez    {p.muted}quick, low-risk cash.{RESET}")
+    out_line(f"    {p.gold}[C]{RESET}rew Recruit   {p.muted}pay ${RECRUIT_COST}, +1 crew member.{RESET}")
+    out_line(f"    {p.gold}[J]{RESET}ob             {p.muted}bigger risk, bigger payout.{RESET}")
+    out_line(f"    {p.gold}[R]{RESET}aid             {p.muted}hit a rival crew, steal their cash.{RESET}")
+    out_line(f"    Root E{p.gold}[x]{RESET}change   {p.muted}seize a shared exchange for hourly income.{RESET}")
+    out_line()
+    out_line(
+        f"  {p.white}Heat rises with every risky move; cross {int(HEAT_BUST_THRESHOLD)} and you're "
+        f"{p.bad}{BOLD}BUSTED{RESET}"
+    )
+    out_line(f"  {p.white}-- gear and crew scattered. It decays on its own, so cooling off helps.{RESET}")
+    out_line(
+        f"  {p.white}Rank only ever climbs within a season (lifetime totals, not current{RESET}"
+    )
+    out_line(f"  {p.white}holdings) -- resets every {SEASON.days} days.{RESET}")
+    out_line()
+    out_line(
+        f"  {p.gold}[B]{RESET}oard {p.muted}is always free. Press{RESET} {p.gold}[?]{RESET} "
+        f"{p.muted}any time to see this again.{RESET}"
+    )
 
 
 def read_menu_choice(valid: str) -> str:
@@ -1003,9 +1048,22 @@ def main() -> int:
 
         user_id = info.get("user_id", 0)
         handle = info.get("handle", "Guest")
+        # Checked *before* load_or_create_player (which would otherwise
+        # insert the row this exact query is trying to detect the
+        # absence of) rather than having that function itself report
+        # whether it just created one -- that function's return type is
+        # exercised directly by a full test module already
+        # (test_war_dialer_domain.py), and changing it to a tuple for
+        # this one presentation-layer concern would ripple through
+        # every one of those call sites for no reason a domain function
+        # should care about.
+        is_new_player = conn.execute("SELECT 1 FROM players WHERE user_id=?", (user_id,)).fetchone() is None
         player = load_or_create_player(conn, user_id, handle, now, season_number)
 
         draw_title(palette, info, season_number, w)
+        if is_new_player:
+            draw_help(palette, w)
+            press_any_key(palette)
         events = unseen_events(conn, player.user_id)
         if events:
             draw_offline_summary(palette, events, w)
@@ -1017,11 +1075,14 @@ def main() -> int:
                 draw_status(palette, player, w)
                 has_turns = player.turns_used < TURNS_PER_DAY
                 draw_menu(palette, has_turns)
-                valid = "BQ" + ("TCJRX" if has_turns else "")
+                valid = "BQ?" + ("TCJRX" if has_turns else "")
                 choice = read_menu_choice(valid)
                 action_now = now_utc()
                 if choice == "Q":
                     break
+                elif choice == "?":
+                    draw_help(palette, w)
+                    press_any_key(palette)
                 elif choice == "B":
                     draw_board(palette, conn, w)
                 elif choice == "T":
