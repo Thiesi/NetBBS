@@ -369,6 +369,21 @@ async def edit_resource_draft(
         if not menu_sections:
             menu_sections.append(("", []))
         menu_sections[-1][1].extend(menu_entries[len(fields):])
+        # Every other budget below measures against this same total --
+        # `menu_description_level`'s real default is "brief", not "off"
+        # (every caller who hasn't touched the setting already has it
+        # on), and this screen has no pagination to fall back on the
+        # way picker.py does -- the *whole* field list plus whichever
+        # menu row is chosen must fit, or the top of the field list
+        # scrolls off (dogfood-reported regression).
+        fixed_lines = (
+            (3 if subtitle else 2)  # screen_title: title [+ subtitle] + underline
+            + (preamble_text.count("\r\n") + 1 if preamble_text else 0)
+            + field_line_count  # every field's own value lines, wrapped ones included
+            + 1  # blank line before the menu row
+            + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
+            + 1  # "Choice: " prompt line
+        )
         # Dogfood report: on an ordinary terminal, this screen's own
         # sectioned value list above already leaves no height budget for
         # the *descriptive* menu_grid form below to fit (see that
@@ -381,44 +396,43 @@ async def edit_resource_draft(
         # `action_bar` call whenever there's more than one real group --
         # an unsectioned screen (`len(menu_sections) == 1`) renders
         # byte-for-byte as before.
+        flat_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
+        menu_line = flat_menu_line
         if len(menu_sections) > 1:
             compact_lines: list[str] = []
             for title, entries in menu_sections:
                 if title:
                     compact_lines.append(colored(title.upper(), fg_color=METADATA_COLOR, bold=True))
                 compact_lines.append(action_bar([e.label for e in entries], width=session.terminal_width))
-            compact_menu_line = "\r\n".join(compact_lines)
-        else:
-            compact_menu_line = action_bar([e.label for e in menu_entries], width=session.terminal_width)
-        menu_line = compact_menu_line
+            sectioned_compact_menu_line = "\r\n".join(compact_lines)
+            # Codex review (PR #229): unlike the old always-one-line flat
+            # form, a sectioned compact row grows with the section count
+            # -- Board/Area/Channel's four sections add a heading plus a
+            # packed row each, easily enough on its own to push a real
+            # 24-row terminal's field list off the top before `Choice:`
+            # ever appears, the exact scroll-off regression the
+            # descriptive-form check below already guards against.
+            # Reuses that same budget rather than a separate one -- if
+            # even the sectioned compact row doesn't fit, fall all the
+            # way back to the flat one line, which always did (and still
+            # does) fit within it.
+            sectioned_compact_lines = sectioned_compact_menu_line.count("\r\n") + 1
+            if fixed_lines + sectioned_compact_lines <= session.terminal_height:
+                menu_line = sectioned_compact_menu_line
         if description_level != "off":
             # `menu_grid` always renders one entry per line, even with
             # descriptions off -- unlike `action_bar`'s packed single-
             # line row, that's not a byte-for-byte-compatible
-            # substitute at this level. `menu_description_level`'s real
-            # default is "brief", not "off" (every caller who hasn't
-            # touched the setting already has it on), and this screen
-            # has no pagination to fall back on the way picker.py does
-            # -- the *whole* field list plus the now much taller menu
-            # row must fit, or the top of the field list scrolls off
-            # (dogfood-reported regression). Falls back to the compact
-            # row, regardless of preference, whenever the descriptive
-            # form wouldn't fit this terminal at all -- descriptions are
-            # a nice-to-have, being able to see the whole screen is the
+            # substitute at this level. Falls back to the compact row,
+            # regardless of preference, whenever the descriptive form
+            # wouldn't fit this terminal at all -- descriptions are a
+            # nice-to-have, being able to see the whole screen is the
             # point.
             descriptive_menu_line = menu_grid(
                 menu_sections,
                 width=session.terminal_width,
                 height=session.terminal_height,
                 description_level=description_level,
-            )
-            fixed_lines = (
-                (3 if subtitle else 2)  # screen_title: title [+ subtitle] + underline
-                + (preamble_text.count("\r\n") + 1 if preamble_text else 0)
-                + field_line_count  # every field's own value lines, wrapped ones included
-                + 1  # blank line before the menu row
-                + (1 if any(f.help for f in fields) else 0)  # "(Ctrl-H for help...)" hint
-                + 1  # "Choice: " prompt line
             )
             descriptive_lines = descriptive_menu_line.count("\r\n") + 1
             if fixed_lines + descriptive_lines <= session.terminal_height:

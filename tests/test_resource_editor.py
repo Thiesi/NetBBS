@@ -1378,6 +1378,52 @@ def test_sectioned_fields_group_the_compact_fallback_menu_row_too():
     assert identity_menu_index < text.index("[N]ame") < display_menu_index < text.index("[P]inned")
 
 
+def _many_sectioned_fields() -> list[FieldSpec]:
+    fields = []
+    for i in range(6):
+        section = f"Group{i}"
+        for j in range(2):
+            key = f"f{i}_{j}"
+            hotkey = chr(ord("a") + i * 2 + j)
+            fields.append(
+                FieldSpec(
+                    key=key, hotkey=hotkey, menu_text=menu_key(hotkey.upper(), "x"),
+                    label=f"Field {i}{j}",
+                    render=lambda draft, key=key: draft.get(key) or "(blank)",
+                    prompt=text_field(key),
+                    section=section,
+                )
+            )
+    return fields
+
+
+def test_sectioned_compact_menu_row_falls_back_to_flat_when_it_would_not_fit():
+    # Codex review (PR #229): a sectioned compact menu row grows with
+    # the section count (a heading plus a packed action row per
+    # section) -- unlike the old always-one-line flat form, that's no
+    # longer automatically bounded, and can push the field list off the
+    # top of a short terminal on its own. Six sections here comfortably
+    # bust that budget, so the row must fall all the way back to one
+    # flat, ungrouped action_bar line -- which always fits, the same
+    # guarantee the pre-#229 form always gave.
+    session = FakeSession(["b"])
+    session.terminal_height = 15
+    fields = _many_sectioned_fields()
+    draft = {f.key: "" for f in fields}
+    asyncio.run(
+        edit_resource_draft(
+            session, None,
+            title="Create thing", fields=fields, draft=draft,
+            save=None, back_menu_text=menu_key("B", "ack"),
+        )
+    )
+    text = _visible(_written_text(session))
+    # Once (the value list's own heading) rather than twice (heading
+    # repeated as the sectioned menu row's own group title) confirms
+    # the menu row fell back to the flat form instead.
+    assert text.count("GROUP0") == 1
+
+
 def test_sectioned_fields_group_the_descriptive_menu_row_too():
     # The hotkey menu row already routed through menu_grid before this
     # feature existed -- confirms a sectioned screen gets real per-
