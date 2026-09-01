@@ -171,7 +171,20 @@ def out_line(text: str = "") -> None:
 
 
 def read_key() -> str:
-    data = sys.stdin.buffer.read(1)
+    # Codex review (PR #241), a real P1: `sys.stdin.buffer` is a
+    # `BufferedReader` -- even a `.read(1)` call may pull more than one
+    # byte from the underlying OS pipe into its own internal buffer if
+    # more are already available, so a real arrow key's full `ESC [
+    # <letter>` sequence (arriving in one terminal write) could have its
+    # trailing bytes already sitting in *Python's* buffer, invisible to
+    # `select()` on the raw fd in `_stdin_has_pending_byte` below --
+    # which would then wrongly report "nothing pending," treat a real
+    # arrow key as a standalone Escape, and leak the trailing bytes into
+    # the next read exactly the way PR #239 was meant to stop. Reading
+    # via `os.read()` directly instead is unbuffered -- never pulls more
+    # than the one byte asked for -- so what `select()` sees on the fd
+    # always matches what's actually still unread.
+    data = os.read(sys.stdin.fileno(), 1)
     if not data:
         raise EOFError("stdin closed")
     return data.decode("ascii", errors="replace")
@@ -199,8 +212,23 @@ def _stdin_has_pending_byte(timeout: float) -> bool:
     blocking to find out. Kept as its own function (rather than inlined
     into `press_any_key`) so a test double can stub the readiness check
     itself -- a scripted FakeSession's `stdin` isn't a real, selectable
-    file descriptor the way this door's actual raw terminal stream is."""
-    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    file descriptor the way this door's actual raw terminal stream is.
+
+    Codex review (PR #241): `select.select()` only accepts sockets on
+    Windows -- not the pipe `sys.stdin` actually is when this door runs
+    as a NetBBS subprocess (or a real console handle, run standalone) --
+    and raises `OSError` there instead of just failing to detect
+    readiness, which would crash the whole door the moment a caller
+    pressed a standalone Escape. This project's real deployment target
+    is NetBSD/POSIX generally (design doc); Windows is this repo's own
+    documented *development* environment only. Caught here and treated
+    as "nothing pending" -- exactly the behavior every platform already
+    had before this readiness check existed, so Windows just doesn't
+    gain the CSI-lookahead fix POSIX gets, it doesn't regress further."""
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    except OSError:
+        return False
     return bool(ready)
 
 
@@ -1024,9 +1052,16 @@ def draw_help(p: Palette, w: int) -> None:
     )
     out_line()
     para(
+        # Codex review (PR #241): the prior trim dropped "Nothing
+        # carries over" to save a row, but the shortened list it left
+        # behind doesn't mention exchange control -- and
+        # sweep_exchange_season_reset() really does clear every
+        # exchange's controller/garrison at the season boundary too, so
+        # the list needs to say so explicitly now that there's no
+        # catch-all phrase covering it.
         f"Rank only ever climbs this season (lifetime totals, immune to busts) -- "
-        f"every {SEASON.days} days it wipes cash, crew, Heat, and those totals for "
-        f"everyone."
+        f"every {SEASON.days} days it wipes cash, crew, Heat, exchanges, and those "
+        f"totals."
     )
     out_line()
     para("[B]oard is always free. Press [?] any time to see this again.")

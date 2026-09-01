@@ -4,8 +4,8 @@ domain.py's broad domain-formula coverage. This door has no other
 presentation-layer tests (matches Retro Trivia's own established
 boundary: domain logic gets real regression coverage, the terminal-
 driving `main()`/rendering glue doesn't) -- these exist specifically
-because each pins a real bug Codex caught on PR #239 or its own PR #240
-follow-up review, not a routine rendering check.
+because each pins a real bug Codex caught across PR #239/#240/#241's
+review rounds, not a routine rendering check.
 
 Loaded directly from its file path, same reasoning as test_war_dialer_
 domain.py: this is the exact file NetBBS launches as a standalone
@@ -15,9 +15,12 @@ subprocess, not an ordinarily-imported library module.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
+
+import pytest
 
 _WAR_DIALER_PATH = (
     Path(__file__).resolve().parent.parent / "src" / "netbbs" / "doors" / "bundled" / "war_dialer.py"
@@ -148,3 +151,97 @@ def test_press_any_key_does_not_block_on_a_standalone_escape():
         wd._stdin_has_pending_byte = original_has_pending
 
     assert session.calls == 1
+
+
+def test_read_key_does_not_over_consume_from_a_real_pipe():
+    # Codex review (PR #241), the real root cause of the P1 finding
+    # above: the *previous* read_key() went through sys.stdin.buffer
+    # (a BufferedReader), which can pull more than the one requested
+    # byte from the OS pipe into its own internal buffer -- invisible
+    # to select()-based readiness checks, which only see the raw fd.
+    # This is what the stubbed-readiness tests above can't catch (Codex
+    # called that out specifically): they prove press_any_key()'s own
+    # branching logic is right, but not that read_key() itself leaves
+    # unread bytes actually unread. Exercises the real read_key()
+    # against a real OS pipe -- unlike select(), os.pipe()/os.read()
+    # behave the same on Windows and POSIX, so this test needs no
+    # platform guard.
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"AB")
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = os.fdopen(read_fd, "rb", buffering=0, closefd=False)
+        key = wd.read_key()
+    finally:
+        sys.stdin = real_stdin
+        os.close(write_fd)
+
+    assert key == "A"
+    # The second byte must still be sitting unread in the pipe -- proof
+    # read_key() took exactly the one byte it asked for, nothing more.
+    remaining = os.read(read_fd, 10)
+    os.close(read_fd)
+    assert remaining == b"B"
+
+
+def test_stdin_has_pending_byte_survives_a_windows_style_oserror():
+    # Codex review (PR #241), a real bug: select.select() only accepts
+    # sockets on Windows, not the pipe/console handle sys.stdin actually
+    # is for this door -- raising OSError there instead of just failing
+    # to detect readiness, which used to crash the whole door the moment
+    # a caller dismissed a pause with a standalone Escape. Confirms the
+    # guard: with select.select() forced to behave the way it really
+    # does on Windows, _stdin_has_pending_byte() must return False
+    # (never propagate the exception), not fail the caller's own read.
+    def _raise(*args, **kwargs):
+        raise OSError("select() only accepts sockets on Windows")
+
+    original_select = wd.select.select
+    try:
+        wd.select.select = _raise
+        assert wd._stdin_has_pending_byte(0.01) is False
+    finally:
+        wd.select.select = original_select
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "select.select() only accepts sockets on Windows, not a real pipe -- "
+        "this test exercises exactly the POSIX-only readiness check "
+        "_stdin_has_pending_byte() falls back to False without on Windows "
+        "(see test_stdin_has_pending_byte_survives_a_windows_style_oserror "
+        "above), so it cannot pass there by construction, not by a bug."
+    ),
+)
+def test_press_any_key_consumes_full_csi_sequence_over_a_real_pipe():
+    # Codex review (PR #241): the strongest form of this regression
+    # test -- exercises the REAL read_key() and REAL
+    # _stdin_has_pending_byte() together (no stubbing at all) against a
+    # real OS pipe, with a full right-arrow CSI sequence written in one
+    # shot the way an actual terminal delivers it. This is the only way
+    # to actually catch a mismatch between what select() reports ready
+    # on the raw fd and what read_key() has already consumed -- the
+    # exact gap the previous (BufferedReader-based) read_key() had.
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"\x1b[Cb")  # right-arrow, then a real next keystroke
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = os.fdopen(read_fd, "rb", buffering=0, closefd=False)
+        written: list[str] = []
+        original_out = wd.out
+        try:
+            wd.out = written.append
+            wd.press_any_key(wd.Palette(truecolor=False))
+        finally:
+            wd.out = original_out
+    finally:
+        sys.stdin = real_stdin
+        os.close(write_fd)
+
+    # The whole 3-byte CSI sequence must be consumed by press_any_key()
+    # itself, leaving only the caller's real next keystroke ('b') for
+    # whatever reads next -- not leaked into it.
+    remaining = os.read(read_fd, 10)
+    os.close(read_fd)
+    assert remaining == b"b"
