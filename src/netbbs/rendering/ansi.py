@@ -23,6 +23,8 @@ target; truecolor is additive and opt-in, not a replacement for it.
 
 from __future__ import annotations
 
+import re
+
 ESC = "\x1b"
 CSI = ESC + "["  # Control Sequence Introducer
 
@@ -204,6 +206,44 @@ def reject_keystroke(count: int = 1) -> str:
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
     return ("\b \b" * count) + "\a"
+
+
+# Matches every sequence shape this module's own primitives can ever
+# emit: CSI ... final-byte (colored/fg/bg/BOLD/UNDERLINE/REVERSE/RESET/
+# clear_screen/clear_line/move_cursor/set_scroll_region/reset_scroll_
+# region all end in one letter after an optional numeric/`;`-separated
+# parameter list), and the two bare ESC+letter forms (save_cursor/
+# restore_cursor). Not a general-purpose ANSI parser (no charset-select
+# handling, unlike the similar private regex duplicated in
+# netbbs.doors.bundled's two door games, which parse arbitrary door
+# output rather than this module's own known-shape sequences) --
+# narrower on purpose, since stripping here only ever needs to undo
+# what this module itself can produce.
+_ANSI_ESCAPE_RE = re.compile(rf"{re.escape(CSI)}[0-9;]*[A-Za-z]|{re.escape(ESC)}[78]")
+
+
+def strip_ansi(text: str) -> str:
+    """
+    Remove every ANSI/VT100 escape sequence this module's own
+    primitives can produce, leaving plain text -- for trusted,
+    already-composed output (e.g. a `colored()`/`gradient_text()`
+    banner) that needs to reach a display context which can't reliably
+    render escape sequences at all, such as an SSH pre-auth banner
+    (`SSH_MSG_USERAUTH_BANNER`, shown before any pty/terminal channel
+    exists -- many clients route it through a display path that never
+    runs an ANSI parser over it, dumping literal escape bytes instead
+    of interpreting them, regardless of color depth chosen).
+
+    A different concern from `netbbs.rendering.sanitize.sanitize_text`,
+    which defuses *untrusted* text by stripping only the introducing
+    ESC byte -- enough to prevent untrusted content from ever forming a
+    sequence, but which would leave one of this module's own trusted
+    sequences as inert bracket-and-letter noise (`[38;5;208m`) rather
+    than clean text. Never apply this to untrusted text expecting it to
+    sanitize anything; it has no such guarantee for content this module
+    didn't produce.
+    """
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _validate_color(color: int) -> None:
