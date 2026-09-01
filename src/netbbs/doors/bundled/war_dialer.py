@@ -73,6 +73,7 @@ import select
 import sqlite3
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -177,7 +178,7 @@ def read_key() -> str:
     # more are already available, so a real arrow key's full `ESC [
     # <letter>` sequence (arriving in one terminal write) could have its
     # trailing bytes already sitting in *Python's* buffer, invisible to
-    # `select()` on the raw fd in `_stdin_has_pending_byte` below --
+    # `select()` on the raw fd in `_read_key_with_timeout` below --
     # which would then wrongly report "nothing pending," treat a real
     # arrow key as a standalone Escape, and leak the trailing bytes into
     # the next read exactly the way PR #239 was meant to stop. Reading
@@ -200,43 +201,72 @@ def read_key() -> str:
 # caller's actual next menu choice vanished. A real CSI sequence's
 # remaining bytes arrive in the same terminal write as the leading ESC,
 # so they're already sitting in the OS input buffer by the time this
-# runs; `select()` distinguishes "more bytes already here" from
-# "nothing else coming" without blocking on the latter. A short but
-# nonzero timeout, not 0, gives a few milliseconds of slack for network
-# jitter (telnet/SSH) between the ESC and '[' bytes actually arriving.
+# runs; a short but nonzero timeout, not 0, gives a few milliseconds of
+# slack for network jitter (telnet/SSH) between the ESC and '[' bytes
+# actually arriving.
 _ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS = 0.1
 
+# Codex review (PR #242): the Windows poll fallback below re-checks
+# roughly this often while waiting out the timeout budget above.
+_WINDOWS_POLL_INTERVAL_SECONDS = 0.01
 
-def _stdin_has_pending_byte(timeout: float) -> bool:
-    """Whether another byte is already available on stdin, without
-    blocking to find out. Kept as its own function (rather than inlined
-    into `press_any_key`) so a test double can stub the readiness check
-    itself -- a scripted FakeSession's `stdin` isn't a real, selectable
-    file descriptor the way this door's actual raw terminal stream is.
 
-    Codex review (PR #241): `select.select()` only accepts sockets on
-    Windows -- not the pipe `sys.stdin` actually is when this door runs
-    as a NetBBS subprocess (or a real console handle, run standalone) --
-    and raises `OSError` there instead of just failing to detect
-    readiness, which would crash the whole door the moment a caller
-    pressed a standalone Escape. This project's real deployment target
-    is NetBSD/POSIX generally (design doc); Windows is this repo's own
-    documented *development* environment only. Caught here and treated
-    as "nothing pending" -- exactly the behavior every platform already
-    had before this readiness check existed, so Windows just doesn't
-    gain the CSI-lookahead fix POSIX gets, it doesn't regress further."""
+def _read_key_with_timeout(timeout: float) -> str | None:
+    """Reads and returns the next stdin byte if one arrives within
+    `timeout` seconds, else returns `None` without having consumed
+    anything. Kept as its own function (rather than inlined into
+    `press_any_key`) so a test double can stub it directly -- a
+    scripted FakeSession's `stdin` isn't a real, selectable file
+    descriptor the way this door's actual raw terminal stream is.
+
+    Codex review (PR #241 and its own PR #242 follow-up): the first cut
+    of this used `select.select()` alone, falling back to "nothing
+    pending" whenever it raised -- which was meant to guard Windows
+    (where `select()` only accepts sockets, not the pipe `sys.stdin`
+    actually is), but that fallback also meant a real arrow key's CSI
+    sequence was *never* detected on Windows at all, leaving the
+    original PR #239 leak (right-arrow silently firing Crew Recruit)
+    fully reproducible there. `select()` genuinely works for this on
+    POSIX (a pipe or tty fd), so it's tried first; the Windows fallback
+    instead polls via short non-blocking `os.read()` attempts, verified
+    directly to behave correctly on a real Windows pipe fd (unlike
+    `select()`) -- `os.set_blocking()` is implemented for pipe handles
+    on Windows specifically for this kind of non-blocking-I/O use."""
+    fd = sys.stdin.fileno()
     try:
         ready, _, _ = select.select([sys.stdin], [], [], timeout)
     except OSError:
-        return False
-    return bool(ready)
+        return _poll_read_key_windows(fd, timeout)
+    if not ready:
+        return None
+    return read_key()
+
+
+def _poll_read_key_windows(fd: int, timeout: float) -> str | None:
+    """Windows-only fallback for `_read_key_with_timeout` -- see that
+    function's own docstring for why `select()` can't be used here."""
+    deadline = time.monotonic() + timeout
+    os.set_blocking(fd, False)
+    try:
+        while True:
+            try:
+                data = os.read(fd, 1)
+            except BlockingIOError:
+                data = b""
+            if data:
+                return data.decode("ascii", errors="replace")
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(_WINDOWS_POLL_INTERVAL_SECONDS)
+    finally:
+        os.set_blocking(fd, True)
 
 
 def press_any_key(p: Palette) -> None:
     out_line()
     out(f"  {p.muted}Press any key to continue...{RESET}")
     key = read_key()
-    if key == ESC and _stdin_has_pending_byte(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS):
+    if key == ESC:
         # Codex review (PR #239): an arrow key sends a multi-byte `ESC [
         # <letter>` CSI sequence -- consuming only the leading ESC here
         # left the rest sitting in the input buffer for the *next*
@@ -246,9 +276,10 @@ def press_any_key(p: Palette) -> None:
         # Crew Recruit the caller never chose. Mirrors voidrunner.py's
         # own `read_line_raw`, this codebase's already-established
         # pattern for swallowing a CSI sequence whole rather than
-        # leaking its tail bytes -- reached only once the readiness
-        # check above has confirmed there really is a next byte to read.
-        nxt = read_key()
+        # leaking its tail bytes -- `nxt` is `None`, not blocking
+        # forever, when nothing else was actually coming (a standalone
+        # Escape).
+        nxt = _read_key_with_timeout(_ESCAPE_LOOKAHEAD_TIMEOUT_SECONDS)
         if nxt == "[":
             while True:
                 b = read_key()
