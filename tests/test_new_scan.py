@@ -1,7 +1,7 @@
 """
 Tests for issue #56's `[N]ew scan` activity summary --
 `netbbs.net.login_flow._draw_main_menu`'s always-shown entry and
-`_new_scan_screen` itself: never-visited/caught-up/unread status per
+`netbbs.net.scan_and_find._new_scan_screen` itself: never-visited/caught-up/unread status per
 board/channel/file area, the cross-board "replies to you" section, and
 jumping straight to the first unread post/file. Channel-entry wiring
 (`browse_channels`'s own `initial_channel` parameter) is proved for real
@@ -28,7 +28,7 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
-from netbbs.net import login_flow
+from netbbs.net import scan_and_find
 from netbbs.net.char_input import InputHistory
 from netbbs.net.login_flow import _draw_main_menu, _main_menu
 from netbbs.storage.database import Database
@@ -237,7 +237,17 @@ def test_selecting_a_channel_calls_browse_channels_with_that_channel(db, lane, a
     async def fake_browse_channels(session, lane, hub, presence, mailbox, history, user, **kwargs):
         calls.append(kwargs.get("initial_channel"))
 
-    monkeypatch.setattr(login_flow, "browse_channels", fake_browse_channels)
+    # Patched on scan_and_find, not login_flow -- _new_scan_screen (the
+    # actual call site) lives there now, with its own independent
+    # `browse_channels` import binding (netbbs.net.login_flow's own
+    # binding is a different reference to the same underlying function,
+    # unaffected by patching the other module's copy).
+    # Patched on scan_and_find, not login_flow -- _new_scan_screen (the
+    # actual call site) lives there now, with its own independent
+    # `browse_channels` import binding (netbbs.net.login_flow's own
+    # binding is a different reference to the same underlying function,
+    # unaffected by patching the other module's copy).
+    monkeypatch.setattr(scan_and_find, "browse_channels", fake_browse_channels)
 
     _run_main_menu(db, lane, alice, ["n", "0", "1", "l", "y"])
 
