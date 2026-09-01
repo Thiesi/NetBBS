@@ -1,5 +1,5 @@
 """Test for issue #102's Ctrl-L wiring on the main menu --
-`netbbs.net.login_flow._main_menu` redraws itself in place, not a
+`netbbs.net.main_menu._main_menu` redraws itself in place, not a
 rejected keystroke, and without consuming an extra logoff-confirmation
 answer (it's a no-op, not a real menu action)."""
 
@@ -10,7 +10,7 @@ import asyncio
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.net.char_input import REDRAW_KEY, InputHistory
-from netbbs.net.login_flow import _main_menu
+from netbbs.net.main_menu import _main_menu
 from netbbs.storage.database import Database
 
 

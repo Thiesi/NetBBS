@@ -1,5 +1,5 @@
 """Integration tests for the main-menu masthead (issue #161) actually
-being prepended by `netbbs.net.login_flow._draw_main_menu` -- distinct
+being prepended by `netbbs.net.main_menu._draw_main_menu` -- distinct
 from tests/test_main_menu_banner.py's own isolated loader/status tests.
 
 The critical regression this guards: `rendering.layout.screen_title
@@ -19,7 +19,7 @@ import asyncio
 
 from netbbs.auth.users import create_user
 from netbbs.chat.mailbox import MessageMailbox
-from netbbs.net.login_flow import _draw_main_menu
+from netbbs.net.main_menu import _draw_main_menu
 from netbbs.net.main_menu_banner import main_menu_banner_path, set_main_menu_banner_enabled
 from netbbs.net.redraw_preference import set_redraw_in_place_enabled
 from netbbs.rendering.ansi import clear_screen

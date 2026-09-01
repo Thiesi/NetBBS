@@ -4466,7 +4466,7 @@ async def _revoke_live_sessions(
     can't safely be cancelled-and-awaited from within itself. Any of
     the acting SysOp's *other* live sessions still get disconnected
     normally; the current one is caught instead by the cross-process
-    revalidation boundary in `netbbs.net.login_flow._main_menu` at its
+    revalidation boundary in `netbbs.net.main_menu._main_menu` at its
     next safe checkpoint.
     """
     if node_controls is None:
@@ -4547,7 +4547,7 @@ async def _draw_node_menu(
     a SysOp who toggled `[M]aintenance mode` and then moved on to
     something else has no way to notice it's still on except this
     screen (and the live main-menu prompt's own tag, `netbbs.net.
-    login_flow._draw_main_menu`) -- the actual incident that prompted
+    main_menu._draw_main_menu`) -- the actual incident that prompted
     this: a SysOp left it on and only found out when a user reported
     being unable to log in. Shown unconditionally here (this is already
     the node-management screen, not a place that needs restraint about
@@ -5830,7 +5830,7 @@ async def _draw_main_menu_banner_menu(
 
 
 async def _preview_main_menu_banner_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """Renders the exact masthead `netbbs.net.login_flow._draw_main_menu`
+    """Renders the exact masthead `netbbs.net.main_menu._draw_main_menu`
     would prepend above the main menu right now -- the same
     `load_main_menu_banner` call, a smoke test of the loading path
     itself. Unlike the welcome-banner preview, this never calls into

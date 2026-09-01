@@ -29,7 +29,7 @@ from netbbs.chat.direct_invites import DirectChatInvites
 from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
-from netbbs.net import login_flow
+from netbbs.net import main_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.net.session import Session
 from netbbs.storage.database import Database
@@ -101,7 +101,7 @@ def test_cancelling_the_outer_task_does_not_orphan_the_invite_race(db, alice):
 
         tasks_before = asyncio.all_tasks()
         outer = asyncio.create_task(
-            login_flow._main_menu(
+            main_menu._main_menu(
                 session, db, ChatHub(), PresenceRegistry(), MessageMailbox(), InputHistory(), alice,
                 direct_invites=direct_invites,
             )

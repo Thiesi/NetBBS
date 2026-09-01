@@ -3,11 +3,11 @@ UI-level regression tests for GitHub issue #42: an offline invitee
 previously had no notification mechanism at all for a channel invitation
 (the mailbox `_deliver_private_message` uses is session-addressed and
 ephemeral -- see its own docstring -- so it silently reached nobody with
-no active session at `/invite` time). These drive the real
-`netbbs.net.login_flow` entry points -- `run_authenticated_session`'s
-post-login announcement, `_draw_main_menu`'s conditional `[I]nvitations`
-option, and `_show_pending_invitations`'s full-detail screen -- rather
-than just the underlying `netbbs.chat.membership.
+no active session at `/invite` time). These drive the real entry
+points -- `netbbs.net.login_flow.run_authenticated_session`'s
+post-login announcement, and `netbbs.net.main_menu._draw_main_menu`'s
+conditional `[I]nvitations` option and `_show_pending_invitations`'s
+full-detail screen -- rather than just the underlying `netbbs.chat.membership.
 list_pending_invitations_for_user` (covered separately, at the library
 level, in tests/test_channel_membership.py).
 """
@@ -24,7 +24,8 @@ from netbbs.chat.membership import create_invitation
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.moderation import ChannelPermission, grant_permissions
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _announce_pending_invitations, _main_menu, _show_pending_invitations, run_authenticated_session
+from netbbs.net.login_flow import _announce_pending_invitations, run_authenticated_session
+from netbbs.net.main_menu import _main_menu, _show_pending_invitations
 from netbbs.storage.database import Database
 
 

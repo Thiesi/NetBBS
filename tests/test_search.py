@@ -26,7 +26,7 @@ from netbbs.files.areas import create_file_area
 from netbbs.files.entries import approve_file, delete_file, upload_file
 from netbbs.moderation import BoardPermission, grant_permissions
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _main_menu
+from netbbs.net.main_menu import _main_menu
 from netbbs.search import (
     check_index_integrity,
     file_jump_cursor,

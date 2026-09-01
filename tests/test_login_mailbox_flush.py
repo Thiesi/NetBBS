@@ -1,7 +1,7 @@
 """
 Integration test for the one flush point the mailbox + next-prompt
 private-message delivery relies on: the top of
-`netbbs.net.login_flow._draw_main_menu`,
+`netbbs.net.main_menu._draw_main_menu`,
 called on entry to `_main_menu` and again after returning from every
 submenu -- the one choke point every screen (boards, files, directory,
 profile, chat) passes through before its next redraw. Library-level
@@ -18,7 +18,7 @@ import pytest
 
 from netbbs.auth.users import User, create_user
 from netbbs.chat import MessageMailbox, PresenceRegistry
-from netbbs.net import login_flow
+from netbbs.net import main_menu
 from netbbs.net.char_input import InputHistory
 from netbbs.storage.database import Database
 
@@ -75,7 +75,7 @@ def test_pending_private_message_shown_before_the_menu_on_entry(db):
         # Delivered by session (GitHub issue #27), not by username --
         # the same session object _main_menu will later flush() by.
         mailbox.deliver(session, "*** Private message from bob: hi there", _T)
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
+        await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -90,7 +90,7 @@ def test_message_is_only_shown_once_not_on_every_redraw(db):
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])
         mailbox.deliver(session, "*** Private message from bob: only once", _T)
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
+        await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -101,7 +101,7 @@ def test_no_extra_output_when_mailbox_is_empty(db):
     async def scenario():
         mailbox = MessageMailbox()
         session = FakeSession(keys=["l"])
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
+        await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), _make_user(db))
         return session
 
     session = asyncio.run(scenario())
@@ -125,14 +125,19 @@ def test_a_second_pending_message_delivered_after_returning_to_the_menu(db, monk
         # passes through (design doc §16) -- irrelevant here.
         mailbox.deliver(session, "*** Private message from bob: while you were away", _T)
 
-    monkeypatch.setattr(login_flow, "_browse_boards", fake_browse_boards)
+    # Patched on main_menu, not login_flow -- _resource_type_menu (the
+    # actual call site, reached via [J]ump to... -> [M]essage Boards)
+    # lives there now, with its own independent `_browse_boards` import
+    # binding (netbbs.net.board_flow's real function is unaffected;
+    # patching main_menu's copy of the name is what's needed here).
+    monkeypatch.setattr(main_menu, "_browse_boards", fake_browse_boards)
 
     async def scenario():
         # jump to... (boards/chat/areas are always offered, unfiltered)
         # -> [M]essage Boards -> back out of the resource-type sub-menu
         # -> logoff.
         session = FakeSession(keys=["j", "m", "b", "l"])
-        await login_flow._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
+        await main_menu._main_menu(session, db, object(), PresenceRegistry(), mailbox, InputHistory(), user)
         return session
 
     session = asyncio.run(scenario())

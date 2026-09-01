@@ -2,7 +2,7 @@
 UI-level tests for `netbbs.net.mail_flow`: local asynchronous personal
 mail wired into the main menu. The underlying persistence/quota/deletion
 semantics are covered at the library level in tests/test_mail.py --
-these drive the real `netbbs.net.login_flow._main_menu` /
+these drive the real `netbbs.net.main_menu._main_menu` /
 `netbbs.net.mail_flow.browse_mail` entry points instead.
 
 `netbbs.net.mail_flow` is the first module migrated onto the two-lane
@@ -31,7 +31,7 @@ from netbbs.link.protocol import LinkNode, PeerRecord
 from netbbs.link.store import save_peer
 from netbbs.mail import list_inbox, list_sent, send_mail
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _main_menu
+from netbbs.net.main_menu import _main_menu
 from netbbs.net.mail_flow import browse_mail
 from netbbs.rendering import (
     ACCENT_COLOR,

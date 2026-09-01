@@ -1,6 +1,6 @@
 """
 Tests for issue #56's `[N]ew scan` activity summary --
-`netbbs.net.login_flow._draw_main_menu`'s always-shown entry and
+`netbbs.net.main_menu._draw_main_menu`'s always-shown entry and
 `netbbs.net.scan_and_find._new_scan_screen` itself: never-visited/caught-up/unread status per
 board/channel/file area, the cross-board "replies to you" section, and
 jumping straight to the first unread post/file. Channel-entry wiring
@@ -30,7 +30,7 @@ from netbbs.files.areas import create_file_area
 from netbbs.files.entries import upload_file
 from netbbs.net import scan_and_find
 from netbbs.net.char_input import InputHistory
-from netbbs.net.login_flow import _draw_main_menu, _main_menu
+from netbbs.net.main_menu import _draw_main_menu, _main_menu
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 

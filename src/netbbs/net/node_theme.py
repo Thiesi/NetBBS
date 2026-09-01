@@ -167,7 +167,7 @@ def effective_clock_color(session: Session, db: Database) -> int | tuple[int, in
 
 def effective_clock_color_256(db: Database) -> int:
     """Same `db`-only convenience as `effective_header_color_256` --
-    `login_flow._main_menu_prompt`'s own single real call site resolves
+    `main_menu._main_menu_prompt`'s own single real call site resolves
     it via `lane.run`, matching the accent/header wiring's own shape."""
     override = clock_color_override(db)
     return CLOCK_COLOR if override is None else nearest_256(override)
