@@ -212,3 +212,35 @@ def test_strip_ansi_is_a_no_op_on_plain_text():
 def test_strip_ansi_leaves_no_esc_byte_behind():
     text = colored("multi", fg_color=(10, 20, 30)) + colored("part", bg_color=99, underline=True)
     assert "\x1b" not in strip_ansi(text)
+
+
+def test_strip_ansi_removes_private_mode_csi_sequences():
+    # Codex review (PR #232): the pattern's earlier "digits and `;`
+    # only" CSI parameter class missed private-mode markers like the
+    # `?` in cursor hide/show -- common in real ANSI-art files, not
+    # anything this codebase's own primitives happen to emit.
+    assert strip_ansi("\x1b[?25lhidden cursor\x1b[?25h") == "hidden cursor"
+
+
+def test_strip_ansi_removes_osc_sequences():
+    # OSC (window title/hyperlinks), terminated by either BEL or ST.
+    assert strip_ansi("\x1b]0;window title\x07visible") == "visible"
+    assert strip_ansi("\x1b]8;;http://example\x1b\\link text\x1b]8;;\x1b\\") == "link text"
+
+
+def test_strip_ansi_removes_charset_selection_sequences():
+    # Codex review (PR #232): a SysOp's own custom .ans banner file --
+    # loaded verbatim and passed through this function at the SSH
+    # pre-auth call site -- can use classic ANSI-art charset-select
+    # sequences (DEC special graphics for box-drawing glyphs, back to
+    # ASCII) that the module's own primitives never produce but real
+    # ANSI-art tooling (SyncTERM, TheDraw, ...) does.
+    assert strip_ansi("\x1b(0box-drawing glyphs here\x1b(Bback to ascii") == "box-drawing glyphs hereback to ascii"
+
+
+def test_strip_ansi_handles_realistic_ansi_art_composition():
+    # A composed sample exercising every sequence shape in one string,
+    # the way a real .ans file plausibly would -- private-mode CSI,
+    # charset select, OSC, and ordinary SGR color all together.
+    sample = "\x1b[?25l\x1b(0Hello\x1b(B\x1b]0;title\x07 world\x1b[m"
+    assert strip_ansi(sample) == "Hello world"

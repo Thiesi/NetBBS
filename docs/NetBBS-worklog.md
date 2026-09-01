@@ -349,13 +349,18 @@ there is no live connection left to retry against) -- but any future
 change assuming SSH registration retries the way Telnet/web's does will
 be wrong. Two distinct text channels exist pre-auth over SSH, not one:
 `send_auth_banner` (called from `begin_auth`, before any auth method is
-tried) is the proven mechanism for real multi-line ANSI content -- the
-welcome banner itself uses it; a kbdint challenge's own `instruction`
-field (the second tuple element `get_kbdint_challenge`/
-`_finish_registration` return) is the only channel available *during*
-the kbdint exchange itself, once registration is already underway, and
-is more client-rendering-dependent for anything beyond a short
-paragraph.
+tried) is the proven mechanism for real multi-line content -- the
+welcome banner itself uses it, though as **plain text, not ANSI**
+(issue #203: `SSH_MSG_USERAUTH_BANNER` is shown during authentication,
+before any pty/terminal channel exists, and real clients commonly route
+it through a display path that never runs an ANSI parser over it at
+all -- `netbbs.rendering.ansi.strip_ansi` removes every escape sequence
+from this specific call site's content before it's sent, unlike every
+other banner in the app); a kbdint challenge's own `instruction` field
+(the second tuple element `get_kbdint_challenge`/`_finish_registration`
+return) is the only channel available *during* the kbdint exchange
+itself, once registration is already underway, and is more client-
+rendering-dependent for anything beyond a short paragraph.
 
 ### Transport authentication
 
