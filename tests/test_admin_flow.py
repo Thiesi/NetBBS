@@ -317,7 +317,7 @@ def test_sysop_menu_reaches_trust_domain_configuration(db, lane, sysop):
     domains = list_trust_domains(db)
     assert [(item.domain_id, item.weight) for item in domains] == [("friends", 0.75)]
     text = _written_text(session)
-    assert "NetBBS › System › Trust policy" in _visible(text)
+    assert "NetBBS › System › Policy trust" in _visible(text)
     assert "Trust domain saved and audited." in text
 
 
