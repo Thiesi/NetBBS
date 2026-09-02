@@ -8,6 +8,7 @@ import pytest
 
 from services.managed_dns.store import (
     Database,
+    MIGRATIONS,
     count_registrations,
     count_registrations_for_node,
     delete_expired_registrations,
@@ -158,6 +159,36 @@ def test_migrations_are_idempotent_across_reopen(tmp_path):
     db2 = Database(path)
     assert get_registration_by_name(db2, "myboard") is not None
     db2.close()
+
+
+def test_contact_window_migration_preserves_pending_registration_history(tmp_path):
+    path = tmp_path / "managed_dns.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(MIGRATIONS[0].sql)
+    connection.execute("PRAGMA user_version = 1")
+    connection.executemany(
+        """
+        INSERT INTO registrations
+            (name, credential_hash, node_fingerprint, status, dynamic,
+             created_at, last_contact_at)
+        VALUES (?, ?, ?, 'pending', 0, ?, ?)
+        """,
+        [
+            ("contacted", "hash-1", "fp-1", "2026-09-01T00:00:00+00:00",
+             "2026-09-01T23:00:00+00:00"),
+            ("never-contacted", "hash-2", "fp-2", "2026-09-01T00:00:00+00:00", None),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    assert get_registration_by_name(db, "contacted").contact_started_at == (
+        "2026-09-01T00:00:00+00:00"
+    )
+    assert get_registration_by_name(db, "never-contacted").contact_started_at is None
+    assert db.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    db.close()
 
 
 # -- release / reclaim / abandonment (issue #201 Phase 4) ------------------

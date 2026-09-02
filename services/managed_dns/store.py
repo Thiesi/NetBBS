@@ -70,7 +70,17 @@ MIGRATIONS = [
     ),
     Migration(
         description="Track the beginning of uninterrupted heartbeat contact for the maturation gate.",
-        sql="ALTER TABLE registrations ADD COLUMN contact_started_at TEXT;",
+        sql="""
+        ALTER TABLE registrations ADD COLUMN contact_started_at TEXT;
+
+        -- Before this column existed, pending registrations qualified from
+        -- created_at as long as they were still heartbeating. Preserve that
+        -- already-earned window for contacted rows during the upgrade; a row
+        -- which never heartbeated remains NULL and starts on first contact.
+        UPDATE registrations
+        SET contact_started_at = created_at
+        WHERE status = 'pending' AND last_contact_at IS NOT NULL;
+        """,
     ),
     Migration(
         description="Persist the service-wide registration token bucket across process restarts.",
