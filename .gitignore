@@ -28,3 +28,5 @@ node.pub
 
 # Machine-local agent configuration
 .claude/settings.local.json
+.codex/
+.test-tmp/

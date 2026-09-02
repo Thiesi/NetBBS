@@ -1,0 +1,3 @@
+# codebase-memory indexer ignore rules (gitignore syntax)
+.codex/
+.test-tmp/
