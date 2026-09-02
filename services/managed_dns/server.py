@@ -20,12 +20,19 @@ into `/register` itself, not a separate endpoint -- see `_handle_
 register`'s own docstring for why), plus a periodic sweep that abandons
 a registration gone silent past `abandonment_seconds` and, independently,
 purges any `released`/`abandoned` row whose Decision 5 cooldown has
-fully elapsed. Deliberately does *not* simulate or stub the service-wide
-rate limiter or the cumulative active-registration cap (a later phase;
-Decision 3's originally-locked review queue was dropped entirely during
-implementation planning -- see the issue's own plan). Each endpoint's
-current behavior is exactly what it claims to be, not a partial
-placeholder for unbuilt behavior.
+fully elapsed. **Phase 5 adds**: Decision 3's remaining abuse controls
+-- a service-wide rate limit on new registrations (`services.managed_
+dns.rate_limit.GlobalRateLimiter`, not per-node/identity -- the one
+thing a Sybil attacker cannot multiply by minting more identities) and a
+separate cumulative cap on total active registrations. Both hard-reject
+once exceeded; Decision 3's originally-locked review queue was dropped
+entirely during implementation planning (see the issue's own plan) in
+favor of this simpler, symmetric shape. Neither check applies to a
+reclaim (`_reclaim`): reactivating an already-proven, previously-counted
+row is not the "new capacity created faster than a Sybil identity is
+worth" case either control exists to bound. Each endpoint's current
+behavior is exactly what it claims to be, not a partial placeholder for
+unbuilt behavior.
 """
 
 from __future__ import annotations
@@ -43,9 +50,11 @@ from aiohttp import web
 from services.managed_dns.blocklist import is_reserved
 from services.managed_dns.dns_provider import DnsProvider, DnsProviderError, LoggingDnsProvider, RecordKind
 from services.managed_dns.names import InvalidNameError, normalize_name
+from services.managed_dns.rate_limit import GlobalRateLimiter
 from services.managed_dns.store import (
     Database,
     Registration,
+    count_registrations,
     count_registrations_for_node,
     delete_expired_registrations,
     delete_registration,
@@ -109,6 +118,27 @@ _DEFAULT_ABANDONMENT_SECONDS = 7 * 24 * 60 * 60
 # table this small.
 _DEFAULT_SWEEP_INTERVAL_SECONDS = 60 * 60
 
+# Design doc §16 Decision 3: the actual bound on registration *volume*
+# (the age-gate above only costs an attacker wall-clock time, not effort
+# per identity -- see the design doc's own account of why a bare age-gate
+# was found insufficient). A handful an hour comfortably serves genuine
+# demand for a project at this scale while bounding how fast a burst can
+# consume DNS-provider record slots -- a reasoned default, not fixed by
+# the design doc itself.
+_DEFAULT_RATE_LIMIT_CAPACITY = 5.0
+_DEFAULT_RATE_LIMIT_REFILL_PER_MINUTE = 5.0 / 60.0
+
+# Design doc §16 Decision 3: the separate ceiling a rate limit alone
+# can't provide -- a patient attacker submitting exactly at (never over)
+# the rate limit, keeping every registered identity's contact alive
+# indefinitely so nothing qualifies as abandoned, could otherwise
+# accumulate an unbounded number of active records over a long enough
+# time. Counted against pending+matured only (count_registrations'
+# own convention throughout this module) -- a released/abandoned
+# registration already stopped occupying real capacity. A reasoned
+# default, not fixed by the design doc itself.
+_DEFAULT_CUMULATIVE_CAP = 1000
+
 
 def _default_clock() -> datetime:
     return datetime.now(timezone.utc)
@@ -146,6 +176,9 @@ class ManagedDnsServer:
         abandonment_seconds: float = _DEFAULT_ABANDONMENT_SECONDS,
         sweep_interval_seconds: float = _DEFAULT_SWEEP_INTERVAL_SECONDS,
         sweep_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rate_limit_capacity: float = _DEFAULT_RATE_LIMIT_CAPACITY,
+        rate_limit_refill_per_minute: float = _DEFAULT_RATE_LIMIT_REFILL_PER_MINUTE,
+        cumulative_cap: int = _DEFAULT_CUMULATIVE_CAP,
     ) -> None:
         self._host = host
         self._port = port
@@ -163,6 +196,15 @@ class ManagedDnsServer:
         self._abandonment_seconds = abandonment_seconds
         self._sweep_interval_seconds = sweep_interval_seconds
         self._sweep_sleep = sweep_sleep
+        self._cumulative_cap = cumulative_cap
+        # Driven off this same injectable `clock` (converted to a plain
+        # float via `datetime.timestamp()`) rather than a second,
+        # independent clock -- one thing for a test to control
+        # deterministically, not two.
+        self._rate_limiter = GlobalRateLimiter(
+            capacity=rate_limit_capacity, refill_per_minute=rate_limit_refill_per_minute,
+            clock=lambda: self._clock().timestamp(),
+        )
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._sweep_task: asyncio.Task | None = None
@@ -293,6 +335,22 @@ class ManagedDnsServer:
         if active_for_node >= _MAX_REGISTRATIONS_PER_NODE:
             return web.json_response(
                 {"error": "this node already has an active managed-DNS registration"}, status=403
+            )
+
+        # Design doc §16 Decision 3's remaining abuse controls -- both
+        # hard-reject, neither queues, and neither applies to the
+        # reclaim path above (already returned by this point if that's
+        # what this request was): the cumulative cap first (a request
+        # that's already going to be refused for being over capacity
+        # shouldn't also spend a scarce rate-limit token), then the rate
+        # limit.
+        if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+            return web.json_response(
+                {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+            )
+        if not self._rate_limiter.allow():
+            return web.json_response(
+                {"error": "too many registrations right now -- try again shortly"}, status=429
             )
 
         secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)

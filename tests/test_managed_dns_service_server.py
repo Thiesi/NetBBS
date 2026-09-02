@@ -779,3 +779,104 @@ def test_sweep_does_not_purge_a_registration_still_within_its_cooldown(db):
 
     asyncio.run(scenario())
     assert get_registration_by_name(db, "myboard") is not None
+
+
+# -- abuse controls: rate limit / cumulative cap (issue #201 Phase 5) ------
+
+
+def test_register_rejects_once_the_cumulative_cap_is_reached(db):
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1)
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "error" in body
+    assert get_registration_by_name(db, "board-b") is None
+
+
+def test_register_rejects_once_the_rate_limit_is_exhausted(db):
+    async def scenario():
+        server = await _start_server(db, rate_limit_capacity=1, rate_limit_refill_per_minute=0)
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            return await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 429
+    assert "error" in body
+    assert get_registration_by_name(db, "board-b") is None
+
+
+def test_register_rate_limit_refills_over_time(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, rate_limit_capacity=1, rate_limit_refill_per_minute=1
+        )
+        try:
+            await _register(server, name="board-a", node_fingerprint="fp-1")
+            rejected_status, _ = await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+            clock.now += timedelta(minutes=1)  # exactly one token's worth
+            allowed_status, _ = await _register_raw(server, name="board-b", node_fingerprint="fp-2")
+            return rejected_status, allowed_status
+        finally:
+            await server.stop()
+
+    rejected_status, allowed_status = asyncio.run(scenario())
+    assert rejected_status == 429
+    assert allowed_status == 201
+
+
+def test_reclaim_bypasses_the_cumulative_cap(db):
+    """A reclaim reactivates an already-proven, previously-counted row
+    -- it must never be blocked by a cap that exists to bound *new*
+    capacity being created."""
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=2)
+        try:
+            board_a = await _register(server, name="board-a", node_fingerprint="fp-1")
+            board_b = await _register(server, name="board-b", node_fingerprint="fp-2")
+            await _release(server, credential=board_b["credential"])
+            # Cap is now full again with a fresh registration -- board-a
+            # (still active) plus board-c fills the cap=2 ceiling.
+            await _register(server, name="board-c", node_fingerprint="fp-3")
+            # Reclaiming board-b would make 3 simultaneously "counted"
+            # registrations if it were subject to the same cap check.
+            return await _register_raw(
+                server, name="board-b", node_fingerprint="fp-2", credential=board_b["credential"]
+            )
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "pending"
+
+
+def test_reclaim_bypasses_the_rate_limit(db):
+    async def scenario():
+        server = await _start_server(db, rate_limit_capacity=1, rate_limit_refill_per_minute=0)
+        try:
+            board_a = await _register(server, name="board-a", node_fingerprint="fp-1")
+            await _release(server, credential=board_a["credential"])
+            # The single rate-limit token was already spent registering
+            # board-a above -- a fresh registration would now be
+            # rejected (proven by the sibling test above), but reclaim
+            # must still succeed.
+            return await _register_raw(
+                server, name="board-a", node_fingerprint="fp-1", credential=board_a["credential"]
+            )
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "pending"
