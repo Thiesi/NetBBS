@@ -34,9 +34,16 @@ from netbbs.link.protocol import (
 from netbbs.link.realtime_channels import (
     LiveChannelBridge,
     _MAX_SCROLLBACK_SNAPSHOT_ENTRIES,
+    _snapshot_entries,
     ensure_live_subscription,
 )
-from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, set_trust_override
+from netbbs.link.trust import (
+    TrustDimension,
+    TrustState,
+    TrustSubject,
+    register_subject,
+    set_trust_override,
+)
 from netbbs.link.enforcement import ensure_node_subject
 from netbbs.link.transport import (
     LINK_REALTIME_PROTOCOL_TAG,
@@ -806,6 +813,123 @@ def test_scrollback_snapshot_applies_the_subscribers_author_trust_policy(tmp_pat
             assert subscriber.bridge.pop_channel_scrollback(
                 subscriber_channel.channel_id, request_id
             ) == []
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_ensure_live_subscription_preserves_a_protocol_version_mismatch(tmp_path, monkeypatch):
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    async def incompatible_dial(*args, **kwargs):
+        raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-version-mismatch")
+        subscriber = _Node(tmp_path, "subscriber-version-mismatch")
+        _origin_channel, subscriber_channel = _setup_linked_channel(
+            origin, subscriber, name="version-mismatch"
+        )
+        monkeypatch.setattr(
+            "netbbs.link.realtime_channels.dialable_realtime_addresses_for_peer",
+            lambda *args: [("127.0.0.1", 1)],
+        )
+        monkeypatch.setattr(
+            "netbbs.link.realtime_channels.dial_realtime_session", incompatible_dial
+        )
+        try:
+            with pytest.raises(RealtimeProtocolVersionError):
+                await ensure_live_subscription(
+                    channel=subscriber_channel, node_identity=subscriber.identity,
+                    link_node=subscriber.link_node, lane=subscriber.lane,
+                    registry=subscriber.registry, bridge=subscriber.bridge,
+                )
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_reconstructs_author_label_from_attested_identity(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-attested-label")
+        subscriber = _Node(tmp_path, "subscriber-attested-label")
+        _origin_channel, subscriber_channel = _setup_linked_channel(
+            origin, subscriber, name="attested-label"
+        )
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        request_id = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, origin.identity.fingerprint
+        )
+        entry = _snapshot_entry(
+            author_node=origin.identity.fingerprint, author_user="alice"
+        )
+        entry["author_label"] = "sysop"
+        frame = build_scrollback_snapshot_frame(
+            subscriber_channel.channel_id, request_id, [entry]
+        )
+        try:
+            await subscriber.bridge._handle_scrollback_snapshot(
+                _SnapshotSession(origin.identity.fingerprint), frame
+            )
+            [message] = subscriber.bridge.pop_channel_scrollback(
+                subscriber_channel.channel_id, request_id
+            )
+            assert message.author_label == f"alice@{origin.identity.fingerprint}"
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_keeps_authorless_moderation_for_a_blocked_target(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-moderation-target")
+        subscriber = _Node(tmp_path, "subscriber-moderation-target")
+        origin_channel, subscriber_channel = _setup_linked_channel(
+            origin, subscriber, name="moderation-target"
+        )
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        record_message(
+            origin.db, origin_channel, kind="kick", author_label="target-user"
+        )
+        [entry] = _snapshot_entries(origin.db, origin_channel)
+        assert entry["author_label"] == "target-user"
+        assert entry["author_node_fingerprint"] is None
+        assert entry["author_user_id"] is None
+
+        target_subject = TrustSubject.user(origin.identity.fingerprint, "target-user")
+        register_subject(
+            subscriber.db, target_subject,
+            first_accepted_at="2026-09-02T00:00:00Z",
+            now_iso="2026-09-02T00:00:00Z",
+        )
+        set_trust_override(
+            subscriber.db,
+            target_subject,
+            TrustDimension.IDENTITY_INTEGRITY,
+            TrustState.BLOCKED,
+            reason="blocked target for test",
+            now_iso="2026-09-02T00:00:00Z",
+        )
+        request_id = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, origin.identity.fingerprint
+        )
+        frame = build_scrollback_snapshot_frame(
+            subscriber_channel.channel_id, request_id, [entry]
+        )
+        try:
+            await subscriber.bridge._handle_scrollback_snapshot(
+                _SnapshotSession(origin.identity.fingerprint), frame
+            )
+            [message] = subscriber.bridge.pop_channel_scrollback(
+                subscriber_channel.channel_id, request_id
+            )
+            assert (message.kind, message.author_label) == ("kick", "target-user")
         finally:
             await origin.teardown()
             await subscriber.teardown()

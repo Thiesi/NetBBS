@@ -434,6 +434,35 @@ def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(
     assert "Real-time link to this channel's origin is up" in written
 
 
+def test_chat_loop_reports_an_incompatible_real_time_protocol(
+    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+):
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    link_channel(db, channel, node_identity=node_identity)
+
+    async def incompatible_subscription(**kwargs):
+        raise RealtimeProtocolVersionError(
+            "unsupported real-time application protocol version"
+        )
+
+    monkeypatch.setattr(
+        "netbbs.link.realtime_channels.ensure_live_subscription",
+        incompatible_subscription,
+    )
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "incompatible real-time protocol version" in written
+    assert "upgrade one of the nodes" in written
+
+
 def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
     db, lane, hub, presence, channel, alice, node_identity, monkeypatch
 ):
@@ -626,7 +655,7 @@ def test_remote_scrollback_marks_truncated_bodies_visibly(
         request_id = bridge.begin_scrollback_request(channel.channel_id, "origin")
         bridge._remote_channel_scrollback[request_id] = [
             LocalChannelMessage(
-                id=-1, channel_id=channel.id, kind="message", author_label="alice@origin",
+                id=-1, channel_id=channel.id, kind="action", author_label="alice@origin",
                 author_fingerprint=None, body="partial sentence", created_at="2026-01-01T00:00:00+00:00",
                 body_truncated=True,
             )
@@ -640,6 +669,8 @@ def test_remote_scrollback_marks_truncated_bodies_visibly(
             deliver, lane, channel, alice, bridge, request_id, set(),
             unicode_style=False, truecolor=False, terminal_width=80,
         )
-        assert "truncated; full history will arrive after sync" in "\n".join(delivered)
+        rendered = "\n".join(delivered)
+        assert "truncated in join snapshot" in rendered
+        assert "full history" not in rendered
 
     asyncio.run(scenario())

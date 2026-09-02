@@ -1826,15 +1826,28 @@ expand quotes and backslashes. The builder serializes the complete frame
 before it may enter the transport queue, and the sender drops oldest catch-up
 entries until the encoded frame fits. A shortened body carries an explicit
 `body_truncated` flag and renders a visible notice; its full durable copy is
-still independently in flight through the existing async path.
+still independently in flight through the existing async path only for durable
+message events. The notice therefore says only that the join snapshot was
+truncated; actions and other transient events must not promise later sync.
 
 **Snapshot attribution is identity-bearing, not label-only.** Carried entries
 preserve their already-qualified display label and derive author node/user
 identity from the locally retained signed event. Origin-local entries qualify
 their bare stored label as `user@origin` before transmission. The subscriber
 uses those identity fields for its own trust decision and the content ID for
-local-history deduplication; it never treats the display label itself as
-authority.
+deduplication, then reconstructs the displayed `user@node` label from those
+attested fields rather than trusting `author_label`. Moderation rows store the
+target label for sentence rendering, so snapshots carry them as authorless
+system events; target trust policy must not hide audit history. This payload is
+real-time protocol v2. Version 1 already carried request correlation and
+separate author node/user identity; the incompatible v2 changes are that
+authored display labels are reconstructed from those identity fields and
+moderation target rows now carry null author identity. The Noise identity
+payload advertises the application version so mixed peers fail the
+authenticated handshake before a session is reported live. That typed mismatch
+propagates through `ensure_live_subscription` to a caller-visible upgrade
+message; ordinary network failures remain best-effort `None`. Per-frame version
+checks remain defense in depth.
 
 ### Current distribution limit
 

@@ -48,6 +48,7 @@ from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import (
     LinkNode,
     LinkProtocolError,
+    RealtimeProtocolVersionError,
     RealtimeFrame,
     build_channel_message_frame,
     build_node_presence_delta_frame,
@@ -118,7 +119,7 @@ def _snapshot_entries(db: Database, channel: Channel) -> list[dict]:
         author_user_id: str | None = None
         author_label = message.author_label
         content_id = message.link_content_id
-        if message.kind != "daybreak":
+        if message.kind not in {"mute", "unmute", "ban", "unban", "kick", "daybreak"}:
             if message.link_content_id is None:
                 author_node_fingerprint = origin_fingerprint
                 author_user_id = message.author_label
@@ -170,16 +171,21 @@ def _accept_scrollback_snapshot(
         raise LinkProtocolError("scrollback_snapshot sender is not the channel's current origin")
     messages = []
     for entry in entries:
-        if entry["kind"] != "daybreak":
+        authored = entry["author_node_fingerprint"] is not None
+        if authored:
             home = node_transport_state(db, entry["author_node_fingerprint"])
             if home in {TrustState.BLOCKED, TrustState.QUARANTINED}:
                 continue
             subject = TrustSubject.user(entry["author_node_fingerprint"], entry["author_user_id"])
             if not content_visible_for_subject(db, subject):
                 continue
+        author_label = (
+            f"{entry['author_user_id']}@{entry['author_node_fingerprint']}"
+            if authored else entry["author_label"]
+        )
         messages.append(LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=entry["kind"],
-            author_label=entry["author_label"], author_fingerprint=None,
+            author_label=author_label, author_fingerprint=None,
             body=entry["body"], created_at=entry["created_at"],
             link_content_id=entry["content_id"], body_truncated=entry["body_truncated"],
         ))
@@ -711,7 +717,9 @@ async def ensure_live_subscription(
     If `channel` is Linked, ensure this node holds (or can establish) a
     live session to its origin node and has sent it a request-correlated
     `subscribe` --
-    best-effort, never raises. A caller who can't get live delivery
+    best-effort except for an authenticated protocol-version mismatch,
+    which raises `RealtimeProtocolVersionError` so callers can distinguish
+    an upgrade requirement from transient unavailability. A caller who can't get live delivery
     still has the existing async catch-up path (design doc §8.10.2:
     "the caller sees that live traffic may have been missed"), so
     degrading silently to `None` is the correct signal here, not a
@@ -743,6 +751,8 @@ async def ensure_live_subscription(
                     ),
                     timeout=dial_timeout_seconds,
                 )
+            except RealtimeProtocolVersionError:
+                raise
             except Exception:
                 continue
             await bridge.track_session(session)

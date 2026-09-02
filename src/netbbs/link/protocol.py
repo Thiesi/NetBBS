@@ -160,7 +160,16 @@ _MAX_SEEN_INVENTORY_REQUEST_NONCES = 4096
 _TRUST_PULL_FRESHNESS_SECONDS = 5 * 60
 _MAX_SEEN_TRUST_PULL_NONCES = 4096
 
-REALTIME_PROTOCOL_VERSION = 1
+# Version 2 changes the scrollback-snapshot contract. Version 1 already
+# carried `request_id` and separate author node/user identity fields; the
+# incompatible v2 changes are that authored display labels are reconstructed
+# from those attested identity fields instead of trusting `author_label`, and
+# moderation target rows carry null author identity as authorless system
+# events. Version 1 peers would misinterpret those rows, so mixed versions
+# fail at the version boundary rather than accumulating protocol strikes for
+# payloads both sides believe belong to the same version.
+REALTIME_PROTOCOL_VERSION = 2
+_REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
 REALTIME_FRAME_TYPES = frozenset(
@@ -188,10 +197,10 @@ _REALTIME_PRESENCE_CHANGES = frozenset({"join", "leave"})
 # its per-entry bounds must be much tighter than channel_message's own --
 # chosen so _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES entries at their
 # worst-case size still land comfortably under REALTIME_MAX_PLAINTEXT_BYTES.
-# This is a "catch-up" glance, not a substitute for the full durable copy
-# already on its way through the existing async materialization path
-# (design doc §16, issue #194 Decision 2) -- a long message showing
-# truncated here is not data loss.
+# This is a bounded "catch-up" glance. Durable message events also arrive
+# through the existing async materialization path (design doc §16, issue
+# #194 Decision 2), while transient actions and moderation notices do not;
+# consumers must therefore describe truncation without promising later sync.
 _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES = 20
 _REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
 # Must stay in sync with netbbs.chat.scrollback.MessageKind's Literal
@@ -199,6 +208,9 @@ _REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
 # decoupled from netbbs.chat's domain layer (see module docstring).
 _REALTIME_SCROLLBACK_ENTRY_KINDS = frozenset(
     {"message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action", "nick", "daybreak"}
+)
+_REALTIME_AUTHORLESS_SCROLLBACK_ENTRY_KINDS = frozenset(
+    {"mute", "unmute", "ban", "unban", "kick", "daybreak"}
 )
 
 # design doc §8.10.1: "IDs are bounded strings and deduplicated within a
@@ -263,6 +275,10 @@ class LinkProtocolError(Exception):
     other than whoever actually sent the acknowledgement."""
 
 
+class RealtimeProtocolVersionError(LinkProtocolError):
+    """The authenticated peer cannot speak this live application version."""
+
+
 def _validate_realtime_json_value(value: object, *, path: str = "payload") -> None:
     """Reject values whose meaning is not portable across strict JSON peers."""
     if value is None or isinstance(value, (str, bool)):
@@ -297,7 +313,7 @@ class RealtimeFrame:
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != REALTIME_PROTOCOL_VERSION:
-            raise LinkProtocolError("unsupported real-time protocol version")
+            raise RealtimeProtocolVersionError("unsupported real-time protocol version")
         if not isinstance(self.type, str) or self.type not in REALTIME_FRAME_TYPES:
             raise LinkProtocolError(f"unsupported real-time frame type {self.type!r}")
         if not isinstance(self.message_id, str) or not self.message_id:
@@ -356,13 +372,14 @@ class RealtimeFrame:
 
 @dataclass(frozen=True)
 class RealtimeIdentityPayload:
-    """Root-verifiable binding between a peer and its Noise static key."""
+    """Root-verifiable Noise binding plus application-version admission."""
 
     root_fingerprint: str
     root_public_key: str
     transport_transitions: tuple[KeyTransition, ...]
     noise_static_key: str
-    version: int = 1
+    realtime_protocol_version: int = REALTIME_PROTOCOL_VERSION
+    version: int = _REALTIME_IDENTITY_PAYLOAD_VERSION
 
     @classmethod
     def for_node(cls, identity: NodeIdentity) -> "RealtimeIdentityPayload":
@@ -385,6 +402,7 @@ class RealtimeIdentityPayload:
             "root_public_key": self.root_public_key,
             "transport_transitions": [transition.to_dict() for transition in self.transport_transitions],
             "noise_static_key": self.noise_static_key,
+            "realtime_protocol_version": self.realtime_protocol_version,
         }
 
     def to_json_bytes(self) -> bytes:
@@ -397,40 +415,58 @@ class RealtimeIdentityPayload:
         return encoded
 
     @classmethod
-    def from_dict(cls, value: dict) -> "RealtimeIdentityPayload":
+    def from_dict(
+        cls, value: dict, *, defer_version_check: bool = False
+    ) -> "RealtimeIdentityPayload":
         if not isinstance(value, dict):
             raise LinkProtocolError("real-time identity payload must be an object")
         expected = {
             "version", "root_fingerprint", "root_public_key",
-            "transport_transitions", "noise_static_key",
+            "transport_transitions", "noise_static_key", "realtime_protocol_version",
         }
-        if set(value) != expected:
+        legacy_expected = expected - {"realtime_protocol_version"}
+        legacy_shape = set(value) == legacy_expected and value.get("version") == 1
+        if set(value) != expected and not legacy_shape:
             raise LinkProtocolError("real-time identity payload has unexpected or missing fields")
-        if type(value["version"]) is not int or value["version"] != 1:
-            raise LinkProtocolError("unsupported real-time identity payload version")
+        realtime_protocol_version = value.get("realtime_protocol_version", 1)
         if not isinstance(value["transport_transitions"], list):
             raise LinkProtocolError("transport_transitions must be a list")
         try:
             transitions = tuple(KeyTransition.from_dict(item) for item in value["transport_transitions"])
         except (KeyError, TypeError, ValueError) as exc:
             raise LinkProtocolError(f"malformed transport transition: {exc}") from exc
-        return cls(
+        result = cls(
             version=value["version"],
             root_fingerprint=value["root_fingerprint"],
             root_public_key=value["root_public_key"],
             transport_transitions=transitions,
             noise_static_key=value["noise_static_key"],
+            realtime_protocol_version=realtime_protocol_version,
         )
+        if not defer_version_check:
+            result.require_supported_version()
+        return result
+
+    def require_supported_version(self) -> None:
+        if type(self.version) is not int or self.version != _REALTIME_IDENTITY_PAYLOAD_VERSION:
+            raise RealtimeProtocolVersionError("unsupported real-time identity payload version")
+        if (
+            type(self.realtime_protocol_version) is not int
+            or self.realtime_protocol_version != REALTIME_PROTOCOL_VERSION
+        ):
+            raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
 
     @classmethod
-    def from_json_bytes(cls, data: bytes) -> "RealtimeIdentityPayload":
+    def from_json_bytes(
+        cls, data: bytes, *, defer_version_check: bool = False
+    ) -> "RealtimeIdentityPayload":
         if not isinstance(data, bytes) or not 1 <= len(data) <= REALTIME_MAX_IDENTITY_PAYLOAD_BYTES:
             raise LinkProtocolError("real-time identity payload must be between 1 byte and 48 KiB")
         try:
             value = strict_json_loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkProtocolError(f"malformed real-time identity JSON: {exc}") from exc
-        return cls.from_dict(value)
+        return cls.from_dict(value, defer_version_check=defer_version_check)
 
     def verify_noise_static(self, presented_static_key: bytes) -> nacl.signing.VerifyKey:
         """Verify the full root -> transport transition -> X25519 binding."""
@@ -580,14 +616,15 @@ def _validate_scrollback_entry(entry: object, *, path: str) -> None:
     if not isinstance(entry["kind"], str) or entry["kind"] not in _REALTIME_SCROLLBACK_ENTRY_KINDS:
         raise LinkProtocolError(f"{path}.kind is not a recognized scrollback event kind")
     # author_label is display-only. The separate node/user identity fields
-    # are what the subscriber uses for trust enforcement. Daybreak is the
-    # sole authorless event and therefore allows an empty label.
+    # are what the subscriber uses for trust enforcement. Moderation entries
+    # name their target in author_label, not their actor, so they are system
+    # events for attribution purposes alongside daybreak.
     _validate_bounded_text(
         entry["author_label"], path=f"{path}.author_label", max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES
     )
-    if entry["kind"] == "daybreak":
+    if entry["kind"] in _REALTIME_AUTHORLESS_SCROLLBACK_ENTRY_KINDS:
         if entry["author_node_fingerprint"] is not None or entry["author_user_id"] is not None:
-            raise LinkProtocolError(f"{path} daybreak entries must not name an author")
+            raise LinkProtocolError(f"{path} authorless entries must not name an author")
     else:
         _validate_bounded_id(entry["author_node_fingerprint"], path=f"{path}.author_node_fingerprint")
         _validate_bounded_id(entry["author_user_id"], path=f"{path}.author_user_id")

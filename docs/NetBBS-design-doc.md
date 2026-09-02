@@ -4952,6 +4952,17 @@ content), so the subscriber independently suppresses authors it marks
 the authenticated origin; they must never resolve as same-named local
 accounts on the subscriber.
 
+The revised snapshot attribution contract is real-time protocol v2. The Noise
+identity payload declares that application version, and incompatible peers are
+rejected during the authenticated handshake before either side advertises a
+usable live session. The join flow reports this as an explicit upgrade
+requirement rather than folding it into generic transient unavailability.
+Frame versions remain an inner defensive boundary.
+The subscriber reconstructs every authored display label from the attested
+`user@node` identity rather than trusting the wire label. Moderation entries
+retain their target label for rendering but are authorless system events, so a
+target's trust state cannot suppress audit history the target did not author.
+
 `chat/scrollback.py`'s own module docstring — "the separate, harder
 question of a newly-joined Link node needing catch-up scrollback from
 peers... stays explicitly deferred to whenever Phase 5 starts" — is
