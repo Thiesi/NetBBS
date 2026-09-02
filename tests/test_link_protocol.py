@@ -42,6 +42,7 @@ from netbbs.link.protocol import (
     PeerListMessage,
     RealtimeFrame,
     RealtimeIdentityPayload,
+    RealtimeProtocolVersionError,
     RealtimeReplayWindow,
     build_channel_message_frame,
     build_close_frame,
@@ -137,6 +138,16 @@ def test_realtime_identity_payload_rejects_an_incompatible_application_version()
 
     with pytest.raises(LinkProtocolError, match="application protocol version"):
         RealtimeIdentityPayload.from_json_bytes(payload.to_json_bytes())
+
+
+def test_realtime_identity_payload_classifies_the_v1_wire_shape_as_incompatible():
+    identity = bootstrap_node_identity("actual-v1-realtime-peer")
+    payload = RealtimeIdentityPayload.for_node(identity).to_dict()
+    del payload["realtime_protocol_version"]
+    payload["version"] = 1
+
+    with pytest.raises(RealtimeProtocolVersionError, match="application protocol version"):
+        RealtimeIdentityPayload.from_dict(payload)
 
 
 @pytest.mark.parametrize("tamper", ["fingerprint", "static", "transition"])

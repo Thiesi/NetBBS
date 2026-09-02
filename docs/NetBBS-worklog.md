@@ -1848,8 +1848,6 @@ authenticated handshake before a session is reported live. That typed mismatch
 propagates through `ensure_live_subscription` to a caller-visible upgrade
 message; ordinary network failures remain best-effort `None`. Per-frame version
 checks remain defense in depth.
-local-history deduplication; it never treats the display label itself as
-authority.
 
 ### Current distribution limit
 

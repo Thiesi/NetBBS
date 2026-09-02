@@ -418,6 +418,11 @@ class RealtimeIdentityPayload:
             "version", "root_fingerprint", "root_public_key",
             "transport_transitions", "noise_static_key", "realtime_protocol_version",
         }
+        legacy_expected = expected - {"realtime_protocol_version"}
+        if set(value) == legacy_expected and value.get("version") == 1:
+            raise RealtimeProtocolVersionError(
+                "unsupported real-time application protocol version"
+            )
         if set(value) != expected:
             raise LinkProtocolError("real-time identity payload has unexpected or missing fields")
         if (
