@@ -41,6 +41,26 @@ async def _register(server: ManagedDnsServer, *, name: str, node_fingerprint: st
             return await response.json()
 
 
+async def _register_raw(
+    server: ManagedDnsServer, *, name: str, node_fingerprint: str = "fp-1", dynamic: bool = False,
+    credential: str | None = None,
+):
+    payload = {"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic}
+    if credential is not None:
+        payload["credential"] = credential
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"http://127.0.0.1:{server.port}/register", json=payload) as response:
+            return response.status, await response.json()
+
+
+async def _release(server: ManagedDnsServer, *, credential: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/release", json={"credential": credential}
+        ) as response:
+            return response.status, await response.json()
+
+
 async def _heartbeat(server: ManagedDnsServer, *, credential: str, headers: dict | None = None):
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -454,3 +474,308 @@ def test_heartbeat_is_resilient_to_a_dns_provider_failure(db):
     assert registration.status == "matured"
     assert registration.last_contact_at is not None
     assert registration.last_known_address is None
+
+
+# -- release / reclaim / cooldown / sweep (issue #201 Phase 4) -------------
+
+
+def test_release_marks_a_pending_registration_released(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            registered = await _register(server, name="myboard")
+            return await _release(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "released"
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "released"
+    assert registration.released_at is not None
+
+
+def test_release_deletes_the_dns_record_when_matured(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=registered["credential"])  # matures + publishes
+            return await _release(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert provider.deletes == ["myboard.netbbs.org."]
+
+
+def test_release_never_matured_does_not_call_the_dns_provider(db):
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            return await _release(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert provider.deletes == []  # nothing was ever published, nothing to delete
+
+
+def test_release_rejects_an_unknown_credential(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            return await _release(server, credential="not-a-real-credential")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 401
+    assert "error" in body
+
+
+def test_release_rejects_an_already_released_registration(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            return await _release(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 401
+
+
+def test_register_rejects_a_different_credential_during_the_cooldown(db):
+    async def scenario():
+        server = await _start_server(db, cooldown_seconds=3600)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            return await _register_raw(server, name="myboard", credential="wrong-credential")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 409
+    assert "cooldown" in body["error"]
+
+
+def test_register_rejects_no_credential_during_the_cooldown(db):
+    async def scenario():
+        server = await _start_server(db, cooldown_seconds=3600)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            return await _register_raw(server, name="myboard")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 409
+    assert "cooldown" in body["error"]
+
+
+def test_register_reclaims_a_never_matured_registration_with_the_right_credential(db):
+    async def scenario():
+        server = await _start_server(db, cooldown_seconds=3600)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            status, body = await _register_raw(server, name="myboard", credential=registered["credential"])
+            return registered, status, body
+        finally:
+            await server.stop()
+
+    registered, status, body = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "pending"
+    assert body["credential"] == registered["credential"]  # same secret, not rotated
+    assert body["created_at"] == registered["created_at"]  # same row, history preserved
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "pending"
+    assert registration.released_at is None
+
+
+def test_register_reclaims_a_matured_registration_and_republishes(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, cooldown_seconds=3600, dns_provider=provider
+        )
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=registered["credential"])  # matures + publishes once
+            await _release(server, credential=registered["credential"])  # deletes the record
+            status, body = await _register_raw(server, name="myboard", credential=registered["credential"])
+            return status, body
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "matured"  # skipped straight back, no re-earning the age-gate
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "matured"
+    assert registration.last_known_address == "127.0.0.1"
+    assert provider.upserts == [
+        ("myboard.netbbs.org.", "A", "127.0.0.1"),  # original publish at maturation
+        ("myboard.netbbs.org.", "A", "127.0.0.1"),  # republish on reclaim
+    ]
+
+
+def test_register_allows_a_fresh_registration_once_the_cooldown_elapses(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, cooldown_seconds=60)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=61)
+            status, body = await _register_raw(server, name="myboard", node_fingerprint="fp-2")
+            return registered, status, body
+        finally:
+            await server.stop()
+
+    registered, status, body = asyncio.run(scenario())
+    assert status == 201
+    assert body["status"] == "pending"
+    assert body["credential"] != registered["credential"]  # a genuinely new registration
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.node_fingerprint == "fp-2"
+
+
+def test_sweep_loop_runs_once_immediately_then_sleeps_for_the_configured_interval(db):
+    sweep_calls: list[float] = []
+    parked = asyncio.Event()
+
+    async def fake_sweep_sleep(seconds: float) -> None:
+        sweep_calls.append(seconds)
+        await parked.wait()
+
+    async def scenario():
+        server = await _start_server(db, sweep_sleep=fake_sweep_sleep, sweep_interval_seconds=1800.0)
+        try:
+            for _ in range(200):
+                if sweep_calls:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert sweep_calls == [1800.0]
+
+
+def test_sweep_abandons_a_stale_matured_registration_and_deletes_its_record(db):
+    provider = LoggingDnsProvider()
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+        clock.now += timedelta(seconds=8 * 24 * 60 * 60)
+        sweeper = ManagedDnsServer(
+            "127.0.0.1", 0, db, clock=clock, dns_provider=provider, abandonment_seconds=7 * 24 * 60 * 60,
+        )
+        sweeper._sweep_once()
+
+    asyncio.run(scenario())
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "abandoned"
+    assert registration.released_at is not None
+    assert provider.deletes == ["myboard.netbbs.org."]
+
+
+def test_sweep_abandons_a_stale_never_matured_registration_without_calling_the_dns_provider(db):
+    provider = LoggingDnsProvider()
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, dns_provider=provider)
+        try:
+            await _register(server, name="myboard")
+        finally:
+            await server.stop()
+
+        clock.now += timedelta(seconds=8 * 24 * 60 * 60)
+        sweeper = ManagedDnsServer(
+            "127.0.0.1", 0, db, clock=clock, dns_provider=provider, abandonment_seconds=7 * 24 * 60 * 60,
+        )
+        sweeper._sweep_once()
+
+    asyncio.run(scenario())
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "abandoned"
+    assert provider.deletes == []  # nothing was ever published
+
+
+def test_sweep_does_not_abandon_a_registration_still_within_its_contact_window(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, abandonment_seconds=7 * 24 * 60 * 60)
+        try:
+            await _register(server, name="myboard")
+            clock.now += timedelta(days=1)  # well within the 7-day window
+            server._sweep_once()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert get_registration_by_name(db, "myboard").status == "pending"
+
+
+def test_sweep_purges_a_registration_past_its_cooldown(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, cooldown_seconds=60)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=61)
+            server._sweep_once()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert get_registration_by_name(db, "myboard") is None
+
+
+def test_sweep_does_not_purge_a_registration_still_within_its_cooldown(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, cooldown_seconds=3600)
+        try:
+            registered = await _register(server, name="myboard")
+            await _release(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=60)  # well short of the hour-long cooldown
+            server._sweep_once()
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+    assert get_registration_by_name(db, "myboard") is not None

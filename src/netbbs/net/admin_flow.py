@@ -84,6 +84,7 @@ from netbbs.managed_dns.state import (
     get_registered_name as get_managed_dns_registered_name,
     get_registration_status as get_managed_dns_registration_status,
 )
+from netbbs.net.managed_dns_flow import register_via_prompt, release_registration
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
@@ -3747,17 +3748,18 @@ async def _backup_status_screen(session: Session, lane: DatabaseLane, actor: Use
     await session.read_any_key()
 
 
-async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """
-    Read-only visibility into this node's managed netbbs.org subdomain
-    registration (design doc §16, issue #201) -- Phase 2's own scoped
-    deliverable: shows whatever `netbbs.net.managed_dns_flow.offer_
-    managed_dns_opt_in`'s own inline registration already set. Register/
-    Release actions land here in a later phase (same "read-only status
-    first, interactive actions once release/reclaim exist to make Release
-    meaningful" sequencing `_backup_status_screen` doesn't need, since
-    that screen was never going to grow actions at all).
-    """
+_MANAGED_DNS_ACTIVE_STATUSES = (ManagedDnsRegistrationStatus.PENDING, ManagedDnsRegistrationStatus.MATURED)
+
+
+async def _draw_managed_dns_status(
+    session: Session, lane: DatabaseLane, actor: User
+) -> ManagedDnsRegistrationStatus:
+    """Renders this node's managed netbbs.org subdomain registration
+    status (design doc §16, issue #201) -- shows whatever `netbbs.net.
+    managed_dns_flow`'s register/release flows already set. Returns the
+    current status so `_managed_dns_status_screen` knows whether to
+    offer `[R]egister` or `[L] Release` without re-reading it a second
+    time."""
     opt_in = await lane.run(get_managed_dns_opt_in)
     name = await lane.run(get_managed_dns_registered_name)
     status = await lane.run(get_managed_dns_registration_status)
@@ -3818,8 +3820,40 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             )
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
 
-    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_any_key()
+    action_key = (
+        menu_key("L", " Release") if status in _MANAGED_DNS_ACTIVE_STATUSES else menu_key("R", "egister")
+    )
+    await session.write_line(f"\r\n{action_key}    {menu_key('B', 'ack')}")
+    return status
+
+
+async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Design doc §16, issue #201: status plus, once release/reclaim exist
+    to make them meaningful, the actions themselves -- `[R]egister`
+    (also how a SysOp who initially declined the opt-in prompt, or wants
+    to reclaim a previously-released name, gets in) and `[L] Release`,
+    mutually exclusive on whether this node currently has an active
+    (`pending`/`matured`) registration. Same single-item hotkey-menu-loop
+    shape as `_post_action_screen`.
+    """
+    status = await _draw_managed_dns_status(session, lane, actor)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "r" and status not in _MANAGED_DNS_ACTIVE_STATUSES:
+            await session.write_line("")
+            await register_via_prompt(session, lane)
+            status = await _draw_managed_dns_status(session, lane, actor)
+        elif choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES:
+            await session.write_line("")
+            await release_registration(session, lane)
+            status = await _draw_managed_dns_status(session, lane, actor)
+        else:
+            await session.write(reject_unhandled_key(choice))
 
 
 # -- node-wide display format/timezone -------------------------------------

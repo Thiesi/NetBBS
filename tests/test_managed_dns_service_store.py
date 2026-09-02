@@ -10,10 +10,18 @@ from services.managed_dns.store import (
     Database,
     count_registrations,
     count_registrations_for_node,
+    delete_expired_registrations,
+    delete_registration,
     get_registration_by_credential_hash,
     get_registration_by_name,
     hash_credential,
     insert_registration,
+    list_stale_active_registrations,
+    mark_abandoned,
+    mark_matured,
+    mark_released,
+    reclaim,
+    set_last_contact_at,
 )
 
 
@@ -149,3 +157,136 @@ def test_migrations_are_idempotent_across_reopen(tmp_path):
     db2 = Database(path)
     assert get_registration_by_name(db2, "myboard") is not None
     db2.close()
+
+
+# -- release / reclaim / abandonment (issue #201 Phase 4) ------------------
+
+
+def _insert(db, name="myboard", **overrides):
+    kwargs = dict(
+        name=name, credential_hash=hash_credential(f"secret-{name}"),
+        node_fingerprint="fp-1", dynamic=False, created_at="2026-09-02T00:00:00+00:00",
+    )
+    kwargs.update(overrides)
+    return insert_registration(db, **kwargs)
+
+
+def test_mark_released_transitions_a_pending_registration(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_released(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "released"
+    assert registration.released_at == "2026-09-02T01:00:00+00:00"
+    db.close()
+
+
+def test_mark_released_transitions_a_matured_registration(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_matured(db, "myboard", matured_at="2026-09-02T00:30:00+00:00")
+    mark_released(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "released"
+    assert registration.matured_at == "2026-09-02T00:30:00+00:00"  # preserved, not cleared
+    db.close()
+
+
+def test_mark_released_is_a_no_op_on_an_already_released_registration(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_released(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    mark_released(db, "myboard", released_at="2026-09-02T02:00:00+00:00")  # must not clobber the first
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.released_at == "2026-09-02T01:00:00+00:00"
+    db.close()
+
+
+def test_reclaim_restores_pending_when_never_matured(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_released(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    reclaim(db, "myboard", matured=False)
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "pending"
+    assert registration.released_at is None
+    db.close()
+
+
+def test_reclaim_restores_matured_when_previously_matured(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_matured(db, "myboard", matured_at="2026-09-02T00:30:00+00:00")
+    mark_released(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    reclaim(db, "myboard", matured=True)
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "matured"
+    assert registration.released_at is None
+    assert registration.matured_at == "2026-09-02T00:30:00+00:00"  # unchanged, same row
+    db.close()
+
+
+def test_mark_abandoned_transitions_a_stale_registration(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    mark_abandoned(db, "myboard", released_at="2026-09-02T01:00:00+00:00")
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "abandoned"
+    assert registration.released_at == "2026-09-02T01:00:00+00:00"
+    db.close()
+
+
+def test_list_stale_active_registrations_uses_last_contact_when_present(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="fresh", created_at="2026-09-01T00:00:00+00:00")
+    set_last_contact_at(db, "fresh", "2026-09-02T00:00:00+00:00")
+    _insert(db, name="stale", created_at="2026-09-01T00:00:00+00:00")
+    set_last_contact_at(db, "stale", "2026-08-30T00:00:00+00:00")
+
+    stale = list_stale_active_registrations(db, older_than="2026-09-01T12:00:00+00:00")
+    assert [r.name for r in stale] == ["stale"]
+    db.close()
+
+
+def test_list_stale_active_registrations_falls_back_to_created_at_when_never_contacted(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="never-contacted", created_at="2026-08-01T00:00:00+00:00")
+
+    stale = list_stale_active_registrations(db, older_than="2026-09-01T00:00:00+00:00")
+    assert [r.name for r in stale] == ["never-contacted"]
+    db.close()
+
+
+def test_list_stale_active_registrations_ignores_released_and_abandoned(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="released", created_at="2026-08-01T00:00:00+00:00")
+    mark_released(db, "released", released_at="2026-08-02T00:00:00+00:00")
+
+    stale = list_stale_active_registrations(db, older_than="2026-09-01T00:00:00+00:00")
+    assert stale == []
+    db.close()
+
+
+def test_delete_expired_registrations_removes_only_fully_expired_rows(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="long-expired")
+    mark_released(db, "long-expired", released_at="2026-01-01T00:00:00+00:00")
+    _insert(db, name="recently-released")
+    mark_released(db, "recently-released", released_at="2026-09-01T00:00:00+00:00")
+    _insert(db, name="still-active")
+
+    removed = delete_expired_registrations(db, older_than="2026-06-01T00:00:00+00:00")
+
+    assert removed == 1
+    assert get_registration_by_name(db, "long-expired") is None
+    assert get_registration_by_name(db, "recently-released") is not None
+    assert get_registration_by_name(db, "still-active") is not None
+    db.close()
+
+
+def test_delete_registration_removes_the_row(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    delete_registration(db, "myboard")
+    assert get_registration_by_name(db, "myboard") is None
+    db.close()

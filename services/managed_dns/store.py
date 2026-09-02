@@ -239,3 +239,93 @@ def mark_matured(db: Database, name: str, *, matured_at: str) -> None:
 def set_last_known_address(db: Database, name: str, address: str) -> None:
     db.connection.execute("UPDATE registrations SET last_known_address = ? WHERE name = ?", (address, name))
     db.connection.commit()
+
+
+def mark_released(db: Database, name: str, *, released_at: str) -> None:
+    """Design doc §16 Decision 5: voluntary release -- the SysOp's own
+    `[L] Release` action. Only an active (`pending`/`matured`)
+    registration can be released; an already-`released`/`abandoned` one
+    has no `/release` call site that would ever reach this (heartbeat's
+    own credential lookup already rejects a non-active registration
+    before any release logic runs)."""
+    db.connection.execute(
+        "UPDATE registrations SET status = 'released', released_at = ? "
+        "WHERE name = ? AND status IN ('pending', 'matured')",
+        (released_at, name),
+    )
+    db.connection.commit()
+
+
+def reclaim(db: Database, name: str, *, matured: bool) -> None:
+    """Design doc §16 Decision 5: the same credential that released (or
+    watched abandonment happen to) this name reclaims it -- reactivates
+    the *same* row (never a new one, so `created_at`/`matured_at`
+    history is preserved) rather than treating this as a fresh
+    registration. `matured` restores whichever status this row actually
+    had before it stopped being active (`matured_at IS NOT NULL` is how
+    `services.managed_dns.server` already determines this -- see its own
+    reclaim-handling docstring), letting a registration that was already
+    live skip back to `matured` immediately rather than re-earning the
+    age-gate a second time for the same, already-proven node."""
+    db.connection.execute(
+        "UPDATE registrations SET status = ?, released_at = NULL WHERE name = ?",
+        ("matured" if matured else "pending", name),
+    )
+    db.connection.commit()
+
+
+def mark_abandoned(db: Database, name: str, *, released_at: str) -> None:
+    """The sweep's own counterpart to `mark_released` -- a
+    `pending`/`matured` registration that has gone silent past the
+    abandonment threshold. Shares the exact same `released_at` column
+    (and therefore Decision 5's exact same cooldown) as voluntary
+    release: "both exit paths...share one deliberately generous
+    cooldown," not two."""
+    db.connection.execute(
+        "UPDATE registrations SET status = 'abandoned', released_at = ? "
+        "WHERE name = ? AND status IN ('pending', 'matured')",
+        (released_at, name),
+    )
+    db.connection.commit()
+
+
+def list_stale_active_registrations(db: Database, *, older_than: str) -> list[Registration]:
+    """Every `pending`/`matured` registration whose most recent sign of
+    life (`last_contact_at`, or `created_at` if it has never once
+    heartbeated) is older than `older_than` -- the sweep's own
+    abandonment candidates. `COALESCE` rather than treating a `NULL`
+    `last_contact_at` as "never stale": a registration that was created
+    and then never heartbeated even once is exactly the case this needs
+    to catch, not skip."""
+    rows = db.connection.execute(
+        "SELECT * FROM registrations WHERE status IN ('pending', 'matured') "
+        "AND COALESCE(last_contact_at, created_at) < ?",
+        (older_than,),
+    ).fetchall()
+    return [_row_to_registration(row) for row in rows]
+
+
+def delete_expired_registrations(db: Database, *, older_than: str) -> int:
+    """Permanently removes every `released`/`abandoned` row whose
+    cooldown (Decision 5) has fully elapsed -- the name becomes
+    available to a genuinely new, unrelated registrant from this point
+    on, not just no-longer-blocked-from-reclaim-by-the-original-owner.
+    Pure table hygiene otherwise (an expired row doesn't count against
+    any cap or block anything on its own); returns the number of rows
+    removed, for the sweep's own logging."""
+    cursor = db.connection.execute(
+        "DELETE FROM registrations WHERE status IN ('released', 'abandoned') AND released_at < ?",
+        (older_than,),
+    )
+    db.connection.commit()
+    return cursor.rowcount
+
+
+def delete_registration(db: Database, name: str) -> None:
+    """Used only by `/register`'s own reclaim-vs-fresh-registration path
+    (`services.managed_dns.server`): once a cooldown-expired row is
+    confirmed to no longer block a genuinely new registrant, the stale
+    row is removed first so the new `INSERT` doesn't collide with the
+    primary key it still technically holds."""
+    db.connection.execute("DELETE FROM registrations WHERE name = ?", (name,))
+    db.connection.commit()
