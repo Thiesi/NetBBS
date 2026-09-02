@@ -820,6 +820,39 @@ def test_scrollback_snapshot_applies_the_subscribers_author_trust_policy(tmp_pat
     asyncio.run(scenario())
 
 
+def test_ensure_live_subscription_preserves_a_protocol_version_mismatch(tmp_path, monkeypatch):
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    async def incompatible_dial(*args, **kwargs):
+        raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
+
+    async def scenario():
+        origin = _Node(tmp_path, "origin-version-mismatch")
+        subscriber = _Node(tmp_path, "subscriber-version-mismatch")
+        _origin_channel, subscriber_channel = _setup_linked_channel(
+            origin, subscriber, name="version-mismatch"
+        )
+        monkeypatch.setattr(
+            "netbbs.link.realtime_channels.dialable_realtime_addresses_for_peer",
+            lambda *args: [("127.0.0.1", 1)],
+        )
+        monkeypatch.setattr(
+            "netbbs.link.realtime_channels.dial_realtime_session", incompatible_dial
+        )
+        try:
+            with pytest.raises(RealtimeProtocolVersionError):
+                await ensure_live_subscription(
+                    channel=subscriber_channel, node_identity=subscriber.identity,
+                    link_node=subscriber.link_node, lane=subscriber.lane,
+                    registry=subscriber.registry, bridge=subscriber.bridge,
+                )
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
 def test_scrollback_snapshot_reconstructs_author_label_from_attested_identity(tmp_path):
     async def scenario():
         origin = _Node(tmp_path, "origin-attested-label")

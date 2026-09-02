@@ -48,6 +48,7 @@ from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import (
     LinkNode,
     LinkProtocolError,
+    RealtimeProtocolVersionError,
     RealtimeFrame,
     build_channel_message_frame,
     build_node_presence_delta_frame,
@@ -716,7 +717,9 @@ async def ensure_live_subscription(
     If `channel` is Linked, ensure this node holds (or can establish) a
     live session to its origin node and has sent it a request-correlated
     `subscribe` --
-    best-effort, never raises. A caller who can't get live delivery
+    best-effort except for an authenticated protocol-version mismatch,
+    which raises `RealtimeProtocolVersionError` so callers can distinguish
+    an upgrade requirement from transient unavailability. A caller who can't get live delivery
     still has the existing async catch-up path (design doc §8.10.2:
     "the caller sees that live traffic may have been missed"), so
     degrading silently to `None` is the correct signal here, not a
@@ -748,6 +751,8 @@ async def ensure_live_subscription(
                     ),
                     timeout=dial_timeout_seconds,
                 )
+            except RealtimeProtocolVersionError:
+                raise
             except Exception:
                 continue
             await bridge.track_session(session)

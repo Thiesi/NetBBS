@@ -434,6 +434,35 @@ def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(
     assert "Real-time link to this channel's origin is up" in written
 
 
+def test_chat_loop_reports_an_incompatible_real_time_protocol(
+    db, lane, hub, presence, channel, alice, node_identity, monkeypatch
+):
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    link_channel(db, channel, node_identity=node_identity)
+
+    async def incompatible_subscription(**kwargs):
+        raise RealtimeProtocolVersionError(
+            "unsupported real-time application protocol version"
+        )
+
+    monkeypatch.setattr(
+        "netbbs.link.realtime_channels.ensure_live_subscription",
+        incompatible_subscription,
+    )
+    registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+    bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+    link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
+
+    session, _action = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["/quit"], link_context=link_context)
+    )
+
+    written = "\n".join(session.written)
+    assert "incompatible real-time protocol version" in written
+    assert "upgrade one of the nodes" in written
+
+
 def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
     db, lane, hub, presence, channel, alice, node_identity, monkeypatch
 ):

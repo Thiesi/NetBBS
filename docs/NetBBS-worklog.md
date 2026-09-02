@@ -1844,7 +1844,9 @@ separate author node/user identity; the incompatible v2 changes are that
 authored display labels are reconstructed from those identity fields and
 moderation target rows now carry null author identity. The Noise identity
 payload advertises the application version so mixed peers fail the
-authenticated handshake before a session is reported live; per-frame version
+authenticated handshake before a session is reported live. That typed mismatch
+propagates through `ensure_live_subscription` to a caller-visible upgrade
+message; ordinary network failures remain best-effort `None`. Per-frame version
 checks remain defense in depth.
 local-history deduplication; it never treats the display label itself as
 authority.

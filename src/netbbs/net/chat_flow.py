@@ -3697,13 +3697,24 @@ async def _chat_loop(
                 # only ever non-`None` when that import already
                 # succeeded once, at node startup (see `netbbs.
                 # __main__`'s own matching lazy import).
+                from netbbs.link.protocol import RealtimeProtocolVersionError
                 from netbbs.link.realtime_channels import ensure_live_subscription
 
-                live_result = await ensure_live_subscription(
-                    channel=channel, node_identity=link_context.node_identity,
-                    link_node=link_context.link_node, lane=lane,
-                    registry=link_context.realtime_registry, bridge=link_context.realtime_bridge,
-                )
+                try:
+                    live_result = await ensure_live_subscription(
+                        channel=channel, node_identity=link_context.node_identity,
+                        link_node=link_context.link_node, lane=lane,
+                        registry=link_context.realtime_registry, bridge=link_context.realtime_bridge,
+                    )
+                except RealtimeProtocolVersionError:
+                    await deliver(
+                        colored(
+                            "(This channel's origin uses an incompatible real-time protocol version -- "
+                            "upgrade one of the nodes; synchronized messages will still arrive.)",
+                            fg_color=MUTED_COLOR,
+                        )
+                    )
+                    return
                 if live_result is None:
                     await deliver(
                         colored(

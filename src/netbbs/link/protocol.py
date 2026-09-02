@@ -271,6 +271,10 @@ class LinkProtocolError(Exception):
     other than whoever actually sent the acknowledgement."""
 
 
+class RealtimeProtocolVersionError(LinkProtocolError):
+    """The authenticated peer cannot speak this live application version."""
+
+
 def _validate_realtime_json_value(value: object, *, path: str = "payload") -> None:
     """Reject values whose meaning is not portable across strict JSON peers."""
     if value is None or isinstance(value, (str, bool)):
@@ -305,7 +309,7 @@ class RealtimeFrame:
 
     def __post_init__(self) -> None:
         if type(self.version) is not int or self.version != REALTIME_PROTOCOL_VERSION:
-            raise LinkProtocolError("unsupported real-time protocol version")
+            raise RealtimeProtocolVersionError("unsupported real-time protocol version")
         if not isinstance(self.type, str) or self.type not in REALTIME_FRAME_TYPES:
             raise LinkProtocolError(f"unsupported real-time frame type {self.type!r}")
         if not isinstance(self.message_id, str) or not self.message_id:
@@ -420,12 +424,12 @@ class RealtimeIdentityPayload:
             type(value["version"]) is not int
             or value["version"] != _REALTIME_IDENTITY_PAYLOAD_VERSION
         ):
-            raise LinkProtocolError("unsupported real-time identity payload version")
+            raise RealtimeProtocolVersionError("unsupported real-time identity payload version")
         if (
             type(value["realtime_protocol_version"]) is not int
             or value["realtime_protocol_version"] != REALTIME_PROTOCOL_VERSION
         ):
-            raise LinkProtocolError("unsupported real-time application protocol version")
+            raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
         if not isinstance(value["transport_transitions"], list):
             raise LinkProtocolError("transport_transitions must be a list")
         try:
