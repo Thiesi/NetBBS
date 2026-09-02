@@ -57,3 +57,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# "." (repo root): makes `services.managed_dns` importable (issue #201)
+# -- that package deliberately lives outside src/ (see its own __init__
+# docstring for why) so [tool.setuptools.packages.find] never packages
+# it, but its own tests still need it on sys.path. "src": the existing
+# convention of manually passing PYTHONPATH=<worktree>/src stays valid
+# and takes precedence when set, this is only a default for a bare
+# `pytest tests/` invocation from repo root.
+pythonpath = [".", "src"]

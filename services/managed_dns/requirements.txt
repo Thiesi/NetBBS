@@ -1,0 +1,8 @@
+# Dependencies for running the managed-DNS service itself (issue #201).
+# This is a separate deployable from the `netbbs` package -- see this
+# directory's own __init__.py docstring for why -- so it declares its
+# own requirements rather than adding to pyproject.toml's
+# [project.optional-dependencies], which govern only the installable
+# node client.
+aiohttp>=3.9
+dnspython>=2.6
