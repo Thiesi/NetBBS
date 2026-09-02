@@ -26,6 +26,7 @@ import base64
 import hashlib
 import json
 import random
+from dataclasses import replace
 
 import aiohttp
 import nacl.public
@@ -544,6 +545,46 @@ def test_dial_realtime_session_accepts_a_matching_expected_fingerprint():
         finally:
             await registry_b.close_all(reason="test_done")
             await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_dial_realtime_session_rejects_an_incompatible_version_before_admission():
+    async def scenario():
+        alice = bootstrap_node_identity("alice-version-admission")
+        bob = bootstrap_node_identity("bob-version-admission")
+        registry = LinkRealtimeSessionRegistry(own_fingerprint=alice.fingerprint)
+
+        async def legacy_responder(reader, writer):
+            handshake = NoiseXXHandshake(
+                initiator=False,
+                static_private_key=bytes(derive_encryption_private_key(bob.transport_key)),
+            )
+            try:
+                first = await read_realtime_record(reader)
+                handshake.read_message(first)
+                legacy_payload = replace(
+                    RealtimeIdentityPayload.for_node(bob), realtime_protocol_version=1
+                ).to_json_bytes()
+                second, _ = handshake.write_message(legacy_payload)
+                await write_realtime_record(writer, second)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(legacy_responder, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            with pytest.raises(LinkProtocolError, match="application protocol version"):
+                await dial_realtime_session(
+                    "127.0.0.1", port, alice,
+                    on_frame=_default_on_frame, registry=registry,
+                    expected_fingerprint=bob.fingerprint,
+                )
+            assert registry.get(bob.fingerprint) is None
+        finally:
+            server.close()
+            await server.wait_closed()
 
     asyncio.run(scenario())
 

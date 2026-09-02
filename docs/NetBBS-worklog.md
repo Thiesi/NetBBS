@@ -1839,8 +1839,13 @@ deduplication, then reconstructs the displayed `user@node` label from those
 attested fields rather than trusting `author_label`. Moderation rows store the
 target label for sentence rendering, so snapshots carry them as authorless
 system events; target trust policy must not hide audit history. This payload is
-real-time protocol v2, deliberately incompatible at the version boundary with
-the earlier label-only/un-correlated v1 snapshot shape.
+real-time protocol v2. Version 1 already carried request correlation and
+separate author node/user identity; the incompatible v2 changes are that
+authored display labels are reconstructed from those identity fields and
+moderation target rows now carry null author identity. The Noise identity
+payload advertises the application version so mixed peers fail the
+authenticated handshake before a session is reported live; per-frame version
+checks remain defense in depth.
 local-history deduplication; it never treats the display label itself as
 authority.
 

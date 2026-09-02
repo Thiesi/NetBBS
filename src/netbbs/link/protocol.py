@@ -165,6 +165,7 @@ _MAX_SEEN_TRUST_PULL_NONCES = 4096
 # fail at the frame-version boundary rather than accumulating protocol strikes
 # for payloads both sides believe belong to the same version.
 REALTIME_PROTOCOL_VERSION = 2
+_REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
 REALTIME_FRAME_TYPES = frozenset(
@@ -363,13 +364,14 @@ class RealtimeFrame:
 
 @dataclass(frozen=True)
 class RealtimeIdentityPayload:
-    """Root-verifiable binding between a peer and its Noise static key."""
+    """Root-verifiable Noise binding plus application-version admission."""
 
     root_fingerprint: str
     root_public_key: str
     transport_transitions: tuple[KeyTransition, ...]
     noise_static_key: str
-    version: int = 1
+    realtime_protocol_version: int = REALTIME_PROTOCOL_VERSION
+    version: int = _REALTIME_IDENTITY_PAYLOAD_VERSION
 
     @classmethod
     def for_node(cls, identity: NodeIdentity) -> "RealtimeIdentityPayload":
@@ -392,6 +394,7 @@ class RealtimeIdentityPayload:
             "root_public_key": self.root_public_key,
             "transport_transitions": [transition.to_dict() for transition in self.transport_transitions],
             "noise_static_key": self.noise_static_key,
+            "realtime_protocol_version": self.realtime_protocol_version,
         }
 
     def to_json_bytes(self) -> bytes:
@@ -409,12 +412,20 @@ class RealtimeIdentityPayload:
             raise LinkProtocolError("real-time identity payload must be an object")
         expected = {
             "version", "root_fingerprint", "root_public_key",
-            "transport_transitions", "noise_static_key",
+            "transport_transitions", "noise_static_key", "realtime_protocol_version",
         }
         if set(value) != expected:
             raise LinkProtocolError("real-time identity payload has unexpected or missing fields")
-        if type(value["version"]) is not int or value["version"] != 1:
+        if (
+            type(value["version"]) is not int
+            or value["version"] != _REALTIME_IDENTITY_PAYLOAD_VERSION
+        ):
             raise LinkProtocolError("unsupported real-time identity payload version")
+        if (
+            type(value["realtime_protocol_version"]) is not int
+            or value["realtime_protocol_version"] != REALTIME_PROTOCOL_VERSION
+        ):
+            raise LinkProtocolError("unsupported real-time application protocol version")
         if not isinstance(value["transport_transitions"], list):
             raise LinkProtocolError("transport_transitions must be a list")
         try:
@@ -427,6 +438,7 @@ class RealtimeIdentityPayload:
             root_public_key=value["root_public_key"],
             transport_transitions=transitions,
             noise_static_key=value["noise_static_key"],
+            realtime_protocol_version=value["realtime_protocol_version"],
         )
 
     @classmethod

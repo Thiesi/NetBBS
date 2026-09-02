@@ -129,6 +129,16 @@ def test_realtime_identity_payload_verifies_root_authorized_noise_static_key():
     assert all(item.payload["purpose"] == "transport" for item in parsed.transport_transitions)
 
 
+def test_realtime_identity_payload_rejects_an_incompatible_application_version():
+    identity = bootstrap_node_identity("legacy-realtime-peer")
+    payload = replace(
+        RealtimeIdentityPayload.for_node(identity), realtime_protocol_version=1
+    )
+
+    with pytest.raises(LinkProtocolError, match="application protocol version"):
+        RealtimeIdentityPayload.from_json_bytes(payload.to_json_bytes())
+
+
 @pytest.mark.parametrize("tamper", ["fingerprint", "static", "transition"])
 def test_realtime_identity_payload_rejects_broken_root_transport_binding(tamper):
     identity = bootstrap_node_identity("alice")
