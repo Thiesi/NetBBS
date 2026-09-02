@@ -6001,7 +6001,7 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
 
 
 def test_managed_dns_status_shows_undecided_by_default(db, lane, sysop):
-    session = FakeSession(["d", " ", "b"])
+    session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Not yet decided" in text
@@ -6011,7 +6011,7 @@ def test_managed_dns_status_shows_declined(db, lane, sysop):
     from netbbs.managed_dns.state import OptIn, set_opt_in
 
     set_opt_in(db, OptIn.DECLINED)
-    session = FakeSession(["d", " ", "b"])
+    session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Declined" in text
@@ -6024,7 +6024,7 @@ def test_managed_dns_status_shows_a_pending_registration(db, lane, sysop):
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.PENDING)
 
-    session = FakeSession(["d", " ", "b"])
+    session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "PENDING" in text
@@ -6038,18 +6038,102 @@ def test_managed_dns_status_shows_a_live_matured_registration(db, lane, sysop):
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.MATURED)
 
-    session = FakeSession(["d", " ", "b"])
+    session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "LIVE" in text
 
 
-def test_managed_dns_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
+def test_managed_dns_status_offers_register_when_not_active(db, lane, sysop):
     session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
-    text = _written_text(session)
-    assert "Press any key to continue..." in text
-    assert "Return to the main menu" in text
+    # _visible() strips SGR codes, but the "[R]" bracket itself still
+    # sits between the hotkey letter and the rest of the word (e.g.
+    # "[R]egister"), so "Register" is never a literal contiguous
+    # substring -- check the actual rendered bracketed form instead.
+    text = _visible(_written_text(session))
+    assert "[R]egister" in text
+    assert "[L] Release" not in text
+
+
+def test_managed_dns_status_offers_release_when_active(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "[L] Release" in text
+    assert "[R]egister" not in text
+
+
+def test_managed_dns_status_rejects_the_register_hotkey_when_already_active(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", "r", "b", "b"])  # "r" is rejected -- no name/dynamic prompt follows
+    _run(session, lane, sysop)
+
+
+def test_managed_dns_status_rejects_the_release_hotkey_when_not_active(db, lane, sysop):
+    session = FakeSession(["d", "l", "b", "b"])  # "l" is rejected -- no confirmation prompt follows
+    _run(session, lane, sysop)
+
+
+def test_managed_dns_status_register_hotkey_registers_end_to_end(db, lane, sysop):
+    from netbbs.managed_dns.state import get_registered_name, set_node_fingerprint, set_service_url
+    from services.managed_dns.server import ManagedDnsServer
+    from services.managed_dns.store import Database as ManagedDnsServerDatabase
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(db.path.parent / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            # admin_menu awaited directly, not via _run (which does its
+            # own asyncio.run) -- the server above needs to keep running
+            # in *this* coroutine's own event loop while the admin
+            # screen dials it.
+            session = FakeSession(["d", "r", "myboard", "n", "b", "b"])
+            await admin_menu(session, lane, sysop)
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    asyncio.run(scenario())
+    assert get_registered_name(db) == "myboard"
+
+
+def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
+    from netbbs.managed_dns.state import RegistrationStatus, get_registration_status, set_node_fingerprint, set_service_url
+    from services.managed_dns.server import ManagedDnsServer
+    from services.managed_dns.store import Database as ManagedDnsServerDatabase
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(db.path.parent / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            # Register first (outside the admin screen, to set up state),
+            # then exercise the screen's own [L] Release hotkey.
+            await admin_menu(FakeSession(["d", "r", "myboard", "n", "b", "b"]), lane, sysop)
+            await admin_menu(FakeSession(["d", "l", "y", "b", "b"]), lane, sysop)
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    asyncio.run(scenario())
+    assert get_registration_status(db) is RegistrationStatus.RELEASED
 
 
 # -- outbox: work-item inspection/replay/cancel (design doc §13.7) ----------

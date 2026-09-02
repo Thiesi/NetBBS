@@ -42,22 +42,30 @@ class RegisterResult:
 
 async def register(
     session: ClientSession, base_url: str, *, name: str, node_fingerprint: str, dynamic: bool,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    credential: str | None = None, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> RegisterResult:
     """`POST {base_url}/register`. Raises `ManagedDnsError` for a
     rejected or unreachable request -- including a name already taken,
-    a reserved name, or this node already having an active registration
-    (design doc §16 Decision 3) -- with the server's own `error` message
-    included, since the caller (`netbbs.net.managed_dns_flow`, a UI
-    layer) needs a human-readable reason to show, not just a status
-    code.
+    a reserved name, this node already having an active registration
+    (design doc §16 Decision 3), or `name` still being in Decision 5's
+    cooldown -- with the server's own `error` message included, since
+    the caller (`netbbs.net.managed_dns_flow`, a UI layer) needs a
+    human-readable reason to show, not just a status code.
+
+    `credential`, if given, is this node's own still-valid credential
+    from a previous registration of the *same* `name` -- reclaim is
+    folded into this same call, not a separate function, matching
+    `services.managed_dns.server._handle_register`'s own reclaim
+    handling on the other end (see its docstring for why). Irrelevant,
+    and ignored server-side, for a genuinely new `name`.
     """
     url = f"{base_url}/register"
+    payload = {"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic}
+    if credential is not None:
+        payload["credential"] = credential
     try:
         async with session.post(
-            url,
-            json={"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic},
-            timeout=ClientTimeout(total=timeout),
+            url, json=payload, timeout=ClientTimeout(total=timeout),
         ) as response:
             if response.status != 201:
                 text = await response.text()
@@ -110,3 +118,35 @@ async def heartbeat(
         )
     except (KeyError, TypeError) as exc:
         raise ManagedDnsError(f"malformed heartbeat response from {url}: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class ReleaseResult:
+    name: str
+    status: str
+
+
+async def release(
+    session: ClientSession, base_url: str, *, credential: str, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> ReleaseResult:
+    """`POST {base_url}/release` (design doc §16 Decision 5). The
+    credential stays valid after this -- it's what a later reclaim (via
+    `register`'s own `credential` parameter) presents -- so callers must
+    not delete it locally just because release succeeded.
+    """
+    url = f"{base_url}/release"
+    try:
+        async with session.post(
+            url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise ManagedDnsError(f"release failed: HTTP {response.status}: {text}")
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+
+    try:
+        return ReleaseResult(name=body["name"], status=body["status"])
+    except (KeyError, TypeError) as exc:
+        raise ManagedDnsError(f"malformed release response from {url}: {exc}") from exc
