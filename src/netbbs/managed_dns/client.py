@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from aiohttp import ClientError, ClientSession, ClientTimeout
 
 from netbbs.link.events import strict_json_loads
+from netbbs.managed_dns.state import RegistrationStatus
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -74,12 +75,20 @@ async def register(
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
-    try:
-        return RegisterResult(
-            name=body["name"], credential=body["credential"], status=body["status"], created_at=body["created_at"],
-        )
-    except (KeyError, TypeError) as exc:
-        raise ManagedDnsError(f"malformed registration response from {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ManagedDnsError(f"malformed registration response from {url}: expected an object")
+    name_value = body.get("name")
+    credential_value = body.get("credential")
+    status_value = body.get("status")
+    created_at_value = body.get("created_at")
+    if (
+        not isinstance(name_value, str) or not name_value
+        or not isinstance(credential_value, str) or not credential_value
+        or status_value not in (RegistrationStatus.PENDING.value, RegistrationStatus.MATURED.value)
+        or not isinstance(created_at_value, str) or not created_at_value
+    ):
+        raise ManagedDnsError(f"malformed registration response from {url}: invalid fields")
+    return RegisterResult(name_value, credential_value, status_value, created_at_value)
 
 
 @dataclass(frozen=True)
@@ -112,12 +121,18 @@ async def heartbeat(
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
-    try:
-        return HeartbeatResult(
-            name=body["name"], status=body["status"], last_known_address=body["last_known_address"],
-        )
-    except (KeyError, TypeError) as exc:
-        raise ManagedDnsError(f"malformed heartbeat response from {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ManagedDnsError(f"malformed heartbeat response from {url}: expected an object")
+    name_value = body.get("name")
+    status_value = body.get("status")
+    address_value = body.get("last_known_address")
+    if (
+        not isinstance(name_value, str) or not name_value
+        or status_value not in (RegistrationStatus.PENDING.value, RegistrationStatus.MATURED.value)
+        or (address_value is not None and not isinstance(address_value, str))
+    ):
+        raise ManagedDnsError(f"malformed heartbeat response from {url}: invalid fields")
+    return HeartbeatResult(name_value, status_value, address_value)
 
 
 @dataclass(frozen=True)
@@ -146,7 +161,10 @@ async def release(
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
 
-    try:
-        return ReleaseResult(name=body["name"], status=body["status"])
-    except (KeyError, TypeError) as exc:
-        raise ManagedDnsError(f"malformed release response from {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ManagedDnsError(f"malformed release response from {url}: expected an object")
+    name_value = body.get("name")
+    status_value = body.get("status")
+    if not isinstance(name_value, str) or not name_value or status_value != RegistrationStatus.RELEASED.value:
+        raise ManagedDnsError(f"malformed release response from {url}: invalid fields")
+    return ReleaseResult(name_value, status_value)

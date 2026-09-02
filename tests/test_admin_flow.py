@@ -6066,19 +6066,20 @@ def test_managed_dns_status_offers_release_when_active(db, lane, sysop):
     session = FakeSession(["d", "b", "b"])
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
-    assert "[L] Release" in text
-    assert "[R]egister" not in text
+    assert "Re[l]ease" in text
+    assert "[R]egister" in text
 
 
-def test_managed_dns_status_rejects_the_register_hotkey_when_already_active(db, lane, sysop):
+def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(db, lane, sysop):
     from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
 
     set_opt_in(db, OptIn.ACCEPTED)
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.PENDING)
 
-    session = FakeSession(["d", "r", "b", "b"])  # "r" is rejected -- no name/dynamic prompt follows
+    session = FakeSession(["d", "r", "b", "b"])
     _run(session, lane, sysop)
+    assert "hasn't been configured" in _visible(_written_text(session))
 
 
 def test_managed_dns_status_rejects_the_release_hotkey_when_not_active(db, lane, sysop):

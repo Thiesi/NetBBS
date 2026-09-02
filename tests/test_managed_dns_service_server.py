@@ -352,6 +352,7 @@ def test_heartbeat_matures_and_publishes_once_the_age_gate_passes(db):
         server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             return await _heartbeat(server, credential=registered["credential"])
         finally:
@@ -378,6 +379,7 @@ def test_heartbeat_does_not_republish_for_a_static_registration_once_matured(db)
         )
         try:
             registered = await _register(server, name="myboard", dynamic=False)
+            await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
             clock.now += timedelta(seconds=61)
             await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
             # A later heartbeat from a different observed address must
@@ -407,6 +409,7 @@ def test_heartbeat_republishes_for_a_dynamic_registration_when_the_address_chang
         )
         try:
             registered = await _register(server, name="myboard", dynamic=True)
+            await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
             clock.now += timedelta(seconds=61)
             await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
             status, body = await _heartbeat(
@@ -439,6 +442,7 @@ def test_heartbeat_ignores_x_forwarded_for_unless_explicitly_trusted(db):
         server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             return await _heartbeat(
                 server, credential=registered["credential"], headers={"X-Forwarded-For": "9.9.9.9"}
@@ -461,6 +465,7 @@ def test_heartbeat_is_resilient_to_a_dns_provider_failure(db):
         server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=_FailingDnsProvider())
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             return await _heartbeat(server, credential=registered["credential"])
         finally:
@@ -504,6 +509,7 @@ def test_release_deletes_the_dns_record_when_matured(db):
         server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             await _heartbeat(server, credential=registered["credential"])  # matures + publishes
             return await _release(server, credential=registered["credential"])
@@ -618,6 +624,7 @@ def test_register_reclaims_a_matured_registration_and_republishes(db):
         )
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             await _heartbeat(server, credential=registered["credential"])  # matures + publishes once
             await _release(server, credential=registered["credential"])  # deletes the record
@@ -690,6 +697,7 @@ def test_sweep_abandons_a_stale_matured_registration_and_deletes_its_record(db):
         server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
         try:
             registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
             await _heartbeat(server, credential=registered["credential"])
         finally:
@@ -699,7 +707,7 @@ def test_sweep_abandons_a_stale_matured_registration_and_deletes_its_record(db):
         sweeper = ManagedDnsServer(
             "127.0.0.1", 0, db, clock=clock, dns_provider=provider, abandonment_seconds=7 * 24 * 60 * 60,
         )
-        sweeper._sweep_once()
+        await sweeper._sweep_once()
 
     asyncio.run(scenario())
     registration = get_registration_by_name(db, "myboard")
@@ -723,7 +731,7 @@ def test_sweep_abandons_a_stale_never_matured_registration_without_calling_the_d
         sweeper = ManagedDnsServer(
             "127.0.0.1", 0, db, clock=clock, dns_provider=provider, abandonment_seconds=7 * 24 * 60 * 60,
         )
-        sweeper._sweep_once()
+        await sweeper._sweep_once()
 
     asyncio.run(scenario())
     registration = get_registration_by_name(db, "myboard")
@@ -739,7 +747,7 @@ def test_sweep_does_not_abandon_a_registration_still_within_its_contact_window(d
         try:
             await _register(server, name="myboard")
             clock.now += timedelta(days=1)  # well within the 7-day window
-            server._sweep_once()
+            await server._sweep_once()
         finally:
             await server.stop()
 
@@ -756,7 +764,7 @@ def test_sweep_purges_a_registration_past_its_cooldown(db):
             registered = await _register(server, name="myboard")
             await _release(server, credential=registered["credential"])
             clock.now += timedelta(seconds=61)
-            server._sweep_once()
+            await server._sweep_once()
         finally:
             await server.stop()
 
@@ -773,7 +781,7 @@ def test_sweep_does_not_purge_a_registration_still_within_its_cooldown(db):
             registered = await _register(server, name="myboard")
             await _release(server, credential=registered["credential"])
             clock.now += timedelta(seconds=60)  # well short of the hour-long cooldown
-            server._sweep_once()
+            await server._sweep_once()
         finally:
             await server.stop()
 
@@ -835,10 +843,7 @@ def test_register_rate_limit_refills_over_time(db):
     assert allowed_status == 201
 
 
-def test_reclaim_bypasses_the_cumulative_cap(db):
-    """A reclaim reactivates an already-proven, previously-counted row
-    -- it must never be blocked by a cap that exists to bound *new*
-    capacity being created."""
+def test_reclaim_obeys_the_cumulative_cap(db):
     async def scenario():
         server = await _start_server(db, cumulative_cap=2)
         try:
@@ -857,8 +862,8 @@ def test_reclaim_bypasses_the_cumulative_cap(db):
             await server.stop()
 
     status, body = asyncio.run(scenario())
-    assert status == 201
-    assert body["status"] == "pending"
+    assert status == 503
+    assert "capacity" in body["error"]
 
 
 def test_reclaim_bypasses_the_rate_limit(db):
@@ -880,3 +885,129 @@ def test_reclaim_bypasses_the_rate_limit(db):
     status, body = asyncio.run(scenario())
     assert status == 201
     assert body["status"] == "pending"
+
+
+@pytest.mark.parametrize("endpoint", ["register", "heartbeat", "release"])
+def test_endpoints_reject_non_object_json(db, endpoint):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"http://127.0.0.1:{server.port}/{endpoint}", json=[]) as response:
+                    return response.status, await response.json()
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 400
+    assert "object" in body["error"]
+
+
+def test_static_publish_failure_retries_on_the_next_heartbeat(db):
+    class FailOnceProvider(LoggingDnsProvider):
+        def __init__(self):
+            super().__init__()
+            self.failed = False
+
+        def upsert_record(self, name, kind, address):
+            if not self.failed:
+                self.failed = True
+                raise DnsProviderError("temporary failure")
+            super().upsert_record(name, kind, address)
+
+    clock = _MutableClock(datetime(2026, 9, 2, tzinfo=timezone.utc))
+    provider = FailOnceProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard", dynamic=False)
+            await _heartbeat(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=61)
+            first = await _heartbeat(server, credential=registered["credential"])
+            second = await _heartbeat(server, credential=registered["credential"])
+            return first, second
+        finally:
+            await server.stop()
+
+    first, second = asyncio.run(scenario())
+    assert first[1]["last_known_address"] is None
+    assert second[1]["last_known_address"] == "127.0.0.1"
+
+
+def test_maturation_window_resets_after_a_long_contact_gap(db):
+    clock = _MutableClock(datetime(2026, 9, 2, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, abandonment_seconds=30,
+        )
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=61)
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "pending"
+
+
+def test_release_stays_active_when_dns_deletion_fails(db):
+    clock = _MutableClock(datetime(2026, 9, 2, tzinfo=timezone.utc))
+    provider = _FailingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=0, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            return await _release(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "remains active" in body["error"]
+    assert get_registration_by_name(db, "myboard").status == "matured"
+
+
+def test_reclaim_updates_dynamic_choice_and_contact_time(db):
+    clock = _MutableClock(datetime(2026, 9, 2, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock)
+        try:
+            registered = await _register(server, name="myboard", dynamic=False)
+            await _release(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=10)
+            return await _register_raw(
+                server, name="myboard", dynamic=True, credential=registered["credential"]
+            )
+        finally:
+            await server.stop()
+
+    status, _body = asyncio.run(scenario())
+    registration = get_registration_by_name(db, "myboard")
+    assert status == 201
+    assert registration.dynamic is True
+    assert registration.last_contact_at == clock.now.isoformat()
+
+
+def test_rate_limit_state_survives_server_restart(db):
+    async def scenario():
+        first = await _start_server(db, rate_limit_capacity=1, rate_limit_refill_per_minute=0)
+        try:
+            await _register(first, name="board-a", node_fingerprint="fp-1")
+        finally:
+            await first.stop()
+        replacement = await _start_server(db, rate_limit_capacity=1, rate_limit_refill_per_minute=0)
+        try:
+            return await _register_raw(replacement, name="board-b", node_fingerprint="fp-2")
+        finally:
+            await replacement.stop()
+
+    status, _body = asyncio.run(scenario())
+    assert status == 429

@@ -19,6 +19,9 @@ lazy import of `netbbs.link.realtime_channels` already documents (issue
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from netbbs.managed_dns.credential import credential_path_for, load_credential, save_credential
 from netbbs.managed_dns.state import (
     OptIn,
@@ -34,7 +37,7 @@ from netbbs.managed_dns.state import (
 )
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session
-from netbbs.rendering import MUTED_COLOR, colored, wrap_to_width
+from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
 _OPT_IN_BLURB = (
@@ -50,6 +53,7 @@ _OPT_IN_BLURB = (
 # (a fresh attempt would just be rejected) or [L] Release (nothing
 # active to release) makes sense to offer on the admin screen.
 _ACTIVE_STATUSES = (RegistrationStatus.PENDING, RegistrationStatus.MATURED)
+_opt_in_locks: dict[Path, asyncio.Lock] = {}
 
 
 async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None:
@@ -59,8 +63,10 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
     that decision is node-wide, not per-user, so this single check
     guarantees the prompt fires exactly once regardless of which caller
     wins the race, and is a safe no-op every time after."""
-    if await lane.run(get_opt_in) is not OptIn.UNDECIDED:
-        return
+    lock = _opt_in_locks.setdefault(lane.path.resolve(), asyncio.Lock())
+    async with lock:
+        if await lane.run(get_opt_in) is not OptIn.UNDECIDED:
+            return
 
     # Word-wrapped to the real terminal width before coloring, one
     # physical line at a time -- coloring the whole blurb as one string
@@ -68,16 +74,16 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
     # edge unpredictably on anything narrower than the text itself (the
     # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
     # docstring documents fixing for screen subtitles).
-    await session.write_line("")
-    for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
-        await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
-    await session.write_line("")
-    accepted = await prompt_yes_no(
-        session, "Enable managed netbbs.org subdomain hosting for this node?", default=False
-    )
-    await lane.run(set_opt_in, OptIn.ACCEPTED if accepted else OptIn.DECLINED)
-    if accepted:
-        await register_via_prompt(session, lane)
+        await session.write_line("")
+        for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
+            await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+        await session.write_line("")
+        accepted = await prompt_yes_no(
+            session, "Enable managed netbbs.org subdomain hosting for this node?", default=False
+        )
+        await lane.run(set_opt_in, OptIn.ACCEPTED if accepted else OptIn.DECLINED)
+        if accepted:
+            await register_via_prompt(session, lane)
 
 
 async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
@@ -147,7 +153,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
     # sent, only sets the SysOp's own expectations up front.
     web_behind_proxy = await prompt_yes_no(
         session,
-        f"If callers should reach this board's web interface at {raw_name}.netbbs.org, "
+        f"If callers should reach this board's web interface at {sanitize_text(raw_name)}.netbbs.org, "
         "is it served through an HTTPS-terminating reverse proxy on port 443? "
         "(Telnet/SSH are always assumed to be on their standard ports.)",
         default=False,
@@ -166,13 +172,27 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
     )
 
     stored_credential = load_credential(credential_path_for(lane.path))
+    if stored_credential is not None and previous_name is not None and raw_name.lower() != previous_name.lower():
+        replace = await prompt_yes_no(
+            session,
+            f"Registering a different name will replace this node's saved credential for "
+            f"{sanitize_text(previous_name)}.netbbs.org and forfeit its reclaim window. Continue?",
+            default=False,
+        )
+        if not replace:
+            return
 
     # Lazy: netbbs.managed_dns.client requires aiohttp, which this
     # module must not require merely to import itself -- see this
     # module's own docstring.
-    from aiohttp import ClientSession
-
-    from netbbs.managed_dns.client import ManagedDnsError, register
+    try:
+        from aiohttp import ClientSession
+        from netbbs.managed_dns.client import ManagedDnsError, register
+    except ModuleNotFoundError:
+        await session.write_line(
+            colored("Registration requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR)
+        )
+        return
 
     try:
         async with ClientSession(trust_env=True) as http_session:
@@ -181,7 +201,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
                 dynamic=dynamic, credential=stored_credential,
             )
     except ManagedDnsError as exc:
-        await session.write_line(colored(f"Registration failed: {exc}", fg_color=MUTED_COLOR))
+        await session.write_line(colored(f"Registration failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return
 
     # A reclaim always returns the exact same credential the caller
@@ -198,6 +218,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
     await lane.run(set_registered_name, result.name)
     await lane.run(set_registration_status, RegistrationStatus(result.status))
     await lane.run(set_dynamic, dynamic)
+    await lane.run(set_opt_in, OptIn.ACCEPTED)
 
     if was_reclaim:
         if result.status == "matured":
@@ -238,15 +259,18 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
         )
         return
 
-    from aiohttp import ClientSession
-
-    from netbbs.managed_dns.client import ManagedDnsError, release
+    try:
+        from aiohttp import ClientSession
+        from netbbs.managed_dns.client import ManagedDnsError, release
+    except ModuleNotFoundError:
+        await session.write_line(colored("Release requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
+        return
 
     try:
         async with ClientSession(trust_env=True) as http_session:
             result = await release(http_session, base_url, credential=stored_credential)
     except ManagedDnsError as exc:
-        await session.write_line(colored(f"Release failed: {exc}", fg_color=MUTED_COLOR))
+        await session.write_line(colored(f"Release failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return
 
     await lane.run(set_registration_status, RegistrationStatus(result.status))

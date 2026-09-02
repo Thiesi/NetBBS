@@ -39,13 +39,11 @@ def test_logging_provider_upsert_replaces_the_same_kind():
     assert provider.records == {"myboard.netbbs.org.": {"A": "203.0.113.9"}}
 
 
-def test_logging_provider_upsert_keeps_different_kinds_independent():
+def test_logging_provider_upsert_replaces_the_previous_address_family():
     provider = LoggingDnsProvider()
     provider.upsert_record("myboard.netbbs.org.", "A", "203.0.113.5")
     provider.upsert_record("myboard.netbbs.org.", "AAAA", "2001:db8::5")
-    assert provider.records == {
-        "myboard.netbbs.org.": {"A": "203.0.113.5", "AAAA": "2001:db8::5"}
-    }
+    assert provider.records == {"myboard.netbbs.org.": {"AAAA": "2001:db8::5"}}
 
 
 def test_logging_provider_delete_removes_every_kind():
@@ -125,9 +123,9 @@ def test_rfc2136_delete_sends_a_delete_update_for_the_right_name(monkeypatch):
     _provider().delete_record("myboard.netbbs.org.")
 
     update, _server, _port = sent[0]
-    assert len(update.update) == 1
-    assert str(update.update[0].name) == "myboard.netbbs.org."
-    assert update.update[0].rdtype == dns.rdatatype.ANY
+    assert len(update.update) == 2
+    assert {rrset.rdtype for rrset in update.update} == {dns.rdatatype.A, dns.rdatatype.AAAA}
+    assert all(str(rrset.name) == "myboard.netbbs.org." for rrset in update.update)
 
 
 def test_rfc2136_update_is_tsig_signed_with_the_configured_key(monkeypatch):

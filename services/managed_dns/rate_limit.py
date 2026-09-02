@@ -31,12 +31,15 @@ class GlobalRateLimiter:
     is explicit this must be service-wide, since per-identity is exactly
     what a Sybil attacker can multiply for free."""
 
-    def __init__(self, *, capacity: float, refill_per_minute: float, clock: Clock) -> None:
+    def __init__(
+        self, *, capacity: float, refill_per_minute: float, clock: Clock,
+        tokens: float | None = None, last_refill: float | None = None,
+    ) -> None:
         self._capacity = capacity
         self._refill_rate = refill_per_minute / 60.0
         self._clock = clock
-        self._tokens = capacity
-        self._last_refill = clock()
+        self._tokens = capacity if tokens is None else min(capacity, max(0.0, tokens))
+        self._last_refill = clock() if last_refill is None else last_refill
 
     def _refill(self) -> None:
         now = self._clock()
@@ -51,3 +54,6 @@ class GlobalRateLimiter:
             return False
         self._tokens -= 1.0
         return True
+
+    def snapshot(self) -> tuple[float, float]:
+        return self._tokens, self._last_refill

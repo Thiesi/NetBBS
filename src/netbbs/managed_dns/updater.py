@@ -28,6 +28,7 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_opt_in,
     get_registered_name,
+    get_registration_status,
     get_service_url,
     set_last_contact_at,
     set_registration_status,
@@ -78,7 +79,10 @@ async def run_scheduled_managed_dns_updater(
         if get_opt_in(db) is OptIn.ACCEPTED:
             name = get_registered_name(db)
             base_url = get_service_url(db)
-            if name is not None and base_url is not None:
+            status = get_registration_status(db)
+            if name is not None and base_url is not None and status not in (
+                RegistrationStatus.RELEASED, RegistrationStatus.ABANDONED,
+            ):
                 credential = load_credential(credential_path_for(db.path))
                 if credential is not None:
                     await _send_heartbeat(db, base_url, credential)
@@ -91,7 +95,10 @@ async def _send_heartbeat(db: Database, base_url: str, credential: str) -> None:
         # every other outbound call this project makes to project-
         # operated infrastructure (see netbbs.managed_dns.client's own
         # docstring for the full worklog citation).
-        async with ClientSession(trust_env=True) as session:
+        # The service derives the node address from the TCP peer. A
+        # forward proxy would make that peer the proxy, so this request
+        # must always use a direct connection.
+        async with ClientSession(trust_env=False) as session:
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)

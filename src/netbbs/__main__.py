@@ -596,9 +596,15 @@ async def run(
     # level: netbbs.managed_dns.updater needs aiohttp (via netbbs.
     # managed_dns.client), an optional extra, the same reasoning
     # run_link_sync's own lazy import (below) already documents.
-    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
-
-    managed_dns_updater_task = asyncio.create_task(run_scheduled_managed_dns_updater(db))
+    try:
+        from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+    except ModuleNotFoundError as exc:
+        if exc.name != "aiohttp":
+            raise
+        managed_dns_updater_task = None
+        _logger.info("managed-DNS updater disabled because optional HTTP support is not installed")
+    else:
+        managed_dns_updater_task = asyncio.create_task(run_scheduled_managed_dns_updater(db))
 
     def _log_managed_dns_updater_failure(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -612,7 +618,8 @@ async def run(
                 exc_info=exc,
             )
 
-    managed_dns_updater_task.add_done_callback(_log_managed_dns_updater_failure)
+    if managed_dns_updater_task is not None:
+        managed_dns_updater_task.add_done_callback(_log_managed_dns_updater_failure)
 
     async def session_handler(session):
         await handle_session(
@@ -967,7 +974,8 @@ async def run(
         # gets the same immediate-cancel treatment as the other simple
         # periodic tasks above, not that task's own graceful-finish
         # machinery below.
-        await _drain_immediately(managed_dns_updater_task)
+        if managed_dns_updater_task is not None:
+            await _drain_immediately(managed_dns_updater_task)
         # Design doc §13.11, issue #60: graceful drain, not an
         # unconditional hard cancel -- an in-flight dial/push otherwise
         # gets torn out of half-done at whatever await happens to be

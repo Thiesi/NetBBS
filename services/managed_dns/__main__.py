@@ -116,24 +116,19 @@ def _build_server() -> ManagedDnsServer:
 async def _run() -> None:
     server = _build_server()
     await server.start()
-    _logger.info("managed-DNS service listening on %s:%d", server.host, server.port)
-
-    shutdown_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            loop.add_signal_handler(sig, shutdown_event.set)
-        except NotImplementedError:
-            # add_signal_handler is Unix-only; Windows dev environments
-            # fall back to signal.signal, which can't safely touch
-            # asyncio state directly from the handler -- same
-            # call_soon_threadsafe indirection netbbs.__main__'s own
-            # signal setup already uses for the identical reason.
-            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(shutdown_event.set))
-
-    await shutdown_event.wait()
-    _logger.info("shutting down")
-    await server.stop()
+    try:
+        _logger.info("managed-DNS service listening on %s:%d", server.host, server.port)
+        shutdown_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, shutdown_event.set)
+            except NotImplementedError:
+                signal.signal(sig, lambda *_: loop.call_soon_threadsafe(shutdown_event.set))
+        await shutdown_event.wait()
+        _logger.info("shutting down")
+    finally:
+        await asyncio.shield(server.stop())
 
 
 def main() -> None:

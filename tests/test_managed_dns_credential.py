@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import sys
+import os
 
 import pytest
 
@@ -49,6 +50,19 @@ def test_save_credential_leaves_no_tmp_file_behind(tmp_path):
     path = tmp_path / "node_managed_dns_credential"
     save_credential(path, "super-secret-token")
     assert not path.with_suffix(path.suffix + ".tmp").exists()
+
+
+def test_save_credential_uses_owner_only_mode_at_creation(tmp_path, monkeypatch):
+    modes = []
+    real_open = os.open
+
+    def recording_open(path, flags, mode=0o777):
+        modes.append(mode)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr("netbbs.managed_dns.credential.os.open", recording_open)
+    save_credential(tmp_path / "node_managed_dns_credential", "secret")
+    assert modes == [stat.S_IRUSR | stat.S_IWUSR]
 
 
 def test_delete_credential_removes_the_file(tmp_path):

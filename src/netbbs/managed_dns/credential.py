@@ -45,8 +45,14 @@ def save_credential(path: Path, secret: str) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(secret)
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600: owner read/write only
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(secret)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     tmp_path.replace(path)
 
 

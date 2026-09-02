@@ -487,6 +487,22 @@ def test_restore_backup_returns_none_when_nothing_was_live_to_preserve(tmp_path,
     assert rollback_dir is None
 
 
+def test_restore_rebases_managed_dns_credential_to_a_different_database_stem(
+    tmp_path, db_path, identity_dir,
+):
+    _seed_full_node(db_path, identity_dir)
+    source = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "portable-backup"
+    )
+    target_db = tmp_path / "restored" / "renamed.db"
+    target_identity = tmp_path / "restored-identity"
+
+    restore_backup(source=source, db_path=target_db, identity_dir=target_identity)
+
+    assert _managed_dns_credential_path(target_db).read_text() == "fake managed-dns credential"
+    assert not (target_db.parent / f"{db_path.stem}_managed_dns_credential").exists()
+
+
 def test_restore_backup_no_staging_or_state_files_left_behind_on_success(tmp_path, db_path, identity_dir):
     _seed_full_node(db_path, identity_dir)
     destination = tmp_path / "backup1"

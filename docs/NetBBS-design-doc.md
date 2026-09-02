@@ -5360,12 +5360,12 @@ the same outcome is reached faster, with less to maintain, by simply
 rejecting outright once the rate limit or the cumulative cap is
 exceeded, symmetric with each other, and telling the caller plainly
 that the service is at capacity with a contact channel for the rare
-legitimate exception. Both are hard-reject, service-wide, and — the one
-mechanism-level subtlety worth recording — neither applies to a
-reclaim (Decision 5): reactivating an already-proven, previously-counted
-registration via its own still-valid credential is not the "new
-capacity created faster than a free identity is worth" case either
-control exists to bound.
+legitimate exception. Both are hard-reject and service-wide. A reclaim
+(Decision 5) bypasses the *rate* limiter because it is not a new
+registration, but it must still fit the cumulative active-registration
+ceiling and the one-active-name-per-node limit: reactivation consumes a
+real active slot, and release/reclaim cycling must not create more live
+rows than either bound permits.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5485,7 +5485,7 @@ paragraph above) in favor of a simpler, symmetric hard-reject shape for
 both the rate limit and the cumulative cap. Shipped implementation-time
 parameters, all constructor-injectable and reasoned defaults rather than
 values this design doc fixes: a 24-hour minimum-age qualifying period
-(Decision 3), a 5-per-minute-refilling, 5-capacity service-wide
+(Decision 3), a 5-per-hour-refilling, 5-capacity service-wide
 registration rate limit (Decision 3), a cumulative cap of 1000 active
 registrations (Decision 3), a 7-day no-contact abandonment threshold
 before a registration is swept as abandoned, and a 90-day cooldown
@@ -5494,6 +5494,14 @@ order of 90 days" as locked in above). Actually standing the backend up
 — a host, DNS delegation, a real BIND server's `allow-update` ACL and
 matching TSIG key — is an operational step the code does not perform on
 its own; see `services/managed_dns/README.md`.
+
+The minimum-age period measures uninterrupted successful heartbeat
+contact, not wall-clock time since registration: first contact starts
+the window and a gap beyond the abandonment threshold resets it. DNS
+provider mutations run outside the HTTP event loop. Publication and
+deletion failures remain retryable state (release is not finalized
+until deletion succeeds, and a failed static publication is retried),
+and the service-wide token-bucket state survives backend restarts.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 
