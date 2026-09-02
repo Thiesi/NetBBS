@@ -931,7 +931,13 @@ def _render_all_scrollback(db: Database, channel: Channel, user: User, messages:
     """Bundles rendering the whole scrollback replay into one `lane.run`
     call rather than one per message -- the same "one round
     trip, not N" reasoning as every other bundled loop in this module."""
-    return [_render_scrollback_message(db, channel, user, message) for message in messages]
+    rendered = []
+    for message in messages:
+        line = _render_scrollback_message(db, channel, user, message)
+        if message.body_truncated:
+            line += colored(" [truncated; full history will arrive after sync]", fg_color=MUTED_COLOR)
+        rendered.append(line)
+    return rendered
 
 
 async def _deliver_remote_scrollback_snapshot(
@@ -940,6 +946,8 @@ async def _deliver_remote_scrollback_snapshot(
     channel: Channel,
     user: User,
     bridge: "LiveChannelBridge",
+    request_id: str,
+    locally_rendered_content_ids: set[str],
     *,
     unicode_style: bool,
     truecolor: bool,
@@ -968,12 +976,21 @@ async def _deliver_remote_scrollback_snapshot(
     `bridge.pop_channel_scrollback` already enforces the "once" half by
     popping rather than merely reading).
     """
-    for _ in range(_REMOTE_SCROLLBACK_POLL_ATTEMPTS):
-        messages = bridge.pop_channel_scrollback(channel.channel_id)
-        if messages:
-            break
-        await asyncio.sleep(_REMOTE_SCROLLBACK_POLL_INTERVAL_SECONDS)
-    else:
+    try:
+        for _ in range(_REMOTE_SCROLLBACK_POLL_ATTEMPTS):
+            messages = bridge.pop_channel_scrollback(channel.channel_id, request_id)
+            if messages:
+                break
+            await asyncio.sleep(_REMOTE_SCROLLBACK_POLL_INTERVAL_SECONDS)
+        else:
+            return
+    finally:
+        bridge.finish_scrollback_request(request_id)
+    messages = [
+        message for message in messages
+        if message.link_content_id is None or message.link_content_id not in locally_rendered_content_ids
+    ]
+    if not messages:
         return
     rendered = await lane.run(_render_all_scrollback, channel, user, messages)
     await deliver(
@@ -3682,13 +3699,12 @@ async def _chat_loop(
                 # __main__`'s own matching lazy import).
                 from netbbs.link.realtime_channels import ensure_live_subscription
 
-                live = await ensure_live_subscription(
+                live_result = await ensure_live_subscription(
                     channel=channel, node_identity=link_context.node_identity,
                     link_node=link_context.link_node, lane=lane,
                     registry=link_context.realtime_registry, bridge=link_context.realtime_bridge,
                 )
-                live_session_holder["session"] = live
-                if live is None:
+                if live_result is None:
                     await deliver(
                         colored(
                             "(No real-time link to this channel's origin right now -- "
@@ -3697,6 +3713,8 @@ async def _chat_loop(
                         )
                     )
                     return
+                live, scrollback_request_id = live_result
+                live_session_holder["session"] = live
                 # Issue #159: record this caller's own interest in
                 # `channel` -- `finally`'s matching `release_local_
                 # interest` call is unconditional on `live_session_
@@ -3710,6 +3728,8 @@ async def _chat_loop(
                 )
                 await _deliver_remote_scrollback_snapshot(
                     deliver, lane, channel, user, link_context.realtime_bridge,
+                    scrollback_request_id,
+                    {message.link_content_id for message in scrollback if message.link_content_id is not None},
                     unicode_style=unicode_style, truecolor=truecolor, terminal_width=session.terminal_width,
                 )
                 await live.closed.wait()

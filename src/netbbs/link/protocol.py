@@ -571,30 +571,49 @@ def _validate_channel_message_payload(payload: dict, *, path: str) -> None:
 
 
 def _validate_scrollback_entry(entry: object, *, path: str) -> None:
-    if not isinstance(entry, dict) or set(entry) != {"kind", "author_label", "body", "created_at"}:
-        raise LinkProtocolError(f"{path} must contain exactly kind, author_label, body, and created_at")
-    if entry["kind"] not in _REALTIME_SCROLLBACK_ENTRY_KINDS:
+    expected = {
+        "kind", "author_label", "author_node_fingerprint", "author_user_id",
+        "content_id", "body", "body_truncated", "created_at",
+    }
+    if not isinstance(entry, dict) or set(entry) != expected:
+        raise LinkProtocolError(f"{path} has unexpected or missing fields")
+    if not isinstance(entry["kind"], str) or entry["kind"] not in _REALTIME_SCROLLBACK_ENTRY_KINDS:
         raise LinkProtocolError(f"{path}.kind is not a recognized scrollback event kind")
-    # author_label is the origin's own already-resolved display string for
-    # this event (passed through as-is, never decomposed/reassembled here
-    # -- see build_scrollback_snapshot_frame), so it's allowed to be empty
-    # for a "daybreak" event, which has no author at all.
+    # author_label is display-only. The separate node/user identity fields
+    # are what the subscriber uses for trust enforcement. Daybreak is the
+    # sole authorless event and therefore allows an empty label.
     _validate_bounded_text(
         entry["author_label"], path=f"{path}.author_label", max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES
     )
+    if entry["kind"] == "daybreak":
+        if entry["author_node_fingerprint"] is not None or entry["author_user_id"] is not None:
+            raise LinkProtocolError(f"{path} daybreak entries must not name an author")
+    else:
+        _validate_bounded_id(entry["author_node_fingerprint"], path=f"{path}.author_node_fingerprint")
+        _validate_bounded_id(entry["author_user_id"], path=f"{path}.author_user_id")
+    if entry["content_id"] is not None:
+        _validate_bounded_id(entry["content_id"], path=f"{path}.content_id")
+    body_required = entry["kind"] in {"message", "action", "nick", "daybreak"}
+    if body_required and entry["body"] is None:
+        raise LinkProtocolError(f"{path}.body is required for kind {entry['kind']!r}")
     if entry["body"] is not None:
         _validate_bounded_text(
             entry["body"], path=f"{path}.body", max_bytes=_REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES
         )
+    if not isinstance(entry["body_truncated"], bool):
+        raise LinkProtocolError(f"{path}.body_truncated must be a boolean")
+    if entry["body_truncated"] and entry["body"] is None:
+        raise LinkProtocolError(f"{path}.body_truncated requires a body")
     if not isinstance(entry["created_at"], str):
         raise LinkProtocolError(f"{path}.created_at must be a string")
     _parse_aware_timestamp(entry["created_at"], field_name=f"{path}.created_at")
 
 
 def _validate_scrollback_snapshot_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"channel_id", "entries"}:
-        raise LinkProtocolError(f"{path} must contain exactly channel_id and entries")
+    if set(payload) != {"channel_id", "request_id", "entries"}:
+        raise LinkProtocolError(f"{path} must contain exactly channel_id, request_id, and entries")
     _validate_bounded_id(payload["channel_id"], path=f"{path}.channel_id")
+    _validate_bounded_id(payload["request_id"], path=f"{path}.request_id")
     entries = payload["entries"]
     if not isinstance(entries, list):
         raise LinkProtocolError(f"{path}.entries must be a list")
@@ -733,24 +752,24 @@ def build_channel_message_frame(
 
 
 def build_scrollback_snapshot_frame(
-    channel_id: str, entries: list[dict], *, message_id: str | None = None
+    channel_id: str, request_id: str, entries: list[dict], *, message_id: str | None = None
 ) -> RealtimeFrame:
-    """Issue #194: `entries` are already-shaped
-    `{"kind", "author_label", "body", "created_at"}` dicts -- the sender's
-    job (see `netbbs.link.realtime_channels._handle_subscribe`), not this
-    function's. `author_label` is carried through verbatim, never
-    decomposed into a separate user_id/fingerprint pair the way
-    `build_channel_message_frame`'s `display_label` is on receive: a
-    scrollback entry's `author_label` may already be a fully-resolved
-    identity string from a third node (a materialized/carried message),
-    and re-wrapping it with this session's own peer fingerprint would be
-    wrong."""
+    """Build one request-correlated, identity-bearing catch-up snapshot.
+
+    The sender shapes entries because it owns the accepted signed-event
+    metadata needed to distinguish carried authors from origin-local ones.
+    Validation here keeps display labels separate from identity authority
+    and verifies the complete encoded size before transport enqueueing."""
     frame = RealtimeFrame(
         type="scrollback_snapshot",
         message_id=message_id or new_realtime_message_id(),
-        payload={"channel_id": channel_id, "entries": list(entries)},
+        payload={"channel_id": channel_id, "request_id": request_id, "entries": list(entries)},
     )
     validate_realtime_frame_payload(frame)
+    # Validate the complete encoded frame here, before the transport
+    # accepts it into its writer queue. Per-field UTF-8 bounds alone do
+    # not account for JSON escaping overhead (notably quotes/backslashes).
+    frame.to_json_bytes()
     return frame
 
 

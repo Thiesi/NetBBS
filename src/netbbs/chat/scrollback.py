@@ -71,6 +71,9 @@ class ChannelMessage:
     author_fingerprint: str | None
     body: str | None
     created_at: str
+    link_content_id: str | None = None
+    link_event_json: str | None = None
+    body_truncated: bool = False
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -200,6 +203,7 @@ def get_scrollback(db: Database, channel: Channel) -> list[ChannelMessage]:
 
 
 def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
+    columns = row.keys()
     return ChannelMessage(
         id=row["id"],
         channel_id=row["channel_id"],
@@ -208,4 +212,9 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         author_fingerprint=row["author_fingerprint"],
         body=row["body"],
         created_at=row["created_at"],
+        # Migration tests intentionally exercise historical schemas from
+        # before these Link columns existed. Their absent metadata is the
+        # same semantic state as NULL on a current local-only row.
+        link_content_id=row["link_content_id"] if "link_content_id" in columns else None,
+        link_event_json=row["link_event_json"] if "link_event_json" in columns else None,
     )

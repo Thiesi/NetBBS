@@ -4922,9 +4922,10 @@ sent as a new frame alongside the existing subscribe-time
 presence roster the moment a peer subscribes (§8.10.2); a
 `scrollback_snapshot` frame is a sibling addition at the identical call
 site, sourced from `netbbs.chat.scrollback.get_scrollback` — the same
-already-bounded, already-#164-trust-filtered function the local UI
-already renders from. No new storage, filtering, or authorization
-mechanism.
+already-bounded, origin-policy-filtered function the local UI renders
+from. A subscriber accepts the frame only from the channel's current
+authenticated origin and only when its `request_id` matches a still-pending
+subscribe attempt; unsolicited or late snapshots cannot fill a later join.
 
 **Decision 2 (locked in) — bounded the same way every other snapshot
 already is, and rendered once, never durably stored on the subscribing
@@ -4935,17 +4936,20 @@ Writing it into the subscriber's own `channel_messages` was considered
 and rejected: the same content already arrives durably, independently,
 through the existing async materialization path, and persisting both
 would risk duplicate or conflicting rows for one message with no natural
-dedup key across the two paths. A caller sees it once at subscribe time,
-the same way they'd see any other one-time live event; the durable copy
-still lands separately, on its own schedule, as it already does today.
+dedup key across the two paths. Snapshot entries therefore carry the signed
+event's existing content ID when one exists, letting the join flow suppress
+anything already rendered from local materialized history. A caller sees
+only the remaining gap once at subscribe time; the durable copy still lands
+separately, on its own schedule, as it already does today.
 
-**Decision 3 (locked in) — trust filtering is issue #164's existing rule,
-unchanged.** The snapshot is built from `get_scrollback`, which already
-applies #164's per-message author-trust visibility filter
-(`BLOCKED`/`QUARANTINED` authors suppressed, `PROBATIONARY` and local
-messages unaffected). Nothing about "the first thing a caller sees on
-joining" changes that calculus — one more consumer of an existing,
-already-correct filter, not a new one.
+**Decision 3 (locked in) — issue #164's author-trust rule is enforced at
+both nodes.** The origin's `get_scrollback` applies its own policy first.
+Each entry also carries the author identity the origin derived from the
+accepted signed event (or the origin plus local user ID for origin-local
+content), so the subscriber independently suppresses authors it marks
+`BLOCKED` or `QUARANTINED`. Origin-local display labels are qualified with
+the authenticated origin; they must never resolve as same-named local
+accounts on the subscriber.
 
 `chat/scrollback.py`'s own module docstring — "the separate, harder
 question of a newly-joined Link node needing catch-up scrollback from
