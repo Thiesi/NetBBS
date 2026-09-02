@@ -64,16 +64,17 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
     guarantees the prompt fires exactly once regardless of which caller
     wins the race, and is a safe no-op every time after."""
     lock = _opt_in_locks.setdefault(lane.path.resolve(), asyncio.Lock())
+    accepted = False
     async with lock:
         if await lane.run(get_opt_in) is not OptIn.UNDECIDED:
             return
 
-    # Word-wrapped to the real terminal width before coloring, one
-    # physical line at a time -- coloring the whole blurb as one string
-    # and relying on the terminal's own soft-wrap runs past the right
-    # edge unpredictably on anything narrower than the text itself (the
-    # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
-    # docstring documents fixing for screen subtitles).
+        # Word-wrapped to the real terminal width before coloring, one
+        # physical line at a time -- coloring the whole blurb as one string
+        # and relying on the terminal's own soft-wrap runs past the right
+        # edge unpredictably on anything narrower than the text itself (the
+        # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
+        # docstring documents fixing for screen subtitles).
         await session.write_line("")
         for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
             await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
@@ -82,8 +83,12 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
             session, "Enable managed netbbs.org subdomain hosting for this node?", default=False
         )
         await lane.run(set_opt_in, OptIn.ACCEPTED if accepted else OptIn.DECLINED)
-        if accepted:
-            await register_via_prompt(session, lane)
+
+    # The once-only choice is durable now. Name selection and registration
+    # can remain interactive indefinitely without blocking another SysOp's
+    # login behind the node-wide decision lock.
+    if accepted:
+        await register_via_prompt(session, lane)
 
 
 async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:

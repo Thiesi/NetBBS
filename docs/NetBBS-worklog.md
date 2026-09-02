@@ -2344,7 +2344,11 @@ HTTP, never imports it.
   address is recorded; voluntary release remains active until deletion
   succeeds; sweep abandonment likewise waits for deletion rather than
   orphaning a stale record. Address-family changes remove the obsolete
-  A/AAAA family in the same RFC 2136 update.
+  A/AAAA family in the same RFC 2136 update. Provider I/O and its
+  surrounding SQLite transition share one bounded service-wide lane:
+  sweep, heartbeat, release, and reclaim cannot commit from stale
+  pre-await state, and concurrent HTTP mutations receive a retryable 503
+  before any additional executor work is queued.
 - **The service sits behind its own reverse proxy for TLS, so
   `request.remote` is the proxy's address, not the caller's.**
   Dynamic-address change detection compares against a trusted

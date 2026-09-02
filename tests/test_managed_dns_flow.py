@@ -119,6 +119,33 @@ def test_offer_opt_in_accepting_and_leaving_the_name_blank_registers_nothing(tmp
     db.close()
 
 
+def test_offer_opt_in_releases_the_decision_lock_before_registration(tmp_path, monkeypatch):
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        lane = DatabaseLane(db.path)
+        registration_started = asyncio.Event()
+        finish_registration = asyncio.Event()
+
+        async def parked_registration(session, registration_lane):
+            registration_started.set()
+            await finish_registration.wait()
+
+        monkeypatch.setattr(
+            "netbbs.net.managed_dns_flow.register_via_prompt", parked_registration
+        )
+        first = asyncio.create_task(offer_managed_dns_opt_in(FakeSession(["y"]), lane))
+        await registration_started.wait()
+        second_session = FakeSession([])
+        await asyncio.wait_for(offer_managed_dns_opt_in(second_session, lane), timeout=0.5)
+        assert second_session.written == []
+        finish_registration.set()
+        await first
+        lane.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
 def test_offer_opt_in_accept_and_register_succeeds_end_to_end(tmp_path):
     """Real loopback round trip -- accepting the prompt, naming a
     subdomain, and getting a live registration back, exactly the flow a

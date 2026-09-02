@@ -5498,10 +5498,14 @@ its own; see `services/managed_dns/README.md`.
 The minimum-age period measures uninterrupted successful heartbeat
 contact, not wall-clock time since registration: first contact starts
 the window and a gap beyond the abandonment threshold resets it. DNS
-provider mutations run outside the HTTP event loop. Publication and
-deletion failures remain retryable state (release is not finalized
-until deletion succeeds, and a failed static publication is retried),
-and the service-wide token-bucket state survives backend restarts.
+provider mutations run outside the HTTP event loop and share one bounded
+transition lane with their surrounding database mutation. A sweep,
+heartbeat, release, or reclaim therefore cannot commit from state made
+stale by another provider await; concurrent HTTP transitions receive a
+retryable rejection before entering the worker queue. Publication and
+deletion failures remain retryable state (release is not finalized until
+deletion succeeds, and a failed static publication is retried), and the
+service-wide token-bucket state survives backend restarts.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

@@ -214,6 +214,10 @@ class ManagedDnsServer:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._sweep_task: asyncio.Task | None = None
+        # One bounded transition lane protects the SQLite snapshot around
+        # each blocking DNS operation. Handlers reject visibly when it is
+        # occupied instead of accumulating work in asyncio's executor queue.
+        self._dns_transition_lock = asyncio.Lock()
 
     @property
     def host(self) -> str:
@@ -262,6 +266,10 @@ class ManagedDnsServer:
             await self._sweep_sleep(self._sweep_interval_seconds)
 
     async def _sweep_once(self) -> None:
+        async with self._dns_transition_lock:
+            await self._sweep_once_serialized()
+
+    async def _sweep_once_serialized(self) -> None:
         now = self._clock()
         abandonment_cutoff = (now - timedelta(seconds=self._abandonment_seconds)).isoformat()
         for registration in list_stale_active_registrations(self._db, older_than=abandonment_cutoff):
@@ -351,7 +359,22 @@ class ManagedDnsServer:
                         return web.json_response(
                             {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
                         )
-                    return await self._reclaim(existing, request, credential, dynamic=dynamic)
+                    if self._dns_transition_lock.locked():
+                        return web.json_response(
+                            {"error": "a managed-DNS transition is already in progress; retry shortly"},
+                            status=503,
+                        )
+                    async with self._dns_transition_lock:
+                        current = get_registration_by_name(self._db, name)
+                        if (
+                            current is None or current.status in _ACTIVE_STATUSES
+                            or hash_credential(credential) != current.credential_hash
+                        ):
+                            return web.json_response(
+                                {"error": f"{name!r} is already registered or no longer reclaimable"},
+                                status=409,
+                            )
+                        return await self._reclaim(current, request, credential, dynamic=dynamic)
                 return web.json_response(
                     {"error": f"{name!r} is in a cooldown period and not currently available"}, status=409
                 )
@@ -466,6 +489,15 @@ class ManagedDnsServer:
         if not isinstance(credential, str) or not credential:
             return web.json_response({"error": "request must contain a string credential"}, status=400)
 
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            return await self._process_heartbeat(request, credential)
+
+    async def _process_heartbeat(self, request: web.Request, credential: str) -> web.Response:
+
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             # Deliberately the same message/status for "no such
@@ -541,6 +573,15 @@ class ManagedDnsServer:
         credential = body.get("credential")
         if not isinstance(credential, str) or not credential:
             return web.json_response({"error": "request must contain a string credential"}, status=400)
+
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            return await self._process_release(credential)
+
+    async def _process_release(self, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
         if registration is None or registration.status not in _ACTIVE_STATUSES:

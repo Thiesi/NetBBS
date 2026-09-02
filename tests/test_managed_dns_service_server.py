@@ -521,6 +521,44 @@ def test_release_deletes_the_dns_record_when_matured(db):
     assert provider.deletes == ["myboard.netbbs.org."]
 
 
+def test_release_rejects_a_concurrent_heartbeat_during_dns_deletion(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=0)
+        deletion_started = asyncio.Event()
+        finish_deletion = asyncio.Event()
+        try:
+            registered = await _register(server, name="myboard", dynamic=True)
+            await _heartbeat(server, credential=registered["credential"])
+
+            async def parked_delete(name):
+                deletion_started.set()
+                await finish_deletion.wait()
+                return True
+
+            server._delete_record = parked_delete
+            release_task = asyncio.create_task(
+                _release(server, credential=registered["credential"])
+            )
+            await deletion_started.wait()
+            heartbeat_status, heartbeat_body = await _heartbeat(
+                server, credential=registered["credential"]
+            )
+            finish_deletion.set()
+            release_status, _release_body = await release_task
+            return release_status, heartbeat_status, heartbeat_body
+        finally:
+            finish_deletion.set()
+            await server.stop()
+
+    release_status, heartbeat_status, heartbeat_body = asyncio.run(scenario())
+    assert release_status == 200
+    assert heartbeat_status == 503
+    assert "transition" in heartbeat_body["error"]
+    assert get_registration_by_name(db, "myboard").status == "released"
+
+
 def test_release_never_matured_does_not_call_the_dns_provider(db):
     provider = LoggingDnsProvider()
 
@@ -714,6 +752,45 @@ def test_sweep_abandons_a_stale_matured_registration_and_deletes_its_record(db):
     assert registration.status == "abandoned"
     assert registration.released_at is not None
     assert provider.deletes == ["myboard.netbbs.org."]
+
+
+def test_sweep_rejects_a_concurrent_heartbeat_until_abandonment_commits(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=0,
+            abandonment_seconds=7 * 24 * 60 * 60,
+        )
+        deletion_started = asyncio.Event()
+        finish_deletion = asyncio.Event()
+        try:
+            registered = await _register(server, name="myboard", dynamic=True)
+            await _heartbeat(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=8 * 24 * 60 * 60)
+
+            async def parked_delete(name):
+                deletion_started.set()
+                await finish_deletion.wait()
+                return True
+
+            server._delete_record = parked_delete
+            sweep_task = asyncio.create_task(server._sweep_once())
+            await deletion_started.wait()
+            heartbeat_status, heartbeat_body = await _heartbeat(
+                server, credential=registered["credential"]
+            )
+            finish_deletion.set()
+            await sweep_task
+            return heartbeat_status, heartbeat_body
+        finally:
+            finish_deletion.set()
+            await server.stop()
+
+    heartbeat_status, heartbeat_body = asyncio.run(scenario())
+    assert heartbeat_status == 503
+    assert "transition" in heartbeat_body["error"]
+    assert get_registration_by_name(db, "myboard").status == "abandoned"
 
 
 def test_sweep_abandons_a_stale_never_matured_registration_without_calling_the_dns_provider(db):
