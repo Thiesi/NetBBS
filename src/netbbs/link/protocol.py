@@ -411,7 +411,9 @@ class RealtimeIdentityPayload:
         return encoded
 
     @classmethod
-    def from_dict(cls, value: dict) -> "RealtimeIdentityPayload":
+    def from_dict(
+        cls, value: dict, *, defer_version_check: bool = False
+    ) -> "RealtimeIdentityPayload":
         if not isinstance(value, dict):
             raise LinkProtocolError("real-time identity payload must be an object")
         expected = {
@@ -419,46 +421,48 @@ class RealtimeIdentityPayload:
             "transport_transitions", "noise_static_key", "realtime_protocol_version",
         }
         legacy_expected = expected - {"realtime_protocol_version"}
-        if set(value) == legacy_expected and value.get("version") == 1:
-            raise RealtimeProtocolVersionError(
-                "unsupported real-time application protocol version"
-            )
-        if set(value) != expected:
+        legacy_shape = set(value) == legacy_expected and value.get("version") == 1
+        if set(value) != expected and not legacy_shape:
             raise LinkProtocolError("real-time identity payload has unexpected or missing fields")
-        if (
-            type(value["version"]) is not int
-            or value["version"] != _REALTIME_IDENTITY_PAYLOAD_VERSION
-        ):
-            raise RealtimeProtocolVersionError("unsupported real-time identity payload version")
-        if (
-            type(value["realtime_protocol_version"]) is not int
-            or value["realtime_protocol_version"] != REALTIME_PROTOCOL_VERSION
-        ):
-            raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
+        realtime_protocol_version = value.get("realtime_protocol_version", 1)
         if not isinstance(value["transport_transitions"], list):
             raise LinkProtocolError("transport_transitions must be a list")
         try:
             transitions = tuple(KeyTransition.from_dict(item) for item in value["transport_transitions"])
         except (KeyError, TypeError, ValueError) as exc:
             raise LinkProtocolError(f"malformed transport transition: {exc}") from exc
-        return cls(
+        result = cls(
             version=value["version"],
             root_fingerprint=value["root_fingerprint"],
             root_public_key=value["root_public_key"],
             transport_transitions=transitions,
             noise_static_key=value["noise_static_key"],
-            realtime_protocol_version=value["realtime_protocol_version"],
+            realtime_protocol_version=realtime_protocol_version,
         )
+        if not defer_version_check:
+            result.require_supported_version()
+        return result
+
+    def require_supported_version(self) -> None:
+        if type(self.version) is not int or self.version != _REALTIME_IDENTITY_PAYLOAD_VERSION:
+            raise RealtimeProtocolVersionError("unsupported real-time identity payload version")
+        if (
+            type(self.realtime_protocol_version) is not int
+            or self.realtime_protocol_version != REALTIME_PROTOCOL_VERSION
+        ):
+            raise RealtimeProtocolVersionError("unsupported real-time application protocol version")
 
     @classmethod
-    def from_json_bytes(cls, data: bytes) -> "RealtimeIdentityPayload":
+    def from_json_bytes(
+        cls, data: bytes, *, defer_version_check: bool = False
+    ) -> "RealtimeIdentityPayload":
         if not isinstance(data, bytes) or not 1 <= len(data) <= REALTIME_MAX_IDENTITY_PAYLOAD_BYTES:
             raise LinkProtocolError("real-time identity payload must be between 1 byte and 48 KiB")
         try:
             value = strict_json_loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkProtocolError(f"malformed real-time identity JSON: {exc}") from exc
-        return cls.from_dict(value)
+        return cls.from_dict(value, defer_version_check=defer_version_check)
 
     def verify_noise_static(self, presented_static_key: bytes) -> nacl.signing.VerifyKey:
         """Verify the full root -> transport transition -> X25519 binding."""

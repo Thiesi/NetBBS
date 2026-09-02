@@ -146,7 +146,7 @@ def test_realtime_identity_payload_classifies_the_v1_wire_shape_as_incompatible(
     del payload["realtime_protocol_version"]
     payload["version"] = 1
 
-    with pytest.raises(RealtimeProtocolVersionError, match="application protocol version"):
+    with pytest.raises(RealtimeProtocolVersionError, match="unsupported real-time"):
         RealtimeIdentityPayload.from_dict(payload)
 
 

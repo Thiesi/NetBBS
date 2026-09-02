@@ -697,6 +697,7 @@ async def establish_noise_xx_initiator(
     identity: NodeIdentity,
     *,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    expected_fingerprint: str | None = None,
 ) -> tuple[RealtimeIdentityPayload, NoiseTransportCiphers]:
     """Run the initiator side of XX and verify the responder's Link identity."""
     handshake = NoiseXXHandshake(
@@ -709,8 +710,16 @@ async def establish_noise_xx_initiator(
         await asyncio.wait_for(write_realtime_record(writer, first), timeout_seconds)
         second = await asyncio.wait_for(read_realtime_record(reader), timeout_seconds)
         remote_bytes, _ = handshake.read_message(second)
-        remote = RealtimeIdentityPayload.from_json_bytes(remote_bytes)
+        remote = RealtimeIdentityPayload.from_json_bytes(
+            remote_bytes, defer_version_check=True
+        )
         remote.verify_noise_static(handshake.remote_static_key)
+        if expected_fingerprint is not None and remote.root_fingerprint != expected_fingerprint:
+            raise LinkProtocolError(
+                f"expected a real-time session with {expected_fingerprint}, "
+                f"but authenticated as {remote.root_fingerprint}"
+            )
+        remote.require_supported_version()
         third, ciphers = handshake.write_message(own_payload)
         await asyncio.wait_for(write_realtime_record(writer, third), timeout_seconds)
     except TimeoutError as exc:
@@ -740,8 +749,11 @@ async def establish_noise_xx_responder(
         await asyncio.wait_for(write_realtime_record(writer, second), timeout_seconds)
         third = await asyncio.wait_for(read_realtime_record(reader), timeout_seconds)
         remote_bytes, ciphers = handshake.read_message(third)
-        remote = RealtimeIdentityPayload.from_json_bytes(remote_bytes)
+        remote = RealtimeIdentityPayload.from_json_bytes(
+            remote_bytes, defer_version_check=True
+        )
         remote.verify_noise_static(handshake.remote_static_key)
+        remote.require_supported_version()
     except TimeoutError as exc:
         raise LinkTransportError("Noise XX responder handshake timed out") from exc
     if ciphers is None:
@@ -1232,17 +1244,13 @@ async def dial_realtime_session(
         raise ValueError("enforce_trust_policy requires a lane")
     reader, writer = await asyncio.open_connection(host, port)
     try:
-        remote, ciphers = await establish_noise_xx_initiator(reader, writer, identity)
+        remote, ciphers = await establish_noise_xx_initiator(
+            reader, writer, identity, expected_fingerprint=expected_fingerprint
+        )
     except (LinkTransportError, LinkProtocolError):
         await _reject_before_session(writer)
         raise
     fingerprint = remote.root_fingerprint
-    if expected_fingerprint is not None and fingerprint != expected_fingerprint:
-        await _reject_before_session(writer)
-        raise LinkProtocolError(
-            f"expected a real-time session with {expected_fingerprint}, "
-            f"but {host}:{port} authenticated as {fingerprint}"
-        )
     if enforce_trust_policy:
         assert lane is not None
         allowed = await lane.run(_decide_realtime_admission, fingerprint)
