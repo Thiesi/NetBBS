@@ -72,3 +72,41 @@ async def register(
         )
     except (KeyError, TypeError) as exc:
         raise ManagedDnsError(f"malformed registration response from {url}: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class HeartbeatResult:
+    name: str
+    status: str
+    last_known_address: str | None
+
+
+async def heartbeat(
+    session: ClientSession, base_url: str, *, credential: str, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> HeartbeatResult:
+    """`POST {base_url}/heartbeat`. Carries only `credential` -- the
+    server infers this node's current address from the connection
+    itself (design doc §16, issue #201 Phase 3), the same way any
+    ordinary dynamic-DNS update client works; there is nothing for this
+    node to report about its own address. Raises `ManagedDnsError` for a
+    rejected (e.g. an unknown/released credential) or unreachable
+    request, same conventions as `register` above.
+    """
+    url = f"{base_url}/heartbeat"
+    try:
+        async with session.post(
+            url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise ManagedDnsError(f"heartbeat failed: HTTP {response.status}: {text}")
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+
+    try:
+        return HeartbeatResult(
+            name=body["name"], status=body["status"], last_known_address=body["last_known_address"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise ManagedDnsError(f"malformed heartbeat response from {url}: {exc}") from exc

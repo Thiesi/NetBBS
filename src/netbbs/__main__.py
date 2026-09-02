@@ -589,6 +589,31 @@ async def run(
 
     update_check_task.add_done_callback(_log_update_check_failure)
 
+    # Issue #201: same "runs regardless of Link configuration, general
+    # node maintenance" shape as update_check_task just above -- managed-
+    # DNS is deliberately Link-independent. Unlike that task, the import
+    # is lazy, here at the call site rather than this module's own top
+    # level: netbbs.managed_dns.updater needs aiohttp (via netbbs.
+    # managed_dns.client), an optional extra, the same reasoning
+    # run_link_sync's own lazy import (below) already documents.
+    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+
+    managed_dns_updater_task = asyncio.create_task(run_scheduled_managed_dns_updater(db))
+
+    def _log_managed_dns_updater_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _logger.error(
+                "managed-DNS updater task failed -- this node's managed "
+                "netbbs.org registration, if any, will stop receiving "
+                "heartbeats for the rest of this node's uptime",
+                exc_info=exc,
+            )
+
+    managed_dns_updater_task.add_done_callback(_log_managed_dns_updater_failure)
+
     async def session_handler(session):
         await handle_session(
             session, db, hub, presence, mailbox, throttle, throttle_config, session_registry, maintenance,
@@ -934,6 +959,15 @@ async def run(
 
         await _drain_immediately(daybreak_task)
         await _drain_immediately(update_check_task)
+        # A single heartbeat call is quick, idempotent, and retry-safe
+        # (worst case, cutting it off mid-flight just means "this pass's
+        # heartbeat didn't complete, the next one retries") -- none of
+        # link_sync_task's own "a wedged dial/half-completed push could
+        # corrupt protocol-level state" concern applies here, so this
+        # gets the same immediate-cancel treatment as the other simple
+        # periodic tasks above, not that task's own graceful-finish
+        # machinery below.
+        await _drain_immediately(managed_dns_updater_task)
         # Design doc §13.11, issue #60: graceful drain, not an
         # unconditional hard cancel -- an in-flight dial/push otherwise
         # gets torn out of half-done at whatever await happens to be

@@ -8,11 +8,12 @@ convention (e.g. tests/test_link_realtime_channels.py).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import pytest
 
+from services.managed_dns.dns_provider import DnsProviderError, LoggingDnsProvider
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import Database, get_registration_by_name, hash_credential
 
@@ -24,11 +25,30 @@ def db(tmp_path):
     database.close()
 
 
-async def _start_server(db: Database, *, clock=None) -> ManagedDnsServer:
-    kwargs = {"clock": clock} if clock is not None else {}
+async def _start_server(db: Database, **kwargs) -> ManagedDnsServer:
     server = ManagedDnsServer("127.0.0.1", 0, db, **kwargs)
     await server.start()
     return server
+
+
+async def _register(server: ManagedDnsServer, *, name: str, node_fingerprint: str = "fp-1", dynamic: bool = False) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/register",
+            json={"name": name, "node_fingerprint": node_fingerprint, "dynamic": dynamic},
+        ) as response:
+            assert response.status == 201
+            return await response.json()
+
+
+async def _heartbeat(server: ManagedDnsServer, *, credential: str, headers: dict | None = None):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/heartbeat",
+            json={"credential": credential},
+            headers=headers or {},
+        ) as response:
+            return response.status, await response.json()
 
 
 def test_register_creates_a_pending_registration(db):
@@ -210,3 +230,227 @@ def test_register_uses_the_injected_clock_for_created_at(db):
 
     body = asyncio.run(scenario())
     assert body["created_at"] == fixed.isoformat()
+
+
+# -- heartbeat / maturation / dynamic updates (issue #201 Phase 3) ---------
+
+
+class _MutableClock:
+    """A plain callable clock whose current time a test can advance
+    mid-scenario -- matches this project's own "plain callable
+    parameter, real value by default" injectable-clock convention
+    (`netbbs.net.throttle`), just mutable so one server instance can
+    simulate the passage of time across several heartbeats."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class _FailingDnsProvider:
+    def upsert_record(self, name, kind, address):
+        raise DnsProviderError("simulated DNS provider failure")
+
+    def delete_record(self, name):
+        raise DnsProviderError("simulated DNS provider failure")
+
+
+def test_heartbeat_records_last_contact(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            registered = await _register(server, name="myboard")
+            status, body = await _heartbeat(server, credential=registered["credential"])
+            return status, body
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["name"] == "myboard"
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.last_contact_at is not None
+
+
+def test_heartbeat_rejects_an_unknown_credential(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            return await _heartbeat(server, credential="not-a-real-credential")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 401
+    assert "error" in body
+
+
+def test_heartbeat_rejects_a_released_registration(db):
+    """No /release endpoint exists yet (a later phase) -- the row is
+    set directly to exercise heartbeat's own rejection independently of
+    however a release eventually gets there."""
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            registered = await _register(server, name="myboard")
+            db.connection.execute("UPDATE registrations SET status = 'released' WHERE name = 'myboard'")
+            db.connection.commit()
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 401
+    assert "error" in body
+
+
+def test_heartbeat_stays_pending_before_the_age_gate_matures(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60)
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=30)  # not old enough yet
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "pending"
+    assert get_registration_by_name(db, "myboard").status == "pending"
+
+
+def test_heartbeat_matures_and_publishes_once_the_age_gate_passes(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "matured"
+    assert body["last_known_address"] == "127.0.0.1"  # the real loopback test client's own address
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "matured"
+    assert registration.matured_at is not None
+    assert registration.last_known_address == "127.0.0.1"
+    assert provider.upserts == [("myboard.netbbs.org.", "A", "127.0.0.1")]
+
+
+def test_heartbeat_does_not_republish_for_a_static_registration_once_matured(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, dns_provider=provider, trust_x_forwarded_for=True
+        )
+        try:
+            registered = await _register(server, name="myboard", dynamic=False)
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
+            # A later heartbeat from a different observed address must
+            # not republish -- this registration never asked to track
+            # its address (design doc §16: "a board could plausibly want
+            # [the subdomain] without [dynamic tracking]").
+            status, body = await _heartbeat(
+                server, credential=registered["credential"], headers={"X-Forwarded-For": "5.6.7.8"}
+            )
+            return status, body
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["last_known_address"] == "1.2.3.4"
+    assert provider.upserts == [("myboard.netbbs.org.", "A", "1.2.3.4")]
+
+
+def test_heartbeat_republishes_for_a_dynamic_registration_when_the_address_changes(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, dns_provider=provider, trust_x_forwarded_for=True
+        )
+        try:
+            registered = await _register(server, name="myboard", dynamic=True)
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=registered["credential"], headers={"X-Forwarded-For": "1.2.3.4"})
+            status, body = await _heartbeat(
+                server, credential=registered["credential"], headers={"X-Forwarded-For": "5.6.7.8"}
+            )
+            return status, body
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["last_known_address"] == "5.6.7.8"
+    assert provider.upserts == [
+        ("myboard.netbbs.org.", "A", "1.2.3.4"),
+        ("myboard.netbbs.org.", "A", "5.6.7.8"),
+    ]
+    assert get_registration_by_name(db, "myboard").last_known_address == "5.6.7.8"
+
+
+def test_heartbeat_ignores_x_forwarded_for_unless_explicitly_trusted(db):
+    """`trust_x_forwarded_for` defaults to False -- a caller-supplied
+    header must never override the connection's own real observed
+    address (design doc §16's own reasoning: a header any client can
+    freely set must never be trusted without an operator explicitly
+    confirming a real trusted reverse proxy sits in front)."""
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            return await _heartbeat(
+                server, credential=registered["credential"], headers={"X-Forwarded-For": "9.9.9.9"}
+            )
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["last_known_address"] == "127.0.0.1"  # the real connection, not the spoofed header
+
+
+def test_heartbeat_is_resilient_to_a_dns_provider_failure(db):
+    """A transient DNS-provider failure must not fail the heartbeat call
+    itself -- last_contact_at is still recorded, and the next heartbeat
+    simply retries the publish."""
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=_FailingDnsProvider())
+        try:
+            registered = await _register(server, name="myboard")
+            clock.now += timedelta(seconds=61)
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "matured"  # maturation itself doesn't depend on a successful publish
+    assert body["last_known_address"] is None
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.status == "matured"
+    assert registration.last_contact_at is not None
+    assert registration.last_known_address is None

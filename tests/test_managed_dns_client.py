@@ -12,7 +12,7 @@ import asyncio
 import aiohttp
 import pytest
 
-from netbbs.managed_dns.client import ManagedDnsError, register
+from netbbs.managed_dns.client import ManagedDnsError, heartbeat, register
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import Database
 
@@ -72,5 +72,51 @@ def test_register_raises_managed_dns_error_when_unreachable(db):
                     session, "http://127.0.0.1:1",  # nothing listens here
                     name="myboard", node_fingerprint="fp-1", dynamic=False, timeout=1.0,
                 )
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_round_trips_against_a_real_server(db):
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                registered = await register(
+                    session, f"http://127.0.0.1:{server.port}",
+                    name="myboard", node_fingerprint="fp-1", dynamic=False,
+                )
+                return await heartbeat(
+                    session, f"http://127.0.0.1:{server.port}", credential=registered.credential,
+                )
+        finally:
+            await server.stop()
+
+    result = asyncio.run(scenario())
+    assert result.name == "myboard"
+    assert result.status == "pending"  # real clock, no time has passed to mature it
+
+
+def test_heartbeat_raises_managed_dns_error_on_an_unknown_credential(db):
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                with pytest.raises(ManagedDnsError):
+                    await heartbeat(
+                        session, f"http://127.0.0.1:{server.port}", credential="not-a-real-credential",
+                    )
+        finally:
+            await server.stop()
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_raises_managed_dns_error_when_unreachable(db):
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(ManagedDnsError):
+                await heartbeat(session, "http://127.0.0.1:1", credential="whatever", timeout=1.0)
 
     asyncio.run(scenario())
