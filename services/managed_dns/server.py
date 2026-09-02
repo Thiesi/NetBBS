@@ -27,10 +27,9 @@ thing a Sybil attacker cannot multiply by minting more identities) and a
 separate cumulative cap on total active registrations. Both hard-reject
 once exceeded; Decision 3's originally-locked review queue was dropped
 entirely during implementation planning (see the issue's own plan) in
-favor of this simpler, symmetric shape. Neither check applies to a
-reclaim (`_reclaim`): reactivating an already-proven, previously-counted
-row is not the "new capacity created faster than a Sybil identity is
-worth" case either control exists to bound. Each endpoint's current
+favor of this simpler, symmetric shape. Reclaim bypasses the admission
+rate but still obeys the cumulative and per-node active caps because it
+reactivates a real capacity-consuming row. Each endpoint's current
 behavior is exactly what it claims to be, not a partial placeholder for
 unbuilt behavior.
 """
@@ -56,6 +55,7 @@ from services.managed_dns.store import (
     Registration,
     count_registrations,
     count_registrations_for_node,
+    clear_last_known_address,
     delete_expired_registrations,
     delete_registration,
     get_registration_by_credential_hash,
@@ -63,10 +63,13 @@ from services.managed_dns.store import (
     hash_credential,
     insert_registration,
     list_stale_active_registrations,
+    load_rate_limit_state,
     mark_abandoned,
     mark_matured,
     mark_released,
     reclaim,
+    save_rate_limit_state,
+    set_contact_window,
     set_last_contact_at,
     set_last_known_address,
 )
@@ -201,13 +204,20 @@ class ManagedDnsServer:
         # float via `datetime.timestamp()`) rather than a second,
         # independent clock -- one thing for a test to control
         # deterministically, not two.
+        persisted_rate_state = load_rate_limit_state(db)
         self._rate_limiter = GlobalRateLimiter(
             capacity=rate_limit_capacity, refill_per_minute=rate_limit_refill_per_minute,
             clock=lambda: self._clock().timestamp(),
+            tokens=None if persisted_rate_state is None else persisted_rate_state[0],
+            last_refill=None if persisted_rate_state is None else persisted_rate_state[1],
         )
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._sweep_task: asyncio.Task | None = None
+        # One bounded transition lane protects the SQLite snapshot around
+        # each blocking DNS operation. Handlers reject visibly when it is
+        # occupied instead of accumulating work in asyncio's executor queue.
+        self._dns_transition_lock = asyncio.Lock()
 
     @property
     def host(self) -> str:
@@ -231,14 +241,16 @@ class ManagedDnsServer:
         self._sweep_task = asyncio.create_task(self._run_sweep_loop())
 
     async def stop(self) -> None:
-        if self._sweep_task is not None:
-            self._sweep_task.cancel()
-            try:
-                await self._sweep_task
-            except asyncio.CancelledError:
-                pass
-        if self._runner is not None:
-            await self._runner.cleanup()
+        try:
+            if self._sweep_task is not None:
+                self._sweep_task.cancel()
+                try:
+                    await self._sweep_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            if self._runner is not None:
+                await self._runner.cleanup()
 
     async def _run_sweep_loop(self) -> None:
         """Runs for the service's lifetime: one sweep pass immediately
@@ -247,31 +259,52 @@ class ManagedDnsServer:
         in this project already uses (e.g. `netbbs.link.seedlist.
         run_scheduled_seed_refresh`)."""
         while True:
-            self._sweep_once()
+            try:
+                await self._sweep_once()
+            except Exception:
+                _logger.exception("managed-DNS sweep pass failed; it will retry on the next interval")
             await self._sweep_sleep(self._sweep_interval_seconds)
 
-    def _sweep_once(self) -> None:
+    async def _sweep_once(self) -> None:
         now = self._clock()
-        abandonment_cutoff = (now - timedelta(seconds=self._abandonment_seconds)).isoformat()
-        for registration in list_stale_active_registrations(self._db, older_than=abandonment_cutoff):
-            if registration.status == "matured":
-                self._best_effort_delete_record(registration.name)
-            mark_abandoned(self._db, registration.name, released_at=now.isoformat())
-            _logger.info("Managed-DNS registration %r abandoned (no contact since %s)", registration.name, registration.last_contact_at)
+        abandonment_cutoff = now - timedelta(seconds=self._abandonment_seconds)
+        candidates = list_stale_active_registrations(
+            self._db, older_than=abandonment_cutoff.isoformat()
+        )
+        for candidate in candidates:
+            async with self._dns_transition_lock:
+                # The candidate list is intentionally outside the lane so one
+                # slow provider cannot monopolize it for the whole pass. Re-read
+                # after admission because a heartbeat may have refreshed the row.
+                registration = get_registration_by_name(self._db, candidate.name)
+                if registration is None or registration.status not in _ACTIVE_STATUSES:
+                    continue
+                latest_contact = registration.last_contact_at or registration.created_at
+                if datetime.fromisoformat(latest_contact) >= abandonment_cutoff:
+                    continue
+                if registration.status == "matured":
+                    if not await self._delete_record(registration.name):
+                        continue
+                mark_abandoned(self._db, registration.name, released_at=now.isoformat())
+                _logger.info(
+                    "Managed-DNS registration %r abandoned (no contact since %s)",
+                    registration.name, registration.last_contact_at,
+                )
+            # Give a waiting heartbeat/release/reclaim a chance to acquire the
+            # now-free lane before the sweep considers its next stale row.
+            await asyncio.sleep(0)
         cooldown_cutoff = (now - timedelta(seconds=self._cooldown_seconds)).isoformat()
-        removed = delete_expired_registrations(self._db, older_than=cooldown_cutoff)
+        async with self._dns_transition_lock:
+            removed = delete_expired_registrations(self._db, older_than=cooldown_cutoff)
         if removed:
             _logger.info("Purged %d managed-DNS registration(s) past their cooldown", removed)
 
-    def _best_effort_delete_record(self, name: str) -> None:
+    async def _delete_record(self, name: str) -> bool:
         try:
-            self._dns_provider.delete_record(f"{name}.{_ZONE}.")
+            await asyncio.to_thread(self._dns_provider.delete_record, f"{name}.{_ZONE}.")
         except DnsProviderError:
-            # Best-effort, same tolerance as everywhere else this class
-            # touches the DNS provider: a stale record left behind by a
-            # failed deletion is a minor inconvenience, not a reason to
-            # fail the caller (or, here, skip marking the row itself).
-            pass
+            return False
+        return True
 
     async def _handle_register(self, request: web.Request) -> web.Response:
         """`credential` is optional (design doc §16 Decision 5) --
@@ -290,6 +323,8 @@ class ManagedDnsServer:
         except ValueError as exc:
             return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
 
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
         raw_name = body.get("name")
         node_fingerprint = body.get("node_fingerprint")
         dynamic = body.get("dynamic", False)
@@ -329,7 +364,33 @@ class ManagedDnsServer:
             cooldown_elapsed = now - datetime.fromisoformat(existing.released_at)
             if cooldown_elapsed < timedelta(seconds=self._cooldown_seconds):
                 if credential and hash_credential(credential) == existing.credential_hash:
-                    return self._reclaim(existing, request, credential)
+                    active_for_node = count_registrations_for_node(
+                        self._db, existing.node_fingerprint, statuses=_ACTIVE_STATUSES
+                    )
+                    if active_for_node >= _MAX_REGISTRATIONS_PER_NODE:
+                        return web.json_response(
+                            {"error": "this node already has an active managed-DNS registration"}, status=403
+                        )
+                    if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+                        return web.json_response(
+                            {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                        )
+                    if self._dns_transition_lock.locked():
+                        return web.json_response(
+                            {"error": "a managed-DNS transition is already in progress; retry shortly"},
+                            status=503,
+                        )
+                    async with self._dns_transition_lock:
+                        current = get_registration_by_name(self._db, name)
+                        if (
+                            current is None or current.status in _ACTIVE_STATUSES
+                            or hash_credential(credential) != current.credential_hash
+                        ):
+                            return web.json_response(
+                                {"error": f"{name!r} is already registered or no longer reclaimable"},
+                                status=409,
+                            )
+                        return await self._reclaim(current, request, credential, dynamic=dynamic)
                 return web.json_response(
                     {"error": f"{name!r} is in a cooldown period and not currently available"}, status=409
                 )
@@ -342,9 +403,9 @@ class ManagedDnsServer:
             )
 
         # Design doc §16 Decision 3's remaining abuse controls -- both
-        # hard-reject, neither queues, and neither applies to the
-        # reclaim path above (already returned by this point if that's
-        # what this request was): the cumulative cap first (a request
+        # hard-reject and neither queues. Reclaim bypasses only the rate
+        # limiter; its cumulative-cap check happened above. For a fresh
+        # registration, check the cumulative cap first (a request
         # that's already going to be refused for being over capacity
         # shouldn't also spend a scarce rate-limit token), then the rate
         # limit.
@@ -356,6 +417,8 @@ class ManagedDnsServer:
             return web.json_response(
                 {"error": "too many registrations right now -- try again shortly"}, status=429
             )
+        tokens, last_refill = self._rate_limiter.snapshot()
+        save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
 
         secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
         created_at = now.isoformat()
@@ -384,23 +447,40 @@ class ManagedDnsServer:
             status=201,
         )
 
-    def _reclaim(self, existing: Registration, request: web.Request, credential: str) -> web.Response:
+    async def _reclaim(
+        self, existing: Registration, request: web.Request, credential: str, *, dynamic: bool,
+    ) -> web.Response:
         matured = existing.matured_at is not None
-        reclaim(self._db, existing.name, matured=matured)
+        now = self._clock()
+        now_iso = now.isoformat()
+        contact_started_at = existing.contact_started_at
+        if (
+            existing.status == "abandoned" or existing.last_contact_at is None
+            or now - datetime.fromisoformat(existing.last_contact_at)
+            > timedelta(seconds=self._abandonment_seconds)
+        ):
+            contact_started_at = now_iso
+        reclaim(
+            self._db, existing.name, matured=matured, dynamic=dynamic,
+            last_contact_at=now_iso, contact_started_at=contact_started_at,
+        )
         status: str = "matured" if matured else "pending"
 
         last_known_address = existing.last_known_address
         if matured:
             observed_address = self._observed_address(request)
-            if observed_address and self._best_effort_publish(existing.name, observed_address):
+            if observed_address and await self._best_effort_publish(existing.name, observed_address):
                 last_known_address = observed_address
+            else:
+                clear_last_known_address(self._db, existing.name)
+                last_known_address = None
 
         return web.json_response(
             {"name": existing.name, "credential": credential, "status": status, "created_at": existing.created_at},
             status=201,
         )
 
-    def _best_effort_publish(self, name: str, address: str) -> bool:
+    async def _best_effort_publish(self, name: str, address: str) -> bool:
         """Publishes `address` for `name`, returning whether it
         succeeded -- the shared "call the DNS provider, tolerate
         failure, and let the caller decide what to persist" step both
@@ -408,8 +488,9 @@ class ManagedDnsServer:
         registration (re)establishes a live published record."""
         fqdn = f"{name}.{_ZONE}."
         try:
-            self._dns_provider.upsert_record(fqdn, _address_kind(address), address)
-        except DnsProviderError:
+            kind = _address_kind(address)
+            await asyncio.to_thread(self._dns_provider.upsert_record, fqdn, kind, address)
+        except (DnsProviderError, ValueError):
             return False
         set_last_known_address(self._db, name, address)
         return True
@@ -427,9 +508,20 @@ class ManagedDnsServer:
         except ValueError as exc:
             return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
 
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
         credential = body.get("credential")
         if not isinstance(credential, str) or not credential:
             return web.json_response({"error": "request must contain a string credential"}, status=400)
+
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            return await self._process_heartbeat(request, credential)
+
+    async def _process_heartbeat(self, request: web.Request, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
         if registration is None or registration.status not in _ACTIVE_STATUSES:
@@ -444,13 +536,21 @@ class ManagedDnsServer:
 
         now = self._clock()
         now_iso = now.isoformat()
-        set_last_contact_at(self._db, registration.name, now_iso)
+        contact_started_at = registration.contact_started_at
+        if (
+            contact_started_at is None or registration.last_contact_at is None
+            or now - datetime.fromisoformat(registration.last_contact_at)
+            > timedelta(seconds=self._abandonment_seconds)
+        ):
+            contact_started_at = now_iso
+        set_contact_window(
+            self._db, registration.name, last_contact_at=now_iso, contact_started_at=contact_started_at
+        )
 
         newly_matured = False
         status = registration.status
         if status == "pending":
-            created_at = datetime.fromisoformat(registration.created_at)
-            if now - created_at >= timedelta(seconds=self._min_age_seconds):
+            if now - datetime.fromisoformat(contact_started_at) >= timedelta(seconds=self._min_age_seconds):
                 mark_matured(self._db, registration.name, matured_at=now_iso)
                 status = "matured"
                 newly_matured = True
@@ -465,14 +565,16 @@ class ManagedDnsServer:
         # published record never calls the DNS provider again after its
         # initial publish, matching design doc §16's "a board could
         # plausibly want [the subdomain] without [dynamic tracking]."
-        should_publish = status == "matured" and (newly_matured or registration.dynamic)
+        should_publish = status == "matured" and (
+            newly_matured or last_known_address is None or registration.dynamic
+        )
         if should_publish and observed_address and observed_address != last_known_address:
             # Best-effort: the next heartbeat retries. A transient
             # DNS-provider failure must not fail the heartbeat call
             # itself -- last_contact_at above is already recorded, so
             # this registration doesn't spuriously look abandoned over
             # one failed publish attempt.
-            if self._best_effort_publish(registration.name, observed_address):
+            if await self._best_effort_publish(registration.name, observed_address):
                 last_known_address = observed_address
 
         return web.json_response(
@@ -491,16 +593,31 @@ class ManagedDnsServer:
         except ValueError as exc:
             return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
 
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
         credential = body.get("credential")
         if not isinstance(credential, str) or not credential:
             return web.json_response({"error": "request must contain a string credential"}, status=400)
+
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            return await self._process_release(credential)
+
+    async def _process_release(self, credential: str) -> web.Response:
 
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 
         if registration.status == "matured":
-            self._best_effort_delete_record(registration.name)
+            if not await self._delete_record(registration.name):
+                return web.json_response(
+                    {"error": "DNS deletion failed; the registration remains active and may be retried"},
+                    status=503,
+                )
 
         released_at = self._clock().isoformat()
         mark_released(self._db, registration.name, released_at=released_at)

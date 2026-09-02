@@ -3820,10 +3820,11 @@ async def _draw_managed_dns_status(
             )
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
 
-    action_key = (
-        menu_key("l", "lease", prefix="Re") if status in _MANAGED_DNS_ACTIVE_STATUSES else menu_key("R", "egister")
-    )
-    await session.write_line(f"\r\n{action_key}    {menu_key('B', 'ack')}")
+    actions = [menu_key("R", "egister")]
+    if status in _MANAGED_DNS_ACTIVE_STATUSES:
+        actions.append(menu_key("l", "ease", prefix="Re"))
+    actions.append(menu_key("B", "ack"))
+    await session.write_line("\r\n" + "    ".join(actions))
     return status
 
 
@@ -3844,7 +3845,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
         if choice == "b":
             await session.write_line("")
             return
-        elif choice == "r" and status not in _MANAGED_DNS_ACTIVE_STATUSES:
+        elif choice == "r":
             await session.write_line("")
             await register_via_prompt(session, lane)
             status = await _draw_managed_dns_status(session, lane, actor)

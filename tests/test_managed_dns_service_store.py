@@ -8,6 +8,7 @@ import pytest
 
 from services.managed_dns.store import (
     Database,
+    MIGRATIONS,
     count_registrations,
     count_registrations_for_node,
     delete_expired_registrations,
@@ -21,6 +22,7 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
+    set_contact_window,
     set_last_contact_at,
 )
 
@@ -159,6 +161,42 @@ def test_migrations_are_idempotent_across_reopen(tmp_path):
     db2.close()
 
 
+def test_contact_window_migration_preserves_pending_registration_history(tmp_path):
+    path = tmp_path / "managed_dns.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(MIGRATIONS[0].sql)
+    connection.execute("PRAGMA user_version = 1")
+    connection.executemany(
+        """
+        INSERT INTO registrations
+            (name, credential_hash, node_fingerprint, status, dynamic,
+             created_at, last_contact_at)
+        VALUES (?, ?, ?, ?, 0, ?, ?)
+        """,
+        [
+            ("contacted", "hash-1", "fp-1", "pending", "2026-09-01T00:00:00+00:00",
+             "2026-09-01T23:00:00+00:00"),
+            ("never-contacted", "hash-2", "fp-2", "pending",
+             "2026-09-01T00:00:00+00:00", None),
+            ("released-before-maturation", "hash-3", "fp-3", "released",
+             "2026-09-01T00:00:00+00:00", "2026-09-01T23:00:00+00:00"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    assert get_registration_by_name(db, "contacted").contact_started_at == (
+        "2026-09-01T00:00:00+00:00"
+    )
+    assert get_registration_by_name(db, "never-contacted").contact_started_at is None
+    assert get_registration_by_name(
+        db, "released-before-maturation"
+    ).contact_started_at == "2026-09-01T00:00:00+00:00"
+    assert db.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    db.close()
+
+
 # -- release / reclaim / abandonment (issue #201 Phase 4) ------------------
 
 
@@ -210,6 +248,27 @@ def test_reclaim_restores_pending_when_never_matured(tmp_path):
     registration = get_registration_by_name(db, "myboard")
     assert registration.status == "pending"
     assert registration.released_at is None
+    db.close()
+
+
+def test_reclaim_can_refresh_contact_without_resetting_the_earned_window(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    set_contact_window(
+        db, "myboard", last_contact_at="2026-09-02T00:30:00+00:00",
+        contact_started_at="2026-09-02T00:00:00+00:00",
+    )
+    mark_released(db, "myboard", released_at="2026-09-02T00:31:00+00:00")
+
+    reclaim(
+        db, "myboard", matured=False,
+        last_contact_at="2026-09-02T00:32:00+00:00",
+        contact_started_at="2026-09-02T00:00:00+00:00",
+    )
+
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.last_contact_at == "2026-09-02T00:32:00+00:00"
+    assert registration.contact_started_at == "2026-09-02T00:00:00+00:00"
     db.close()
 
 

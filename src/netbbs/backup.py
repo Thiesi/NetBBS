@@ -529,7 +529,10 @@ def _restore_switch_plan(staging_dir: Path, db_path: Path, identity_dir: Path) -
         if entry.name in _RESERVED_BACKUP_ENTRIES:
             continue
         if entry.is_file():
-            plan.append((entry.name, entry, db_path.parent / entry.name))
+            live_path = db_path.parent / entry.name
+            if entry.name.endswith("_managed_dns_credential"):
+                live_path = _managed_dns_credential_path_for(db_path)
+            plan.append((entry.name, entry, live_path))
 
     return plan
 

@@ -10,12 +10,13 @@ knows nothing about boards, users, or channels, so it gets its own
 `Database`/`MIGRATIONS` pair rather than smuggling its table into every
 SysOp's own node database, which would be the wrong layer entirely.
 
-One table, `registrations`: one row per subdomain name currently
+The primary `registrations` table has one row per subdomain name currently
 reserved (whether or not it has actually been published to DNS yet --
 see design doc §16 Decision 3's age-gate). The raw bearer credential
 (design doc §16 Decision 2) is never stored here, only its SHA-256 hash
 -- this store never needs to present the secret back to anyone, only
-confirm a presented one matches.
+confirm a presented one matches. A separate singleton table persists
+the service-wide admission bucket across process restarts.
 """
 
 from __future__ import annotations
@@ -65,6 +66,31 @@ MIGRATIONS = [
         CREATE UNIQUE INDEX idx_registrations_credential_hash ON registrations(credential_hash);
         CREATE INDEX idx_registrations_node_fingerprint ON registrations(node_fingerprint);
         CREATE INDEX idx_registrations_status ON registrations(status);
+        """,
+    ),
+    Migration(
+        description="Track the beginning of uninterrupted heartbeat contact for the maturation gate.",
+        sql="""
+        ALTER TABLE registrations ADD COLUMN contact_started_at TEXT;
+
+        -- Before this column existed, pending registrations qualified from
+        -- created_at as long as they were still heartbeating. Preserve that
+        -- already-earned window for contacted rows during the upgrade; a row
+        -- which never heartbeated remains NULL and starts on first contact.
+        UPDATE registrations
+        SET contact_started_at = created_at
+        WHERE (status = 'pending' OR (status = 'released' AND matured_at IS NULL))
+          AND last_contact_at IS NOT NULL;
+        """,
+    ),
+    Migration(
+        description="Persist the service-wide registration token bucket across process restarts.",
+        sql="""
+        CREATE TABLE rate_limit_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            tokens REAL NOT NULL,
+            last_refill REAL NOT NULL
+        );
         """,
     ),
 ]
@@ -142,6 +168,7 @@ class Registration:
     last_contact_at: str | None
     released_at: str | None
     last_known_address: str | None
+    contact_started_at: str | None
 
 
 def _row_to_registration(row: sqlite3.Row) -> Registration:
@@ -156,6 +183,7 @@ def _row_to_registration(row: sqlite3.Row) -> Registration:
         last_contact_at=row["last_contact_at"],
         released_at=row["released_at"],
         last_known_address=row["last_known_address"],
+        contact_started_at=row["contact_started_at"],
     )
 
 
@@ -220,6 +248,14 @@ def set_last_contact_at(db: Database, name: str, timestamp: str) -> None:
     db.connection.commit()
 
 
+def set_contact_window(db: Database, name: str, *, last_contact_at: str, contact_started_at: str) -> None:
+    db.connection.execute(
+        "UPDATE registrations SET last_contact_at = ?, contact_started_at = ? WHERE name = ?",
+        (last_contact_at, contact_started_at, name),
+    )
+    db.connection.commit()
+
+
 def mark_matured(db: Database, name: str, *, matured_at: str) -> None:
     """Design doc §16 Decision 3: a registration only actually goes live
     once the age-gate passes -- `services.managed_dns.server` calls this
@@ -241,6 +277,11 @@ def set_last_known_address(db: Database, name: str, address: str) -> None:
     db.connection.commit()
 
 
+def clear_last_known_address(db: Database, name: str) -> None:
+    db.connection.execute("UPDATE registrations SET last_known_address = NULL WHERE name = ?", (name,))
+    db.connection.commit()
+
+
 def mark_released(db: Database, name: str, *, released_at: str) -> None:
     """Design doc §16 Decision 5: voluntary release -- the SysOp's own
     `[L] Release` action. Only an active (`pending`/`matured`)
@@ -256,7 +297,10 @@ def mark_released(db: Database, name: str, *, released_at: str) -> None:
     db.connection.commit()
 
 
-def reclaim(db: Database, name: str, *, matured: bool) -> None:
+def reclaim(
+    db: Database, name: str, *, matured: bool, dynamic: bool | None = None,
+    last_contact_at: str | None = None, contact_started_at: str | None = None,
+) -> None:
     """Design doc §16 Decision 5: the same credential that released (or
     watched abandonment happen to) this name reclaims it -- reactivates
     the *same* row (never a new one, so `created_at`/`matured_at`
@@ -268,8 +312,11 @@ def reclaim(db: Database, name: str, *, matured: bool) -> None:
     live skip back to `matured` immediately rather than re-earning the
     age-gate a second time for the same, already-proven node."""
     db.connection.execute(
-        "UPDATE registrations SET status = ?, released_at = NULL WHERE name = ?",
-        ("matured" if matured else "pending", name),
+        "UPDATE registrations SET status = ?, released_at = NULL, "
+        "dynamic = COALESCE(?, dynamic), last_contact_at = COALESCE(?, last_contact_at), "
+        "contact_started_at = COALESCE(?, contact_started_at) WHERE name = ?",
+        ("matured" if matured else "pending", None if dynamic is None else int(dynamic),
+         last_contact_at, contact_started_at, name),
     )
     db.connection.commit()
 
@@ -328,4 +375,20 @@ def delete_registration(db: Database, name: str) -> None:
     row is removed first so the new `INSERT` doesn't collide with the
     primary key it still technically holds."""
     db.connection.execute("DELETE FROM registrations WHERE name = ?", (name,))
+    db.connection.commit()
+
+
+def load_rate_limit_state(db: Database) -> tuple[float, float] | None:
+    row = db.connection.execute(
+        "SELECT tokens, last_refill FROM rate_limit_state WHERE singleton = 1"
+    ).fetchone()
+    return (float(row[0]), float(row[1])) if row is not None else None
+
+
+def save_rate_limit_state(db: Database, *, tokens: float, last_refill: float) -> None:
+    db.connection.execute(
+        "INSERT INTO rate_limit_state(singleton, tokens, last_refill) VALUES (1, ?, ?) "
+        "ON CONFLICT(singleton) DO UPDATE SET tokens = excluded.tokens, last_refill = excluded.last_refill",
+        (tokens, last_refill),
+    )
     db.connection.commit()

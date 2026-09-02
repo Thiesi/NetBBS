@@ -2307,9 +2307,12 @@ HTTP, never imports it.
   `abandoned` row (Decision 5's shared ~90-day cooldown, both exit
   paths) reactivates that exact row — `created_at`/`matured_at` history
   preserved, skipping straight back to `matured` with an immediate
-  republish if it had matured before. Reclaim deliberately bypasses
-  both abuse controls below: it isn't a new registration competing for
-  capacity, it's the same registrant coming back.
+  republish if it had matured before. Reclaim bypasses the admission
+  *rate* limiter, but still obeys both the cumulative active cap and
+  one-active-name-per-node cap because it consumes a real live slot. A
+  short voluntary-release/reclaim cycle preserves a pending row's earned
+  `contact_started_at`; only abandonment, no prior contact, or a gap beyond
+  the abandonment threshold resets that maturation window.
 - **The originally-locked human-review queue for over-cap registrations
   was dropped during implementation planning, not built.** Both the
   service-wide rate limiter and the cumulative active-registration cap
@@ -2329,11 +2332,32 @@ HTTP, never imports it.
   implementation detail neither one exports; re-implementing the same
   small primitive locally (`services/managed_dns/server.py`'s
   `GlobalRateLimiter`) is worth the few duplicated lines.
+  Persist its state only after a token is consumed. A rejected request does
+  not change the durable bucket and must not turn a cheap over-limit flood
+  into one SQLite commit per response.
 - **A `pending` registration does not resolve.** Only `/heartbeat`
   transitions `pending → matured` (Decision 3's age gate,
   `min_age_seconds` of heartbeat contact) and calls
   `DnsProvider.upsert_record` for the first time; `/register` itself
   never publishes anything, no matter how the request was decided.
+- **Maturation measures uninterrupted successful contact, not age since
+  registration.** `contact_started_at` begins at the first heartbeat
+  and resets after a gap longer than the abandonment window. A node
+  cannot register, stay offline through the age gate, and mature on its
+  first later contact.
+- **DNS provider I/O never runs on the aiohttp event loop, and failed
+  mutations stay retryable.** Static publication retries while no
+  address is recorded; voluntary release remains active until deletion
+  succeeds; sweep abandonment likewise waits for deletion rather than
+  orphaning a stale record. Address-family changes remove the obsolete
+  A/AAAA family in the same RFC 2136 update. Provider I/O and its
+  surrounding SQLite transition share one bounded service-wide lane:
+  sweep, heartbeat, release, and reclaim cannot commit from stale
+  pre-await state, and concurrent HTTP mutations receive a retryable 503
+  before any additional executor work is queued. A sweep acquires that lane
+  for one revalidated row at a time and yields between rows; a large stale
+  backlog must not monopolize live mutations for the duration of every DNS
+  timeout in the pass.
 - **The service sits behind its own reverse proxy for TLS, so
   `request.remote` is the proxy's address, not the caller's.**
   Dynamic-address change detection compares against a trusted
@@ -2356,7 +2380,12 @@ HTTP, never imports it.
   same `credential_path_for(db_path)` derived-path formula every other
   plain-file artifact already uses (see `Backup and restore` above) —
   needed no new path-helper shape in `netbbs.backup`, just an import
-  and one `extra_path` tuple entry.
+  and one `extra_path` tuple entry. Restore recognizes that artifact by
+  role and rebases it through the target database stem; preserving the
+  source filename would make a `--db` rename silently lose the secret.
+- **The service-wide admission bucket is durable.** Its tokens and last
+  refill timestamp live in the managed-service database, so a restart
+  does not mint a fresh burst of registrations.
 - **Standard-ports confirmation (Decision 6) is purely informational,
   never server-enforced.** The admin screen and the opt-in prompt both
   ask whether the web listener sits behind an HTTPS-terminating reverse

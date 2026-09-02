@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import sys
+import os
 
 import pytest
 
@@ -45,10 +46,36 @@ def test_save_credential_is_owner_only_permissions(tmp_path):
     assert mode == stat.S_IRUSR | stat.S_IWUSR
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file permission bits aren't meaningful on Windows")
+def test_save_credential_repairs_permissions_on_a_reused_temp_file(tmp_path):
+    path = tmp_path / "node_managed_dns_credential"
+    tmp_pathname = path.with_suffix(path.suffix + ".tmp")
+    tmp_pathname.write_text("stale")
+    tmp_pathname.chmod(0o666)
+
+    save_credential(path, "new-secret")
+
+    assert load_credential(path) == "new-secret"
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+
+
 def test_save_credential_leaves_no_tmp_file_behind(tmp_path):
     path = tmp_path / "node_managed_dns_credential"
     save_credential(path, "super-secret-token")
     assert not path.with_suffix(path.suffix + ".tmp").exists()
+
+
+def test_save_credential_uses_owner_only_mode_at_creation(tmp_path, monkeypatch):
+    modes = []
+    real_open = os.open
+
+    def recording_open(path, flags, mode=0o777):
+        modes.append(mode)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr("netbbs.managed_dns.credential.os.open", recording_open)
+    save_credential(tmp_path / "node_managed_dns_credential", "secret")
+    assert modes == [stat.S_IRUSR | stat.S_IWUSR]
 
 
 def test_delete_credential_removes_the_file(tmp_path):

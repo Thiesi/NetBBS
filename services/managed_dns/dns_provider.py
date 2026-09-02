@@ -76,7 +76,7 @@ class LoggingDnsProvider:
 
     def upsert_record(self, name: str, kind: RecordKind, address: str) -> None:
         self.upserts.append((name, kind, address))
-        self.records.setdefault(name, {})[kind] = address
+        self.records[name] = {kind: address}
 
     def delete_record(self, name: str) -> None:
         self.deletes.append(name)
@@ -122,23 +122,33 @@ class Rfc2136DnsProvider:
             )
 
     def upsert_record(self, name: str, kind: RecordKind, address: str) -> None:
-        update = dns.update.Update(
-            self.zone, keyring=self._keyring(), keyname=self.keyname, keyalgorithm=self.algorithm
-        )
-        rdtype = dns.rdatatype.A if kind == "A" else dns.rdatatype.AAAA
-        # replace() clears any existing rdataset of this type at this
-        # name before adding the new one -- exactly the upsert semantics
-        # this method promises, in one atomic RFC 2136 operation rather
-        # than a separate delete-then-add round trip.
-        update.replace(name, _DEFAULT_TTL_SECONDS, rdtype, address)
-        self._send(update)
+        try:
+            update = dns.update.Update(
+                self.zone, keyring=self._keyring(), keyname=self.keyname, keyalgorithm=self.algorithm
+            )
+            rdtype = dns.rdatatype.A if kind == "A" else dns.rdatatype.AAAA
+            other_rdtype = dns.rdatatype.AAAA if kind == "A" else dns.rdatatype.A
+            # An address-family change replaces the published endpoint,
+            # rather than leaving the old family reachable indefinitely.
+            update.delete(name, other_rdtype)
+            update.replace(name, _DEFAULT_TTL_SECONDS, rdtype, address)
+            self._send(update)
+        except DnsProviderError:
+            raise
+        except Exception as exc:
+            raise DnsProviderError(f"could not construct RFC 2136 update: {exc}") from exc
 
     def delete_record(self, name: str) -> None:
-        update = dns.update.Update(
-            self.zone, keyring=self._keyring(), keyname=self.keyname, keyalgorithm=self.algorithm
-        )
-        # No rdtype given -- deletes every rdataset (A and AAAA both) at
-        # this name, matching delete_record's own "every address record"
-        # contract.
-        update.delete(name)
-        self._send(update)
+        try:
+            update = dns.update.Update(
+                self.zone, keyring=self._keyring(), keyname=self.keyname, keyalgorithm=self.algorithm
+            )
+            # Never issue delete-ANY: unrelated TXT/MX/etc. data at this
+            # owner name is outside this provider's authority.
+            update.delete(name, dns.rdatatype.A)
+            update.delete(name, dns.rdatatype.AAAA)
+            self._send(update)
+        except DnsProviderError:
+            raise
+        except Exception as exc:
+            raise DnsProviderError(f"could not construct RFC 2136 deletion: {exc}") from exc

@@ -58,7 +58,7 @@ on -- a typo here fails silently at update time otherwise, surfacing
 only as `DnsProviderError` from this service once it's already live.
 
 `Rfc2136DnsProvider` sends updates over TCP to whichever host you name
-as `MANAGED_DNS_TSIG_SERVER` below -- point it at the zone's primary
+as `MANAGED_DNS_BIND_SERVER` below -- point it at the zone's primary
 (the host actually authoritative for writes), not a secondary or a
 public-facing resolver.
 
@@ -80,8 +80,8 @@ of touching DNS at all -- useful for a dry run, wrong for production):
 - `MANAGED_DNS_TSIG_KEYNAME` -- the key name from step 2 (e.g.
   `managed-dns-key`).
 - `MANAGED_DNS_TSIG_SECRET` -- the base64 secret from step 2.
-- `MANAGED_DNS_TSIG_SERVER` -- the BIND primary's address.
-- `MANAGED_DNS_TSIG_ZONE` -- the zone updates are scoped to (e.g.
+- `MANAGED_DNS_BIND_SERVER` -- the BIND primary's address.
+- `MANAGED_DNS_ZONE` -- the zone updates are scoped to (e.g.
   `netbbs.org`).
 
 Optional, all with working defaults (see `services/managed_dns/
@@ -114,8 +114,8 @@ __main__.py` for the exact default values currently shipped):
 MANAGED_DNS_DB_PATH=/var/lib/netbbs-managed-dns/registrations.db \
 MANAGED_DNS_TSIG_KEYNAME=managed-dns-key \
 MANAGED_DNS_TSIG_SECRET=<base64 secret from step 2> \
-MANAGED_DNS_TSIG_SERVER=<BIND primary address> \
-MANAGED_DNS_TSIG_ZONE=netbbs.org \
+MANAGED_DNS_BIND_SERVER=<BIND primary address> \
+MANAGED_DNS_ZONE=netbbs.org \
 python -m services.managed_dns
 ```
 

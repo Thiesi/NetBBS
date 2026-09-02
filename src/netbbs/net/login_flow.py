@@ -628,9 +628,6 @@ async def run_authenticated_session(
     # convention -- `offer_managed_dns_opt_in` is itself a no-op once
     # any SysOp has already answered it, so this costs nothing on every
     # subsequent login.
-    if lane is not None and meets_level(user, SYSOP_LEVEL):
-        await offer_managed_dns_opt_in(session, lane)
-
     # One InputHistory per connection (design doc),
     # not node-wide like hub/presence/mailbox -- constructed here rather
     # than passed in from netbbs.__main__, so each connected session
@@ -664,6 +661,9 @@ async def run_authenticated_session(
             _watch_for_account_revocation(session, db, user, node_controls.session_registry)
         )
     try:
+        if lane is not None and meets_level(user, SYSOP_LEVEL):
+            await offer_managed_dns_opt_in(session, lane)
+
         # Deliberately after the watcher task above, not alongside the
         # other post-login notices earlier in this function: unlike
         # those (which only ever print, never read), this is genuinely
