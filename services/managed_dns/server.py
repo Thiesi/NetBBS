@@ -266,20 +266,36 @@ class ManagedDnsServer:
             await self._sweep_sleep(self._sweep_interval_seconds)
 
     async def _sweep_once(self) -> None:
-        async with self._dns_transition_lock:
-            await self._sweep_once_serialized()
-
-    async def _sweep_once_serialized(self) -> None:
         now = self._clock()
-        abandonment_cutoff = (now - timedelta(seconds=self._abandonment_seconds)).isoformat()
-        for registration in list_stale_active_registrations(self._db, older_than=abandonment_cutoff):
-            if registration.status == "matured":
-                if not await self._delete_record(registration.name):
+        abandonment_cutoff = now - timedelta(seconds=self._abandonment_seconds)
+        candidates = list_stale_active_registrations(
+            self._db, older_than=abandonment_cutoff.isoformat()
+        )
+        for candidate in candidates:
+            async with self._dns_transition_lock:
+                # The candidate list is intentionally outside the lane so one
+                # slow provider cannot monopolize it for the whole pass. Re-read
+                # after admission because a heartbeat may have refreshed the row.
+                registration = get_registration_by_name(self._db, candidate.name)
+                if registration is None or registration.status not in _ACTIVE_STATUSES:
                     continue
-            mark_abandoned(self._db, registration.name, released_at=now.isoformat())
-            _logger.info("Managed-DNS registration %r abandoned (no contact since %s)", registration.name, registration.last_contact_at)
+                latest_contact = registration.last_contact_at or registration.created_at
+                if datetime.fromisoformat(latest_contact) >= abandonment_cutoff:
+                    continue
+                if registration.status == "matured":
+                    if not await self._delete_record(registration.name):
+                        continue
+                mark_abandoned(self._db, registration.name, released_at=now.isoformat())
+                _logger.info(
+                    "Managed-DNS registration %r abandoned (no contact since %s)",
+                    registration.name, registration.last_contact_at,
+                )
+            # Give a waiting heartbeat/release/reclaim a chance to acquire the
+            # now-free lane before the sweep considers its next stale row.
+            await asyncio.sleep(0)
         cooldown_cutoff = (now - timedelta(seconds=self._cooldown_seconds)).isoformat()
-        removed = delete_expired_registrations(self._db, older_than=cooldown_cutoff)
+        async with self._dns_transition_lock:
+            removed = delete_expired_registrations(self._db, older_than=cooldown_cutoff)
         if removed:
             _logger.info("Purged %d managed-DNS registration(s) past their cooldown", removed)
 
@@ -398,8 +414,6 @@ class ManagedDnsServer:
                 {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
             )
         if not self._rate_limiter.allow():
-            tokens, last_refill = self._rate_limiter.snapshot()
-            save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
             return web.json_response(
                 {"error": "too many registrations right now -- try again shortly"}, status=429
             )
@@ -437,8 +451,19 @@ class ManagedDnsServer:
         self, existing: Registration, request: web.Request, credential: str, *, dynamic: bool,
     ) -> web.Response:
         matured = existing.matured_at is not None
-        now_iso = self._clock().isoformat()
-        reclaim(self._db, existing.name, matured=matured, dynamic=dynamic, last_contact_at=now_iso)
+        now = self._clock()
+        now_iso = now.isoformat()
+        contact_started_at = existing.contact_started_at
+        if (
+            existing.status == "abandoned" or existing.last_contact_at is None
+            or now - datetime.fromisoformat(existing.last_contact_at)
+            > timedelta(seconds=self._abandonment_seconds)
+        ):
+            contact_started_at = now_iso
+        reclaim(
+            self._db, existing.name, matured=matured, dynamic=dynamic,
+            last_contact_at=now_iso, contact_started_at=contact_started_at,
+        )
         status: str = "matured" if matured else "pending"
 
         last_known_address = existing.last_known_address

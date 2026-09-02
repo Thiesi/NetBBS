@@ -288,7 +288,7 @@ def mark_released(db: Database, name: str, *, released_at: str) -> None:
 
 def reclaim(
     db: Database, name: str, *, matured: bool, dynamic: bool | None = None,
-    last_contact_at: str | None = None,
+    last_contact_at: str | None = None, contact_started_at: str | None = None,
 ) -> None:
     """Design doc §16 Decision 5: the same credential that released (or
     watched abandonment happen to) this name reclaims it -- reactivates
@@ -305,7 +305,7 @@ def reclaim(
         "dynamic = COALESCE(?, dynamic), last_contact_at = COALESCE(?, last_contact_at), "
         "contact_started_at = COALESCE(?, contact_started_at) WHERE name = ?",
         ("matured" if matured else "pending", None if dynamic is None else int(dynamic),
-         last_contact_at, last_contact_at, name),
+         last_contact_at, contact_started_at, name),
     )
     db.connection.commit()
 

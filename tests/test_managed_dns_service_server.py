@@ -652,6 +652,53 @@ def test_register_reclaims_a_never_matured_registration_with_the_right_credentia
     assert registration.released_at is None
 
 
+def test_pending_reclaim_preserves_an_uninterrupted_maturation_window(db):
+    clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=60, cooldown_seconds=3600,
+            abandonment_seconds=600,
+        )
+        try:
+            registered = await _register(server, name="myboard")
+            await _heartbeat(server, credential=registered["credential"])
+            clock.now += timedelta(seconds=30)
+            await _release(server, credential=registered["credential"])
+            await _register_raw(
+                server, name="myboard", credential=registered["credential"]
+            )
+            clock.now += timedelta(seconds=31)
+            return await _heartbeat(server, credential=registered["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["status"] == "matured"
+
+
+def test_rate_limited_rejections_do_not_write_bucket_state(db, monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        "services.managed_dns.server.save_rate_limit_state",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+
+    async def scenario():
+        server = await _start_server(db, rate_limit_capacity=0)
+        try:
+            first = await _register_raw(server, name="first", node_fingerprint="fp-1")
+            second = await _register_raw(server, name="second", node_fingerprint="fp-2")
+            return first, second
+        finally:
+            await server.stop()
+
+    first, second = asyncio.run(scenario())
+    assert first[0] == second[0] == 429
+    assert writes == []
+
+
 def test_register_reclaims_a_matured_registration_and_republishes(db):
     clock = _MutableClock(datetime(2026, 9, 2, 0, 0, 0, tzinfo=timezone.utc))
     provider = LoggingDnsProvider()

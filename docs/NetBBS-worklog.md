@@ -2309,7 +2309,10 @@ HTTP, never imports it.
   preserved, skipping straight back to `matured` with an immediate
   republish if it had matured before. Reclaim bypasses the admission
   *rate* limiter, but still obeys both the cumulative active cap and
-  one-active-name-per-node cap because it consumes a real live slot.
+  one-active-name-per-node cap because it consumes a real live slot. A
+  short voluntary-release/reclaim cycle preserves a pending row's earned
+  `contact_started_at`; only abandonment, no prior contact, or a gap beyond
+  the abandonment threshold resets that maturation window.
 - **The originally-locked human-review queue for over-cap registrations
   was dropped during implementation planning, not built.** Both the
   service-wide rate limiter and the cumulative active-registration cap
@@ -2329,6 +2332,9 @@ HTTP, never imports it.
   implementation detail neither one exports; re-implementing the same
   small primitive locally (`services/managed_dns/server.py`'s
   `GlobalRateLimiter`) is worth the few duplicated lines.
+  Persist its state only after a token is consumed. A rejected request does
+  not change the durable bucket and must not turn a cheap over-limit flood
+  into one SQLite commit per response.
 - **A `pending` registration does not resolve.** Only `/heartbeat`
   transitions `pending → matured` (Decision 3's age gate,
   `min_age_seconds` of heartbeat contact) and calls
@@ -2348,7 +2354,10 @@ HTTP, never imports it.
   surrounding SQLite transition share one bounded service-wide lane:
   sweep, heartbeat, release, and reclaim cannot commit from stale
   pre-await state, and concurrent HTTP mutations receive a retryable 503
-  before any additional executor work is queued.
+  before any additional executor work is queued. A sweep acquires that lane
+  for one revalidated row at a time and yields between rows; a large stale
+  backlog must not monopolize live mutations for the duration of every DNS
+  timeout in the pass.
 - **The service sits behind its own reverse proxy for TLS, so
   `request.remote` is the proxy's address, not the caller's.**
   Dynamic-address change detection compares against a trusted

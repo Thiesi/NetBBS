@@ -21,6 +21,7 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
+    set_contact_window,
     set_last_contact_at,
 )
 
@@ -210,6 +211,27 @@ def test_reclaim_restores_pending_when_never_matured(tmp_path):
     registration = get_registration_by_name(db, "myboard")
     assert registration.status == "pending"
     assert registration.released_at is None
+    db.close()
+
+
+def test_reclaim_can_refresh_contact_without_resetting_the_earned_window(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db)
+    set_contact_window(
+        db, "myboard", last_contact_at="2026-09-02T00:30:00+00:00",
+        contact_started_at="2026-09-02T00:00:00+00:00",
+    )
+    mark_released(db, "myboard", released_at="2026-09-02T00:31:00+00:00")
+
+    reclaim(
+        db, "myboard", matured=False,
+        last_contact_at="2026-09-02T00:32:00+00:00",
+        contact_started_at="2026-09-02T00:00:00+00:00",
+    )
+
+    registration = get_registration_by_name(db, "myboard")
+    assert registration.last_contact_at == "2026-09-02T00:32:00+00:00"
+    assert registration.contact_started_at == "2026-09-02T00:00:00+00:00"
     db.close()
 
 
