@@ -213,3 +213,29 @@ def count_registrations(db: Database, *, statuses: tuple[str, ...]) -> int:
         f"SELECT COUNT(*) FROM registrations WHERE status IN ({placeholders})", statuses
     ).fetchone()
     return row[0]
+
+
+def set_last_contact_at(db: Database, name: str, timestamp: str) -> None:
+    db.connection.execute("UPDATE registrations SET last_contact_at = ? WHERE name = ?", (timestamp, name))
+    db.connection.commit()
+
+
+def mark_matured(db: Database, name: str, *, matured_at: str) -> None:
+    """Design doc §16 Decision 3: a registration only actually goes live
+    once the age-gate passes -- `services.managed_dns.server` calls this
+    exactly once per registration, the first heartbeat that clears the
+    minimum-age threshold. Idempotent by construction (an already-
+    matured registration never re-enters the age-check branch that calls
+    this), but the `WHERE status = 'pending'` guard is a second, cheap
+    belt-and-suspenders check against a caller bug clobbering an already-
+    matured row's own `matured_at`."""
+    db.connection.execute(
+        "UPDATE registrations SET status = 'matured', matured_at = ? WHERE name = ? AND status = 'pending'",
+        (matured_at, name),
+    )
+    db.connection.commit()
+
+
+def set_last_known_address(db: Database, name: str, address: str) -> None:
+    db.connection.execute("UPDATE registrations SET last_known_address = ? WHERE name = ?", (address, name))
+    db.connection.commit()
