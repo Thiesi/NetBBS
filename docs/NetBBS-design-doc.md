@@ -2990,7 +2990,7 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
-A node's recoverable state is not only its database — it is twelve
+A node's recoverable state is not only its database — it is thirteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
 
@@ -3000,6 +3000,7 @@ with no single existing tool that treats them as one recoverable set:
 | Content blobs | `db_path.parent / f"{db_path.stem}_files"` (git-style `xx/xxxx...` sharding; excludes its own `.incoming/` staging subdirectory, which is always crash-orphan garbage — see `purge_incoming_staging`) | `netbbs.files.storage` |
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
 | SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
+| Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
 | Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
 | Main-menu masthead | `db_path.parent / f"{db_path.stem}_main_menu_banner.ans"` | SysOp, via the masthead menu screen (issue #161) |
 | Logoff banner | `db_path.parent / f"{db_path.stem}_logoff_banner.ans"` | SysOp, via the logoff-banner menu screen (issue #177) |
@@ -3013,7 +3014,7 @@ A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all twelve as one atomic backup
+separate ceremony) — so this design treats all thirteen as one atomic backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no
@@ -5224,7 +5225,7 @@ still unpicked here — this locks in their *shape*, not their exact
 numbers) is separate, future, tracked work, not part of this design
 pass.
 
-### Issue #201 — managed netbbs.org subdomain + dynamic DNS
+### Issue #201 — managed netbbs.org subdomain + dynamic DNS — closed
 
 **Goal:** since the project controls the `netbbs.org` domain, offer SysOps
 an easy way to publish their board under it (e.g. `myboard.netbbs.org`)
@@ -5282,11 +5283,10 @@ stories, fully independent.
 plus a reserved-word blocklist and a one-name-per-node cap; a registered
 name only actually goes live once the node has maintained a minimum age
 of successful contact with the registration service; new registrations
-service-wide are rate-limited, with anything above that rate held in a
-capacity-bounded review queue for a human, rejected outright once that
-queue is full; and total active managed registrations are capped by a
+service-wide are rate-limited, rejected outright once that rate is
+exceeded; and total active managed registrations are capped by a
 separate cumulative ceiling, refused once reached — no preventive
-identity vetting beyond that.** Matches how the project
+identity vetting, and no human review queue, beyond that.** Matches how the project
 treats registration/content elsewhere (SysOp owns the trust decision,
 best-effort not gatekept) — requiring identity *verification* before
 registering a subdomain would add real friction against the feature's
@@ -5326,49 +5326,46 @@ bound is a separate, service-enforced admission control layered on
 top: a rate limit on new registrations across the whole managed
 service (not per node/identity — the thing an attacker cannot multiply
 by minting more identities), automatic up to that rate, with anything
-beyond it queued for the project maintainer to review** — the same
-"a human reviews it" shape Decision 4 already uses for contested-name
-disputes, extended from content disputes to registration *volume*.
-This is what actually closes the gap: DNS-provider record cost and
-squatting are bounded by how fast the *service* will create new
-records at all, independent of how many identities a single attacker
-can mint and age in parallel.
+beyond it originally specified as queued for the project maintainer to
+review** — the same "a human reviews it" shape Decision 4 already uses
+for contested-name disputes, extended from content disputes to
+registration *volume*. This is what actually closes the gap:
+DNS-provider record cost and squatting are bounded by how fast the
+*service* will create new records at all, independent of how many
+identities a single attacker can mint and age in parallel.
 
-Two further Codex findings, same PR (#225), both about resources this
-rate limit itself introduces or leaves unbounded, not about the rate
-limit's own logic:
+Two further Codex findings, same PR (#225), both about resources a
+review queue would itself introduce or leave unbounded, not about the
+rate limit's own logic: the queue would need its own explicit-capacity
+bound (itself a remotely-influenced resource a Sybil attacker submitting
+past the rate limit could otherwise fill without limit); and separately,
+a rate limit alone bounds *speed*, not *total count* — an attacker
+patient enough to always submit exactly at (never over) the threshold,
+keeping every registration's contact alive indefinitely so nothing
+qualifies as abandoned, could still accumulate an unbounded number of
+active records over a long enough time. The second finding needed its
+own fix regardless of the queue question: a separate cumulative cap on
+total *active* managed registrations service-wide, refused (not queued)
+once reached, freed only as existing registrations are voluntarily
+released or genuinely abandoned (Decision 5) — the rate limit alone
+never stands in for a real total ceiling.
 
-- **The review queue needs its own explicit bound.** "Queued for
-  review" is itself a remotely-influenced resource — this project's
-  own standing convention already requires "queues, transfers, retained
-  events, retries, and mailboxes" to have explicit limits and visible
-  failure behavior, and a Sybil attacker submitting past the rate limit
-  can otherwise fill that queue without limit, exhausting storage or
-  maintainer workload even though every individual *record* stays
-  rate-limited. Fixed by specifying a finite queue capacity with clear
-  admission behavior once full: reject new above-threshold requests
-  outright (visible to the caller, not silently dropped) rather than
-  growing the queue further, matching the "bounded, not silently
-  unbounded" shape this project already uses for relay mailboxes and
-  similar structures.
-- **A rate limit bounds speed, not total count.** An attacker patient
-  enough to always submit exactly at (never over) the threshold, and to
-  keep every registered node's dynamic-DNS updater contact alive
-  indefinitely so nothing qualifies as abandoned, can still accumulate
-  an unbounded number of active records over a long enough time —
-  nothing in a pure rate limit ever says "no more, full." This needs a
-  second, independent ceiling: a cumulative cap on total *active*
-  managed registrations service-wide, refused (not queued) once
-  reached, freed only as existing registrations are voluntarily
-  released or genuinely abandoned (Decision 5). The rate limit still
-  matters on its own — it prevents a single burst from consuming the
-  service's entire remaining capacity at once — but does not by itself
-  stand in for a real total ceiling.
-
-Exact qualifying period (age-gate), rate-limit threshold, review-queue
-capacity, and cumulative active-registration ceiling are all
-implementation-time parameters (see the closing note below), not fixed
-here.
+**The review queue itself was dropped entirely during implementation
+planning, not carried forward as a bounded-capacity queue.** Once a
+request is queued at all, the realistic resolution is the same either
+way: the maintainer hears the SysOp's explanation and decides by hand.
+A capacity-bounded queue adds real code and a genuine single point of
+(human) failure without actually simplifying that manual conversation —
+the same outcome is reached faster, with less to maintain, by simply
+rejecting outright once the rate limit or the cumulative cap is
+exceeded, symmetric with each other, and telling the caller plainly
+that the service is at capacity with a contact channel for the rare
+legitimate exception. Both are hard-reject, service-wide, and — the one
+mechanism-level subtlety worth recording — neither applies to a
+reclaim (Decision 5): reactivating an already-proven, previously-counted
+registration via its own still-valid credential is not the "new
+capacity created faster than a free identity is worth" case either
+control exists to bound.
 
 **Decision 4 (locked in) — contested-name disputes are manual and
 complaint-driven, stated as such, not implied automation.** At this
@@ -5457,48 +5454,46 @@ dynamic-IP-tracking half of this feature alone) but does not get a bare
 nonstandard port remains the SysOp's own responsibility to communicate,
 same as today.
 
-**Decision 7 (locked in) — the managed-DNS credential is in scope for
-node backup/restore, as a future addition to §13.4's contract, not a
-separate ceremony.** Code review follow-up (PR #218): §13.4 already
-treats a node's recoverable state as one atomic set of specific
+**Decision 7 (locked in, implemented) — the managed-DNS credential is
+in scope for node backup/restore, as an addition to §13.4's contract,
+not a separate ceremony.** Code review follow-up (PR #218): §13.4
+already treats a node's recoverable state as one atomic set of specific
 artifacts (database, node identity, SSH host key, banners) precisely
 because a partial backup silently loses things a SysOp needs after
 restoring from disk loss. The managed-DNS credential (Decision 2) is
 exactly that kind of durable node state — without it, a restored node
 cannot update, voluntarily release, or benefit from Decision 5's
-same-owner reclaim window for its existing registration. When this
-feature is implemented, its credential file joins §13.4's backup
-manifest as a thirteenth artifact, following the same plain-file-copy
-handling already used for node identity and the SSH host key; §13.4
-itself is not amended now, since the artifact does not exist yet.
+same-owner reclaim window for its existing registration. Its credential
+file (`netbbs.managed_dns.credential`) joined §13.4's backup manifest as
+its thirteenth artifact, the same plain-file-copy handling already used
+for node identity and the SSH host key — see §13.4's own table.
 
-**Still open, implementation-time detail, not blocking this decision:**
-which DNS provider(s) the managed path actually runs on and what that
-costs to operate; Decision 3's exact minimum-age qualifying period,
-service-wide registration-rate-limit threshold, review-queue capacity,
-and cumulative active-registration ceiling; and Decision 5's exact
-cooldown length (settled in principle at "on the order of 90 days," not
-pinned to an exact number here). Nothing structural remains open in
-this entry — Decision 3 was revised three times: a bare node-count cap
-(found insufficient, Codex review on PR #221), then a minimum-age gate
-alone (found insufficient too, a further Codex review on PR #223 — the
-gate costs an attacker wall-clock time but not per-identity effort, so
-parallel Sybil registration still gets through once the gate's period
-elapses), then a rate limit with human review layered on top of the
-age-gate (still not itself a total ceiling — a further Codex review on
-PR #225 pointed out both that the review queue itself needed a bound,
-and that a rate limit alone caps *speed*, not *count*), landing on the
-age-gate plus rate limit plus a bounded review queue plus a cumulative
-active-registration ceiling together. Decision 5 was revised twice on
-the same review round, first to permanent retirement, then deliberately
-reverted back to a bounded cooldown (Thiesi's own follow-up) after
-weighing it against how domain registries and telecom carriers actually
-handle identifier reassignment — both accept exactly this residual risk
-with a grace period, never "reassign nothing, ever," and permanent
-retirement was a stricter bar than that comparison justified, at a
-real, unbounded ongoing cost this entry doesn't need to pay. The
-cooldown here is already deliberately more generous than commercial
-practice requires.
+**Implemented.** Node-side client (`src/netbbs/managed_dns/`, shipped
+inside the installable `netbbs` package: opt-in prompt, credential
+storage, the periodic heartbeat/updater task, the SysOp status/register/
+release admin screen) and the managed-service backend
+(`services/managed_dns/`, a separate deployable the project itself
+operates, never packaged into a node install, the same relationship the
+already-live netbbs.org website has to its own separate deployment) —
+including a real `Rfc2136DnsProvider` (TSIG-signed RFC 2136 dynamic
+updates against a self-hosted BIND server, this project's own
+infrastructure choice, not a commercial DNS API) behind the same
+`DnsProvider` interface a `LoggingDnsProvider` satisfies for every
+automated test. Decision 3's originally-locked review queue was dropped
+during implementation planning (see that decision's own closing
+paragraph above) in favor of a simpler, symmetric hard-reject shape for
+both the rate limit and the cumulative cap. Shipped implementation-time
+parameters, all constructor-injectable and reasoned defaults rather than
+values this design doc fixes: a 24-hour minimum-age qualifying period
+(Decision 3), a 5-per-minute-refilling, 5-capacity service-wide
+registration rate limit (Decision 3), a cumulative cap of 1000 active
+registrations (Decision 3), a 7-day no-contact abandonment threshold
+before a registration is swept as abandoned, and a 90-day cooldown
+shared by both voluntary release and abandonment (Decision 5, "on the
+order of 90 days" as locked in above). Actually standing the backend up
+— a host, DNS delegation, a real BIND server's `allow-update` ACL and
+matching TSIG key — is an operational step the code does not perform on
+its own; see `services/managed_dns/README.md`.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

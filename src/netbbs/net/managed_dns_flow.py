@@ -135,6 +135,32 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
             return
         raw_name = previous_name
 
+    # Design doc §16 Decision 6: Telnet/SSH are always assumed to sit on
+    # their standard ports as part of the caller-facing promise; web is
+    # the one exception, since a bare A/AAAA record can't itself say
+    # which port/transport a caller should use, and this node's own web
+    # listener has no TLS of its own (nodeconfig's own docstring) -- it
+    # only means something as part of that promise behind a real
+    # HTTPS-terminating reverse proxy on 443. This is purely informational:
+    # neither this node nor the managed service can verify a reverse
+    # proxy's existence, so a "no" here changes nothing about what gets
+    # sent, only sets the SysOp's own expectations up front.
+    web_behind_proxy = await prompt_yes_no(
+        session,
+        f"If callers should reach this board's web interface at {raw_name}.netbbs.org, "
+        "is it served through an HTTPS-terminating reverse proxy on port 443? "
+        "(Telnet/SSH are always assumed to be on their standard ports.)",
+        default=False,
+    )
+    if not web_behind_proxy:
+        for wrapped in wrap_to_width(
+            "(Noting that -- the managed record still tracks this node's address, "
+            "but a bare web address won't be part of the promise; telling callers "
+            "how to actually reach any web interface stays your own responsibility.)",
+            session.terminal_width, break_long_words=False,
+        ):
+            await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+
     dynamic = await prompt_yes_no(
         session, "Keep this pointed at your node's current address if it changes (dynamic IP)?", default=True
     )

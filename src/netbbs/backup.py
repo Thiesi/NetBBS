@@ -2,22 +2,24 @@
 Node backup and restore (design doc §13.4/§13.10, issue #60's first
 operational slice, hardened by issue #75).
 
-A node's recoverable state is twelve `db_path`-relative artifacts, not
+A node's recoverable state is thirteen `db_path`-relative artifacts, not
 just the database: content blobs (`netbbs.files.storage`), node
 identity (`netbbs.link.node_identity`), the SSH host key
-(`netbbs.net.ssh`), the welcome banner (`netbbs.net.welcome_banner`),
-the main-menu masthead (`netbbs.net.main_menu_banner`, issue #161), the
-logoff banner (`netbbs.net.logoff_banner`, issue #177), the two
-new-account banners (`netbbs.net.new_account_banner_before`/`_after`,
-issue #177), and the three submenu mastheads (`netbbs.net.
-board_list_banner`/`file_area_banner`/`chat_channel_picker_banner`,
-issue #176) all live at derived paths alongside the database, each with
-no independent config field of its own. A backup covering only the
-database silently loses the SSH host key (every client gets a MITM
-warning after restore) and, far more seriously, the Link node identity
--- root-key custody is explicitly "part of ordinary node backup and
-restore" (design doc §4.5), not a separate ceremony. This module treats
-all twelve as one atomic backup operation, never a DB-only one.
+(`netbbs.net.ssh`), the managed-DNS registration credential
+(`netbbs.managed_dns.credential`, design doc §16 Decision 7, issue
+#201), the welcome banner (`netbbs.net.welcome_banner`), the main-menu
+masthead (`netbbs.net.main_menu_banner`, issue #161), the logoff banner
+(`netbbs.net.logoff_banner`, issue #177), the two new-account banners
+(`netbbs.net.new_account_banner_before`/`_after`, issue #177), and the
+three submenu mastheads (`netbbs.net.board_list_banner`/`file_area_
+banner`/`chat_channel_picker_banner`, issue #176) all live at derived
+paths alongside the database, each with no independent config field of
+its own. A backup covering only the database silently loses the SSH
+host key (every client gets a MITM warning after restore) and, far more
+seriously, the Link node identity -- root-key custody is explicitly
+"part of ordinary node backup and restore" (design doc §4.5), not a
+separate ceremony. This module treats all thirteen as one atomic backup
+operation, never a DB-only one.
 
 Deliberately path-based, not `Database`-based: a backup must be safely
 takeable against a live, running node, and opening a second `Database`
@@ -82,6 +84,7 @@ from pathlib import Path
 from netbbs import __version__
 from netbbs.config import get_config, set_config
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
+from netbbs.managed_dns.credential import credential_path_for as _managed_dns_credential_path_for
 from netbbs.operational_history import record_operational_run
 from netbbs.selfupdate import snapshot_database
 from netbbs.storage.database import Database
@@ -244,6 +247,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
 
     for extra_path in (
         _ssh_host_key_path_for(db_path),
+        _managed_dns_credential_path_for(db_path),
         _welcome_banner_path_for(db_path),
         _main_menu_banner_path_for(db_path),
         _logoff_banner_path_for(db_path),

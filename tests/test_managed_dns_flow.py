@@ -132,7 +132,8 @@ def test_offer_opt_in_accept_and_register_succeeds_end_to_end(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            session = FakeSession(["y", "MyBoard", "n"])  # accept, name, decline dynamic tracking
+            # accept, name, decline standard-ports confirmation, decline dynamic tracking
+            session = FakeSession(["y", "MyBoard", "n", "n"])
 
             await offer_managed_dns_opt_in(session, lane)
 
@@ -168,11 +169,11 @@ def test_register_via_prompt_blank_name_defaults_to_the_previous_registration(tm
             lane = DatabaseLane(db.path)
 
             # First registration, then release it.
-            await register_via_prompt(FakeSession(["myboard", "n"]), lane)
+            await register_via_prompt(FakeSession(["myboard", "n", "n"]), lane)
             await release_registration(FakeSession(["y"]), lane)
 
             # Reclaim via a blank name -- must default to "myboard".
-            session = FakeSession(["", "n"])
+            session = FakeSession(["", "n", "n"])
             await register_via_prompt(session, lane)
 
             lane.close()
@@ -205,7 +206,7 @@ def test_register_via_prompt_reclaims_a_matured_registration(tmp_path):
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
 
-            await register_via_prompt(FakeSession(["myboard", "n"]), lane)
+            await register_via_prompt(FakeSession(["myboard", "n", "n"]), lane)
             # min_age_seconds=0 -- a heartbeat matures it immediately.
             import aiohttp
 
@@ -218,7 +219,7 @@ def test_register_via_prompt_reclaims_a_matured_registration(tmp_path):
                 )
             await release_registration(FakeSession(["y"]), lane)
 
-            session = FakeSession(["", "n"])  # blank -- reclaim "myboard"
+            session = FakeSession(["", "n", "n"])  # blank -- reclaim "myboard"
             await register_via_prompt(session, lane)
 
             lane.close()
@@ -257,7 +258,7 @@ def test_release_registration_declining_the_confirmation_does_nothing(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["myboard", "n"]), lane)
+            await register_via_prompt(FakeSession(["myboard", "n", "n"]), lane)
 
             session = FakeSession(["n"])  # decline the release confirmation
             await release_registration(session, lane)
@@ -283,7 +284,7 @@ def test_release_registration_succeeds_end_to_end(tmp_path):
             set_service_url(db, f"http://127.0.0.1:{server.port}")
             set_node_fingerprint(db, "fp-1")
             lane = DatabaseLane(db.path)
-            await register_via_prompt(FakeSession(["myboard", "n"]), lane)
+            await register_via_prompt(FakeSession(["myboard", "n", "n"]), lane)
 
             session = FakeSession(["y"])
             await release_registration(session, lane)
@@ -300,4 +301,60 @@ def test_release_registration_succeeds_end_to_end(tmp_path):
     assert any("Released myboard.netbbs.org" in line for line in session.written)
     # The credential must stay on disk -- it's what a later reclaim presents.
     assert load_credential(credential_path_for(db.path)) is not None
+    db.close()
+
+
+def test_register_via_prompt_declining_standard_ports_shows_a_caveat(tmp_path):
+    """Design doc §16 Decision 6: declining the reverse-proxy question
+    is purely informational -- registration still succeeds, but the
+    SysOp is told plainly that a bare web address won't be part of the
+    promise."""
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            session = FakeSession(["myboard", "n", "n"])  # name, decline proxy, decline dynamic
+
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session = asyncio.run(scenario())
+    assert get_registered_name(db) == "myboard"  # registration still succeeded
+    assert any("won't be part of the promise" in line for line in session.written)
+    db.close()
+
+
+def test_register_via_prompt_accepting_standard_ports_shows_no_caveat(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            session = FakeSession(["myboard", "y", "n"])  # name, confirm proxy, decline dynamic
+
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session = asyncio.run(scenario())
+    assert get_registered_name(db) == "myboard"
+    assert not any("won't be part of the promise" in line for line in session.written)
     db.close()

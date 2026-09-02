@@ -1,7 +1,7 @@
 """
 Tests for netbbs.backup (design doc §13.4, issue #60's first
 operational slice): create_backup/restore_backup capturing and
-restoring all twelve recoverable-state artifacts, the ordering/safety
+restoring all thirteen recoverable-state artifacts, the ordering/safety
 invariants around them, and the `python -m netbbs.backup` CLI.
 """
 
@@ -42,6 +42,10 @@ def _storage_root(db_path):
 
 def _ssh_host_key_path(db_path):
     return db_path.parent / f"{db_path.stem}_ssh_host_key"
+
+
+def _managed_dns_credential_path(db_path):
+    return db_path.parent / f"{db_path.stem}_managed_dns_credential"
 
 
 def _welcome_banner_path(db_path):
@@ -89,7 +93,7 @@ def identity_dir(tmp_path):
 
 
 def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
-    """Populate every one of the twelve backup artifacts with
+    """Populate every one of the thirteen backup artifacts with
     distinguishable content, including the transient `.incoming`
     staging file that must never survive into a backup."""
     blob_path = _storage_root(db_path) / _BLOB_HASH[:2] / _BLOB_HASH
@@ -104,6 +108,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
     identity.save(identity_dir)
 
     _ssh_host_key_path(db_path).write_bytes(b"fake ssh host key")
+    _managed_dns_credential_path(db_path).write_text("fake managed-dns credential")
     _welcome_banner_path(db_path).write_text("fake banner")
     _main_menu_banner_path(db_path).write_text("fake masthead")
     _logoff_banner_path(db_path).write_text("fake logoff banner")
@@ -119,7 +124,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 # -- create_backup --------------------------------------------------------
 
 
-def test_create_backup_captures_all_twelve_artifacts(tmp_path, db_path, identity_dir):
+def test_create_backup_captures_all_thirteen_artifacts(tmp_path, db_path, identity_dir):
     _seed_full_node(db_path, identity_dir)
     destination = tmp_path / "backup1"
 
@@ -130,6 +135,7 @@ def test_create_backup_captures_all_twelve_artifacts(tmp_path, db_path, identity
     assert (destination / "identity" / "root.identity").exists()
     assert (destination / "identity" / "transitions.json").exists()
     assert (destination / f"{db_path.stem}_ssh_host_key").read_bytes() == b"fake ssh host key"
+    assert (destination / f"{db_path.stem}_managed_dns_credential").read_text() == "fake managed-dns credential"
     assert (destination / f"{db_path.stem}_welcome_banner.ans").read_text() == "fake banner"
     assert (destination / f"{db_path.stem}_main_menu_banner.ans").read_text() == "fake masthead"
     assert (destination / f"{db_path.stem}_logoff_banner.ans").read_text() == "fake logoff banner"
@@ -235,7 +241,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     destination = tmp_path / "backup1"
     create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
 
-    # Simulate data loss: wipe every one of the twelve artifacts.
+    # Simulate data loss: wipe every one of the thirteen artifacts.
     conn = sqlite3.connect(str(db_path))
     conn.execute("DELETE FROM node_config")
     conn.commit()
@@ -244,6 +250,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     shutil.rmtree(_storage_root(db_path))
     shutil.rmtree(identity_dir)
     _ssh_host_key_path(db_path).unlink()
+    _managed_dns_credential_path(db_path).unlink()
     _welcome_banner_path(db_path).unlink()
     _main_menu_banner_path(db_path).unlink()
     _logoff_banner_path(db_path).unlink()
@@ -258,6 +265,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     assert (_storage_root(db_path) / _BLOB_HASH[:2] / _BLOB_HASH).read_bytes() == b"blob content"
     assert (identity_dir / "root.identity").exists()
     assert _ssh_host_key_path(db_path).read_bytes() == b"fake ssh host key"
+    assert _managed_dns_credential_path(db_path).read_text() == "fake managed-dns credential"
     assert _welcome_banner_path(db_path).read_text() == "fake banner"
     assert _main_menu_banner_path(db_path).read_text() == "fake masthead"
     assert _logoff_banner_path(db_path).read_text() == "fake logoff banner"
