@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from services.managed_dns.__main__ import (
@@ -11,6 +13,7 @@ from services.managed_dns.__main__ import (
     _env_bool,
     _env_float,
     _env_int,
+    _stop_server_preserving_primary,
 )
 from services.managed_dns.dns_provider import LoggingDnsProvider, Rfc2136DnsProvider
 from services.managed_dns.server import ManagedDnsServer
@@ -99,3 +102,21 @@ def test_build_server_builds_a_real_server_with_defaults(tmp_path, monkeypatch):
         assert server.host == "127.0.0.1"
     finally:
         server._db.close()
+
+
+def test_cleanup_failure_does_not_replace_an_initiating_error():
+    class FailingServer:
+        async def stop(self):
+            raise RuntimeError("cleanup failed")
+
+    primary = ValueError("primary failed")
+    asyncio.run(_stop_server_preserving_primary(FailingServer(), primary))
+
+
+def test_cleanup_failure_surfaces_after_a_normal_exit():
+    class FailingServer:
+        async def stop(self):
+            raise RuntimeError("cleanup failed")
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        asyncio.run(_stop_server_preserving_primary(FailingServer(), None))

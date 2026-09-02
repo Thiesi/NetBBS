@@ -171,12 +171,15 @@ def test_contact_window_migration_preserves_pending_registration_history(tmp_pat
         INSERT INTO registrations
             (name, credential_hash, node_fingerprint, status, dynamic,
              created_at, last_contact_at)
-        VALUES (?, ?, ?, 'pending', 0, ?, ?)
+        VALUES (?, ?, ?, ?, 0, ?, ?)
         """,
         [
-            ("contacted", "hash-1", "fp-1", "2026-09-01T00:00:00+00:00",
+            ("contacted", "hash-1", "fp-1", "pending", "2026-09-01T00:00:00+00:00",
              "2026-09-01T23:00:00+00:00"),
-            ("never-contacted", "hash-2", "fp-2", "2026-09-01T00:00:00+00:00", None),
+            ("never-contacted", "hash-2", "fp-2", "pending",
+             "2026-09-01T00:00:00+00:00", None),
+            ("released-before-maturation", "hash-3", "fp-3", "released",
+             "2026-09-01T00:00:00+00:00", "2026-09-01T23:00:00+00:00"),
         ],
     )
     connection.commit()
@@ -187,6 +190,9 @@ def test_contact_window_migration_preserves_pending_registration_history(tmp_pat
         "2026-09-01T00:00:00+00:00"
     )
     assert get_registration_by_name(db, "never-contacted").contact_started_at is None
+    assert get_registration_by_name(
+        db, "released-before-maturation"
+    ).contact_started_at == "2026-09-01T00:00:00+00:00"
     assert db.connection.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
     db.close()
 

@@ -116,6 +116,7 @@ def _build_server() -> ManagedDnsServer:
 async def _run() -> None:
     server = _build_server()
     await server.start()
+    primary_exception: BaseException | None = None
     try:
         _logger.info("managed-DNS service listening on %s:%d", server.host, server.port)
         shutdown_event = asyncio.Event()
@@ -127,8 +128,22 @@ async def _run() -> None:
                 signal.signal(sig, lambda *_: loop.call_soon_threadsafe(shutdown_event.set))
         await shutdown_event.wait()
         _logger.info("shutting down")
+    except BaseException as exc:
+        primary_exception = exc
+        raise
     finally:
+        await _stop_server_preserving_primary(server, primary_exception)
+
+
+async def _stop_server_preserving_primary(
+    server: ManagedDnsServer, primary_exception: BaseException | None
+) -> None:
+    try:
         await asyncio.shield(server.stop())
+    except BaseException:
+        if primary_exception is None:
+            raise
+        _logger.exception("managed-DNS cleanup failed while handling an earlier error")
 
 
 def main() -> None:

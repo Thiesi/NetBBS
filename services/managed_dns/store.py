@@ -79,7 +79,8 @@ MIGRATIONS = [
         -- which never heartbeated remains NULL and starts on first contact.
         UPDATE registrations
         SET contact_started_at = created_at
-        WHERE status = 'pending' AND last_contact_at IS NOT NULL;
+        WHERE (status = 'pending' OR (status = 'released' AND matured_at IS NULL))
+          AND last_contact_at IS NOT NULL;
         """,
     ),
     Migration(
