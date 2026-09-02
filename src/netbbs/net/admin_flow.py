@@ -1777,7 +1777,7 @@ async def _trust_menu(session: Session, lane: DatabaseLane, actor: User) -> None
         await session.write_line(
             "\r\n"
             + screen_title(
-                "Trust policy",
+                "Policy trust",
                 breadcrumb=(session.node_display_name, "System"),
                 subtitle="Inspect policy, explain restrictions, and manage trusted authorities.",
                 width=session.terminal_width,
@@ -3821,7 +3821,7 @@ async def _draw_managed_dns_status(
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
 
     action_key = (
-        menu_key("L", " Release") if status in _MANAGED_DNS_ACTIVE_STATUSES else menu_key("R", "egister")
+        menu_key("l", "lease", prefix="Re") if status in _MANAGED_DNS_ACTIVE_STATUSES else menu_key("R", "egister")
     )
     await session.write_line(f"\r\n{action_key}    {menu_key('B', 'ack')}")
     return status
