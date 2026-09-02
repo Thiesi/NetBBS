@@ -34,7 +34,7 @@ from netbbs.managed_dns.state import (
 )
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session
-from netbbs.rendering import MUTED_COLOR, colored
+from netbbs.rendering import MUTED_COLOR, colored, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
 _OPT_IN_BLURB = (
@@ -62,7 +62,16 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
     if await lane.run(get_opt_in) is not OptIn.UNDECIDED:
         return
 
-    await session.write_line(f"\r\n{colored(_OPT_IN_BLURB, fg_color=MUTED_COLOR)}\r\n")
+    # Word-wrapped to the real terminal width before coloring, one
+    # physical line at a time -- coloring the whole blurb as one string
+    # and relying on the terminal's own soft-wrap runs past the right
+    # edge unpredictably on anything narrower than the text itself (the
+    # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
+    # docstring documents fixing for screen subtitles).
+    await session.write_line("")
+    for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
+        await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
+    await session.write_line("")
     accepted = await prompt_yes_no(
         session, "Enable managed netbbs.org subdomain hosting for this node?", default=False
     )

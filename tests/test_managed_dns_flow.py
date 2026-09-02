@@ -45,6 +45,37 @@ def test_offer_opt_in_is_a_no_op_once_already_decided(tmp_path):
     db.close()
 
 
+def test_offer_opt_in_blurb_is_word_wrapped_to_the_terminal_width(tmp_path):
+    """Dogfood report: the opt-in blurb shown at first-SysOp login/
+    bootstrap relied on the terminal's own soft-wrap instead of being
+    wrapped before coloring, the same bug netbbs.net.admin_flow.
+    _write_wrapped_subtitle's own docstring already documents fixing
+    for screen subtitles elsewhere -- a colored ANSI string can run
+    visibly past the right edge on a narrow terminal. Every blurb line
+    must fit within the (narrow, to make the effect unmissable)
+    terminal width, and the sentence must span more than one physical
+    line -- not just the Y/N confirmation line that follows it, which
+    is a single short question and is never wrapped."""
+    from netbbs.rendering import visible_width
+
+    db = Database(tmp_path / "node.db")
+    lane = DatabaseLane(db.path)
+    session = FakeSession(["n"])
+    session.terminal_width = 40
+
+    asyncio.run(offer_managed_dns_opt_in(session, lane))
+
+    blurb_lines = [
+        line for line in session.written
+        if ("netbbs.org" in line or "SysOp menu" in line) and "Enable managed" not in line
+    ]
+    assert len(blurb_lines) > 1  # split across several write_line calls, not one long one
+    for line in blurb_lines:
+        assert visible_width(line) <= session.terminal_width
+    lane.close()
+    db.close()
+
+
 def test_offer_opt_in_declining_records_declined_and_asks_nothing_more(tmp_path):
     db = Database(tmp_path / "node.db")
     lane = DatabaseLane(db.path)
