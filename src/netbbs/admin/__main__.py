@@ -46,6 +46,7 @@ from netbbs.auth.users import SYSOP_LEVEL, User, create_user, list_users
 from netbbs.identity.keys import IdentityError, parse_verify_key
 from netbbs.moderation.log import record_action
 from netbbs.net.admin_flow import admin_menu
+from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in
 from netbbs.net.local_cli import LocalCLISession
 from netbbs.net.local_terminal import raw_terminal
 from netbbs.net.node_theme import effective_accent_color_256
@@ -138,6 +139,13 @@ async def _bootstrap_first_sysop(session: Session, lane: DatabaseLane) -> User:
 
     user = await lane.run(_create)
     await session.write_line(f"\r\nCreated SysOp account {user.username!r}.\r\n")
+    # Design doc §16 Decision 1 (issue #201): anchored here (the
+    # earliest interactive surface a fresh node has) rather than a
+    # literal "first daemon run" prompt -- a supported persistent
+    # deployment bootstraps its first SysOp non-interactively via
+    # netbbs.admin and then runs headlessly under systemd/rc.d, with no
+    # interactive channel left by the time the daemon itself starts.
+    await offer_managed_dns_opt_in(session, lane)
     return user
 
 

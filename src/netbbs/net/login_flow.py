@@ -45,6 +45,7 @@ from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
 from netbbs.net.main_menu import _main_menu
+from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
@@ -617,6 +618,18 @@ async def run_authenticated_session(
                 fg_color=ALERT_COLOR, bold=True,
             )
         )
+
+    # Design doc §16 Decision 1 (issue #201): the fallback anchor for
+    # the managed-DNS opt-in prompt, for a SysOp created by a path that
+    # bypassed netbbs.admin's own interactive bootstrap prompt (e.g. a
+    # scripted provisioning call straight into create_user). Gated on
+    # `lane is not None`, matching every other lane-dependent feature in
+    # this function's own established degrade-gracefully-in-tests
+    # convention -- `offer_managed_dns_opt_in` is itself a no-op once
+    # any SysOp has already answered it, so this costs nothing on every
+    # subsequent login.
+    if lane is not None and meets_level(user, SYSOP_LEVEL):
+        await offer_managed_dns_opt_in(session, lane)
 
     # One InputHistory per connection (design doc),
     # not node-wide like hub/presence/mailbox -- constructed here rather

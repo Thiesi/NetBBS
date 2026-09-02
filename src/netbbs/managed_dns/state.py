@@ -56,6 +56,8 @@ NAME_CONFIG_KEY = "managed_dns_name"
 STATUS_CONFIG_KEY = "managed_dns_status"
 LAST_CONTACT_AT_CONFIG_KEY = "managed_dns_last_contact_at"
 DYNAMIC_CONFIG_KEY = "managed_dns_dynamic"
+NODE_FINGERPRINT_CONFIG_KEY = "managed_dns_node_fingerprint"
+SERVICE_URL_CONFIG_KEY = "managed_dns_service_url"
 
 
 def get_opt_in(db: Database) -> OptIn:
@@ -65,6 +67,52 @@ def get_opt_in(db: Database) -> OptIn:
 
 def set_opt_in(db: Database, decision: OptIn) -> None:
     set_config(db, OPT_IN_CONFIG_KEY, decision.value)
+
+
+def get_node_fingerprint(db: Database) -> str | None:
+    """This node's own `NodeIdentity.fingerprint` (design doc §16
+    Decision 3's `node_fingerprint`, the value the managed service's
+    one-name-per-node cap keys on) -- a cached copy, not the source of
+    truth. `NodeIdentity` itself is always loaded/bootstrapped at node
+    startup regardless of whether Link is enabled (see `netbbs.
+    __main__.run`'s own comment on that), but its fingerprint isn't
+    otherwise reachable from `netbbs.net.login_flow`/`netbbs.admin`
+    without threading a new parameter through `handle_session`/
+    `handle_ssh_session`/`run_authenticated_session` purely for this
+    one Link-independent feature -- `netbbs.__main__.run` writes this
+    cache once, synchronously, right where it already loads the real
+    `NodeIdentity`, the same place `load_link_node`'s own direct-`db`
+    write already happens at that point in startup. Safe to cache:
+    the root key this is derived from doesn't rotate (only the
+    *operational* signing/transport keys do), so this can't silently go
+    stale across a node's lifetime the way a mutable setting could.
+    `None` only ever means "this node hasn't started up since this
+    feature was added yet" -- self-healing on the very next startup."""
+    return get_config(db, NODE_FINGERPRINT_CONFIG_KEY)
+
+
+def set_node_fingerprint(db: Database, fingerprint: str) -> None:
+    set_config(db, NODE_FINGERPRINT_CONFIG_KEY, fingerprint)
+
+
+def get_service_url(db: Database) -> str | None:
+    """The managed-DNS service's own base URL (e.g.
+    `"https://managed.netbbs.org"`) -- `None` until an operator
+    configures it. Deliberately not a hardcoded default: this project
+    runs one instance of `services.managed_dns`, but its real production
+    address is an operational decision independent of this client code,
+    the same "which DNS provider... is implementation-time detail, not
+    blocking" reasoning design doc §16 already applies to the DNS
+    provider choice itself. `set_service_url` stores `None` as `""`
+    (same "empty string means None" convention as `set_registered_
+    name`), so this translates it back rather than ever returning an
+    empty string a caller never actually set."""
+    value = get_config(db, SERVICE_URL_CONFIG_KEY)
+    return value or None
+
+
+def set_service_url(db: Database, url: str | None) -> None:
+    set_config(db, SERVICE_URL_CONFIG_KEY, url or "")
 
 
 def get_registered_name(db: Database) -> str | None:

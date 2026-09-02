@@ -7,14 +7,18 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_dynamic,
     get_last_contact_at,
+    get_node_fingerprint,
     get_opt_in,
     get_registered_name,
     get_registration_status,
+    get_service_url,
     set_dynamic,
     set_last_contact_at,
+    set_node_fingerprint,
     set_opt_in,
     set_registered_name,
     set_registration_status,
+    set_service_url,
 )
 from netbbs.storage.database import Database
 
@@ -98,4 +102,38 @@ def test_dynamic_roundtrip(tmp_path):
     assert get_dynamic(db) is True
     set_dynamic(db, False)
     assert get_dynamic(db) is False
+    db.close()
+
+
+def test_node_fingerprint_defaults_to_none(tmp_path):
+    db = Database(tmp_path / "node.db")
+    assert get_node_fingerprint(db) is None
+    db.close()
+
+
+def test_node_fingerprint_roundtrip(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_node_fingerprint(db, "abc123fingerprint")
+    assert get_node_fingerprint(db) == "abc123fingerprint"
+    db.close()
+
+
+def test_service_url_defaults_to_none(tmp_path):
+    db = Database(tmp_path / "node.db")
+    assert get_service_url(db) is None
+    db.close()
+
+
+def test_service_url_roundtrip(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "https://managed.netbbs.org")
+    assert get_service_url(db) == "https://managed.netbbs.org"
+    db.close()
+
+
+def test_service_url_can_be_cleared_back_to_none(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "https://managed.netbbs.org")
+    set_service_url(db, None)
+    assert get_service_url(db) is None
     db.close()

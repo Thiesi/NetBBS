@@ -28,14 +28,18 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_dynamic,
     get_last_contact_at,
+    get_node_fingerprint,
     get_opt_in,
     get_registered_name,
     get_registration_status,
+    get_service_url,
     set_dynamic,
     set_last_contact_at,
+    set_node_fingerprint,
     set_opt_in,
     set_registered_name,
     set_registration_status,
+    set_service_url,
 )
 
 __all__ = [
@@ -55,4 +59,8 @@ __all__ = [
     "set_last_contact_at",
     "get_dynamic",
     "set_dynamic",
+    "get_node_fingerprint",
+    "set_node_fingerprint",
+    "get_service_url",
+    "set_service_url",
 ]

@@ -76,6 +76,14 @@ from netbbs.auth.users import (
     set_user_level,
 )
 from netbbs.backup import get_last_backup_summary
+from netbbs.managed_dns.state import (
+    OptIn as ManagedDnsOptIn,
+    RegistrationStatus as ManagedDnsRegistrationStatus,
+    get_last_contact_at as get_managed_dns_last_contact_at,
+    get_opt_in as get_managed_dns_opt_in,
+    get_registered_name as get_managed_dns_registered_name,
+    get_registration_status as get_managed_dns_registration_status,
+)
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
@@ -708,6 +716,11 @@ async def admin_menu(
             await _backup_status_screen(session, lane, user)
             await _draw_admin_menu(session, lane, user, node_controls=node_controls,
                                    link_context=link_context, state=dashboard_state)
+        elif choice == "d":
+            await session.write_line("")
+            await _managed_dns_status_screen(session, lane, user)
+            await _draw_admin_menu(session, lane, user, node_controls=node_controls,
+                                   link_context=link_context, state=dashboard_state)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -919,7 +932,10 @@ async def _draw_admin_menu(
         MenuEntry(label=menu_key("R", "efresh"), brief="Redraw with current numbers"),
         MenuEntry(label=menu_key("B", "ack"), brief="Return to the main menu"),
     ]
-    quick = [MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Last backup status and history")]
+    quick = [
+        MenuEntry(label=menu_key("K", "up", prefix="Bac"), brief="Last backup status and history"),
+        MenuEntry(label=menu_key("D", "NS"), brief="Managed netbbs.org subdomain status"),
+    ]
     if node_controls is not None:
         quick.insert(
             0,
@@ -3727,6 +3743,81 @@ async def _backup_status_screen(session: Session, lane: DatabaseLane, actor: Use
     # reading as "the hotkey did nothing." Matches the "Press any key to
     # continue..." + read_any_key() convention every other such screen
     # in this module already uses.
+    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+    await session.read_any_key()
+
+
+async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Read-only visibility into this node's managed netbbs.org subdomain
+    registration (design doc §16, issue #201) -- Phase 2's own scoped
+    deliverable: shows whatever `netbbs.net.managed_dns_flow.offer_
+    managed_dns_opt_in`'s own inline registration already set. Register/
+    Release actions land here in a later phase (same "read-only status
+    first, interactive actions once release/reclaim exist to make Release
+    meaningful" sequencing `_backup_status_screen` doesn't need, since
+    that screen was never going to grow actions at all).
+    """
+    opt_in = await lane.run(get_managed_dns_opt_in)
+    name = await lane.run(get_managed_dns_registered_name)
+    status = await lane.run(get_managed_dns_registration_status)
+    last_contact_at = await lane.run(get_managed_dns_last_contact_at)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+
+    await session.write_line(
+        "\r\n"
+        + screen_title(
+            "Managed DNS",
+            breadcrumb=(session.node_display_name, "System"),
+            subtitle="This node's netbbs.org subdomain registration, if any.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color,
+        node_name_gradient=session.node_name_gradient)
+    )
+
+    if opt_in is ManagedDnsOptIn.UNDECIDED:
+        await session.write_line(
+            empty_state(
+                "Not yet decided",
+                detail="This node hasn't been asked (or hasn't answered) the managed-DNS opt-in prompt yet.",
+                width=session.terminal_width,
+                header_color=header_color,
+            )
+        )
+    elif name is None:
+        await session.write_line(
+            empty_state(
+                "Declined" if opt_in is ManagedDnsOptIn.DECLINED else "No registration",
+                detail="This node has no active managed-DNS registration.",
+                width=session.terminal_width,
+                header_color=header_color,
+            )
+        )
+    else:
+        tone = "success" if status is ManagedDnsRegistrationStatus.MATURED else "neutral"
+        badge_text = {
+            ManagedDnsRegistrationStatus.PENDING: "PENDING",
+            ManagedDnsRegistrationStatus.MATURED: "LIVE",
+            ManagedDnsRegistrationStatus.RELEASED: "RELEASED",
+            ManagedDnsRegistrationStatus.ABANDONED: "ABANDONED",
+            ManagedDnsRegistrationStatus.NONE: "NONE",
+        }[status]
+        await session.write_line(status_badge(badge_text, tone=tone, unicode_style=unicode_style))
+        await session.write_line(
+            colored("Name: ", fg_color=LABEL_COLOR) + colored(f"{name}.netbbs.org", fg_color=METADATA_COLOR)
+        )
+        if last_contact_at is not None:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            when = format_for_display(
+                last_contact_at, override_format=display_format, override_timezone=display_timezone
+            )
+            await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
+
     await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
     await session.read_any_key()
 
