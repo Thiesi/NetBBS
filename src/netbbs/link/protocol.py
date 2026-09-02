@@ -160,10 +160,14 @@ _MAX_SEEN_INVENTORY_REQUEST_NONCES = 4096
 _TRUST_PULL_FRESHNESS_SECONDS = 5 * 60
 _MAX_SEEN_TRUST_PULL_NONCES = 4096
 
-# Version 2 adds request-correlated, identity-bearing scrollback snapshots.
-# Version 1 peers cannot safely interpret those frames, so mixed versions
-# fail at the frame-version boundary rather than accumulating protocol strikes
-# for payloads both sides believe belong to the same version.
+# Version 2 changes the scrollback-snapshot contract. Version 1 already
+# carried `request_id` and separate author node/user identity fields; the
+# incompatible v2 changes are that authored display labels are reconstructed
+# from those attested identity fields instead of trusting `author_label`, and
+# moderation target rows carry null author identity as authorless system
+# events. Version 1 peers would misinterpret those rows, so mixed versions
+# fail at the version boundary rather than accumulating protocol strikes for
+# payloads both sides believe belong to the same version.
 REALTIME_PROTOCOL_VERSION = 2
 _REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
