@@ -2281,6 +2281,92 @@ one deliberately-left-behind trace of an in-progress restore, and a
 subsequent restore attempt refuses to start a second one over it rather
 than compounding the mess.
 
+### Managed netbbs.org subdomain + dynamic DNS is two independently-deployed components, not one (issue #201)
+
+Design doc §16 locks seven decisions; `services/managed_dns/` (the
+project-operated backend, one instance for all of netbbs.org) and
+`src/netbbs/managed_dns/` (the node-side client every opted-in SysOp's
+own BBS runs) are genuinely separate deployables that happen to share
+this repo, the same way the already-live netbbs.org website is deployed
+independently of any node install. `services/` sits outside `src/`
+specifically so `pyproject.toml`'s `[tool.setuptools.packages.find]`
+scoping (see the `examples/` entry just below) never packages it into a
+node's own install — a SysOp who opts in talks to the backend over
+HTTP, never imports it.
+
+- **The bearer credential is not the node's Ed25519 key, and the server
+  never stores it in recoverable form.** `POST /register` mints a
+  separate per-registration secret server-side, returns it once, and
+  persists only `hash_credential()` (SHA-256) thereafter. Every
+  subsequent `/heartbeat` or `/release` call presents the raw secret;
+  the server re-hashes and compares. This keeps a managed-DNS backend
+  compromise from ever exposing anything that could impersonate a
+  node's actual Link identity.
+- **Reclaim reuses `/register` rather than adding a fourth endpoint.**
+  Presenting the credential of a still-in-cooldown `released` or
+  `abandoned` row (Decision 5's shared ~90-day cooldown, both exit
+  paths) reactivates that exact row — `created_at`/`matured_at` history
+  preserved, skipping straight back to `matured` with an immediate
+  republish if it had matured before. Reclaim deliberately bypasses
+  both abuse controls below: it isn't a new registration competing for
+  capacity, it's the same registrant coming back.
+- **The originally-locked human-review queue for over-cap registrations
+  was dropped during implementation planning, not built.** Both the
+  service-wide rate limiter and the cumulative active-registration cap
+  now hard-reject immediately once exceeded, symmetric with each other.
+  The reasoning (recorded in full in design doc §16 Decision 3): once a
+  request would have landed in a queue at all, the realistic resolution
+  is identical either way — the maintainer hears the SysOp's own
+  out-of-band explanation and decides by hand — so a capacity-bounded
+  queue would have added real code and a genuine single point of
+  (human) failure without actually simplifying that manual conversation.
+  Don't resurrect a review-queue table for this service without
+  re-reading that decision first.
+- **The rate limiter is a small standalone token bucket, not an import
+  of `netbbs.net.throttle`'s private `_TokenBucket`.** Reaching across
+  the `services/`↔`src/netbbs/` package boundary to grab a private
+  symbol would couple two independently-deployed components through an
+  implementation detail neither one exports; re-implementing the same
+  small primitive locally (`services/managed_dns/server.py`'s
+  `GlobalRateLimiter`) is worth the few duplicated lines.
+- **A `pending` registration does not resolve.** Only `/heartbeat`
+  transitions `pending → matured` (Decision 3's age gate,
+  `min_age_seconds` of heartbeat contact) and calls
+  `DnsProvider.upsert_record` for the first time; `/register` itself
+  never publishes anything, no matter how the request was decided.
+- **The service sits behind its own reverse proxy for TLS, so
+  `request.remote` is the proxy's address, not the caller's.**
+  Dynamic-address change detection compares against a trusted
+  `X-Forwarded-For` chain instead
+  (`ManagedDnsServer(..., trust_x_forwarded_for=...)`), off by default —
+  turning it on without an actual trusted proxy in front lets any
+  caller spoof its own source address into the DNS record.
+- **`Rfc2136DnsProvider` is real BIND integration (`dnspython`,
+  RFC 2136 dynamic updates, TSIG-signed) and is backend-only** —
+  `dnspython` is a `services/managed_dns/` dependency, never added to
+  the installable `netbbs` package's own dependency list. The zone's
+  `named.conf` needs an `allow-update` policy scoped to this TSIG key;
+  that server-side BIND configuration is the operator's own step (see
+  `services/managed_dns/README.md`), not something any code here
+  performs. `LoggingDnsProvider` (in-memory, records intended
+  mutations) is the default until TSIG env vars are actually set, and
+  is what every automated test uses — no test talks to a real BIND
+  server.
+- **The credential is the backup manifest's 13th artifact**, via the
+  same `credential_path_for(db_path)` derived-path formula every other
+  plain-file artifact already uses (see `Backup and restore` above) —
+  needed no new path-helper shape in `netbbs.backup`, just an import
+  and one `extra_path` tuple entry.
+- **Standard-ports confirmation (Decision 6) is purely informational,
+  never server-enforced.** The admin screen and the opt-in prompt both
+  ask whether the web listener sits behind an HTTPS-terminating reverse
+  proxy on 443 before registering; a "no" still registers the record
+  (useful for the Telnet/SSH dynamic-IP-tracking half alone) but shows
+  a caveat that no bare web address is implied. This can't be verified
+  remotely — the service has no way to confirm a proxy actually exists
+  in front of a given node — so don't add a server-side check that
+  pretends otherwise.
+
 ### `examples/` is not installed package data (issue #169)
 
 `pyproject.toml`'s `[tool.setuptools.packages.find]` is scoped to

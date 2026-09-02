@@ -210,6 +210,10 @@ class ManagedDnsServer:
         self._sweep_task: asyncio.Task | None = None
 
     @property
+    def host(self) -> str:
+        return self._host
+
+    @property
     def port(self) -> int:
         if self._site is None:
             raise RuntimeError("server has not been started yet")
