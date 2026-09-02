@@ -59,6 +59,21 @@ from netbbs.link.protocol import (
 from tests.link_harness import FakeClock, ScriptedTransport, spawn_node
 
 
+def _snapshot_entry(**overrides):
+    entry = {
+        "kind": "message",
+        "author_label": "Alice@origin",
+        "author_node_fingerprint": "origin",
+        "author_user_id": "Alice",
+        "content_id": None,
+        "body": "hi",
+        "body_truncated": False,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    entry.update(overrides)
+    return entry
+
+
 @pytest.mark.parametrize("frame_type", sorted(REALTIME_FRAME_TYPES))
 def test_realtime_frame_round_trips_every_message_type(frame_type):
     frame = RealtimeFrame(type=frame_type, message_id="message_1", payload={"nested": [True, None, 7]})
@@ -131,8 +146,7 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
         build_node_presence_delta_frame("join", "u1", "Alice"),
         build_channel_message_frame("channel-1", "u1", "Alice", "hello", "2026-01-01T00:00:00+00:00"),
         build_scrollback_snapshot_frame(
-            "channel-1",
-            [{"kind": "message", "author_label": "Alice", "body": "hi", "created_at": "2026-01-01T00:00:00+00:00"}],
+            "channel-1", "request-1", [_snapshot_entry()],
         ),
         build_ping_frame(),
         build_pong_frame(),
@@ -243,35 +257,57 @@ def test_realtime_frame_payload_validator_rejects_malformed_typed_payloads(frame
         validate_realtime_frame_payload(frame)
 
 
-def test_scrollback_snapshot_allows_a_daybreak_entry_with_no_author_or_body():
+def test_scrollback_snapshot_allows_a_daybreak_entry_with_no_author():
     """Issue #194: a "daybreak" event (design doc) has no author at all
-    -- unlike every other kind, its entry's author_label carries no
-    real meaning, and body is None the same as "join"/"leave"."""
+    -- unlike every other kind, its entry's author identity carries no
+    real meaning, while its announcement body is required."""
     frame = build_scrollback_snapshot_frame(
-        "channel-1",
-        [{"kind": "daybreak", "author_label": "", "body": None, "created_at": "2026-01-01T00:00:00+00:00"}],
+        "channel-1", "request-1",
+        [_snapshot_entry(
+            kind="daybreak", author_label="", author_node_fingerprint=None,
+            author_user_id=None, body="A new day begins.",
+        )],
     )
     validate_realtime_frame_payload(frame)  # must not raise
     assert RealtimeFrame.from_json_bytes(frame.to_json_bytes()) == frame
 
 
-def test_scrollback_snapshot_worst_case_entries_stay_under_the_frame_size_limit():
-    """The bound choices in protocol.py (entry count and per-entry body
-    size) exist specifically so a full, maximally-sized snapshot never
-    hits to_json_bytes' own 16 KiB ceiling -- proven directly here rather
-    than only trusted as arithmetic, since realtime_channels.py's send
-    side must never raise when building one of these."""
+def test_scrollback_snapshot_builder_rejects_complete_encoded_frame_over_the_limit():
+    """Per-field bounds do not hide JSON escaping overhead. The builder
+    validates the complete wire frame before it can enter a writer queue."""
     entries = [
-        {
-            "kind": "message",
-            "author_label": "a" * 256,
-            "body": "b" * 400,
-            "created_at": "2026-01-01T00:00:00.123456+00:00",
-        }
+        _snapshot_entry(author_label='"' * 256, body='"' * 400)
         for _ in range(20)
     ]
-    frame = build_scrollback_snapshot_frame("c" * 128, entries)
-    assert len(frame.to_json_bytes()) < 16 * 1024
+    with pytest.raises(LinkProtocolError, match="16 KiB"):
+        build_scrollback_snapshot_frame("c" * 128, "request-1", entries)
+
+
+@pytest.mark.parametrize("kind", [[], {}])
+def test_scrollback_snapshot_rejects_unhashable_event_kinds_as_protocol_errors(kind):
+    frame = RealtimeFrame(
+        type="scrollback_snapshot", message_id="m1",
+        payload={"channel_id": "c1", "request_id": "request-1", "entries": [_snapshot_entry(kind=kind)]},
+    )
+    with pytest.raises(LinkProtocolError, match="recognized scrollback event kind"):
+        validate_realtime_frame_payload(frame)
+
+
+@pytest.mark.parametrize("kind", ["message", "action", "nick", "daybreak"])
+def test_scrollback_snapshot_requires_bodies_for_body_bearing_events(kind):
+    author_fields = (
+        {"author_label": "", "author_node_fingerprint": None, "author_user_id": None}
+        if kind == "daybreak" else {}
+    )
+    frame = RealtimeFrame(
+        type="scrollback_snapshot", message_id="m1",
+        payload={
+            "channel_id": "c1", "request_id": "request-1",
+            "entries": [_snapshot_entry(kind=kind, body=None, **author_fields)],
+        },
+    )
+    with pytest.raises(LinkProtocolError, match="body is required"):
+        validate_realtime_frame_payload(frame)
 
 
 def test_realtime_replay_window_detects_duplicates_and_evicts_oldest_once_full():

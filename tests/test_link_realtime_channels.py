@@ -10,14 +10,27 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from netbbs.auth.users import create_user
 from netbbs.chat.channels import create_channel
 from netbbs.chat.hub import ChatHub, ParticipantId
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import record_message
-from netbbs.link.channels import link_channel, materialize_carried_channel
+from netbbs.link.channels import (
+    link_channel,
+    materialize_carried_channel,
+    queue_channel_message_if_linked,
+)
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.link.protocol import LinkNode, RealtimeFrame, build_error_frame, build_subscribe_frame
+from netbbs.link.protocol import (
+    LinkNode,
+    LinkProtocolError,
+    RealtimeFrame,
+    build_error_frame,
+    build_scrollback_snapshot_frame,
+    build_subscribe_frame,
+)
 from netbbs.link.realtime_channels import (
     LiveChannelBridge,
     _MAX_SCROLLBACK_SNAPSHOT_ENTRIES,
@@ -122,12 +135,13 @@ def test_ensure_live_subscription_dials_the_origin_and_registers_the_subscriptio
             )
             subscriber.link_node.handle_hello(origin_hello)
 
-            session = await ensure_live_subscription(
+            result = await ensure_live_subscription(
                 channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
                 lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
             )
 
-            assert session is not None
+            assert result is not None
+            session, _request_id = result
             assert subscriber.registry.get(origin.identity.fingerprint) is session
             assert await _wait_until(lambda: origin_channel.channel_id in origin.bridge._subscribers)
         finally:
@@ -604,11 +618,12 @@ def test_remote_node_presence_is_populated_from_the_origins_initial_snapshot(tmp
             )
             subscriber.link_node.handle_hello(origin_hello)
 
-            session = await ensure_live_subscription(
+            result = await ensure_live_subscription(
                 channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
                 lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
             )
-            assert session is not None
+            assert result is not None
+            session, _request_id = result
 
             assert await _wait_until(
                 lambda: origin.identity.fingerprint in subscriber.bridge.remote_node_presence()
@@ -675,11 +690,12 @@ def test_remote_channel_presence_is_populated_from_the_origins_initial_snapshot(
             )
             subscriber.link_node.handle_hello(origin_hello)
 
-            session = await ensure_live_subscription(
+            result = await ensure_live_subscription(
                 channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
                 lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
             )
-            assert session is not None
+            assert result is not None
+            session, _request_id = result
 
             assert await _wait_until(
                 lambda: subscriber.bridge.remote_channel_presence(subscriber_channel.channel_id) == {"dave": "dave"}
@@ -720,23 +736,140 @@ def test_remote_channel_presence_is_populated_from_the_origins_initial_snapshot(
 # -- scrollback-on-join (issue #194) ------------------------------------
 
 
+def _snapshot_entry(*, author_node: str, author_user: str = "alice", body: str = "hello") -> dict:
+    return {
+        "kind": "message",
+        "author_label": f"{author_user}@{author_node}",
+        "author_node_fingerprint": author_node,
+        "author_user_id": author_user,
+        "content_id": None,
+        "body": body,
+        "body_truncated": False,
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+class _SnapshotSession:
+    def __init__(self, remote_fingerprint: str) -> None:
+        self.remote_fingerprint = remote_fingerprint
+
+
+def test_scrollback_snapshot_rejects_a_trusted_non_origin_sender(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-only-source")
+        subscriber = _Node(tmp_path, "subscriber-only-source")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="origin-bound")
+        attacker = bootstrap_node_identity("trusted-non-origin")
+        _establish_trust(subscriber.db, attacker.fingerprint)
+        request_id = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, attacker.fingerprint
+        )
+        frame = build_scrollback_snapshot_frame(
+            subscriber_channel.channel_id, request_id,
+            [_snapshot_entry(author_node=attacker.fingerprint)],
+        )
+        try:
+            with pytest.raises(LinkProtocolError, match="current origin"):
+                await subscriber.bridge._handle_scrollback_snapshot(
+                    _SnapshotSession(attacker.fingerprint), frame
+                )
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_applies_the_subscribers_author_trust_policy(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-subscriber-policy")
+        subscriber = _Node(tmp_path, "subscriber-own-policy")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="trust-filtered")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        blocked_author = bootstrap_node_identity("blocked-author").fingerprint
+        ensure_node_subject(subscriber.db, blocked_author)
+        set_trust_override(
+            subscriber.db, TrustSubject.node(blocked_author), TrustDimension.IDENTITY_INTEGRITY,
+            TrustState.BLOCKED, reason="blocked for test", now_iso="2026-09-02T00:00:00Z",
+        )
+        request_id = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, origin.identity.fingerprint
+        )
+        frame = build_scrollback_snapshot_frame(
+            subscriber_channel.channel_id, request_id,
+            [_snapshot_entry(author_node=blocked_author)],
+        )
+        try:
+            await subscriber.bridge._handle_scrollback_snapshot(
+                _SnapshotSession(origin.identity.fingerprint), frame
+            )
+            assert subscriber.bridge.pop_channel_scrollback(
+                subscriber_channel.channel_id, request_id
+            ) == []
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_late_scrollback_snapshot_cannot_fill_a_later_subscribe_attempt(tmp_path):
+    async def scenario():
+        origin = _Node(tmp_path, "origin-late-snapshot")
+        subscriber = _Node(tmp_path, "subscriber-late-snapshot")
+        _origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="late-snapshot")
+        _establish_trust(subscriber.db, origin.identity.fingerprint)
+        old_request = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, origin.identity.fingerprint
+        )
+        subscriber.bridge.finish_scrollback_request(old_request)
+        new_request = subscriber.bridge.begin_scrollback_request(
+            subscriber_channel.channel_id, origin.identity.fingerprint
+        )
+        old_frame = build_scrollback_snapshot_frame(
+            subscriber_channel.channel_id, old_request,
+            [_snapshot_entry(author_node=origin.identity.fingerprint, body="stale")],
+        )
+        try:
+            await subscriber.bridge._handle_scrollback_snapshot(
+                _SnapshotSession(origin.identity.fingerprint), old_frame
+            )
+            assert subscriber.bridge.pop_channel_scrollback(
+                subscriber_channel.channel_id, new_request
+            ) == []
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
+
+
 def test_scrollback_snapshot_is_delivered_once_from_the_origins_recent_scrollback(tmp_path):
     """Design doc §16, issue #194 Decision 1/2: a `scrollback_snapshot`
     arrives as a sibling of the presence_snapshot `test_remote_channel_
     presence_is_populated_from_the_origins_initial_snapshot` above already
-    proves, sourced from the origin's own `get_scrollback`, entries
-    carried through with `author_label` verbatim (never recomposed with a
-    fingerprint the way a live channel_message is) and `author_
-    fingerprint` always `None` on the receiving side (never treated as
-    locally verified) -- and popped exactly once."""
+    proves, sourced from the origin's own `get_scrollback`, with origin-
+    local labels qualified by the authenticated origin and `author_
+    fingerprint` still `None` on the receiving side (never treated as a
+    locally verified account) -- and popped exactly once."""
     async def scenario():
         origin = _Node(tmp_path, "origin-scrollback")
         subscriber = _Node(tmp_path, "subscriber-scrollback")
         origin_channel, subscriber_channel = _setup_linked_channel(origin, subscriber, name="history-room")
 
-        record_message(origin.db, origin_channel, kind="message", author_label="alice", body="first message")
+        first = record_message(
+            origin.db, origin_channel, kind="message", author_label="alice", body="first message"
+        )
+        first_event = queue_channel_message_if_linked(
+            origin.db, first, origin_channel, node_identity=origin.identity
+        )
         record_message(origin.db, origin_channel, kind="join", author_label="bob")
-        record_message(origin.db, origin_channel, kind="message", author_label="alice", body="second message")
+        second = record_message(
+            origin.db, origin_channel, kind="message", author_label="alice", body="second message"
+        )
+        second_event = queue_channel_message_if_linked(
+            origin.db, second, origin_channel, node_identity=origin.identity
+        )
 
         server = LinkRealtimeServer(
             host="127.0.0.1", port=0, identity=origin.identity, registry=origin.registry,
@@ -754,27 +887,32 @@ def test_scrollback_snapshot_is_delivered_once_from_the_origins_recent_scrollbac
             )
             subscriber.link_node.handle_hello(origin_hello)
 
-            session = await ensure_live_subscription(
+            result = await ensure_live_subscription(
                 channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
                 lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
             )
-            assert session is not None
+            assert result is not None
+            session, request_id = result
 
             assert await _wait_until(
-                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+                lambda: request_id in subscriber.bridge._remote_channel_scrollback
             )
-            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id)
+            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id, request_id)
             assert [(entry.kind, entry.author_label, entry.body) for entry in entries] == [
-                ("message", "alice", "first message"),
-                ("join", "bob", None),
-                ("message", "alice", "second message"),
+                ("message", f"alice@{origin.identity.fingerprint}", "first message"),
+                ("join", f"bob@{origin.identity.fingerprint}", None),
+                ("message", f"alice@{origin.identity.fingerprint}", "second message"),
             ]
             assert all(entry.id == -1 for entry in entries)
             assert all(entry.author_fingerprint is None for entry in entries)
+            assert [entry.link_content_id for entry in entries] == [
+                first_event.content_id, None, second_event.content_id,
+            ]
 
             # One-time pickup -- a second pop for the same channel is empty,
             # not a repeat of the same snapshot.
-            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id) == []
+            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id, request_id) == []
+            subscriber.bridge.finish_scrollback_request(request_id)
         finally:
             await server.stop()
             await origin.teardown()
@@ -809,16 +947,17 @@ def test_scrollback_snapshot_caps_at_the_most_recent_entries(tmp_path):
             )
             subscriber.link_node.handle_hello(origin_hello)
 
-            session = await ensure_live_subscription(
+            result = await ensure_live_subscription(
                 channel=subscriber_channel, node_identity=subscriber.identity, link_node=subscriber.link_node,
                 lane=subscriber.lane, registry=subscriber.registry, bridge=subscriber.bridge,
             )
-            assert session is not None
+            assert result is not None
+            session, request_id = result
 
             assert await _wait_until(
-                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+                lambda: request_id in subscriber.bridge._remote_channel_scrollback
             )
-            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id)
+            entries = subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id, request_id)
             assert len(entries) == _MAX_SCROLLBACK_SNAPSHOT_ENTRIES
             # Most-recent bias: the tail of what was sent matches the tail
             # of what was recorded, not the oldest entries.
@@ -899,17 +1038,20 @@ def test_scrollback_snapshot_is_cleared_on_disconnect_before_pickup(tmp_path):
             # _untrack_on_close watcher to actually be watching this
             # session at all.
             await subscriber.bridge.track_session(session)
-            await session.send(build_subscribe_frame(subscriber_channel.channel_id))
+            request_id = subscriber.bridge.begin_scrollback_request(
+                subscriber_channel.channel_id, origin.identity.fingerprint
+            )
+            await session.send(build_subscribe_frame(subscriber_channel.channel_id, message_id=request_id))
             assert await _wait_until(
-                lambda: subscriber_channel.channel_id in subscriber.bridge._remote_channel_scrollback
+                lambda: request_id in subscriber.bridge._remote_channel_scrollback
             )
 
             await session.close(reason="test_done_before_pickup")
 
             assert await _wait_until(
-                lambda: subscriber_channel.channel_id not in subscriber.bridge._remote_channel_scrollback
+                lambda: request_id not in subscriber.bridge._remote_channel_scrollback
             )
-            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id) == []
+            assert subscriber.bridge.pop_channel_scrollback(subscriber_channel.channel_id, request_id) == []
         finally:
             await server.stop()
             await origin.teardown()

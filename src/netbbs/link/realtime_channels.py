@@ -27,6 +27,7 @@ flow) invokes; nothing here runs a background connector loop.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from netbbs.chat.channels import Channel
 from netbbs.chat.hub import ChatHub
@@ -34,7 +35,15 @@ from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import ChannelMessage as LocalChannelMessage
 from netbbs.chat.scrollback import get_scrollback
 from netbbs.link.channels import channel_origin_fingerprint, get_channel_by_channel_id, is_channel_linked
-from netbbs.link.enforcement import LinkPolicyAction, decide_node_action, ensure_node_subject
+from netbbs.link.enforcement import (
+    LinkPolicyAction,
+    content_visible_for_subject,
+    decide_node_action,
+    ensure_node_subject,
+    event_author,
+    node_transport_state,
+)
+from netbbs.link.events import ChannelMessage as LinkChannelMessage
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import (
     LinkNode,
@@ -47,7 +56,9 @@ from netbbs.link.protocol import (
     build_presence_snapshot_frame,
     build_scrollback_snapshot_frame,
     build_subscribe_frame,
+    new_realtime_message_id,
 )
+from netbbs.link.trust import TrustState, TrustSubject
 from netbbs.link.transport import (
     LinkRealtimeSession,
     LinkRealtimeSessionRegistry,
@@ -78,7 +89,7 @@ _MAX_SCROLLBACK_SNAPSHOT_ENTRIES = 20
 _MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
 
 
-def _bounded_utf8(text: str, max_bytes: int) -> str:
+def _bounded_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
     """Cut `text` down to at most `max_bytes` UTF-8 bytes without
     splitting a multi-byte character in two. Issue #194's scrollback
     snapshot bundles many entries into one 16 KiB-bounded frame (unlike a
@@ -88,8 +99,91 @@ def _bounded_utf8(text: str, max_bytes: int) -> str:
     on its way through the existing async materialization path."""
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
-        return text
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _snapshot_entries(db: Database, channel: Channel) -> list[dict]:
+    """Build origin-attested entries with enough author identity for the
+    subscriber to apply its own trust policy. Carried-message identities
+    are extracted from the signed event accepted by this node; origin-local
+    labels are explicitly qualified so they cannot resolve as subscriber-
+    local accounts with the same username."""
+    origin_fingerprint = channel_origin_fingerprint(db, channel)
+    if origin_fingerprint is None:
+        return []
+    entries: list[dict] = []
+    for message in get_scrollback(db, channel)[-_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:]:
+        author_node_fingerprint: str | None = None
+        author_user_id: str | None = None
+        author_label = message.author_label
+        content_id = message.link_content_id
+        if message.kind != "daybreak":
+            if message.link_content_id is None:
+                author_node_fingerprint = origin_fingerprint
+                author_user_id = message.author_label
+                author_label = f"{message.author_label}@{origin_fingerprint}"
+                if message.link_event_json is not None:
+                    try:
+                        content_id = LinkChannelMessage.from_dict(
+                            json.loads(message.link_event_json)
+                        ).content_id
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        content_id = None
+            else:
+                row = db.connection.execute(
+                    "SELECT envelope_json FROM link_events WHERE content_id = ?",
+                    (message.link_content_id,),
+                ).fetchone()
+                try:
+                    subject = event_author(json.loads(row[0])) if row is not None else None
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    subject = None
+                if subject is None or subject.kind != "user" or subject.opaque_user_id is None:
+                    continue
+                author_node_fingerprint = subject.node_fingerprint
+                author_user_id = subject.opaque_user_id
+        body, body_truncated = (
+            _bounded_utf8(message.body, _MAX_SCROLLBACK_ENTRY_BODY_BYTES)
+            if message.body is not None else (None, False)
+        )
+        entries.append({
+            "kind": message.kind,
+            "author_label": author_label,
+            "author_node_fingerprint": author_node_fingerprint,
+            "author_user_id": author_user_id,
+            "content_id": content_id,
+            "body": body,
+            "body_truncated": body_truncated,
+            "created_at": message.created_at,
+        })
+    return entries
+
+
+def _accept_scrollback_snapshot(
+    db: Database, *, channel_id: str, peer_fingerprint: str, entries: list[dict]
+) -> tuple[Channel, list[LocalChannelMessage]]:
+    channel = _decide_channel_subscribe_authorization(
+        db, channel_id=channel_id, peer_fingerprint=peer_fingerprint
+    )
+    if channel_origin_fingerprint(db, channel) != peer_fingerprint:
+        raise LinkProtocolError("scrollback_snapshot sender is not the channel's current origin")
+    messages = []
+    for entry in entries:
+        if entry["kind"] != "daybreak":
+            home = node_transport_state(db, entry["author_node_fingerprint"])
+            if home in {TrustState.BLOCKED, TrustState.QUARANTINED}:
+                continue
+            subject = TrustSubject.user(entry["author_node_fingerprint"], entry["author_user_id"])
+            if not content_visible_for_subject(db, subject):
+                continue
+        messages.append(LocalChannelMessage(
+            id=-1, channel_id=channel.id, kind=entry["kind"],
+            author_label=entry["author_label"], author_fingerprint=None,
+            body=entry["body"], created_at=entry["created_at"],
+            link_content_id=entry["content_id"], body_truncated=entry["body_truncated"],
+        ))
+    return channel, messages
 
 
 def _decide_channel_subscribe_authorization(db: Database, *, channel_id: str, peer_fingerprint: str) -> Channel:
@@ -156,13 +250,14 @@ class LiveChannelBridge:
         # currently waiting on it (netbbs.net.chat_flow._subscribe_live).
         # Popped, not merely read, by pop_channel_scrollback -- design doc
         # §16 Decision 2: "rendered once, never durably stored on the
-        # subscribing side." _source mirrors _remote_channel_presence_
-        # source's own reasoning: which peer's session populated the
-        # current entry, so a disconnect clears only what that peer
-        # actually sent, not a later, unrelated peer's pending snapshot
-        # for the same channel_id.
+        # subscribing side. Unlike presence, snapshots are also correlated
+        # to the exact subscribe attempt so a late response can never be
+        # consumed by a later caller.
+        # request_id -> (channel_id, expected origin) and response entries.
+        # Correlation prevents a late reply from one completed join attempt
+        # from being consumed by a later caller joining the same channel.
+        self._pending_scrollback_requests: dict[str, tuple[str, str]] = {}
         self._remote_channel_scrollback: dict[str, list[LocalChannelMessage]] = {}
-        self._remote_channel_scrollback_source: dict[str, str] = {}
         # peer_fingerprint -> whether this node has already sent that
         # peer its initial node_presence_snapshot for the *current*
         # session -- track_session can be called more than once per
@@ -259,10 +354,9 @@ class LiveChannelBridge:
             if fingerprint == session.remote_fingerprint:
                 del self._remote_channel_presence_source[channel_id]
                 self._remote_channel_presence.pop(channel_id, None)
-        for channel_id, fingerprint in list(self._remote_channel_scrollback_source.items()):
+        for request_id, (_, fingerprint) in list(self._pending_scrollback_requests.items()):
             if fingerprint == session.remote_fingerprint:
-                del self._remote_channel_scrollback_source[channel_id]
-                self._remote_channel_scrollback.pop(channel_id, None)
+                self.finish_scrollback_request(request_id)
 
     async def close(self) -> None:
         if self._watchers:
@@ -310,14 +404,17 @@ class LiveChannelBridge:
         await session.send(
             build_presence_snapshot_frame(channel_id, entries[:_MAX_PRESENCE_SNAPSHOT_ENTRIES])
         )
-        await self._send_scrollback_snapshot(session, channel)
+        await self._send_scrollback_snapshot(session, channel, request_id=frame.message_id)
 
-    async def _send_scrollback_snapshot(self, session: LinkRealtimeSession, channel: Channel) -> None:
+    async def _send_scrollback_snapshot(
+        self, session: LinkRealtimeSession, channel: Channel, *, request_id: str
+    ) -> None:
         """Issue #194 Decision 1: a sibling frame sent right alongside the
         presence_snapshot above, at the same call site, sourced from this
-        node's own already-bounded, already-#164-trust-filtered local
-        scrollback (`netbbs.chat.scrollback.get_scrollback`) -- no new
-        storage, filtering, or authorization mechanism of its own. Best-
+        node's own already-bounded, origin-policy-filtered local
+        scrollback (`netbbs.chat.scrollback.get_scrollback`). Entries also
+        preserve author identity for the subscriber's independent policy
+        check. Best-
         effort and silent on failure: an empty local scrollback, a
         validation failure (this node's own bound choices above are meant
         to prevent that, but nothing here depends on them being perfect),
@@ -325,44 +422,50 @@ class LiveChannelBridge:
         subscribing peer or block anything else `_handle_subscribe`
         already did -- the existing async catch-up path is still there
         regardless (design doc §16)."""
-        messages = await self._lane.run(get_scrollback, channel)
-        if not messages:
+        entries = await self._lane.run(_snapshot_entries, channel)
+        if not entries:
             return
-        recent = messages[-_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:]
-        entries = [
-            {
-                "kind": message.kind,
-                "author_label": message.author_label,
-                "body": (
-                    _bounded_utf8(message.body, _MAX_SCROLLBACK_ENTRY_BODY_BYTES)
-                    if message.body is not None else None
-                ),
-                "created_at": message.created_at,
-            }
-            for message in recent
-        ]
+        # JSON escaping can make valid per-field values exceed the frame
+        # ceiling. Drop oldest catch-up entries until the fully serialized
+        # frame fits; never enqueue a frame that will later kill the session.
+        frame = None
+        while entries:
+            try:
+                frame = build_scrollback_snapshot_frame(
+                    channel.channel_id, request_id, entries
+                )
+                break
+            except LinkProtocolError:
+                entries.pop(0)
+        if frame is None:
+            return
         try:
-            await session.send(build_scrollback_snapshot_frame(channel.channel_id, entries))
-        except (LinkProtocolError, LinkTransportError):
+            await session.send(frame)
+        except LinkTransportError:
             pass
 
     async def _handle_scrollback_snapshot(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
-        channel = await self._lane.run(
-            _decide_channel_subscribe_authorization, channel_id=frame.payload["channel_id"],
-            peer_fingerprint=session.remote_fingerprint,
+        channel, messages = await self._lane.run(
+            _accept_scrollback_snapshot, channel_id=frame.payload["channel_id"],
+            peer_fingerprint=session.remote_fingerprint, entries=frame.payload["entries"],
         )
-        messages = [
-            LocalChannelMessage(
-                id=-1, channel_id=channel.id, kind=entry["kind"],
-                author_label=entry["author_label"], author_fingerprint=None,
-                body=entry["body"], created_at=entry["created_at"],
-            )
-            for entry in frame.payload["entries"]
-        ]
-        self._remote_channel_scrollback[channel.channel_id] = messages
-        self._remote_channel_scrollback_source[channel.channel_id] = session.remote_fingerprint
+        request_id = frame.payload["request_id"]
+        if self._pending_scrollback_requests.get(request_id) != (
+            channel.channel_id, session.remote_fingerprint
+        ):
+            return
+        self._remote_channel_scrollback[request_id] = messages
 
-    def pop_channel_scrollback(self, channel_id: str) -> list[LocalChannelMessage]:
+    def begin_scrollback_request(self, channel_id: str, origin_fingerprint: str) -> str:
+        request_id = new_realtime_message_id()
+        self._pending_scrollback_requests[request_id] = (channel_id, origin_fingerprint)
+        return request_id
+
+    def finish_scrollback_request(self, request_id: str) -> None:
+        self._pending_scrollback_requests.pop(request_id, None)
+        self._remote_channel_scrollback.pop(request_id, None)
+
+    def pop_channel_scrollback(self, channel_id: str, request_id: str) -> list[LocalChannelMessage]:
         """One-time pickup for a just-received scrollback_snapshot (issue
         #194) -- pops and clears rather than a plain get, matching design
         doc §16 Decision 2's "rendered once, never durably stored on the
@@ -370,8 +473,10 @@ class LiveChannelBridge:
         live`) polls this briefly after subscribing; empty means either
         nothing has arrived yet, it was already popped, or this node
         doesn't hold a live subscription for `channel_id` at all."""
-        self._remote_channel_scrollback_source.pop(channel_id, None)
-        return self._remote_channel_scrollback.pop(channel_id, [])
+        pending = self._pending_scrollback_requests.get(request_id)
+        if pending is None or pending[0] != channel_id:
+            return []
+        return self._remote_channel_scrollback.pop(request_id, [])
 
     def _handle_unsubscribe(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         channel_id = frame.payload["channel_id"]
@@ -601,10 +706,11 @@ async def ensure_live_subscription(
     registry: LinkRealtimeSessionRegistry,
     bridge: LiveChannelBridge,
     dial_timeout_seconds: float = 10.0,
-) -> LinkRealtimeSession | None:
+) -> tuple[LinkRealtimeSession, str] | None:
     """
     If `channel` is Linked, ensure this node holds (or can establish) a
-    live session to its origin node and has sent it a `subscribe` --
+    live session to its origin node and has sent it a request-correlated
+    `subscribe` --
     best-effort, never raises. A caller who can't get live delivery
     still has the existing async catch-up path (design doc §8.10.2:
     "the caller sees that live traffic may have been missed"), so
@@ -643,8 +749,10 @@ async def ensure_live_subscription(
             break
         else:
             return None
+    request_id = bridge.begin_scrollback_request(channel.channel_id, origin_fingerprint)
     try:
-        await session.send(build_subscribe_frame(channel.channel_id))
+        await session.send(build_subscribe_frame(channel.channel_id, message_id=request_id))
     except LinkTransportError:
+        bridge.finish_scrollback_request(request_id)
         return None
-    return session
+    return session, request_id

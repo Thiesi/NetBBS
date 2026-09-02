@@ -1809,12 +1809,11 @@ async catch-up path (issue #85) still fills in anything missed, on its own
 schedule, exactly as it already does for a caller that gets no live
 subscription at all.
 
-`pop_channel_scrollback` *pops*, not merely reads -- rendered exactly once
-per design doc §16 Decision 2, never durably stored on the subscribing side.
-A stale, never-picked-up snapshot is cleared on session close
-(`_untrack_on_close`, mirroring `_remote_channel_presence`'s own per-source
-cleanup) rather than left to answer a later, unrelated subscribe for the same
-`channel_id`.
+Each subscribe frame's message ID is also the snapshot `request_id`.
+`LiveChannelBridge` registers that attempt before sending, stores replies by
+request ID rather than channel ID, and invalidates the attempt on pickup,
+timeout, cancellation, send failure, or session close. A late reply therefore
+cannot become history for a later caller joining the same channel.
 
 **A frame bundling many entries needs much tighter per-entry bounds than a
 frame carrying exactly one.** `channel_message`'s single-message body bound
@@ -1822,24 +1821,20 @@ frame carrying exactly one.** `channel_message`'s single-message body bound
 times over if reused per-entry across up to
 `_REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES` (20) bundled entries --
 `protocol.py` gives the bundled case its own, much smaller per-entry body
-bound (400 bytes) chosen so a fully worst-case snapshot (every entry at its
-max size) still lands comfortably under the ceiling, verified directly
-(`test_scrollback_snapshot_worst_case_entries_stay_under_the_frame_size_
-limit`) rather than only trusted as arithmetic. A long message truncated in
-this ephemeral catch-up view is not data loss: the same content's real,
-untruncated durable copy is already independently in flight through the
-existing async path.
+bound (400 bytes), but field bounds are not sufficient: JSON escaping can
+expand quotes and backslashes. The builder serializes the complete frame
+before it may enter the transport queue, and the sender drops oldest catch-up
+entries until the encoded frame fits. A shortened body carries an explicit
+`body_truncated` flag and renders a visible notice; its full durable copy is
+still independently in flight through the existing async path.
 
-**A scrollback entry's `author_label` is carried through verbatim, not
-recomposed.** `build_channel_message_frame`'s live-message payload only
-carries a bare `user_id`, which the *receiving* side reconstructs into
-`f"{user_id}@{session.remote_fingerprint}"` -- correct there because a live
-channel_message is always freshly authored by the peer relaying it. A
-scrollback entry's source is `get_scrollback`, whose `author_label` may
-already be a fully-resolved third-node identity string for a materialized/
-carried message; re-wrapping that with the immediate peer's own fingerprint
-would double-append and produce a wrong label. `scrollback_snapshot` entries
-therefore send/receive `author_label` as an opaque, already-complete string.
+**Snapshot attribution is identity-bearing, not label-only.** Carried entries
+preserve their already-qualified display label and derive author node/user
+identity from the locally retained signed event. Origin-local entries qualify
+their bare stored label as `user@origin` before transmission. The subscriber
+uses those identity fields for its own trust decision and the content ID for
+local-history deduplication; it never treats the display label itself as
+authority.
 
 ### Current distribution limit
 

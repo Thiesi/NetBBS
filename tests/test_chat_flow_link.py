@@ -91,6 +91,13 @@ def _link_context_for(node_identity, *, registry=None, bridge=None) -> LinkConte
     )
 
 
+def _fake_live_result(kwargs, session):
+    request_id = kwargs["bridge"].begin_scrollback_request(
+        kwargs["channel"].channel_id, "fake-origin"
+    )
+    return session, request_id
+
+
 def _establish_trust(db: Database, fingerprint: str) -> None:
     ensure_node_subject(db, fingerprint)
     subject = TrustSubject.node(fingerprint)
@@ -292,7 +299,7 @@ def test_chat_loop_subscribes_to_a_linked_channels_origin_and_unsubscribes_on_qu
 
     async def fake_ensure_live_subscription(**kwargs):
         calls.append(kwargs)
-        return _FakeSession()
+        return _fake_live_result(kwargs, _FakeSession())
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -347,7 +354,7 @@ def test_a_second_local_caller_still_watching_keeps_the_origin_subscription_aliv
 
     async def fake_ensure_live_subscription(**kwargs):
         calls.append(kwargs)
-        return shared_live_session
+        return _fake_live_result(kwargs, shared_live_session)
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -408,7 +415,7 @@ def test_chat_loop_announces_the_real_time_link_coming_up_and_going_down(
     fake_session = _FakeSession()
 
     async def fake_ensure_live_subscription(**kwargs):
-        return fake_session
+        return _fake_live_result(kwargs, fake_session)
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -442,7 +449,7 @@ def test_chat_loop_announces_a_lost_real_time_link_while_still_in_the_channel(
     fake_session = _FakeSession()
 
     async def fake_ensure_live_subscription(**kwargs):
-        return fake_session
+        return _fake_live_result(kwargs, fake_session)
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -513,7 +520,15 @@ def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_
             pass
 
     async def fake_ensure_live_subscription(**kwargs):
-        return _FakeSession()
+        result = _fake_live_result(kwargs, _FakeSession())
+        _session, request_id = result
+        kwargs["bridge"]._remote_channel_scrollback[request_id] = [
+            LocalChannelMessage(
+                id=-1, channel_id=channel.id, kind="message", author_label="remote-alice@origin",
+                author_fingerprint=None, body="catch me up", created_at="2026-01-01T00:00:00+00:00",
+            ),
+        ]
+        return result
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -521,25 +536,19 @@ def test_chat_loop_renders_a_pending_remote_scrollback_snapshot_once_live_comes_
 
     registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
     bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
-    bridge._remote_channel_scrollback[channel.channel_id] = [
-        LocalChannelMessage(
-            id=-1, channel_id=channel.id, kind="message", author_label="remote-alice",
-            author_fingerprint=None, body="catch me up", created_at="2026-01-01T00:00:00+00:00",
-        ),
-    ]
     link_context = _link_context_for(node_identity, registry=registry, bridge=bridge)
 
     session, _action = asyncio.run(
-        _run(lane, hub, presence, channel, alice, ["hello", "/quit"], link_context=link_context)
+        _run(lane, hub, presence, channel, alice, ["hello"] * 10 + ["/quit"], link_context=link_context)
     )
 
     written = "\n".join(session.written)
     assert "Real-time link to this channel's origin is up" in written
     assert "Recent activity from this channel's origin" in written
-    assert "remote-alice" in written
+    assert "remote-alice@origin" in written
     assert "catch me up" in written
     # Popped, not merely read -- nothing left pending afterward.
-    assert channel.channel_id not in bridge._remote_channel_scrollback
+    assert bridge._remote_channel_scrollback == {}
 
 
 def test_chat_loop_shows_no_scrollback_catch_up_when_nothing_is_pending(
@@ -560,7 +569,7 @@ def test_chat_loop_shows_no_scrollback_catch_up_when_nothing_is_pending(
             pass
 
     async def fake_ensure_live_subscription(**kwargs):
-        return _FakeSession()
+        return _fake_live_result(kwargs, _FakeSession())
 
     monkeypatch.setattr(
         "netbbs.link.realtime_channels.ensure_live_subscription", fake_ensure_live_subscription
@@ -577,3 +586,60 @@ def test_chat_loop_shows_no_scrollback_catch_up_when_nothing_is_pending(
     written = "\n".join(session.written)
     assert "Real-time link to this channel's origin is up" in written
     assert "Recent activity from this channel's origin" not in written
+
+
+def test_remote_scrollback_suppresses_entries_already_rendered_from_local_history(
+    lane, hub, presence, channel, alice, node_identity
+):
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+        bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+        request_id = bridge.begin_scrollback_request(channel.channel_id, "origin")
+        bridge._remote_channel_scrollback[request_id] = [
+            LocalChannelMessage(
+                id=-1, channel_id=channel.id, kind="message", author_label="alice@origin",
+                author_fingerprint=None, body="already here", created_at="2026-01-01T00:00:00+00:00",
+                link_content_id="content-1",
+            )
+        ]
+        delivered = []
+
+        async def deliver(line):
+            delivered.append(line)
+
+        await chat_flow._deliver_remote_scrollback_snapshot(
+            deliver, lane, channel, alice, bridge, request_id, {"content-1"},
+            unicode_style=False, truecolor=False, terminal_width=80,
+        )
+        assert delivered == []
+        assert request_id not in bridge._pending_scrollback_requests
+
+    asyncio.run(scenario())
+
+
+def test_remote_scrollback_marks_truncated_bodies_visibly(
+    lane, hub, presence, channel, alice, node_identity
+):
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint=node_identity.fingerprint)
+        bridge = LiveChannelBridge(hub=hub, lane=lane, presence=presence, registry=registry)
+        request_id = bridge.begin_scrollback_request(channel.channel_id, "origin")
+        bridge._remote_channel_scrollback[request_id] = [
+            LocalChannelMessage(
+                id=-1, channel_id=channel.id, kind="message", author_label="alice@origin",
+                author_fingerprint=None, body="partial sentence", created_at="2026-01-01T00:00:00+00:00",
+                body_truncated=True,
+            )
+        ]
+        delivered = []
+
+        async def deliver(line):
+            delivered.append(line)
+
+        await chat_flow._deliver_remote_scrollback_snapshot(
+            deliver, lane, channel, alice, bridge, request_id, set(),
+            unicode_style=False, truecolor=False, terminal_width=80,
+        )
+        assert "truncated; full history will arrive after sync" in "\n".join(delivered)
+
+    asyncio.run(scenario())
