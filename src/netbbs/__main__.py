@@ -32,6 +32,7 @@ from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.link.seedlist import run_scheduled_seed_refresh
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
+from netbbs.managed_dns.state import set_node_fingerprint
 from netbbs.net.daybreak import run_daybreak_announcer
 from netbbs.net.login_flow import handle_session, handle_ssh_session
 from netbbs.net.maintenance import MaintenanceMode
@@ -675,6 +676,16 @@ async def run(
         except NodeIdentityError as exc:
             raise StartupError(f"could not load or bootstrap this node's Link identity: {exc}") from exc
         _logger.info("node Link identity %r: fingerprint %s", config.node_name, node_identity.fingerprint)
+        # Issue #201: managed-DNS registration is deliberately Link-
+        # independent (a board can want a friendly hostname without ever
+        # federating), so it can't reach this fingerprint through
+        # link_context the way Link-specific code does -- link_context
+        # is None outright whenever config.link.enabled is False (see
+        # session_handler below), unlike node_identity, which is always
+        # loaded regardless. Cached here, once, synchronously, same
+        # direct-db reasoning load_link_node's own read just below
+        # already documents for this exact point in startup.
+        set_node_fingerprint(db, node_identity.fingerprint)
 
         # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs

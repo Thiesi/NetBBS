@@ -5997,6 +5997,61 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
     assert "Recent backups:" not in _written_text(session)
 
 
+# -- managed DNS status (design doc §16, issue #201) -----------------------
+
+
+def test_managed_dns_status_shows_undecided_by_default(db, lane, sysop):
+    session = FakeSession(["d", " ", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Not yet decided" in text
+
+
+def test_managed_dns_status_shows_declined(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, set_opt_in
+
+    set_opt_in(db, OptIn.DECLINED)
+    session = FakeSession(["d", " ", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Declined" in text
+
+
+def test_managed_dns_status_shows_a_pending_registration(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", " ", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "PENDING" in text
+    assert "myboard.netbbs.org" in text
+
+
+def test_managed_dns_status_shows_a_live_matured_registration(db, lane, sysop):
+    from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.MATURED)
+
+    session = FakeSession(["d", " ", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "LIVE" in text
+
+
+def test_managed_dns_status_pauses_for_a_keypress_before_returning(db, lane, sysop):
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Press any key to continue..." in text
+    assert "Return to the main menu" in text
+
+
 # -- outbox: work-item inspection/replay/cancel (design doc §13.7) ----------
 
 
