@@ -626,7 +626,7 @@ def test_remote_scrollback_marks_truncated_bodies_visibly(
         request_id = bridge.begin_scrollback_request(channel.channel_id, "origin")
         bridge._remote_channel_scrollback[request_id] = [
             LocalChannelMessage(
-                id=-1, channel_id=channel.id, kind="message", author_label="alice@origin",
+                id=-1, channel_id=channel.id, kind="action", author_label="alice@origin",
                 author_fingerprint=None, body="partial sentence", created_at="2026-01-01T00:00:00+00:00",
                 body_truncated=True,
             )
@@ -640,6 +640,8 @@ def test_remote_scrollback_marks_truncated_bodies_visibly(
             deliver, lane, channel, alice, bridge, request_id, set(),
             unicode_style=False, truecolor=False, terminal_width=80,
         )
-        assert "truncated; full history will arrive after sync" in "\n".join(delivered)
+        rendered = "\n".join(delivered)
+        assert "truncated in join snapshot" in rendered
+        assert "full history" not in rendered
 
     asyncio.run(scenario())

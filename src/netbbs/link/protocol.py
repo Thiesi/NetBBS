@@ -160,7 +160,11 @@ _MAX_SEEN_INVENTORY_REQUEST_NONCES = 4096
 _TRUST_PULL_FRESHNESS_SECONDS = 5 * 60
 _MAX_SEEN_TRUST_PULL_NONCES = 4096
 
-REALTIME_PROTOCOL_VERSION = 1
+# Version 2 adds request-correlated, identity-bearing scrollback snapshots.
+# Version 1 peers cannot safely interpret those frames, so mixed versions
+# fail at the frame-version boundary rather than accumulating protocol strikes
+# for payloads both sides believe belong to the same version.
+REALTIME_PROTOCOL_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
 REALTIME_FRAME_TYPES = frozenset(
@@ -188,10 +192,10 @@ _REALTIME_PRESENCE_CHANGES = frozenset({"join", "leave"})
 # its per-entry bounds must be much tighter than channel_message's own --
 # chosen so _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES entries at their
 # worst-case size still land comfortably under REALTIME_MAX_PLAINTEXT_BYTES.
-# This is a "catch-up" glance, not a substitute for the full durable copy
-# already on its way through the existing async materialization path
-# (design doc §16, issue #194 Decision 2) -- a long message showing
-# truncated here is not data loss.
+# This is a bounded "catch-up" glance. Durable message events also arrive
+# through the existing async materialization path (design doc §16, issue
+# #194 Decision 2), while transient actions and moderation notices do not;
+# consumers must therefore describe truncation without promising later sync.
 _REALTIME_MAX_SCROLLBACK_SNAPSHOT_ENTRIES = 20
 _REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
 # Must stay in sync with netbbs.chat.scrollback.MessageKind's Literal
@@ -199,6 +203,9 @@ _REALTIME_MAX_SCROLLBACK_ENTRY_BODY_BYTES = 400
 # decoupled from netbbs.chat's domain layer (see module docstring).
 _REALTIME_SCROLLBACK_ENTRY_KINDS = frozenset(
     {"message", "join", "leave", "mute", "unmute", "ban", "unban", "kick", "action", "nick", "daybreak"}
+)
+_REALTIME_AUTHORLESS_SCROLLBACK_ENTRY_KINDS = frozenset(
+    {"mute", "unmute", "ban", "unban", "kick", "daybreak"}
 )
 
 # design doc §8.10.1: "IDs are bounded strings and deduplicated within a
@@ -580,14 +587,15 @@ def _validate_scrollback_entry(entry: object, *, path: str) -> None:
     if not isinstance(entry["kind"], str) or entry["kind"] not in _REALTIME_SCROLLBACK_ENTRY_KINDS:
         raise LinkProtocolError(f"{path}.kind is not a recognized scrollback event kind")
     # author_label is display-only. The separate node/user identity fields
-    # are what the subscriber uses for trust enforcement. Daybreak is the
-    # sole authorless event and therefore allows an empty label.
+    # are what the subscriber uses for trust enforcement. Moderation entries
+    # name their target in author_label, not their actor, so they are system
+    # events for attribution purposes alongside daybreak.
     _validate_bounded_text(
         entry["author_label"], path=f"{path}.author_label", max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES
     )
-    if entry["kind"] == "daybreak":
+    if entry["kind"] in _REALTIME_AUTHORLESS_SCROLLBACK_ENTRY_KINDS:
         if entry["author_node_fingerprint"] is not None or entry["author_user_id"] is not None:
-            raise LinkProtocolError(f"{path} daybreak entries must not name an author")
+            raise LinkProtocolError(f"{path} authorless entries must not name an author")
     else:
         _validate_bounded_id(entry["author_node_fingerprint"], path=f"{path}.author_node_fingerprint")
         _validate_bounded_id(entry["author_user_id"], path=f"{path}.author_user_id")

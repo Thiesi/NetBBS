@@ -35,6 +35,7 @@ from netbbs.link.events import (
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import (
     REALTIME_FRAME_TYPES,
+    REALTIME_PROTOCOL_VERSION,
     HelloMessage,
     LinkNode,
     LinkProtocolError,
@@ -79,6 +80,14 @@ def test_realtime_frame_round_trips_every_message_type(frame_type):
     frame = RealtimeFrame(type=frame_type, message_id="message_1", payload={"nested": [True, None, 7]})
 
     assert RealtimeFrame.from_json_bytes(frame.to_json_bytes()) == frame
+
+
+def test_realtime_frame_rejects_the_pre_snapshot_identity_protocol_version():
+    assert REALTIME_PROTOCOL_VERSION == 2
+    with pytest.raises(LinkProtocolError, match="unsupported real-time protocol version"):
+        RealtimeFrame.from_json_bytes(
+            b'{"version":1,"type":"ping","message_id":"m1","payload":{}}'
+        )
 
 
 @pytest.mark.parametrize(
@@ -270,6 +279,18 @@ def test_scrollback_snapshot_allows_a_daybreak_entry_with_no_author():
     )
     validate_realtime_frame_payload(frame)  # must not raise
     assert RealtimeFrame.from_json_bytes(frame.to_json_bytes()) == frame
+
+
+@pytest.mark.parametrize("kind", ["mute", "unmute", "ban", "unban", "kick"])
+def test_scrollback_snapshot_treats_moderation_targets_as_authorless(kind):
+    frame = build_scrollback_snapshot_frame(
+        "channel-1", "request-1",
+        [_snapshot_entry(
+            kind=kind, author_label="target-user", author_node_fingerprint=None,
+            author_user_id=None, body=None,
+        )],
+    )
+    validate_realtime_frame_payload(frame)
 
 
 def test_scrollback_snapshot_builder_rejects_complete_encoded_frame_over_the_limit():

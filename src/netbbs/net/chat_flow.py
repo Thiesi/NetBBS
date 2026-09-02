@@ -935,7 +935,7 @@ def _render_all_scrollback(db: Database, channel: Channel, user: User, messages:
     for message in messages:
         line = _render_scrollback_message(db, channel, user, message)
         if message.body_truncated:
-            line += colored(" [truncated; full history will arrive after sync]", fg_color=MUTED_COLOR)
+            line += colored(" [truncated in join snapshot]", fg_color=MUTED_COLOR)
         rendered.append(line)
     return rendered
 

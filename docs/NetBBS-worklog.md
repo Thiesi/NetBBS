@@ -1826,13 +1826,21 @@ expand quotes and backslashes. The builder serializes the complete frame
 before it may enter the transport queue, and the sender drops oldest catch-up
 entries until the encoded frame fits. A shortened body carries an explicit
 `body_truncated` flag and renders a visible notice; its full durable copy is
-still independently in flight through the existing async path.
+still independently in flight through the existing async path only for durable
+message events. The notice therefore says only that the join snapshot was
+truncated; actions and other transient events must not promise later sync.
 
 **Snapshot attribution is identity-bearing, not label-only.** Carried entries
 preserve their already-qualified display label and derive author node/user
 identity from the locally retained signed event. Origin-local entries qualify
 their bare stored label as `user@origin` before transmission. The subscriber
 uses those identity fields for its own trust decision and the content ID for
+deduplication, then reconstructs the displayed `user@node` label from those
+attested fields rather than trusting `author_label`. Moderation rows store the
+target label for sentence rendering, so snapshots carry them as authorless
+system events; target trust policy must not hide audit history. This payload is
+real-time protocol v2, deliberately incompatible at the version boundary with
+the earlier label-only/un-correlated v1 snapshot shape.
 local-history deduplication; it never treats the display label itself as
 authority.
 
