@@ -54,7 +54,7 @@ async def run_scheduled_managed_dns_updater(
     Runs for the node's lifetime: sends one heartbeat immediately on
     entry (if this node currently has something to heartbeat), then
     every `interval_seconds` (default 15 minutes) after -- mirrors
-    `netbbs.link.seedlist.run_scheduled_seed_refresh`'s exact shape:
+    `netbbs.link.reliable_nodes.run_scheduled_reliable_nodes_refresh`'s exact shape:
     plain `db`, not a `DatabaseLane` (the same accepted brief-blocking-
     cost precedent for a periodic task touching only small, fast local
     config reads/writes, the one network call aside), and a fresh
@@ -72,7 +72,7 @@ async def run_scheduled_managed_dns_updater(
     (`ManagedDnsError`) logs and leaves this node's cached status/
     last-contact state untouched -- the same "a stale reachability claim
     only ever costs a failed connection attempt" tolerance
-    `run_scheduled_seed_refresh` already established for its own fetch
+    `run_scheduled_reliable_nodes_refresh` already established for its own fetch
     failures.
     """
     while True:

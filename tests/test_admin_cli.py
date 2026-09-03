@@ -45,16 +45,18 @@ def lane(db):
 
 
 def test_bootstrap_creates_the_first_sysop(db, lane):
-    # Trailing "n": declines the managed-DNS opt-in prompt (issue #201),
+    # Trailing "n", "n": declines reliable-node participation (issue #219)
+    # and then the managed-DNS opt-in prompt (issue #201) on the first-run
+    # screen,
     # which now fires right after account creation.
-    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n"])
+    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n", "n"])
     user = asyncio.run(_bootstrap_first_sysop(session, lane))
     assert user.username == "sysop"
     assert user.user_level == SYSOP_LEVEL
 
 
 def test_bootstrap_self_attributes_the_audit_entry(db, lane):
-    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n"])
+    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n", "n"])
     user = asyncio.run(_bootstrap_first_sysop(session, lane))
     entries = list_actions_for_target_user(db, user.id)
     bootstrap_entries = [e for e in entries if e.action == "bootstrap_create_sysop"]
@@ -63,13 +65,13 @@ def test_bootstrap_self_attributes_the_audit_entry(db, lane):
 
 
 def test_resolve_actor_bootstraps_when_no_sysop_exists(db, lane):
-    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n"])
+    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n", "n"])
     actor = asyncio.run(_resolve_actor(session, lane, None))
     assert actor.username == "sysop"
 
 
 def test_run_admin_session_bootstraps_then_opens_the_menu(db):
-    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n", "b"])
+    session = FakeSession(["sysop", "hunter2", "hunter2", "", "n", "n", "b"])
     asyncio.run(run_admin_session(session, db, None))
     assert any(u.username == "sysop" and u.user_level == SYSOP_LEVEL for u in list_users(db))
     assert "Attributed to 'sysop'" in _written_text(session)

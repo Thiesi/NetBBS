@@ -114,8 +114,10 @@ only protocol scaffolding:
   decrypt/deliver/bounce, acknowledgement round trip, targeted per-recipient
   sync delivery (not the configured-seed flood-fill model boards use), and
   convergence coverage;
-- peer-list exchange (unverified candidate discovery) and live supplementary
-  seed-list refresh, both merged into the sync loop every pass -- the
+- peer-list exchange (unverified candidate discovery) and the reliable-nodes
+  roster (issue #219: a built-in fallback plus a daily live list from
+  netbbs.org, dialed only once the SysOp accepts participation), both merged
+  into the sync loop every pass -- the
   configured/cached seed list first, falling back to a small random sample of
   discovered candidates only when every one of those fails (or none are
   configured) for that pass, never as a first resort;
@@ -1848,6 +1850,52 @@ authenticated handshake before a session is reported live. That typed mismatch
 propagates through `ensure_live_subscription` to a caller-visible upgrade
 message; ordinary network failures remain best-effort `None`. Per-frame version
 checks remain defense in depth.
+
+### Reliable-node onboarding: tri-state Link enablement and the name gate (issue #219)
+
+`netbbs.net.nodeconfig.LinkConfig.enabled` is `bool | None`, and `None` is
+the shipped default. Only `netbbs.__main__.run` resolves it -- once, right
+after the node identity loads, via `netbbs.link.onboarding.resolve_link_
+enabled` (explicit wins; silent config defers to the SysOp's node-wide
+participation decision) -- and then writes the effective bool back into
+`config` with `dataclasses.replace`. Every consumer after that point
+(`load_link_node`, the diagnostic handler, `_start_servers`, the sync task)
+reads a plain bool; nothing else may read the tri-state. `NodeConfig.
+validate()` runs the Link-field checks (`validate_link()`) only for an
+explicit `True` -- a stray `[link]` table must not stop a local-only node
+that loaded fine before -- and `run()` calls `validate_link()` again once a
+silent config resolves to enabled, so a bad Link value still fails clearly
+before anything binds. `describe_insecure_bindings()` is likewise logged
+only after resolution, or a silent-config full peer would never get its
+warning.
+
+The reliable-nodes roster (`netbbs.link.reliable_nodes`) is dialed only
+while `participation_accepted(db)` -- re-read every sync pass, never
+captured at startup -- regardless of *how* Link came to be enabled. An
+explicit `enabled = true` with a declined (or never-answered) participation
+keeps operator seeds only; a node upgraded in place therefore never starts
+dialing project infrastructure until a SysOp says so. A successful roster
+fetch replaces the built-in fallback outright; the fallback is only ever
+served while no fetch has succeeded, so a node removed from the live list
+actually stops being dialed.
+
+Decision 6 (no Link participation under the placeholder display name) is
+enforced in `run()` as a `StartupError`, after enablement is resolved and
+before `load_link_node`. Consequences for tests: any lifecycle test that
+enables Link must set a display name (`tests/test_main_lifecycle.py`'s
+`_config` helper does this centrally), and any scripted flow that reaches
+the first-run screen (`netbbs.net.onboarding_flow.offer_onboarding`, at
+`netbbs.admin`'s bootstrap and the first SysOp login) must budget its
+keystrokes: participation first (with a name prompt when the node is still
+the placeholder and the answer is yes), then the managed-DNS choice. Both
+choices now default to accept on a bare Enter.
+
+The onboarding screen's "what did accepting do" explanation reads the
+configured tri-state back from `link_configured_enabled`, a config-table
+cache `run()` writes each startup -- `netbbs.admin` and the login flow have
+a `db` but never a `NodeConfig`, so this is the only way they can tell the
+truth about whether the answer decides Link on this node. It reads as
+"unknown" until the node has started once on a build with this feature.
 
 ### Current distribution limit
 

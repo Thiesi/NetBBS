@@ -61,8 +61,9 @@ From the console:
   granting/revoking moderator authority. See §5–§7.
 - `[O]perations` — node/session control, Link status, outbox, diagnostics,
   log tailing, carried-post repair, backup status. See §11 and §15.
-- `[S]ettings` — welcome banner, update checks, timestamp format, trust
-  policy. See §12–§13.
+- `[S]ettings` — welcome banner, node name, joining NetBBS Link through
+  the reliable nodes, update checks, timestamp format, trust policy. See
+  §12–§13.
 - Quick actions (`[N]ode`, `[L]ink status`, `[X]outbox`, `[K]ackup`) jump
   directly to the same screens `[O]perations`/`[S]ettings` reach, when
   their context is available (e.g. `[N]ode` only appears in a live

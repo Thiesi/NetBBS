@@ -159,6 +159,20 @@ it does. This is the real, supported bootstrap path; the `scripts/
 create_test_user.py`-style helpers elsewhere in this repository are
 development conveniences, not an operator-facing tool.
 
+Right after the account is created, the same command shows the one-time
+first-run screen: two independent choices, each defaulting to yes on a
+bare Enter. **Join NetBBS Link through the reliable nodes** turns Link on
+as an outgoing-only node (no port to open) that dials the project's
+reliable nodes as seeds and, when it can't be reached directly, uses them
+as relays — it asks for a node display name first, since a node can't join
+under the shipped placeholder. **A managed `<name>.netbbs.org` subdomain**
+registers a public hostname for the node. Both can be changed later from
+the SysOp console (`Settings > Join NetBBS Link`, and the `[D]NS` quick
+action). If you skip the screen here, it appears once at the first SysOp
+login instead. Note that the config above deliberately has no `[link]`
+table: leaving `enabled` unset is what lets the first-run answer decide;
+an explicit `enabled = true`/`false` always overrides it.
+
 Once that account can log in, `docs/NetBBS-SysOp-Handbook.md` is the
 reference for actually running the node day to day — accounts,
 permissions and moderation, content areas, identity attestation and name
@@ -248,6 +262,16 @@ concurrent-writer conflict each look like.
    install it into the same venv with pip, using the same extras as the
    existing installation (§1a).
 4. Start the service again.
+
+**Upgrading a Link-enabled node from a release before the reliable-nodes
+onboarding (issue #219):** a node with `[link] enabled = true` now refuses
+to start while its display name is still the shipped placeholder
+"NetBBS" (design doc §16 Decision 6 — every node on the mesh needs a name
+of its own). The refusal is a clear startup error naming the fix, but a
+headless service would just restart-loop, so before step 4 set a name
+once, offline: `python -m netbbs.admin --db <db>` → `[S]ettings` →
+`[N]ode name`. Nodes that already have a name, and local-only nodes,
+are unaffected.
 
 On startup, NetBBS compares the database's own recorded schema version
 (SQLite's `PRAGMA user_version`) against what the running build

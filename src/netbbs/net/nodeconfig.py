@@ -101,18 +101,27 @@ class LinkConfig:
     configured seed list -- a plain list of base URLs (e.g.
     `"http://198.51.100.7:7862"`) `netbbs.link.sync`'s background loop
     dials every `sync_interval_seconds`. Just the fixed/operator-
-    configured half of §12's bootstrap model -- `netbbs.link.seedlist.
-    run_scheduled_seed_refresh` fetches a live supplementary
-    list over the same channel `netbbs.selfupdate` uses and
-    `run_link_sync` merges it in every pass, "a supplement to -- never a
-    replacement for" this list, exactly as that design framed
-    it. Empty by default -- Link can run accepting inbound traffic
-    with nothing configured here at all, relying entirely on
-    the live-fetched list (or peer-list-exchange-discovered candidates,
-    once something consumes those) to ever reach the network.
+    configured half of §12's bootstrap model -- `netbbs.link.
+    reliable_nodes` supplies the project's reliable-nodes roster (a
+    built-in fallback plus a daily live fetch from netbbs.org) and
+    `run_link_sync` merges it in every pass once the SysOp accepts
+    participation (`netbbs.link.onboarding`, design doc §16 issue #219),
+    "a supplement to -- never a replacement for" this list. Empty by
+    default -- Link can run accepting inbound traffic with nothing
+    configured here at all, relying entirely on the reliable-nodes
+    roster (or peer-list-exchange-discovered candidates) to ever reach
+    the network.
 
-    Defaults to disabled, matching §15's "Phase 3 is explicitly
-    private/experimental federation" framing -- an operator opts in.
+    `enabled` is tri-state (design doc §16, issue #219): `True`/`False`
+    when the operator set it explicitly (TOML `enabled = ...` or
+    `--enable-link`/`--disable-link`), `None` when the config is silent.
+    An explicit value always wins; a silent config defers to the SysOp's
+    node-wide reliable-node participation decision (`netbbs.link.
+    onboarding.resolve_link_enabled`, resolved once at startup by
+    `netbbs.__main__.run`, which then replaces this field with the
+    effective bool so every downstream consumer keeps reading a plain
+    bool). A node whose config is silent and whose SysOp never accepted
+    therefore stays off, exactly as the old `False` default did.
 
     `relay_serving_enabled`/`max_relay_clients` (design doc §12,
     issue #58) govern this node's own willingness to *act as a
@@ -187,7 +196,7 @@ class LinkConfig:
     collide from small, natural port increments alone.
     """
 
-    enabled: bool = False
+    enabled: bool | None = None
     host: str = "0.0.0.0"
     port: int = 7862
     outgoing_only: bool = True
@@ -274,7 +283,7 @@ class ShutdownConfig:
     # immediate shutdown never had one to spend), versus how long a
     # *background task* gets to notice cancellation before teardown
     # gives up on it and moves on. The other three tasks
-    # (`daybreak_task`/`update_check_task`/`seed_refresh_task`) had *no*
+    # (`daybreak_task`/`update_check_task`/`reliable_nodes_refresh_task`) had *no*
     # bound at all -- a bare `.cancel()` then an unbounded `await`,
     # which cancellation usually satisfies promptly but isn't
     # guaranteed to (two of the three reach a blocking `urllib.request.
@@ -329,71 +338,16 @@ class NodeConfig:
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
 
+        # Only an *explicit* `enabled = true` validates the Link block at
+        # config-load time. A silent config (`None`, design doc §16 issue
+        # #219) may still become enabled via the SysOp's participation
+        # decision -- `netbbs.__main__.run` calls `validate_link()` again
+        # after resolving that, so a bad Link value never reaches a running
+        # node either way, but a local-only node with a stray `[link]`
+        # table keeps loading exactly as it did before `enabled` was
+        # tri-state.
         if self.link.enabled:
-            if not (1 <= self.link.port <= 65535):
-                raise ConfigError(f"link.port must be between 1 and 65535, got {self.link.port}")
-            if not self.link.host.strip():
-                raise ConfigError("link.host must not be empty")
-            realtime_port = effective_realtime_port(self.link)
-            if not (1 <= realtime_port <= 65535):
-                raise ConfigError(
-                    f"link.realtime_port must be between 1 and 65535, got {realtime_port}"
-                )
-            if realtime_port == self.link.port:
-                raise ConfigError(
-                    "link.realtime_port must differ from link.port -- they are two independent "
-                    "listeners (HTTP+JSON gossip vs. persistent Noise real-time chat)"
-                )
-            if not self.link.outgoing_only:
-                if not self.link.advertised_host or not self.link.advertised_host.strip():
-                    raise ConfigError(
-                        "link.advertised_host must be set when link.outgoing_only is false -- "
-                        "a full peer must know what address to tell others to dial"
-                    )
-                advertised_port = (
-                    self.link.advertised_port if self.link.advertised_port is not None else self.link.port
-                )
-                if not (1 <= advertised_port <= 65535):
-                    raise ConfigError(
-                        f"link.advertised_port must be between 1 and 65535, got {advertised_port}"
-                    )
-                realtime_advertised_port = (
-                    self.link.realtime_advertised_port
-                    if self.link.realtime_advertised_port is not None else realtime_port
-                )
-                if not (1 <= realtime_advertised_port <= 65535):
-                    raise ConfigError(
-                        "link.realtime_advertised_port must be between 1 and 65535, got "
-                        f"{realtime_advertised_port}"
-                    )
-            if self.link.sync_interval_seconds <= 0:
-                raise ConfigError(
-                    "link.sync_interval_seconds must be greater than 0, got "
-                    f"{self.link.sync_interval_seconds}"
-                )
-            for seed in self.link.seeds:
-                if not seed.strip():
-                    raise ConfigError("link.seeds must not contain an empty entry")
-            if self.link.max_relay_clients <= 0:
-                raise ConfigError(
-                    f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
-                )
-            _require_positive_link = {
-                "max_peers": self.link.max_peers,
-                "max_carried_boards": self.link.max_carried_boards,
-                "max_carried_channels": self.link.max_carried_channels,
-                "max_carried_file_areas": self.link.max_carried_file_areas,
-                "max_remote_files_per_area": self.link.max_remote_files_per_area,
-                "max_concurrent_file_transfers_per_peer": self.link.max_concurrent_file_transfers_per_peer,
-                "request_rate_capacity": self.link.request_rate_capacity,
-                "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
-                "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
-                "diagnostic_log_max_age_days": self.link.diagnostic_log_max_age_days,
-                "diagnostic_log_max_rows": self.link.diagnostic_log_max_rows,
-            }
-            for name, value in _require_positive_link.items():
-                if value <= 0:
-                    raise ConfigError(f"link.{name} must be greater than 0, got {value}")
+            self.validate_link()
 
         t = self.throttle
         _require_positive = {
@@ -430,6 +384,75 @@ class NodeConfig:
                 "no transport is enabled -- a node with nothing listening can't serve "
                 "anyone; enable at least one of telnet, ssh, or web"
             )
+
+    def validate_link(self) -> None:
+        """The Link-specific half of `validate()`, callable on its own so
+        `netbbs.__main__.run` can re-run it once a silent `enabled` has
+        been resolved to `True` from the participation decision."""
+        if not (1 <= self.link.port <= 65535):
+            raise ConfigError(f"link.port must be between 1 and 65535, got {self.link.port}")
+        if not self.link.host.strip():
+            raise ConfigError("link.host must not be empty")
+        realtime_port = effective_realtime_port(self.link)
+        if not (1 <= realtime_port <= 65535):
+            raise ConfigError(
+                f"link.realtime_port must be between 1 and 65535, got {realtime_port}"
+            )
+        if realtime_port == self.link.port:
+            raise ConfigError(
+                "link.realtime_port must differ from link.port -- they are two independent "
+                "listeners (HTTP+JSON gossip vs. persistent Noise real-time chat)"
+            )
+        if not self.link.outgoing_only:
+            if not self.link.advertised_host or not self.link.advertised_host.strip():
+                raise ConfigError(
+                    "link.advertised_host must be set when link.outgoing_only is false -- "
+                    "a full peer must know what address to tell others to dial"
+                )
+            advertised_port = (
+                self.link.advertised_port if self.link.advertised_port is not None else self.link.port
+            )
+            if not (1 <= advertised_port <= 65535):
+                raise ConfigError(
+                    f"link.advertised_port must be between 1 and 65535, got {advertised_port}"
+                )
+            realtime_advertised_port = (
+                self.link.realtime_advertised_port
+                if self.link.realtime_advertised_port is not None else realtime_port
+            )
+            if not (1 <= realtime_advertised_port <= 65535):
+                raise ConfigError(
+                    "link.realtime_advertised_port must be between 1 and 65535, got "
+                    f"{realtime_advertised_port}"
+                )
+        if self.link.sync_interval_seconds <= 0:
+            raise ConfigError(
+                "link.sync_interval_seconds must be greater than 0, got "
+                f"{self.link.sync_interval_seconds}"
+            )
+        for seed in self.link.seeds:
+            if not seed.strip():
+                raise ConfigError("link.seeds must not contain an empty entry")
+        if self.link.max_relay_clients <= 0:
+            raise ConfigError(
+                f"link.max_relay_clients must be greater than 0, got {self.link.max_relay_clients}"
+            )
+        _require_positive_link = {
+            "max_peers": self.link.max_peers,
+            "max_carried_boards": self.link.max_carried_boards,
+            "max_carried_channels": self.link.max_carried_channels,
+            "max_carried_file_areas": self.link.max_carried_file_areas,
+            "max_remote_files_per_area": self.link.max_remote_files_per_area,
+            "max_concurrent_file_transfers_per_peer": self.link.max_concurrent_file_transfers_per_peer,
+            "request_rate_capacity": self.link.request_rate_capacity,
+            "request_rate_refill_per_minute": self.link.request_rate_refill_per_minute,
+            "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
+            "diagnostic_log_max_age_days": self.link.diagnostic_log_max_age_days,
+            "diagnostic_log_max_rows": self.link.diagnostic_log_max_rows,
+        }
+        for name, value in _require_positive_link.items():
+            if value <= 0:
+                raise ConfigError(f"link.{name} must be greater than 0, got {value}")
 
     def describe_insecure_bindings(self) -> list[str]:
         """
@@ -655,8 +678,11 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
     seeds = table.get("seeds", current.seeds)
     if not isinstance(seeds, list) or not all(isinstance(item, str) for item in seeds):
         raise ConfigError("link.seeds must be a list of strings")
+    enabled = table.get("enabled", current.enabled)
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"link.enabled must be true or false, got {enabled!r}")
     return LinkConfig(
-        enabled=bool(table.get("enabled", current.enabled)),
+        enabled=enabled,
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
         outgoing_only=bool(table.get("outgoing_only", current.outgoing_only)),

@@ -163,8 +163,8 @@ def main() -> int:
         (node_a_dir / "netbbs.toml").write_text(NODE_A_TOML)
         (node_b_dir / "netbbs.toml").write_text(NODE_B_TOML)
 
-        run([sys.executable, "scripts/create_test_user.py", str(node_a_dir / "netbbs.db"), "alice", "hunter2", "255"])
-        run([sys.executable, "scripts/create_test_user.py", str(node_b_dir / "netbbs.db"), "bob", "hunter2", "255"])
+        run([sys.executable, "scripts/create_test_user.py", str(node_a_dir / "netbbs.db"), "alice", "hunter2", "255", "Node A"])
+        run([sys.executable, "scripts/create_test_user.py", str(node_b_dir / "netbbs.db"), "bob", "hunter2", "255", "Node B"])
         run([sys.executable, "scripts/create_test_board.py", str(node_a_dir / "netbbs.db"), "general", "General discussion"])
         steps_passed.append("fixtures created")
 

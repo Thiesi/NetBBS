@@ -12,7 +12,7 @@ Populated by `LinkDiagnosticLogHandler`, a plain `logging.Handler`
 attached to the `netbbs.link` logger namespace (`netbbs.__main__`, only
 when Link is enabled) at `WARNING` level and above -- this catches every
 existing `_logger.warning`/`.error` call already scattered across
-`netbbs.link.sync`/`.transport`/`.seedlist` via ordinary logger
+`netbbs.link.sync`/`.transport`/`.reliable_nodes` via ordinary logger
 propagation, with no per-call-site instrumentation needed. Routine
 `INFO`-level chatter stays stderr-only, exactly as before this module
 existed.
@@ -35,7 +35,7 @@ connection some other in-flight operation hasn't finished its own
 transaction on yet would silently commit that unrelated work too. Only
 ever constructed and used from the main event-loop thread (every
 existing call site this handler observes is in `netbbs.link.sync`/
-`.transport`/`.seedlist`, none of which run on a `DatabaseLane` worker
+`.transport`/`.reliable_nodes`, none of which run on a `DatabaseLane` worker
 thread), so the connection's default thread-affinity is never an issue.
 """
 

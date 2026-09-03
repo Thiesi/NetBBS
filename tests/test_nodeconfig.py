@@ -250,9 +250,28 @@ def test_loaded_config_is_validated_end_to_end(tmp_path):
 # -- Link config (design doc §11/§12) -----------------------------------------
 
 
-def test_default_link_config_is_disabled_and_outgoing_only():
+def test_a_silent_link_table_with_bad_values_still_loads(tmp_path):
+    """Code review (PR #267): a stray [link] table that loaded before
+    `enabled` became tri-state must keep loading -- the Link checks run at
+    startup only if Link actually resolves to enabled."""
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text("[ssh]\nenabled = true\n[link]\nsync_interval_seconds = 0\n")
+    config = load_config(["--config", str(config_file)])
+    assert config.link.enabled is None
+    with pytest.raises(ConfigError, match="sync_interval_seconds"):
+        config.validate_link()
+    config_file.write_text("[ssh]\nenabled = true\n[link]\nenabled = true\nsync_interval_seconds = 0\n")
+    with pytest.raises(ConfigError, match="sync_interval_seconds"):
+        load_config(["--config", str(config_file)])
+
+
+def test_default_link_config_is_unset_and_outgoing_only():
+    # Design doc §16, issue #219: a silent config is `None` (deferred to
+    # the SysOp's participation decision at startup), not `False`.
     config = NodeConfig()
-    assert config.link.enabled is False
+    assert config.link.enabled is None
     assert config.link.outgoing_only is True
 
 

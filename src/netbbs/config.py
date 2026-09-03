@@ -143,6 +143,22 @@ def get_node_display_name(db: Database) -> str:
     return get_config(db, NODE_DISPLAY_NAME_CONFIG_KEY) or _DEFAULT_NODE_DISPLAY_NAME
 
 
+def is_placeholder_node_display_name(name: str) -> bool:
+    """Whether `name` is the shipped default (design doc §16, issue #219
+    Decision 6). Compared case-insensitively so "netbbs" typed back in by
+    hand doesn't count as a choice either. Split from the `db` form so a
+    prompt can reject a candidate *before* persisting it."""
+    return name.strip().lower() == _DEFAULT_NODE_DISPLAY_NAME.lower()
+
+
+def is_node_display_name_placeholder(db: Database) -> bool:
+    """Whether this node still shows the shipped default name: a node may
+    run locally with it forever, but may not participate in NetBBS Link
+    until a SysOp picks a real one -- every default-named node on a mesh
+    would be indistinguishable in conversation."""
+    return is_placeholder_node_display_name(get_node_display_name(db))
+
+
 def set_node_display_name(db: Database, name: str) -> None:
     name = name.strip()
     if not name:
