@@ -216,3 +216,19 @@ def test_deliverer_queues_for_an_online_recipient_and_drops_otherwise(tmp_path):
         body="x", created_at=utc_now_iso(),
     ))) is False
     rig.close()
+
+
+def test_send_reports_an_upgrade_requirement_distinctly(tmp_path):
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    class _OldPeerDirectChat(_StubDirectChat):
+        async def ensure_session(self, fingerprint: str):
+            raise RealtimeProtocolVersionError("unsupported real-time protocol version")
+
+    rig = _Rig(tmp_path)
+    rig.direct = _OldPeerDirectChat()
+    ok, text = _send(rig, f"bob@{rig.peer_identity.fingerprint[:12]}", "hi")
+    assert not ok
+    assert "incompatible real-time protocol version" in text
+    assert UNREACHABLE_NOTE not in text
+    rig.close()

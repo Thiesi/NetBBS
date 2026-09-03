@@ -1357,6 +1357,7 @@ async def attach_relayed_session(
     if role not in ("initiator", "responder"):
         raise LinkTransportError(f"unknown relay role {role!r}")
     reader, writer = await asyncio.open_connection(host, port)
+    owned_by_session = False
     try:
         writer.write(encode_bridge_attach_record(attach_token))
         await writer.drain()
@@ -1371,20 +1372,23 @@ async def attach_relayed_session(
                     f"expected a relayed session with {expected_fingerprint}, "
                     f"but authenticated as {remote.root_fingerprint}"
                 )
-    except (LinkTransportError, LinkProtocolError, ConnectionError, OSError):
-        await _reject_before_session(writer)
-        raise
-    fingerprint = remote.root_fingerprint
-    if enforce_trust_policy:
-        assert lane is not None
-        allowed = await lane.run(_decide_realtime_admission, fingerprint)
-        if not allowed:
+        fingerprint = remote.root_fingerprint
+        if enforce_trust_policy:
+            assert lane is not None
+            allowed = await lane.run(_decide_realtime_admission, fingerprint)
+            if not allowed:
+                raise LinkTransportError(f"relayed session to {fingerprint} refused by local trust policy")
+        session = LinkRealtimeSession(
+            remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
+            is_initiator=(role == "initiator"), on_frame=on_frame,
+        )
+        owned_by_session = True
+    except BaseException:
+        # Includes cancellation (a caller's own rendezvous timeout firing
+        # mid-handshake): until a session owns the socket, close it here.
+        if not owned_by_session:
             await _reject_before_session(writer)
-            raise LinkTransportError(f"relayed session to {fingerprint} refused by local trust policy")
-    session = LinkRealtimeSession(
-        remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
-        is_initiator=(role == "initiator"), on_frame=on_frame,
-    )
+        raise
     session.start()
     survived = await registry.admit(session)
     if not survived:
@@ -1432,9 +1436,15 @@ class LinkRealtimeConnector:
         stable_after_seconds: float = REALTIME_RECONNECT_STABLE_AFTER_SECONDS,
         rng: random.Random | None = None,
         on_session: Callable[[LinkRealtimeSession], Awaitable[None]] | None = None,
+        addresses: list[tuple[str, int]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
+        # Every advertised address, tried in order across successive
+        # attempts (`host`/`port` alone otherwise): a stale first address
+        # must not pin the reconnect loop to an endpoint that never answers.
+        self._addresses: list[tuple[str, int]] = list(addresses) if addresses else [(host, port)]
+        self._attempt = 0
         self._identity = identity
         self._on_frame = on_frame
         self._registry = registry
@@ -1476,8 +1486,10 @@ class LinkRealtimeConnector:
         while not self._stopping:
             try:
                 connected_at = loop.time()
+                host, port = self._addresses[self._attempt % len(self._addresses)]
+                self._attempt += 1
                 session = await dial_realtime_session(
-                    self._host, self._port, self._identity, on_frame=self._on_frame,
+                    host, port, self._identity, on_frame=self._on_frame,
                     registry=self._registry, lane=self._lane,
                     enforce_trust_policy=self._enforce_trust_policy,
                     expected_fingerprint=self._expected_fingerprint,

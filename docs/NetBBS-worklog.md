@@ -1774,6 +1774,21 @@ constrain future changes:
   `LiveDirectChat.ensure_session` re-runs the `REALTIME` policy check too, so
   a SysOp block takes effect before the next private message, not at the next
   reconnect.
+- **Every relay answer echoes the requester's `relay_request` message id**
+  (`request_id` on `relay_waiting`/`relay_ready`/`relay_reject`), and the
+  party honours an answer only for the attempt it is currently waiting on.
+  Without it a late reject to an earlier, timed-out attempt fails the retry
+  (TCP orders each direction, not the cross-direction retry race).
+- **The relay half re-decides `REALTIME` policy for the requester on every
+  request** (`policy_refused`), and **every participating node -- full peers
+  too -- stands by at the reliable nodes**; a full peer sending to an
+  outgoing-only peer needs that relay session as much as the reverse, and
+  `_relay_sessions` dials a reliable node on demand when none is up. A
+  standing connector cycles through *every* advertised address across
+  attempts; a stale first address must not pin it.
+- **`attach_relayed_session` closes its socket on any exit before a session
+  owns it -- cancellation included.** A caller's own rendezvous timeout can
+  fire mid-handshake; the `except BaseException` there is deliberate.
 - **Receiving a node-presence snapshot tracks the session.** Server-side
   `track_session` used to be reached only via `subscribe`; direct-message and
   anchor sessions never subscribe, so their presence was stored with no close

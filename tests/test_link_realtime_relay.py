@@ -96,6 +96,7 @@ class _Node:
         )
         self.bridge.register_frame_handler(self.relay.owns_frame, self.relay.handle_frame)
         self._wire_client()
+        self.relay._decide_peer_allowed = self._peer_allowed
 
     async def _attach(self, token, reader, writer):
         assert self.relay is not None
@@ -106,11 +107,13 @@ class _Node:
         listener, no relay) but can ask relays and answer invitations."""
         self._wire_client()
 
+    async def _peer_allowed(self, fingerprint: str) -> bool:
+        return await self.lane.run(
+            lambda db: decide_node_action(db, fingerprint, LinkPolicyAction.REALTIME).allowed
+        )
+
     def _wire_client(self) -> None:
-        async def _allowed(fingerprint: str) -> bool:
-            return await self.lane.run(
-                lambda db: decide_node_action(db, fingerprint, LinkPolicyAction.REALTIME).allowed
-            )
+        _allowed = self._peer_allowed
 
         async def _establish(**kw):
             return await attach_relayed_session(
@@ -829,3 +832,187 @@ def test_direct_message_frame_rejects_a_malformed_timestamp():
         build_direct_message_frame(
             to_user_id="bob", from_user_id="alice", from_display_label="Alice", body="hi", created_at="x",
         )
+
+
+# -- Codex round 3 (PR #269) --------------------------------------------------------
+
+
+def test_a_node_dials_a_reliable_relay_on_demand_when_it_holds_no_session(tmp_path):
+    """A full peer runs no standing anchor unless it opts in; it must still
+    reach an outgoing-only peer through the shared relay."""
+    async def scenario():
+        relay = _Node(tmp_path, "relay-od")
+        a = _Node(tmp_path, "party-a-od")
+        b = _Node(tmp_path, "party-b-od")
+        await relay.start_server(serving=True)
+        a.wire_party(); b.wire_party()
+        relay.trust(a, b); a.trust(relay, b); b.trust(relay, a)
+        a.know_relay(relay); b.know_relay(relay)
+        from netbbs.link.reliable_nodes import set_cached_reliable_nodes
+        set_cached_reliable_nodes(a.db, ROSTER); set_cached_reliable_nodes(b.db, ROSTER)
+        await b.connect_to(relay)  # only the target stands by; A has no session yet
+        try:
+            assert a.registry.get(relay.identity.fingerprint) is None
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert session.remote_fingerprint == b.identity.fingerprint
+            assert a.registry.get(relay.identity.fingerprint) is not None  # dialed on demand
+        finally:
+            await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_relay_rechecks_the_requesters_policy_on_every_request(tmp_path):
+    async def scenario():
+        relay, a, b = await _three_nodes(tmp_path)
+        try:
+            set_trust_override(
+                relay.db, TrustSubject.node(a.identity.fingerprint), TrustDimension.RESOURCE_BEHAVIOR,
+                TrustState.BLOCKED, reason="sysop lockout", now_iso="2026-09-03T12:00:00+00:00",
+            )
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "policy_refused"
+            assert relay.relay.pending_rendezvous == 0
+        finally:
+            await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_track_session_creates_exactly_one_close_watcher_per_session(tmp_path):
+    async def scenario():
+        node = _Node(tmp_path, "watchers")
+
+        class _Sess:
+            remote_fingerprint = "peer"
+            closed = asyncio.Event()
+
+            async def send(self, frame):
+                pass
+
+        s = _Sess()
+        for _ in range(5):
+            await node.bridge.track_session(s)
+        assert len(node.bridge._watchers) == 1
+        s.closed.set()
+        await asyncio.sleep(0.05)
+        assert node.bridge._watchers == set() and node.bridge._watched == {}
+        node.lane.close(); node.db.close()
+
+    asyncio.run(scenario())
+
+
+def test_attach_closes_its_socket_when_cancelled_mid_handshake():
+    async def scenario():
+        seen_eof = asyncio.Event()
+
+        async def silent(reader, writer):
+            # Never answers; just drains until the client goes away.
+            while await reader.read(4096):
+                pass
+            seen_eof.set()
+            writer.close()
+
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        identity = bootstrap_node_identity("cancelled-attach")
+        registry = LinkRealtimeSessionRegistry(own_fingerprint=identity.fingerprint)
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(attach_relayed_session(
+                    "127.0.0.1", port, identity, attach_token="0" * 32, role="initiator",
+                    expected_fingerprint="peer", on_frame=lambda s, f: asyncio.sleep(0), registry=registry,
+                ), timeout=0.3)
+            assert await _wait_until(seen_eof.is_set)
+        finally:
+            server.close()
+
+    asyncio.run(scenario())
+
+
+def test_version_mismatch_on_direct_dial_surfaces_as_an_upgrade_notice(tmp_path, monkeypatch):
+    import netbbs.link.realtime_direct as direct_module
+    from netbbs.link.protocol import RealtimeProtocolVersionError
+
+    node = _Node(tmp_path, "vmismatch")
+    peer = _Node(tmp_path, "vmismatch-peer")
+    node.wire_party()
+    node.trust(peer)
+    node.link_node.handle_hello(peer.link_node.build_hello(
+        addresses=[{"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": 9}],
+        outgoing_only=False, created_at=utc_now_iso(),
+    ))
+
+    async def old_peer(*args, **kwargs):
+        raise RealtimeProtocolVersionError("unsupported real-time protocol version")
+
+    monkeypatch.setattr(direct_module, "dial_realtime_session", old_peer)
+    with pytest.raises(RealtimeProtocolVersionError):
+        asyncio.run(node.direct.ensure_session(peer.identity.fingerprint))
+    node.lane.close(); node.db.close(); peer.lane.close(); peer.db.close()
+
+
+def test_connector_cycles_through_every_advertised_address(monkeypatch):
+    import netbbs.link.transport as transport_module
+    from netbbs.link.transport import LinkRealtimeConnector
+
+    dialed: list = []
+
+    async def failing_dial(host, port, *args, **kwargs):
+        dialed.append((host, port))
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(transport_module, "dial_realtime_session", failing_dial)
+
+    async def scenario():
+        connector = LinkRealtimeConnector(
+            host="a", port=1, identity=None, on_frame=None, registry=None,
+            addresses=[("a", 1), ("b", 2), ("c", 3)], min_backoff_seconds=0.0, max_backoff_seconds=0.0,
+        )
+        connector.start()
+        await asyncio.sleep(0.05)
+        await connector.stop()
+
+    asyncio.run(scenario())
+    assert dialed[:3] == [("a", 1), ("b", 2), ("c", 3)] and len(dialed) >= 3
+
+
+def test_client_ignores_a_late_answer_to_an_earlier_attempt():
+    async def scenario():
+        client = _client([], timeout=0.2)
+        relay = _RecordingSession("relay")
+        with pytest.raises(RelayRendezvousError):
+            await client.request_bridge(relay, "peer")  # times out
+        stale_id = relay.sent[-1].message_id
+        task = asyncio.create_task(client.request_bridge(relay, "peer"))  # the retry
+        await asyncio.sleep(0)
+        late = build_relay_reject_frame(target_fingerprint="peer", reason="declined", origin="relay", request_id=stale_id)
+        assert client.owns_frame(relay, late) is False
+        fresh = build_relay_reject_frame(
+            target_fingerprint="peer", reason="declined", origin="relay", request_id=relay.sent[-1].message_id,
+        )
+        assert client.owns_frame(relay, fresh) is True
+        await client.handle_frame(relay, fresh)
+        with pytest.raises(RelayRendezvousError) as excinfo:
+            await task
+        assert excinfo.value.reason == "declined"
+
+    asyncio.run(scenario())
+
+
+def test_malformed_roster_urls_are_skipped_not_fatal(tmp_path):
+    from netbbs.link.realtime_direct import _url_host_port
+    from netbbs.link.reliable_nodes import parse_reliable_nodes
+    import json
+
+    assert _url_host_port("http://[::1") == ("", None)
+    assert _url_host_port("http://host:notaport") == ("", None)
+    assert _url_host_port("http://host:99999") == ("", None)
+    node = _Node(tmp_path, "badurl")
+    assert reliable_node_fingerprints(node.link_node, [ReliableNode(name="x", url="http://[::1")]) == []
+    parsed = parse_reliable_nodes(json.dumps({"version": 1, "nodes": [
+        {"name": "bad", "url": "http://host:notaport"}, {"name": "ok", "url": "http://host:7862"},
+    ]}).encode())
+    assert [n.name for n in parsed] == ["ok"]
+    node.lane.close(); node.db.close()

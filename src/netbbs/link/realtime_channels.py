@@ -271,6 +271,11 @@ class LiveChannelBridge:
         # session (existing convention), but the snapshot must only go
         # out once per connection, not once per call.
         self._node_presence_sent: set[str] = set()
+        # id(session) -> its one close-watcher task. track_session is
+        # called for every presence frame a peer sends (issue #168), so
+        # the watcher must be created exactly once per session, not once
+        # per call -- a chatty peer must not grow this node's task set.
+        self._watched: dict[int, asyncio.Task] = {}
         # channel_id -> opaque holder ids (issue #159): this node's own
         # *subscriber*-side interest in a linked channel it doesn't
         # originate -- the mirror image of `_subscribers` above, which is
@@ -352,9 +357,12 @@ class LiveChannelBridge:
         session, and `_untrack_on_close`'s own watcher (already spawned
         above) will clean up `_node_presence_sent` once `session.closed`
         actually fires."""
-        watcher = asyncio.get_running_loop().create_task(self._untrack_on_close(session))
-        self._watchers.add(watcher)
-        watcher.add_done_callback(self._watchers.discard)
+        if id(session) not in self._watched:
+            watcher = asyncio.get_running_loop().create_task(self._untrack_on_close(session))
+            self._watched[id(session)] = watcher
+            self._watchers.add(watcher)
+            watcher.add_done_callback(self._watchers.discard)
+            watcher.add_done_callback(lambda _t, key=id(session): self._watched.pop(key, None))
 
         if session.remote_fingerprint in self._node_presence_sent:
             return

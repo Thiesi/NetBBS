@@ -101,6 +101,9 @@ class _Rendezvous:
     requester: str
     target: str
     created_at: float
+    # The requester's own relay_request message_id, echoed on every
+    # answer so a late answer never lands on a fresh attempt.
+    request_id: str | None = None
     target_agreed: bool = False
     tokens: dict[str, str] = field(default_factory=dict)  # fingerprint -> attach token
     legs: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = field(default_factory=dict)
@@ -138,9 +141,14 @@ class RealtimeRelay:
         rendezvous_timeout_seconds: float = LIVE_RELAY_DEFAULT_RENDEZVOUS_TIMEOUT_SECONDS,
         idle_timeout_seconds: float = LIVE_RELAY_DEFAULT_IDLE_TIMEOUT_SECONDS,
         max_bytes_per_second: int = LIVE_RELAY_DEFAULT_MAX_BYTES_PER_SECOND,
+        decide_peer_allowed: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._own = own_fingerprint
         self._registry = registry
+        # §8.10.2's "checked again" principle for the relay half: a
+        # requester's session can outlive a SysOp block; every request is
+        # re-decided against local REALTIME policy before it costs anything.
+        self._decide_peer_allowed = decide_peer_allowed
         # Serving needs an address the parties can attach to -- an
         # outgoing-only node has none to give, so it never serves.
         self._serving = serving_enabled and attach_address is not None and attach_port is not None
@@ -191,17 +199,22 @@ class RealtimeRelay:
 
     async def handle_frame(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         if frame.type == "relay_request":
-            await self._handle_request(session, frame.payload["target_fingerprint"])
+            await self._handle_request(session, frame.payload["target_fingerprint"], request_id=frame.message_id)
         elif frame.type == "relay_reject":
             await self._handle_party_reject(session, frame.payload["target_fingerprint"])
 
-    async def _handle_request(self, session: LinkRealtimeSession, target: str) -> None:
+    async def _handle_request(
+        self, session: LinkRealtimeSession, target: str, *, request_id: str | None = None,
+    ) -> None:
         requester = session.remote_fingerprint
         if not self._serving:
-            await self._reject(session, target, "not_serving")
+            await self._reject(session, target, "not_serving", request_id=request_id)
+            return
+        if self._decide_peer_allowed is not None and not await self._decide_peer_allowed(requester):
+            await self._reject(session, target, "policy_refused", request_id=request_id)
             return
         if target == self._own or target == requester:
-            await self._reject(session, target, "invalid_target")
+            await self._reject(session, target, "invalid_target", request_id=request_id)
             return
         key = _pair_key(requester, target)
         pending = self._pending.get(key)
@@ -213,25 +226,28 @@ class RealtimeRelay:
             else:
                 # A repeat from the original requester (or a duplicate
                 # agreement): restate the wait, never a second rendezvous.
-                await self._send(session, build_relay_waiting_frame(target_fingerprint=target))
+                await self._send(session, build_relay_waiting_frame(
+                    target_fingerprint=target, request_id=pending.request_id,
+                ))
             return
         target_session = self._registry.get(target)
         if target_session is None:
-            await self._reject(session, target, "target_unreachable")
+            await self._reject(session, target, "target_unreachable", request_id=request_id)
             return
         if len(self._bridges) >= self._max_pairs:
-            await self._reject(session, target, "at_capacity")
+            await self._reject(session, target, "at_capacity", request_id=request_id)
             return
         if len(self._pending) >= self._max_pending:
-            await self._reject(session, target, "pending_full")
+            await self._reject(session, target, "pending_full", request_id=request_id)
             return
         loop = asyncio.get_running_loop()
         rendezvous = _Rendezvous(
             bridge_id=secrets.token_hex(16), requester=requester, target=target, created_at=loop.time(),
+            request_id=request_id,
         )
         self._pending[key] = rendezvous
         rendezvous.timer = loop.create_task(self._expire(rendezvous))
-        await self._send(session, build_relay_waiting_frame(target_fingerprint=target))
+        await self._send(session, build_relay_waiting_frame(target_fingerprint=target, request_id=request_id))
         try:
             await target_session.send(
                 build_relay_request_frame(target_fingerprint=target, requester_fingerprint=requester)
@@ -258,6 +274,7 @@ class RealtimeRelay:
                 bridge_id=rendezvous.bridge_id, peer_fingerprint=peer, role=role,
                 attach_token=rendezvous.tokens[fingerprint], attach_address=self._attach_address,
                 attach_port=self._attach_port,
+                request_id=rendezvous.request_id if fingerprint == rendezvous.requester else None,
             )
             if session is None:
                 await self._fail_rendezvous(rendezvous, reason="target_unreachable")
@@ -296,10 +313,17 @@ class RealtimeRelay:
             session = self._registry.get(fingerprint)
             if session is None:
                 continue
-            await self._reject(session, other, reason)
+            await self._reject(
+                session, other, reason,
+                request_id=rendezvous.request_id if fingerprint == rendezvous.requester else None,
+            )
 
-    async def _reject(self, session: LinkRealtimeSession, target: str, reason: str) -> None:
-        await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason=reason, origin="relay"))
+    async def _reject(
+        self, session: LinkRealtimeSession, target: str, reason: str, *, request_id: str | None = None,
+    ) -> None:
+        await self._send(session, build_relay_reject_frame(
+            target_fingerprint=target, reason=reason, origin="relay", request_id=request_id,
+        ))
 
     async def _send(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         try:
@@ -494,8 +518,9 @@ class RealtimeRelayClient:
         # external service. `None` (tests only) skips the pin.
         self._allowed_attach_addresses = allowed_attach_addresses
         # target fingerprint -> (relay fingerprint asked, future resolved
-        # with the established session or failed with RelayRendezvousError)
-        self._waiting: dict[str, tuple[str, asyncio.Future]] = {}
+        # with the established session or failed with RelayRendezvousError,
+        # the relay_request message_id this attempt used)
+        self._waiting: dict[str, tuple[str, asyncio.Future, str]] = {}
         # inviter fingerprint -> (relay fingerprint the invitation came
         # over, deadline) for invitations this node agreed to and is now
         # expecting a relay_ready for.
@@ -515,16 +540,15 @@ class RealtimeRelayClient:
         existing = self._waiting.get(target)
         if existing is None:
             future: asyncio.Future = loop.create_future()
-            self._waiting[target] = (relay.remote_fingerprint, future)
+            request = build_relay_request_frame(target_fingerprint=target, requester_fingerprint=self._own)
+            self._waiting[target] = (relay.remote_fingerprint, future, request.message_id)
             try:
-                await relay.send(
-                    build_relay_request_frame(target_fingerprint=target, requester_fingerprint=self._own)
-                )
+                await relay.send(request)
             except LinkTransportError as exc:
                 self._settle(target, RelayRendezvousError("relay_unreachable", str(exc)))
                 raise RelayRendezvousError("relay_unreachable", str(exc)) from exc
         else:
-            _, future = existing
+            _, future, _ = existing
         try:
             return await asyncio.wait_for(asyncio.shield(future), timeout=self._timeout)
         except TimeoutError as exc:
@@ -535,7 +559,7 @@ class RealtimeRelayClient:
         entry = self._waiting.pop(target, None)
         if entry is None:
             return
-        _, future = entry
+        _, future, _ = entry
         if future.done():
             return
         if error is not None:
@@ -553,21 +577,28 @@ class RealtimeRelayClient:
         if frame.type == "relay_request":
             return payload["target_fingerprint"] == self._own
         if frame.type == "relay_waiting":
-            entry = self._waiting.get(payload["target_fingerprint"])
-            return entry is not None and entry[0] == sender
+            return self._answers_current_wait(sender, payload["target_fingerprint"], payload.get("request_id"))
         if frame.type == "relay_reject":
             if payload["origin"] != "relay":
                 return False
-            entry = self._waiting.get(payload["target_fingerprint"])
-            return entry is not None and entry[0] == sender
+            return self._answers_current_wait(sender, payload["target_fingerprint"], payload.get("request_id"))
         if frame.type == "relay_ready":
             peer = payload["peer_fingerprint"]
-            entry = self._waiting.get(peer)
-            if entry is not None and entry[0] == sender:
+            if self._answers_current_wait(sender, peer, payload.get("request_id")):
                 return True
             accepted = self._accepted.get(peer)
             return accepted is not None and accepted[0] == sender
         return False
+
+    def _answers_current_wait(self, sender: str, target: str, request_id: str | None) -> bool:
+        """Whether a relay's answer belongs to the request this node is
+        *currently* waiting on for `target`: from the relay asked, and --
+        when the relay echoes one -- for this attempt's own request id, so
+        a late answer to an earlier, timed-out attempt is ignored."""
+        entry = self._waiting.get(target)
+        if entry is None or entry[0] != sender:
+            return False
+        return request_id is None or request_id == entry[2]
 
     async def handle_frame(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         self._expire_accepted()

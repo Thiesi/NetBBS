@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.protocol import LinkNode, RealtimeFrame, build_direct_message_frame
+from netbbs.link.protocol import LinkNode, RealtimeFrame, RealtimeProtocolVersionError, build_direct_message_frame
 from netbbs.link.realtime_relay import RealtimeRelayClient, RelayRendezvousError
 from netbbs.link.reliable_nodes import ReliableNode, effective_reliable_nodes
 from netbbs.link.transport import (
@@ -75,18 +75,28 @@ class IncomingDirectMessage:
 
 
 def _url_host_port(url: str) -> tuple[str, int | None]:
-    parts = urlsplit(url)
-    port = parts.port
+    """`(hostname, port)` for a roster URL, or `("", None)` for one that
+    does not parse (a non-numeric or out-of-range port, unbalanced IPv6
+    brackets): one malformed roster entry must never abort an anchor
+    pass or a relay lookup."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+        hostname = parts.hostname
+    except ValueError:
+        return "", None
+    if not hostname:
+        return "", None
     if port is None:
         port = 443 if parts.scheme == "https" else 80 if parts.scheme == "http" else None
-    return (parts.hostname or "").lower(), port
+    return hostname.lower(), port
 
 
 def reliable_node_fingerprints(node: LinkNode, roster: list[ReliableNode]) -> list[str]:
     """Which known peers are reliable nodes: a roster entry names a Link
     base URL, a completed hello records the peer's advertised HTTP
     address -- match host and port. Order follows the roster."""
-    wanted = [_url_host_port(entry.url) for entry in roster]
+    wanted = [hp for hp in (_url_host_port(entry.url) for entry in roster) if hp[0]]
     found: list[str] = []
     for fingerprint, peer in node.peers.items():
         addresses = peer.descriptor.payload.get("addresses") or []
@@ -167,6 +177,11 @@ class LiveDirectChat:
                     ),
                     timeout=self._dial_timeout,
                 )
+            except RealtimeProtocolVersionError:
+                # An authenticated version mismatch is an upgrade
+                # requirement, not transient unreachability -- the caller
+                # gets the explicit notice, never Decision 3's refusal.
+                raise
             except Exception as exc:
                 _logger.info("direct real-time dial of %s at %s:%d failed: %s", fingerprint[:12], host, port, exc)
                 continue
@@ -194,14 +209,40 @@ class LiveDirectChat:
 
     async def _relay_sessions(self) -> list[LinkRealtimeSession]:
         """Live sessions with reliable nodes (§16 issue #219 Decision 4:
-        the same roster serves as the live-relay anchor), roster order."""
+        the same roster serves as the live-relay anchor), roster order --
+        dialed on demand when this node holds none yet. A full peer runs
+        no standing anchor unless participation is accepted, and even an
+        anchored node may be between reconnects; a relay is a full peer,
+        so reaching it is an ordinary direct dial."""
         roster = await self._lane.run(effective_reliable_nodes)
         sessions: list[LinkRealtimeSession] = []
         for fingerprint in reliable_node_fingerprints(self._node, roster):
             session = self._registry.get(fingerprint)
+            if session is None:
+                session = await self._dial_relay(fingerprint)
             if session is not None:
                 sessions.append(session)
         return sessions
+
+    async def _dial_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
+        for host, port in dialable_realtime_addresses_for_peer(self._node, fingerprint):
+            try:
+                session = await asyncio.wait_for(
+                    dial_realtime_session(
+                        host, port, self._identity, on_frame=self._on_frame, registry=self._registry,
+                        lane=self._lane, enforce_trust_policy=True, expected_fingerprint=fingerprint,
+                    ),
+                    timeout=self._dial_timeout,
+                )
+            except Exception as exc:
+                winner = self._registry.get(fingerprint)
+                if winner is not None:
+                    return winner
+                _logger.info("could not reach relay %s at %s:%d: %s", fingerprint[:12], host, port, exc)
+                continue
+            await self._track_session(session)
+            return session
+        return self._registry.get(fingerprint)
 
     async def send_direct_message(
         self, fingerprint: str, *, to_user_id: str, from_user_id: str, from_display_label: str,
@@ -255,14 +296,15 @@ async def run_reliable_anchor_connectors(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Keep an outgoing-only node standing by at every reliable node it
+    """Keep a participating node standing by at every reliable node it
     knows (design doc §8.10.3): a live session to a relay is what makes
-    this node *reachable* for a rendezvous, so it must exist before
-    anyone wants to talk, not be dialed on demand by the other side
-    (which, by definition, cannot dial us). One `LinkRealtimeConnector`
-    per reliable-node peer with an advertised real-time address, started
-    once and left to its own reconnect loop; re-checked every
-    `interval_seconds` as hellos complete and the roster refreshes.
+    an outgoing-only node *reachable* for a rendezvous (nobody can dial
+    it first), and what lets a full peer *reach* an outgoing-only node
+    through the same relay without a dial per message. One
+    `LinkRealtimeConnector` per reliable-node peer with an advertised
+    real-time address, cycling through every advertised address across
+    attempts, started once and left to its own reconnect loop; re-checked
+    every `interval_seconds` as hellos complete and the roster refreshes.
     Only while reliable-node participation is accepted -- declining it
     means never contacting project infrastructure for this either."""
     # fingerprint -> (connector, (host, port)) -- reconciled every pass
@@ -280,22 +322,26 @@ async def run_reliable_anchor_connectors(
                     for fingerprint in reliable_node_fingerprints(link_node, roster):
                         addresses = dialable_realtime_addresses_for_peer(link_node, fingerprint)
                         if addresses:
-                            desired[fingerprint] = addresses[0]
+                            desired[fingerprint] = tuple(addresses)
                 for fingerprint, (connector, address) in list(started.items()):
                     if desired.get(fingerprint) != address:
                         await connector.stop()  # type: ignore[attr-defined]
                         del started[fingerprint]
                         _logger.info("no longer standing by at %s for live relay", fingerprint[:12])
-                for fingerprint, (host, port) in desired.items():
+                for fingerprint, addresses in desired.items():
                     if fingerprint in started:
                         continue
+                    host, port = addresses[0]
                     connector = start_connector(
                         host=host, port=port, identity=node_identity, on_frame=on_frame, registry=registry,
                         lane=lane, enforce_trust_policy=True, expected_fingerprint=fingerprint,
-                        track_session=track_session,
+                        track_session=track_session, addresses=list(addresses),
                     )
-                    started[fingerprint] = (connector, (host, port))
-                    _logger.info("standing by at reliable node %s (%s:%d) for live relay", fingerprint[:12], host, port)
+                    started[fingerprint] = (connector, addresses)
+                    _logger.info(
+                        "standing by at reliable node %s (%s:%d, %d address(es)) for live relay",
+                        fingerprint[:12], host, port, len(addresses),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:

@@ -217,7 +217,7 @@ _REALTIME_RELAY_ROLES = frozenset({"initiator", "responder"})
 _REALTIME_RELAY_REJECT_ORIGINS = frozenset({"relay", "party"})
 _REALTIME_RELAY_REJECT_REASONS = frozenset(
     {"not_serving", "invalid_target", "target_unreachable", "at_capacity", "pending_full",
-     "declined", "timeout", "attach_failed"}
+     "declined", "timeout", "attach_failed", "policy_refused"}
 )
 
 # Issue #194: a scrollback_snapshot bundles up to this many entries in one
@@ -715,16 +715,28 @@ def _validate_relay_request_payload(payload: dict, *, path: str) -> None:
         raise LinkProtocolError(f"{path} target and requester must differ")
 
 
+def _validate_optional_request_id(payload: dict, *, path: str) -> None:
+    # A relay echoes the requester's own relay_request message_id back on
+    # every answer, so a late answer to an earlier, already timed-out
+    # attempt can never be mistaken for the answer to a fresh one.
+    if "request_id" in payload:
+        _validate_bounded_id(payload["request_id"], path=f"{path}.request_id")
+
+
 def _validate_relay_waiting_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"target_fingerprint"}:
-        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint")
+    keys = set(payload)
+    if "target_fingerprint" not in keys or not keys <= {"target_fingerprint", "request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint (optionally request_id)")
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
+    _validate_optional_request_id(payload, path=path)
 
 
 def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
     expected = {"bridge_id", "peer_fingerprint", "role", "attach_token", "attach_address", "attach_port"}
-    if set(payload) != expected:
-        raise LinkProtocolError(f"{path} must contain exactly {', '.join(sorted(expected))}")
+    keys = set(payload)
+    if not expected <= keys or not keys <= expected | {"request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly {', '.join(sorted(expected))} (optionally request_id)")
+    _validate_optional_request_id(payload, path=path)
     _validate_bounded_id(payload["bridge_id"], path=f"{path}.bridge_id")
     _validate_bounded_id(payload["peer_fingerprint"], path=f"{path}.peer_fingerprint")
     _validate_bounded_id(payload["attach_token"], path=f"{path}.attach_token")
@@ -737,8 +749,11 @@ def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
 
 
 def _validate_relay_reject_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"target_fingerprint", "reason", "origin"}:
-        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint, reason, and origin")
+    required = {"target_fingerprint", "reason", "origin"}
+    keys = set(payload)
+    if not required <= keys or not keys <= required | {"request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint, reason, and origin (optionally request_id)")
+    _validate_optional_request_id(payload, path=path)
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
     if payload["reason"] not in _REALTIME_RELAY_REJECT_REASONS:
         raise LinkProtocolError(f"{path}.reason is not a known relay rejection reason")
@@ -912,10 +927,14 @@ def build_relay_request_frame(
     return frame
 
 
-def build_relay_waiting_frame(*, target_fingerprint: str, message_id: str | None = None) -> RealtimeFrame:
+def build_relay_waiting_frame(
+    *, target_fingerprint: str, request_id: str | None = None, message_id: str | None = None,
+) -> RealtimeFrame:
+    payload: dict = {"target_fingerprint": target_fingerprint}
+    if request_id is not None:
+        payload["request_id"] = request_id
     frame = RealtimeFrame(
-        type="relay_waiting", message_id=message_id or new_realtime_message_id(),
-        payload={"target_fingerprint": target_fingerprint},
+        type="relay_waiting", message_id=message_id or new_realtime_message_id(), payload=payload,
     )
     validate_realtime_frame_payload(frame)
     return frame
@@ -923,25 +942,30 @@ def build_relay_waiting_frame(*, target_fingerprint: str, message_id: str | None
 
 def build_relay_ready_frame(
     *, bridge_id: str, peer_fingerprint: str, role: str, attach_token: str,
-    attach_address: str, attach_port: int, message_id: str | None = None,
+    attach_address: str, attach_port: int, request_id: str | None = None, message_id: str | None = None,
 ) -> RealtimeFrame:
+    payload: dict = {
+        "bridge_id": bridge_id, "peer_fingerprint": peer_fingerprint, "role": role,
+        "attach_token": attach_token, "attach_address": attach_address, "attach_port": attach_port,
+    }
+    if request_id is not None:
+        payload["request_id"] = request_id
     frame = RealtimeFrame(
-        type="relay_ready", message_id=message_id or new_realtime_message_id(),
-        payload={
-            "bridge_id": bridge_id, "peer_fingerprint": peer_fingerprint, "role": role,
-            "attach_token": attach_token, "attach_address": attach_address, "attach_port": attach_port,
-        },
+        type="relay_ready", message_id=message_id or new_realtime_message_id(), payload=payload,
     )
     validate_realtime_frame_payload(frame)
     return frame
 
 
 def build_relay_reject_frame(
-    *, target_fingerprint: str, reason: str, origin: str, message_id: str | None = None,
+    *, target_fingerprint: str, reason: str, origin: str, request_id: str | None = None,
+    message_id: str | None = None,
 ) -> RealtimeFrame:
+    payload: dict = {"target_fingerprint": target_fingerprint, "reason": reason, "origin": origin}
+    if request_id is not None:
+        payload["request_id"] = request_id
     frame = RealtimeFrame(
-        type="relay_reject", message_id=message_id or new_realtime_message_id(),
-        payload={"target_fingerprint": target_fingerprint, "reason": reason, "origin": origin},
+        type="relay_reject", message_id=message_id or new_realtime_message_id(), payload=payload,
     )
     validate_realtime_frame_payload(frame)
     return frame

@@ -21,7 +21,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import list_channels
 from netbbs.chat.nick import display_label
-from netbbs.link.protocol import LinkProtocolError
+from netbbs.link.protocol import LinkProtocolError, RealtimeProtocolVersionError
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
 from netbbs.messaging_preferences import accepts_direct_messages
@@ -136,6 +136,12 @@ async def send_live_direct_message(
         await direct_chat.ensure_session(fingerprint)
     except DirectChatUnreachable:
         await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
+        return False
+    except RealtimeProtocolVersionError:
+        await session.write_line(colored(
+            f"{sanitize_text(fingerprint[:12])}… uses an incompatible real-time protocol version -- "
+            "upgrade one of the nodes. Link mail still works.", fg_color=MUTED_COLOR,
+        ))
         return False
 
     # The peer pushes its node-presence snapshot as soon as it tracks the

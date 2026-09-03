@@ -878,6 +878,7 @@ async def run(
                         lane=background_lane, enforce_trust_policy=True,
                     )
 
+                link_realtime_relay._decide_peer_allowed = _peer_realtime_allowed
                 link_realtime_relay_client = RealtimeRelayClient(
                     own_fingerprint=node_identity.fingerprint, registry=link_realtime_registry,
                     establish_session=_establish_relayed, decide_peer_allowed=_peer_realtime_allowed,
@@ -1037,13 +1038,14 @@ async def run(
 
                 reliable_nodes_refresh_task.add_done_callback(_log_reliable_nodes_refresh_failure)
 
-                # Issue #168 (design doc §8.10.3): an outgoing-only node
-                # stands by at every reliable node it knows, so it can be
-                # reached for a live-relay rendezvous -- nobody can dial
-                # it, so the standing session has to exist first. Only
-                # while participation is accepted; a full peer is
-                # dialable and needs no anchor.
-                if config.link.outgoing_only and link_realtime_bridge is not None and link_realtime_registry is not None:
+                # Issue #168 (design doc §8.10.3): a participating node
+                # stands by at every reliable node it knows -- an
+                # outgoing-only node so it can be *reached* for a
+                # rendezvous (nobody can dial it first), a full peer so it
+                # can *reach* an outgoing-only node through the same relay
+                # without a dial per message. Only while participation is
+                # accepted.
+                if link_realtime_bridge is not None and link_realtime_registry is not None:
                     from netbbs.link.realtime_direct import run_reliable_anchor_connectors
                     from netbbs.link.transport import LinkRealtimeConnector
 
@@ -1052,6 +1054,7 @@ async def run(
                             host=kw["host"], port=kw["port"], identity=kw["identity"], on_frame=kw["on_frame"],
                             registry=kw["registry"], lane=kw["lane"], enforce_trust_policy=kw["enforce_trust_policy"],
                             expected_fingerprint=kw["expected_fingerprint"], on_session=kw["track_session"],
+                            addresses=kw.get("addresses"),
                         )
                         connector.start()
                         return connector
