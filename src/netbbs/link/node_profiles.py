@@ -14,9 +14,10 @@ import re
 import unicodedata
 
 from netbbs.managed_dns.state import (
-    RegistrationStatus, get_previous_name, get_previous_published, get_previous_status,
+    RegistrationStatus, get_node_fingerprint, get_previous_name, get_previous_published, get_previous_status,
     get_published, get_registered_name, get_registration_status,
 )
+from netbbs.config import get_config, get_node_display_name, set_config
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
 
@@ -26,6 +27,7 @@ MAX_CANONICAL_DNS_NAME_LENGTH = 253
 MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
 MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
 _NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
+_OWN_CANONICAL_DNS_CONFIG_KEY = "link_own_canonical_dns_claim"
 UNKNOWN_NODE_NAME = "Unknown linked node"
 UNNAMED_NODE_NAME = "Unnamed linked node"
 
@@ -157,6 +159,11 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
     return normalize_dns_name(advertised_host)
 
 
+def remember_own_identity_claims(db: Database, *, canonical_dns_name: str | None) -> None:
+    """Persist the local DNS presentation used for collision detection."""
+    set_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY, canonical_dns_name or "")
+
+
 def resolve_peer_reference(peers, reference: str):
     """Resolve DNS, a unique friendly name, or a fingerprint prefix."""
     name_needle = name_key(reference.strip())
@@ -266,6 +273,16 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         name_key(value) for value in (current.friendly_name, current.dns_name)
         if value and value != UNNAMED_NODE_NAME
     }
+    local_claims = {
+        name_key(value)
+        for value in (get_node_display_name(db), get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY))
+        if value
+    }
+    if current_claims & local_claims:
+        collision = NodeDisplayIdentity(
+            get_node_fingerprint(db) or "local-node", get_node_display_name(db),
+            normalize_dns_name(get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY)),
+        )
     for row in db.connection.execute(
         "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
         (peer.fingerprint,),
@@ -275,7 +292,7 @@ def record_peer_identity_observation(db: Database, peer) -> None:
             name_key(value) for value in (known.friendly_name, known.dns_name)
             if value and value != UNNAMED_NODE_NAME
         }
-        if current_claims & known_claims:
+        if collision is None and current_claims & known_claims:
             collision = known
             break
 

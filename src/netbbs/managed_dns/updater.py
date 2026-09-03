@@ -96,13 +96,17 @@ async def run_scheduled_managed_dns_updater(
                 if credential is not None:
                     previous_credential = load_credential(previous_credential_path_for(db.path))
                     previous_result = None
+                    previous_inactive = False
                     if previous_credential is not None:
-                        previous_result, _ = await _send_heartbeat(base_url, previous_credential)
+                        previous_result, previous_inactive = await _send_heartbeat(
+                            base_url, previous_credential
+                        )
                     result, primary_inactive = await _send_heartbeat(base_url, credential)
                     if result is not None:
                         _apply_heartbeat_result(
                             db, result, previous_result=previous_result,
                             has_previous_credential=previous_credential is not None,
+                            previous_inactive=previous_inactive,
                         )
                     elif primary_inactive and previous_result is not None and previous_credential is not None:
                         save_credential(credential_path_for(db.path), previous_credential)
@@ -137,7 +141,7 @@ async def _send_heartbeat(
 
 def _apply_heartbeat_result(
     db: Database, result: HeartbeatResult, *, previous_result: HeartbeatResult | None,
-    has_previous_credential: bool,
+    has_previous_credential: bool, previous_inactive: bool = False,
 ) -> None:
     """Apply authoritative service state and repair an interrupted local rename."""
     set_registered_name(db, result.name)
@@ -159,7 +163,11 @@ def _apply_heartbeat_result(
             delete_credential(previous_credential_path_for(db.path))
     elif previous_name is not None:
         set_previous_name(db, previous_name)
-        if previous_result is not None:
+        if previous_inactive:
+            set_previous_status(db, RegistrationStatus.ABANDONED)
+            set_previous_published(db, False)
+            delete_credential(previous_credential_path_for(db.path))
+        elif previous_result is not None:
             set_previous_status(db, RegistrationStatus(previous_result.status))
             set_previous_published(db, previous_result.last_known_address is not None)
     elif has_previous_credential:

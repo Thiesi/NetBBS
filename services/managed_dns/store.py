@@ -376,7 +376,8 @@ def cancel_pending_replacement(
             db.connection.execute(
                 "UPDATE registrations SET "
                 "status = CASE WHEN matured_at IS NULL THEN 'pending' ELSE 'matured' END, "
-                "released_at = NULL, last_contact_at = ?, contact_started_at = ? "
+                "released_at = NULL, last_contact_at = ?, contact_started_at = ?, "
+                "last_known_address = NULL "
                 "WHERE name = ? AND status = 'abandoned'",
                 (contact_at, contact_at, previous_name),
             )

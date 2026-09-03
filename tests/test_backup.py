@@ -1,7 +1,7 @@
 """
 Tests for netbbs.backup (design doc §13.4, issue #60's first
 operational slice): create_backup/restore_backup capturing and
-restoring all thirteen recoverable-state artifacts, the ordering/safety
+restoring all fourteen recoverable-state artifacts, the ordering/safety
 invariants around them, and the `python -m netbbs.backup` CLI.
 """
 
@@ -52,6 +52,10 @@ def _managed_dns_previous_credential_path(db_path):
     return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
 
 
+def _managed_dns_transition_credential_path(db_path):
+    return db_path.parent / f"{db_path.stem}_managed_dns_credential_transition"
+
+
 def _welcome_banner_path(db_path):
     return db_path.parent / f"{db_path.stem}_welcome_banner.ans"
 
@@ -97,7 +101,7 @@ def identity_dir(tmp_path):
 
 
 def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
-    """Populate every one of the thirteen backup artifacts with
+    """Populate the ordinary backup artifacts with
     distinguishable content, including the transient `.incoming`
     staging file that must never survive into a backup."""
     blob_path = _storage_root(db_path) / _BLOB_HASH[:2] / _BLOB_HASH
@@ -129,7 +133,18 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 # -- create_backup --------------------------------------------------------
 
 
-def test_create_backup_captures_all_thirteen_artifacts(tmp_path, db_path, identity_dir):
+def test_create_backup_captures_a_staged_credential_transition(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    _managed_dns_transition_credential_path(db_path).write_text("staged secrets")
+
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup-transition"
+    )
+
+    assert (destination / _managed_dns_transition_credential_path(db_path).name).read_text() == "staged secrets"
+
+
+def test_create_backup_captures_all_ordinary_artifacts(tmp_path, db_path, identity_dir):
     _seed_full_node(db_path, identity_dir)
     destination = tmp_path / "backup1"
 
@@ -247,7 +262,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     destination = tmp_path / "backup1"
     create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
 
-    # Simulate data loss: wipe every one of the thirteen artifacts.
+    # Simulate data loss: wipe every ordinary artifact.
     conn = sqlite3.connect(str(db_path))
     conn.execute("DELETE FROM node_config")
     conn.commit()
@@ -286,6 +301,21 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     marker = conn.execute("SELECT value FROM node_config WHERE key = 'marker'").fetchone()
     conn.close()
     assert marker == ("present-before-backup",)
+
+
+def test_restore_removes_a_newer_credential_transition_absent_from_backup(
+    tmp_path, db_path, identity_dir,
+):
+    _seed_full_node(db_path, identity_dir)
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup1")
+    transition = _managed_dns_transition_credential_path(db_path)
+    transition.write_text("post-backup staged secrets")
+
+    rollback = restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+
+    assert not transition.exists()
+    assert rollback is not None
+    assert (rollback / transition.name).read_text() == "post-backup staged secrets"
 
 
 def test_restore_backup_onto_a_fresh_target_with_nothing_existing_yet(tmp_path, db_path, identity_dir):

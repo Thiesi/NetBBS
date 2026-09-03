@@ -153,7 +153,7 @@ def _build_own_hello_provider(
 
     def _provide() -> HelloMessage:
         from netbbs.config import get_node_display_name
-        from netbbs.link.node_profiles import own_canonical_dns_name
+        from netbbs.link.node_profiles import own_canonical_dns_name, remember_own_identity_claims
 
         addresses = None
         if not link_config.outgoing_only:
@@ -173,13 +173,16 @@ def _build_own_hello_provider(
                     "port": realtime_advertised_port,
                 },
             ]
+        friendly_name = get_node_display_name(db)
+        canonical_dns_name = own_canonical_dns_name(db, link_config.advertised_host)
+        remember_own_identity_claims(db, canonical_dns_name=canonical_dns_name)
         return link_node.build_hello(
             addresses=addresses, outgoing_only=link_config.outgoing_only, created_at=utc_now_iso(),
             # Issue #270: the reliable nodes this node is standing by at,
             # so a peer that cannot dial us knows where to meet us.
             live_relays=live_relays_provider() if live_relays_provider is not None else None,
-            friendly_name=get_node_display_name(db),
-            canonical_dns_name=own_canonical_dns_name(db, link_config.advertised_host),
+            friendly_name=friendly_name,
+            canonical_dns_name=canonical_dns_name,
         )
 
     return _provide

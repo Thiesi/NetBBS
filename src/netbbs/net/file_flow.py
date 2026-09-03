@@ -824,8 +824,7 @@ async def _browse_remote_files(
 
     def render_description(remote_file: RemoteFile) -> str:
         status = "[LOCAL] already fetched" if remote_file.fetched_file_id is not None else "[REMOTE] not yet fetched"
-        peer = link_context.link_node.peers.get(remote_file.origin_fingerprint)
-        origin = identity_for_peer(peer).label if peer is not None else "unknown linked node"
+        origin = _remote_file_origin_label(link_context, remote_file)
         return f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
 
     selected = await pick_item(
@@ -867,6 +866,11 @@ async def _browse_remote_files(
         session, lane, selected, link_context, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed,
     )
+
+
+def _remote_file_origin_label(link_context: LinkContext, remote_file: RemoteFile) -> str:
+    peer = link_context.link_node.peers.get(remote_file.origin_fingerprint)
+    return identity_for_peer(peer).label if peer is not None else remote_file.origin_fingerprint
 
 
 async def _fetch_remote_file(

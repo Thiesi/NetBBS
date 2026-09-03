@@ -152,6 +152,7 @@ def test_remote_command_lists_a_catalogued_but_not_yet_fetched_file(db, lane, al
     assert "game.bin" in output
     assert "[REMOTE]" in output
     assert "not yet fetched" in output
+    assert file_flow._remote_file_origin_label(link_context, remote_file) == remote_file.origin_fingerprint
     assert "Cancelled" in output
 
 

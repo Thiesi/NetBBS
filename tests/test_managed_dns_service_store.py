@@ -23,6 +23,7 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
+    set_last_known_address,
     set_contact_window,
     set_last_contact_at,
 )
@@ -375,13 +376,16 @@ def test_cancel_pending_replacement_restores_matured_for_a_previously_live_row(t
     db = Database(tmp_path / "managed_dns.db")
     _insert(db, name="old-name")
     mark_matured(db, "old-name", matured_at="2026-09-02T01:00:00+00:00")
+    set_last_known_address(db, "old-name", "192.0.2.1")
     _insert(db, name="new-name", replaces_name="old-name")
     mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
 
     assert cancel_pending_replacement(
         db, "new-name", "old-name", revive_previous=True, contact_at="2026-09-04T00:00:00+00:00",
     )
-    assert get_registration_by_name(db, "old-name").status == "matured"
+    revived = get_registration_by_name(db, "old-name")
+    assert revived.status == "matured"
+    assert revived.last_known_address is None
     db.close()
 
 

@@ -3737,3 +3737,16 @@ delimiter and the quoted-address delimiter as well as Unicode control/format
 characters. Administrative fallback to an unseen technical identity accepts
 only a complete 32-character lowercase-base32 node fingerprint (case-insensitive
 on input); arbitrary unmatched names are errors.
+
+Identity-collision detection includes this node's own currently advertised
+friendly and DNS claims, not only remote peer history. Content whose
+authenticated origin has no admitted profile falls back to that origin's
+fingerprint on every catalogue and roster surface.
+
+An authoritative inactive response for a previous managed-DNS credential
+withdraws its cached publication claim; only transient failures preserve the
+last known state. Reviving an abandoned DNS row clears its publication marker
+inside the same transaction so a crash cannot suppress the required
+republish. Address-discovery operations, including cancellation revival,
+bypass forward proxies. Backup and restore treat the credential-transition
+journal as recoverable state and restore its absence as well as its presence.

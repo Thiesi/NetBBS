@@ -386,7 +386,7 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
         await session.write_line(colored("Cancelling a name change requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
         return
     try:
-        async with ClientSession(trust_env=True) as http_session:
+        async with ClientSession(trust_env=False) as http_session:
             result = await cancel_rename(http_session, base_url, credential=replacement_credential)
     except ManagedDnsError as exc:
         await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))

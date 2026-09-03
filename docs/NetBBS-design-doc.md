@@ -3141,7 +3141,7 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
-A node's recoverable state is not only its database — it is thirteen
+A node's recoverable state is not only its database — it is fourteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
 
@@ -3152,6 +3152,7 @@ with no single existing tool that treats them as one recoverable set:
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
 | SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
 | Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
+| Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves both the journal's presence and absence | `netbbs.managed_dns.credential`, during a managed-name transition |
 | Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
 | Main-menu masthead | `db_path.parent / f"{db_path.stem}_main_menu_banner.ans"` | SysOp, via the masthead menu screen (issue #161) |
 | Logoff banner | `db_path.parent / f"{db_path.stem}_logoff_banner.ans"` | SysOp, via the logoff-banner menu screen (issue #177) |
@@ -3165,7 +3166,7 @@ A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all thirteen as one atomic backup
+separate ceremony) — so this design treats all fourteen as one atomic backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no

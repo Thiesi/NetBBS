@@ -2,7 +2,7 @@
 Node backup and restore (design doc §13.4/§13.10, issue #60's first
 operational slice, hardened by issue #75).
 
-A node's recoverable state is thirteen `db_path`-relative artifacts, not
+A node's recoverable state is fourteen `db_path`-relative artifacts, not
 just the database: content blobs (`netbbs.files.storage`), node
 identity (`netbbs.link.node_identity`), the SSH host key
 (`netbbs.net.ssh`), the managed-DNS registration credential
@@ -18,7 +18,7 @@ its own. A backup covering only the database silently loses the SSH
 host key (every client gets a MITM warning after restore) and, far more
 seriously, the Link node identity -- root-key custody is explicitly
 "part of ordinary node backup and restore" (design doc §4.5), not a
-separate ceremony. This module treats all thirteen as one atomic backup
+separate ceremony. This module treats all fourteen as one atomic backup
 operation, never a DB-only one.
 
 Deliberately path-based, not `Database`-based: a backup must be safely
@@ -87,6 +87,7 @@ from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
 from netbbs.managed_dns.credential import (
     credential_path_for as _managed_dns_credential_path_for,
     previous_credential_path_for as _managed_dns_previous_credential_path_for,
+    transition_credential_path_for as _managed_dns_transition_credential_path_for,
 )
 from netbbs.operational_history import record_operational_run
 from netbbs.selfupdate import snapshot_database
@@ -252,6 +253,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
         _ssh_host_key_path_for(db_path),
         _managed_dns_credential_path_for(db_path),
         _managed_dns_previous_credential_path_for(db_path),
+        _managed_dns_transition_credential_path_for(db_path),
         _welcome_banner_path_for(db_path),
         _main_menu_banner_path_for(db_path),
         _logoff_banner_path_for(db_path),
@@ -514,7 +516,9 @@ def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: P
     )
 
 
-def _restore_switch_plan(staging_dir: Path, db_path: Path, identity_dir: Path) -> list[tuple[str, Path, Path]]:
+def _restore_switch_plan(
+    staging_dir: Path, db_path: Path, identity_dir: Path,
+) -> list[tuple[str, Path | None, Path]]:
     """`(name, staged_path, live_path)` for every artifact this backup
     actually contains, in the same DB/files/identity/extras order
     `create_backup` captures them (design doc §13.4's own ordering
@@ -540,12 +544,20 @@ def _restore_switch_plan(staging_dir: Path, db_path: Path, identity_dir: Path) -
                 live_path = _managed_dns_credential_path_for(db_path)
             elif entry.name.endswith("_managed_dns_previous_credential"):
                 live_path = _managed_dns_previous_credential_path_for(db_path)
+            elif entry.name.endswith("_managed_dns_credential_transition"):
+                live_path = _managed_dns_transition_credential_path_for(db_path)
             plan.append((entry.name, entry, live_path))
+
+    transition_path = _managed_dns_transition_credential_path_for(db_path)
+    if not any(live_path == transition_path for _, _, live_path in plan):
+        # Point-in-time restore must also restore absence: a newer staged
+        # transition must not overwrite the restored credential generation.
+        plan.append((transition_path.name, None, transition_path))
 
     return plan
 
 
-def _switch_one(name: str, staged_path: Path, live_path: Path, rollback_dir: Path) -> None:
+def _switch_one(name: str, staged_path: Path | None, live_path: Path, rollback_dir: Path) -> None:
     """Atomic (same-filesystem) rename in each direction -- never a
     copy. `rollback_dir` is created lazily, only once something
     actually needs preserving (a fresh target with nothing live yet
@@ -553,10 +565,11 @@ def _switch_one(name: str, staged_path: Path, live_path: Path, rollback_dir: Pat
     if live_path.exists():
         rollback_dir.mkdir(parents=True, exist_ok=True)
         live_path.rename(rollback_dir / name)
-    staged_path.rename(live_path)
+    if staged_path is not None:
+        staged_path.rename(live_path)
 
 
-def _rollback_switched(switched: list[tuple[str, Path, Path]], rollback_dir: Path) -> None:
+def _rollback_switched(switched: list[tuple[str, Path | None, Path]], rollback_dir: Path) -> None:
     """Best-effort undo for whatever `_switch_one` already completed,
     in reverse order -- the staged content already switched into
     `live_path` is simply discarded (the original backup at `source` is
@@ -630,7 +643,7 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path) -> Path |
             state_path, staging_dir=staging_dir, rollback_dir=rollback_dir, pending=[name for name, _, _ in plan]
         )
 
-        switched: list[tuple[str, Path, Path]] = []
+        switched: list[tuple[str, Path | None, Path]] = []
         for name, staged_path, live_path in plan:
             try:
                 _switch_one(name, staged_path, live_path, rollback_dir)

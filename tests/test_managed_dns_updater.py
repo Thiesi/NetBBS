@@ -28,6 +28,7 @@ from netbbs.managed_dns.state import (
     set_node_fingerprint,
     set_opt_in,
     set_previous_name,
+    set_previous_published,
     set_previous_status,
     set_registered_name,
     set_registration_status,
@@ -162,6 +163,28 @@ def test_updater_preserves_known_previous_status_when_old_heartbeat_fails(tmp_pa
         has_previous_credential=True,
     )
     assert get_previous_status(db) is RegistrationStatus.MATURED
+    db.close()
+
+
+def test_updater_clears_previous_publication_after_authoritative_inactive_response(tmp_path):
+    from netbbs.managed_dns.client import HeartbeatResult
+    from netbbs.managed_dns.updater import _apply_heartbeat_result
+
+    db = Database(tmp_path / "node.db")
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(previous_credential_path_for(db.path), "inactive-old-secret")
+    _apply_heartbeat_result(
+        db,
+        HeartbeatResult("new-name", "pending", None, "old-name"),
+        previous_result=None,
+        has_previous_credential=True,
+        previous_inactive=True,
+    )
+    assert get_previous_status(db) is RegistrationStatus.ABANDONED
+    assert not get_previous_published(db)
+    assert load_credential(previous_credential_path_for(db.path)) is None
     db.close()
 
 

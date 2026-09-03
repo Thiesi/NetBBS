@@ -14,11 +14,10 @@ at-rest protection at all (see its own module docstring), appropriate
 for settings like a display name but not for a secret that authenticates
 mutating calls against project-operated infrastructure.
 
-`credential_path_for(db_path)` follows the exact naming convention
-`netbbs.backup._ssh_host_key_path_for` already uses for its own
-derived-path artifacts, so `netbbs.backup` can adopt this file as its
-13th backup artifact (design doc §16 Decision 7) by importing this
-function rather than re-deriving the path a second time.
+The three path helpers follow the exact derived-path convention used by
+the backup subsystem. The primary credential, rename-time previous
+credential, and crash-recovery transition journal are all recoverable
+artifacts; restore must preserve both the journal's presence and absence.
 """
 
 from __future__ import annotations

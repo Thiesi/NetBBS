@@ -391,7 +391,7 @@ def test_register_via_prompt_accepting_standard_ports_shows_no_caveat(tmp_path):
     db.close()
 
 
-def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path):
+def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, monkeypatch):
     async def scenario():
         backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
         server = ManagedDnsServer("127.0.0.1", 0, backend_db)
@@ -407,6 +407,8 @@ def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path):
             assert get_registered_name(db) == "new-name"
             assert get_previous_name(db) == "old-name"
             assert load_credential(previous_credential_path_for(db.path)) == old_credential
+            monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+            monkeypatch.setenv("NO_PROXY", "")
             await cancel_registration_rename(FakeSession(["y"]), lane)
             lane.close()
             return db, old_credential

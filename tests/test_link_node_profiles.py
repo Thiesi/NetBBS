@@ -12,6 +12,7 @@ from netbbs.link.node_profiles import (
     profile_claims_are_canonical,
     list_identity_observations,
     record_peer_identity_observation,
+    remember_own_identity_claims,
     resolve_peer_reference,
     resolve_stored_peer_reference,
     own_canonical_dns_name,
@@ -19,8 +20,9 @@ from netbbs.link.node_profiles import (
 )
 from netbbs.managed_dns.state import (
     RegistrationStatus, set_previous_name, set_previous_published, set_previous_status,
-    set_published, set_registered_name, set_registration_status,
+    set_node_fingerprint, set_published, set_registered_name, set_registration_status,
 )
+from netbbs.config import set_node_display_name
 from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.store import save_peer
 from netbbs.storage.database import Database
@@ -212,6 +214,25 @@ def test_existing_peer_adopting_another_peers_name_is_security_notice(db, tmp_pa
     notice = list_identity_observations(db)[0]
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.previous_fingerprint == first.fingerprint
+
+
+@pytest.mark.parametrize(
+    ("friendly_name", "dns_name"),
+    [("Local Anchor", "other.example.org"), ("Other", "local.example.org")],
+)
+def test_peer_adopting_the_local_nodes_claim_is_security_notice(
+    db, tmp_path, friendly_name, dns_name,
+):
+    set_node_display_name(db, "Local Anchor")
+    set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
+    remember_own_identity_claims(db, canonical_dns_name="local.example.org")
+
+    save_peer(db, _peer(tmp_path, "impostor", friendly_name, dns_name))
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.severity == "security"
+    assert notice.previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
 
 
 def test_new_peer_adopting_a_retained_previous_name_is_security_notice(db, tmp_path):
