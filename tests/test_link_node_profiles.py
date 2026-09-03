@@ -11,6 +11,7 @@ from netbbs.link.node_profiles import (
     resolve_peer_reference,
     resolve_stored_peer_reference,
     own_canonical_dns_name,
+    is_node_fingerprint,
 )
 from netbbs.managed_dns.state import (
     RegistrationStatus, set_previous_name, set_previous_status, set_registered_name,
@@ -70,6 +71,14 @@ def test_friendly_name_reserves_label_delimiter_and_invisible_controls():
     assert normalize_friendly_name("Trusted Node · honest.example.org") is None
     assert normalize_friendly_name("Anchor\x9b31m") is None
     assert normalize_friendly_name("Anchor\u202eevil") is None
+    assert normalize_friendly_name('The "Rusty" Anchor') is None
+
+
+def test_unseen_technical_identity_requires_a_complete_node_fingerprint():
+    assert is_node_fingerprint("abcdefghijklmnopqrstuvwxyz234567")
+    assert is_node_fingerprint("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    assert not is_node_fingerprint("node-name-typo")
+    assert not is_node_fingerprint("abcd")
 
 
 def test_exact_fingerprint_cannot_be_shadowed_by_a_friendly_name(db, tmp_path):

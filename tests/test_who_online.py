@@ -402,8 +402,7 @@ def test_who_screen_includes_users_online_on_a_linked_node(tmp_path):
         text = _written_text(session)
         who_screen = text.split("Who's online", 1)[1].split("Choice: ")[0]
         assert "erin" in who_screen
-        assert "on linked node Unknown linked node" in who_screen
-        assert "remote-node-" not in who_screen
+        assert "on linked node remote-node-fingerprint-abc123" in who_screen
 
     asyncio.run(scenario())
     database.close()
@@ -441,7 +440,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
     entry prompts for a message and sends it to user@node live."""
     database = db(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
-    fingerprint = "remote-node-fingerprint-abc123"
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
 
     async def scenario():
         node_controls = _node_controls()
@@ -461,7 +460,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
             lane.close()
 
         text = _written_text(session)
-        assert "Message to erin@Unknown linked node" in text
+        assert f"Message to erin@{fingerprint}" in text
         assert direct.sent and direct.sent[0][0] == fingerprint
         assert direct.sent[0][1]["to_user_id"] == "erin"
         assert direct.sent[0][1]["body"] == "hello erin"

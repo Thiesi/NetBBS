@@ -12,7 +12,11 @@ from netbbs.managed_dns.credential import (
     credential_path_for,
     delete_credential,
     load_credential,
+    previous_credential_path_for,
+    recover_credential_transition,
     save_credential,
+    stage_credential_transition,
+    transition_credential_path_for,
 )
 
 
@@ -89,3 +93,14 @@ def test_delete_credential_is_a_safe_no_op_when_nothing_is_there(tmp_path):
     path = tmp_path / "node_managed_dns_credential"
     delete_credential(path)  # must not raise
     assert load_credential(path) is None
+
+
+def test_staged_rename_credential_swap_is_recoverable_after_a_crash(tmp_path):
+    db_path = tmp_path / "node.db"
+    save_credential(credential_path_for(db_path), "old-secret")
+    stage_credential_transition(db_path, "old-secret", "new-secret")
+
+    assert recover_credential_transition(db_path) is True
+    assert load_credential(credential_path_for(db_path)) == "new-secret"
+    assert load_credential(previous_credential_path_for(db_path)) == "old-secret"
+    assert load_credential(transition_credential_path_for(db_path)) is None

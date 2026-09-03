@@ -24,6 +24,7 @@ function rather than re-deriving the path a second time.
 from __future__ import annotations
 
 import os
+import json
 import stat
 from pathlib import Path
 
@@ -38,6 +39,37 @@ def credential_path_for(db_path: Path) -> Path:
 def previous_credential_path_for(db_path: Path) -> Path:
     """Temporary old credential retained while a managed rename is pending."""
     return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
+
+
+def transition_credential_path_for(db_path: Path) -> Path:
+    """Crash-recovery journal for the two-file rename credential swap."""
+    return db_path.parent / f"{db_path.stem}_managed_dns_credential_transition"
+
+
+def stage_credential_transition(db_path: Path, old_secret: str, new_secret: str) -> None:
+    save_credential(
+        transition_credential_path_for(db_path),
+        json.dumps({"old": old_secret, "new": new_secret}),
+    )
+
+
+def recover_credential_transition(db_path: Path) -> bool:
+    """Finish an interrupted managed-name credential swap, if one was staged."""
+    path = transition_credential_path_for(db_path)
+    raw = load_credential(path)
+    if raw is None:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    old_secret, new_secret = payload.get("old"), payload.get("new")
+    if not isinstance(old_secret, str) or not old_secret or not isinstance(new_secret, str) or not new_secret:
+        return False
+    save_credential(previous_credential_path_for(db_path), old_secret)
+    save_credential(credential_path_for(db_path), new_secret)
+    delete_credential(path)
+    return True
 
 
 def save_credential(path: Path, secret: str) -> None:

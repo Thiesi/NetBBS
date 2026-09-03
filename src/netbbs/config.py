@@ -18,6 +18,8 @@ for where that resolution order already lives.
 
 from __future__ import annotations
 
+import unicodedata
+
 from enum import Enum
 
 from netbbs.storage.database import Database
@@ -165,6 +167,8 @@ def set_node_display_name(db: Database, name: str) -> None:
         raise ValueError("node display name must not be blank")
     if len(name) > MAX_NODE_DISPLAY_NAME_LENGTH:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
+    if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
+        raise ValueError("node display name contains a reserved or invisible character")
     set_config(db, NODE_DISPLAY_NAME_CONFIG_KEY, name)
 
 

@@ -24,7 +24,7 @@ from aiohttp import ClientSession
 from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    save_credential,
+    recover_credential_transition, save_credential,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -83,6 +83,7 @@ async def run_scheduled_managed_dns_updater(
     """
     while True:
         if get_opt_in(db) is OptIn.ACCEPTED:
+            recover_credential_transition(db.path)
             name = get_registered_name(db)
             base_url = get_service_url(db)
             status = get_registration_status(db)
@@ -152,10 +153,8 @@ def _apply_heartbeat_result(
             delete_credential(previous_credential_path_for(db.path))
     elif previous_name is not None:
         set_previous_name(db, previous_name)
-        set_previous_status(
-            db,
-            RegistrationStatus(previous_result.status) if previous_result is not None else None,
-        )
+        if previous_result is not None:
+            set_previous_status(db, RegistrationStatus(previous_result.status))
     elif has_previous_credential:
         # The file can be left behind if a crash happens after copying the old
         # credential but before installing a replacement. Both heartbeats then

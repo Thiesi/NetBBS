@@ -186,7 +186,8 @@ from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
-    list_identity_observations, own_canonical_dns_name, resolve_stored_peer_reference,
+    is_node_fingerprint, list_identity_observations, own_canonical_dns_name,
+    resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
@@ -2283,9 +2284,12 @@ async def _resolve_admin_node_reference(
             colored("That friendly name matches multiple nodes; use the DNS name.", fg_color=ERROR_COLOR)
         )
         return None
-    # Trust administration must still be able to preconfigure an as-yet unseen
-    # node by its technical identity.
-    return reference
+    # Trust administration can preconfigure an unseen node, but only from a
+    # complete technical identity -- never from a typo in a human-facing name.
+    if is_node_fingerprint(reference):
+        return reference.strip().lower()
+    await session.write_line(colored("No linked node matches that name or fingerprint.", fg_color=ERROR_COLOR))
+    return None
 
 
 async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:

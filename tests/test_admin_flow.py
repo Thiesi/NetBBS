@@ -475,12 +475,13 @@ def test_sysop_can_clear_a_trust_override_and_view_decision_history_through_real
 
 
 def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop):
+    reporter = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
             "s", "p",
             "d", "a", "emergency", "Emergency operator", "1.0",
-            "r", "a", "reporter", "emergency", "identity_integrity:signed_equivocation", "n", "n",
-            "e", "a", "reporter", "i", "signed_equivocation", "because", "n",
+            "r", "a", reporter, "emergency", "identity_integrity:signed_equivocation", "n", "n",
+            "e", "a", reporter, "i", "signed_equivocation", "because", "n",
             "b", "b", "b",
         ]
     )
@@ -492,15 +493,16 @@ def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop
 def test_sysop_menu_reaches_separate_attestation_authority_configuration(
     db, lane, sysop
 ):
+    identity_node = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
-            "s", "p", "i", "a", "identity-node", "age,name",
+            "s", "p", "i", "a", identity_node, "age,name",
             "verified identity contractor", "b", "b", "b",
         ]
     )
     _run(session, lane, sysop)
     authority = list_attestation_authorities(db)[0]
-    assert authority.fingerprint == "identity-node"
+    assert authority.fingerprint == identity_node
     assert authority.attributes == ("age", "name")
     assert "Attestation authority changed and audited." in _written_text(session)
 

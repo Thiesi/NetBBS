@@ -11,6 +11,7 @@ from netbbs.config import (
     set_config,
     set_invitation_expiry_days,
     set_max_upload_bytes,
+    set_node_display_name,
 )
 from netbbs.storage.database import Database
 
@@ -31,6 +32,14 @@ def test_set_then_get_roundtrip(tmp_path):
     db = Database(tmp_path / "node.db")
     set_config(db, "display_timestamp_format", "%d.%m.%Y %H:%M")
     assert get_config(db, "display_timestamp_format") == "%d.%m.%Y %H:%M"
+    db.close()
+
+
+@pytest.mark.parametrize("name", ["Trusted · Node", 'The "Rusty" Anchor', "Anchor\x9b31m", "Anchor\u202eevil"])
+def test_node_display_name_rejects_reserved_and_invisible_characters(tmp_path, name):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError, match="reserved or invisible"):
+        set_node_display_name(db, name)
     db.close()
 
 

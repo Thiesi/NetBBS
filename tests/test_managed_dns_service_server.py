@@ -232,6 +232,44 @@ def test_lost_rename_retry_reclaims_an_abandoned_replacement(db):
     assert heartbeat_body["name"] == "new-name"
 
 
+def test_abandoned_rename_retry_obeys_the_active_registration_cap(db):
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=2)
+        try:
+            original = await _register(server, name="old-name", node_fingerprint="fp-1")
+            await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "new-name", released_at="2026-09-03T12:00:00+00:00")
+            await _register(server, name="other-name", node_fingerprint="fp-2")
+            return await _rename(server, credential=original["credential"], name="new-name")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "capacity" in body["error"]
+    assert get_registration_by_name(db, "new-name").status == "abandoned"
+
+
+def test_cancel_rename_reactivates_an_abandoned_previous_name(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            cancelled = await _cancel_rename(server, credential=replacement["credential"])
+            heartbeat_result = await _heartbeat(server, credential=original["credential"])
+            return cancelled, heartbeat_result
+        finally:
+            await server.stop()
+
+    (cancel_status, body), (heartbeat_status, heartbeat_body) = asyncio.run(scenario())
+    assert cancel_status == heartbeat_status == 200
+    assert body["previous_status"] == "matured"
+    assert heartbeat_body["name"] == "old-name"
+    assert get_registration_by_name(db, "old-name").status == "matured"
+
+
 class _FailOldNameDeleteProvider(LoggingDnsProvider):
     def delete_record(self, name: str) -> None:
         if name == "old-name.netbbs.org.":

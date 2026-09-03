@@ -24,7 +24,8 @@ from pathlib import Path
 
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
-    save_credential,
+    recover_credential_transition, save_credential, stage_credential_transition,
+    transition_credential_path_for,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -295,6 +296,7 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
 
 async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     """Start an authenticated managed-name transition without releasing the old name."""
+    recover_credential_transition(lane.path)
     old_name = await lane.run(get_registered_name)
     previous_name = await lane.run(get_previous_name)
     if old_name is None:
@@ -331,12 +333,14 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     except ManagedDnsError as exc:
         await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return
+    stage_credential_transition(lane.path, old_credential, result.credential)
     save_credential(previous_credential_path_for(lane.path), old_credential)
     save_credential(primary_path, result.credential)
     await lane.run(set_previous_name, result.previous_name)
     await lane.run(set_previous_status, RegistrationStatus(result.previous_status))
     await lane.run(set_registered_name, result.name)
     await lane.run(set_registration_status, RegistrationStatus.PENDING)
+    delete_credential(transition_credential_path_for(lane.path))
     await session.write_line(
         colored(
             f"Reserved {result.name}.netbbs.org. {result.previous_name}.netbbs.org remains active "
@@ -347,6 +351,7 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
 
 
 async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> None:
+    recover_credential_transition(lane.path)
     new_name = await lane.run(get_registered_name)
     old_name = await lane.run(get_previous_name)
     old_status = await lane.run(get_previous_status)

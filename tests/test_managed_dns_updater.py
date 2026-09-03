@@ -20,6 +20,7 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_last_contact_at,
     get_previous_name,
+    get_previous_status,
     get_registered_name,
     get_registration_status,
     set_node_fingerprint,
@@ -142,6 +143,23 @@ def test_updater_heartbeats_both_names_while_a_rename_is_pending(tmp_path):
     assert old.last_contact_at is not None
     assert new.last_contact_at is not None
     assert get_registration_status(db) is RegistrationStatus.PENDING
+    db.close()
+
+
+def test_updater_preserves_known_previous_status_when_old_heartbeat_fails(tmp_path):
+    from netbbs.managed_dns.client import HeartbeatResult
+    from netbbs.managed_dns.updater import _apply_heartbeat_result
+
+    db = Database(tmp_path / "node.db")
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    _apply_heartbeat_result(
+        db,
+        HeartbeatResult("new-name", "pending", "127.0.0.1", "old-name"),
+        previous_result=None,
+        has_previous_credential=True,
+    )
+    assert get_previous_status(db) is RegistrationStatus.MATURED
     db.close()
 
 

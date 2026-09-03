@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address
 import json
+import re
 import unicodedata
 
 from netbbs.managed_dns.state import (
@@ -24,6 +25,7 @@ MAX_NODE_FRIENDLY_NAME_LENGTH = 64
 MAX_CANONICAL_DNS_NAME_LENGTH = 253
 MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
 MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
+_NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ def normalize_friendly_name(value: object) -> str | None:
     value = value.strip()
     if not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH:
         return None
-    if "·" in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
+    if "·" in value or '"' in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
         return None
     return value
 
@@ -91,6 +93,10 @@ def profile_claims_are_canonical(payload: dict) -> bool:
         (friendly_name is None or normalize_friendly_name(friendly_name) == friendly_name)
         and (canonical_dns_name is None or normalize_dns_name(canonical_dns_name) == canonical_dns_name)
     )
+
+
+def is_node_fingerprint(value: str) -> bool:
+    return bool(_NODE_FINGERPRINT_RE.fullmatch(value.strip().lower()))
 
 
 def identity_for_peer(peer) -> NodeDisplayIdentity:

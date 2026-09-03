@@ -544,6 +544,10 @@ class ManagedDnsServer:
                 secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
                 replacement_status = existing_replacement.status
                 if existing_replacement.status == "abandoned":
+                    if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+                        return web.json_response(
+                            {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                        )
                     reclaim(self._db, existing_replacement.name, matured=False)
                     replacement_status = "pending"
                 replace_registration_credential(
@@ -613,16 +617,23 @@ class ManagedDnsServer:
             ):
                 return web.json_response({"error": "unknown or inactive rename"}, status=401)
             previous_name = replacement.replaces_name
+            previous = get_registration_by_name(self._db, previous_name)
+            if previous is None:
+                return web.json_response({"error": "previous registration no longer exists"}, status=409)
             if not await self._delete_record(replacement.name):
                 return web.json_response(
                     {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
                 )
             if not delete_pending_replacement(self._db, replacement.name):
                 return web.json_response({"error": "rename is no longer pending"}, status=409)
+            previous_status = previous.status
+            if previous_status == "abandoned":
+                reclaim(self._db, previous_name, matured=True)
+                previous_status = "matured"
             return web.json_response(
                 {
                     "name": replacement.name, "previous_name": previous_name,
-                    "previous_status": get_registration_by_name(self._db, previous_name).status,
+                    "previous_status": previous_status,
                     "status": "cancelled",
                 }
             )

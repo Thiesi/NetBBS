@@ -3722,3 +3722,18 @@ When a managed-DNS rename retry finds its same-target replacement abandoned,
 reactivate that row as pending before rotating and returning its credential.
 During a pending rename, advertise the previous managed name only when its
 saved status proves it had already matured and been published.
+
+Managed-DNS credential replacement is a journaled two-file transition: stage
+both bearer secrets atomically before changing either live credential, and
+finish any staged swap before heartbeat or interactive rename/cancellation.
+Transient failure of the old-name heartbeat must not erase its last known
+status. Reactivating an abandoned replacement remains a capacity admission;
+cancelling against an abandoned previous name restores that previous
+registration before reporting success.
+
+The canonical friendly-name grammar is enforced at both local configuration
+and authenticated descriptor ingress. It reserves the composite-label
+delimiter and the quoted-address delimiter as well as Unicode control/format
+characters. Administrative fallback to an unseen technical identity accepts
+only a complete 32-character lowercase-base32 node fingerprint (case-insensitive
+on input); arbitrary unmatched names are errors.

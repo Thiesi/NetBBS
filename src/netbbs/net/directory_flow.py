@@ -181,9 +181,14 @@ def _who_entry_name(entry: _WhoEntry) -> str:
 
 def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
     if isinstance(entry, _RemoteWhoEntry):
-        return f"on linked node {identity_for_fingerprint(db, entry.node_fingerprint).label}"
+        return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
     return f"connected since {when}"
+
+
+def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
+    identity = identity_for_fingerprint(db, entry.node_fingerprint)
+    return identity.label if identity.friendly_name != "Unknown linked node" else entry.node_fingerprint
 
 
 def _remote_who_entries(link_context: LinkContext | None) -> list[_RemoteWhoEntry]:
@@ -288,7 +293,7 @@ async def _caller_who_screen(
                 )
             )
             return
-        node_label = identity_for_fingerprint(db, selected.node_fingerprint).label
+        node_label = _remote_who_node_label(db, selected)
         await session.write(f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: ")
         message = (await session.read_line()).strip()
         if not message:
