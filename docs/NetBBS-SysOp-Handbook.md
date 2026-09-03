@@ -280,6 +280,11 @@ policy (open/members-only) are independent settings — a hidden-but-open
 channel is reachable by anyone who knows to `/join` it by name; that's
 obscurity, not real access control, so don't rely on it as one.
 
+A channel's detail screen also holds its `[M]RC room` mapping — the
+per-channel opt-in that bridges it to a room on the external Multi Relay
+Chat network (§8) — and, once mapped, `[P]ause MRC bridge`, which keeps
+the mapping but relays nothing either way until resumed.
+
 ### Categories
 
 `[C]ontent` → `[C]ategories` manages the shared two-level category
@@ -378,6 +383,38 @@ feature exists alongside these (reachable via the Who screen's
 `[I]nvite to chat`, or `/dm <user>` from inside a channel) — also fully
 ephemeral, no scrollback, and exclusive with channel chat (one active chat
 surface per session).
+
+### Inter-BBS chat: the MRC bridge
+
+MRC (Multi Relay Chat) is a public, unauthenticated inter-BBS chat network
+with one central hub, used by Mystic, Synchronet, ENiGMA½ and others.
+NetBBS can bridge individual channels to MRC rooms; nothing is bridged
+unless you say so, twice:
+
+1. `[S]ettings` → `[I]nter-BBS chat (MRC)`: enable the hub link and set
+   the site name this node presents as (default: the node's display
+   name). The public hub, TLS and its port are pre-filled; the INFO
+   fields (SysOp, description, telnet/SSH/web addresses) are what other
+   MRC users see with `/info`. Saving applies immediately — no restart.
+2. On each channel you want on the network: `[C]ontent` → Cha`[N]`nels →
+   the channel → `[M]RC room`. Type the room name (`lobby` is the hub's
+   default room). One room maps to at most one channel.
+
+What callers experience in a bridged channel: an `[MRC]` badge on the
+status line; a one-line notice on joining that their handle (their
+username, spaces underscored) is now visible to everyone on that network;
+`/who`, `/names` and `/mrc` listing the room's MRC users; and MRC lines
+appearing as `user@site (MRC)` — an external, unverifiable author,
+never a local account. Private MRC messages are not delivered (the
+addressed caller is told once per sender); only room traffic crosses the
+bridge, in both directions.
+
+`[N]ode` → `[C]hat bridge (MRC)` shows the link state (connected,
+reconnecting, error, off), hub, last error, drop counters and every
+bridged channel with the hub's roster, plus `[R]econnect now`. To take a
+single channel off the network without touching the others, use its
+`[P]ause MRC bridge`; to take the whole node off, disable the link under
+Settings. The bridge's own warnings land in the Link diagnostic log.
 
 Phase 2/3 scope is one active channel membership per session at a time;
 simultaneous multi-channel membership and background delivery are later
@@ -518,6 +555,9 @@ error.
   timestamp) and display *timezone* (which real instant it shows). Both
   need to be right — fixing only one still leaves everyone looking at a
   reshaped but wrong wall-clock time.
+- `[I]nter-BBS chat (MRC)` — the node-wide half of the MRC bridge (hub,
+  TLS, site name, INFO fields); see §8. Which channels are bridged is
+  decided per channel, on each channel's own screen.
 - `[P]olicy trust` — see §12.
 
 ---

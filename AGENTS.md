@@ -177,7 +177,10 @@ direct messages (`/msg user@node-fingerprint`, issue #168) shipped with the
 reliable-nodes onboarding (issue #219): a raw-socket proxy below Noise at any
 full peer with relay serving on, anchored at the reliable nodes; chained
 two-relay bridges plus anchor advertisement and cross-node `/private`
-followed (issue #270). Still not built: cross-node `/dm` invites.
+followed (issue #270). Still not built: cross-node `/dm` invites. The MRC
+gateway scoped in issue #165 shipped as issue #275: `netbbs.mrc`, an
+opt-in per-channel bridge to the external Multi Relay Chat network, with
+DB-backed SysOp configuration and no change to Link's own protocol.
 
 Phase 7's first vertical (issue #172, closed — supersedes #63/#167, both
 closed) shipped in v5.4.0: a native door-game execution model (subprocess
