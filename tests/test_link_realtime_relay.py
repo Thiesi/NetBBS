@@ -1774,6 +1774,35 @@ def test_forwarded_request_is_refused_when_the_forwarding_relay_fails_policy():
     asyncio.run(scenario())
 
 
+def test_target_disconnect_during_policy_check_is_reported_as_unreachable():
+    async def scenario():
+        relay = _fake_relay("r2")
+        forwarder = _RecordingSession("r1")
+        target = _RecordingSession("b")
+        relay._registry._sessions["b"] = target
+
+        async def target_allowed(_fingerprint):
+            relay._registry._sessions.pop("b")
+            await asyncio.sleep(0)
+            return True
+
+        relay._decide_peer_allowed = target_allowed
+        try:
+            await relay._handle_forwarded_request(
+                forwarder, requester="a", target="b", request_id="f1",
+            )
+            reject = forwarder.sent[-1]
+            assert reject.type == "relay_reject"
+            assert reject.payload == {
+                "target_fingerprint": "b", "reason": "target_unreachable",
+                "origin": "relay", "requester_fingerprint": "a", "request_id": "f1",
+            }
+        finally:
+            await relay.close()
+
+    asyncio.run(scenario())
+
+
 def test_forwarded_request_for_a_pair_this_relay_is_already_forwarding_waits():
     async def scenario():
         from netbbs.link.realtime_relay import _Forward

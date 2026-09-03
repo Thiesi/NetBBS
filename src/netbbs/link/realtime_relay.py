@@ -407,9 +407,17 @@ class RealtimeRelay:
         self, requester_session: LinkRealtimeSession, *, requester: str, target: str, requester_via: str | None,
         request_id: str | None = None, correlation_required: bool = False,
     ) -> None:
-        target_session = self._registry.get(target)
-        assert target_session is not None
         named = requester if requester_via is not None else None
+        target_session = self._registry.get(target)
+        if target_session is None:
+            # The target can disconnect while the caller awaits its policy
+            # decision. This is ordinary unreachability, never an assertion
+            # that tears down the authenticated requester/forwarder session.
+            await self._reject(
+                requester_session, target, "target_unreachable",
+                requester=named, request_id=request_id,
+            )
+            return
         if len(self._bridges) >= self._max_pairs:
             await self._reject(requester_session, target, "at_capacity", requester=named, request_id=request_id)
             return
