@@ -714,12 +714,16 @@ REALTIME_RELAY_MAX_HOPS = 1
 
 def _validate_relay_request_payload(payload: dict, *, path: str) -> None:
     required = {"target_fingerprint", "requester_fingerprint"}
-    optional = {"via_relay", "hops"}
+    optional = {"via_relay", "hops", "request_id"}
     keys = set(payload)
     if not required <= keys or not keys <= required | optional:
         raise LinkProtocolError(
-            f"{path} must contain target_fingerprint and requester_fingerprint (optionally via_relay, hops)"
+            f"{path} must contain target_fingerprint and requester_fingerprint (optionally via_relay, hops, request_id)"
         )
+    # `request_id` on a relay_request is the invited party's *agreement*
+    # echoing the invitation's message id, so a stale agreement can never
+    # complete a fresh attempt for the same pair.
+    _validate_optional_request_id(payload, path=path)
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
     _validate_bounded_id(payload["requester_fingerprint"], path=f"{path}.requester_fingerprint")
     if payload["target_fingerprint"] == payload["requester_fingerprint"]:
@@ -949,13 +953,15 @@ def build_scrollback_snapshot_frame(
 
 def build_relay_request_frame(
     *, target_fingerprint: str, requester_fingerprint: str, via_relay: str | None = None,
-    hops: int | None = None, message_id: str | None = None,
+    hops: int | None = None, request_id: str | None = None, message_id: str | None = None,
 ) -> RealtimeFrame:
     payload: dict = {"target_fingerprint": target_fingerprint, "requester_fingerprint": requester_fingerprint}
     if via_relay is not None:
         payload["via_relay"] = via_relay
     if hops:
         payload["hops"] = hops
+    if request_id is not None:
+        payload["request_id"] = request_id
     frame = RealtimeFrame(
         type="relay_request", message_id=message_id or new_realtime_message_id(), payload=payload,
     )

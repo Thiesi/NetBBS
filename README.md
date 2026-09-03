@@ -159,9 +159,9 @@ enforcement is implemented and validated (see above), but Phase 3 remains a
 private, invite-your-friends federation until the dogfood half of public
 readiness (issue #83) actually happens, and issue #55's threat model still
 assumes a small, trusted membership rather than the open internet;
-no tier-2 Link-message routing or client-side decryption; no Link-wide
-*private* real-time chat or multi-hop real-time relay (real-time
-linked-*channel* chat, above, is direct node-to-node only so far); and no
+no tier-2 Link-message routing or client-side decryption; no cross-node
+`/dm` invites (live private *messages* and `/private` across nodes, and
+one- or two-relay live sessions, do work -- see above); and no
 linked channel/file-area origin succession, delegated Link moderation, or
 Link Communities. Public external interoperability remains unclaimed;
 issue #71's independent implementation is deferred indefinitely, while

@@ -90,6 +90,13 @@ MAX_RELIABLE_NODES_RAW_ENTRIES = 256
 # successfully-fetched roster. A cache of external, lower-trust data,
 # never conflated with the operator's own `LinkConfig.seeds`.
 CACHED_RELIABLE_NODES_CONFIG_KEY = "link_cached_reliable_nodes"
+# url key ("host:port", lower-case) -> node fingerprint that answered a
+# hello *at that roster URL*. A peer's own signed descriptor can claim any
+# address it likes, so "which peer is the reliable node" is bound to the
+# identity observed by dialing the roster entry, never to a self-
+# advertised address.
+OBSERVED_RELIABLE_IDENTITIES_CONFIG_KEY = "link_observed_reliable_identities"
+MAX_OBSERVED_RELIABLE_IDENTITIES = 64
 
 
 @dataclass(frozen=True)
@@ -255,6 +262,53 @@ def set_cached_reliable_nodes(db: Database, nodes: list[ReliableNode]) -> None:
         "nodes": [{"name": node.name, "url": node.url} for node in nodes],
     }
     set_config(db, CACHED_RELIABLE_NODES_CONFIG_KEY, json.dumps(payload))
+
+
+def reliable_url_key(url: str) -> str | None:
+    """Normalized `host:port` key for a roster URL, or `None` if it does
+    not parse."""
+    try:
+        parts = urlsplit(url)
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    return f"{hostname.lower()}:{port}"
+
+
+def get_observed_reliable_identities(db: Database) -> dict[str, str]:
+    """`{url key: fingerprint}` for every roster URL this node has itself
+    completed a hello at -- never raises."""
+    raw = get_config(db, OBSERVED_RELIABLE_IDENTITIES_CONFIG_KEY)
+    if raw is None:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def record_observed_reliable_identity(db: Database, url: str, fingerprint: str) -> None:
+    """Remember that dialing roster `url` completed a hello with
+    `fingerprint` (called by `netbbs.link.sync` after a successful seed
+    dial of a roster URL). Bounded to `MAX_OBSERVED_RELIABLE_IDENTITIES`
+    entries, oldest dropped first; only this node's own sync loop writes
+    it, for URLs this node chose to dial."""
+    key = reliable_url_key(url)
+    if key is None:
+        return
+    observed = get_observed_reliable_identities(db)
+    observed.pop(key, None)
+    observed[key] = fingerprint
+    while len(observed) > MAX_OBSERVED_RELIABLE_IDENTITIES:
+        del observed[next(iter(observed))]
+    set_config(db, OBSERVED_RELIABLE_IDENTITIES_CONFIG_KEY, json.dumps(observed))
 
 
 def effective_reliable_nodes(db: Database) -> list[ReliableNode]:

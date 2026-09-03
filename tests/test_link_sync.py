@@ -176,9 +176,11 @@ def test_sync_dials_a_cached_reliable_node_once_participation_is_accepted(tmp_pa
     seed_node = LinkNode(identity=seed_identity)
     dialer = _NodeDb(tmp_path, "dialer")
     seed = _NodeDb(tmp_path, "seed")
+    ports: list[int] = []
 
     async def scenario():
         seed_server = await _run_server(seed_node, seed.lane)
+        ports.append(seed_server.port)
         seed_url = f"http://127.0.0.1:{seed_server.port}"
         # Not passed as an operator-configured seed below -- only cached,
         # as if a prior run_scheduled_reliable_nodes_refresh pass had
@@ -200,6 +202,10 @@ def test_sync_dials_a_cached_reliable_node_once_participation_is_accepted(tmp_pa
     try:
         asyncio.run(scenario())
         assert dialer_identity.fingerprint in seed_node.peers  # the dial actually reached the seed
+        # The identity observed at the roster URL is what binds "reliable
+        # node" to a peer for live relay/anchoring -- recorded by the dial.
+        from netbbs.link.reliable_nodes import get_observed_reliable_identities
+        assert get_observed_reliable_identities(dialer.db) == {f"127.0.0.1:{ports[0]}": seed_identity.fingerprint}
     finally:
         dialer.close()
         seed.close()

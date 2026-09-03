@@ -1823,6 +1823,29 @@ constrain future changes:
   forwarded entry matches. A forwarded request reserves its pending slot
   *before* the upstream dial can yield, so concurrent requesters cannot
   all pass the cap and then dial.
+- **A reliable node is whoever answered a hello at the roster URL**
+  (`reliable_nodes.record_observed_reliable_identity`, written by
+  `sync._sync_one_seed`; read via `get_observed_reliable_identities`).
+  `reliable_node_fingerprints` no longer matches a peer's *self-advertised*
+  HTTP address against the roster -- any completed peer could claim a roster
+  address and become an anchor/approved relay on its own say-so. A test
+  that wants a node treated as reliable must record the observed identity,
+  not just advertise the address.
+- **Three attempt ids, all echoed:** the requester's `relay_request` id on
+  every relay answer; the invitation's id on the target's agreement/decline
+  (`_Rendezvous.invitation_id`); the forwarding relay's upstream request id
+  on the upstream's answers (`_Forward.upstream_request_id`). A retry with
+  a new id supersedes a still-pending stale rendezvous instead of being
+  parked behind it.
+- **Session establishment is serialized per peer** (`LiveDirectChat.
+  _establishing`): the registry's newer-wins rule would otherwise let a
+  second concurrent dial close the first caller's fresh session. Both
+  `dial_realtime_session` and `attach_relayed_session` close whatever they
+  started on *any* exit before admission, cancellation included.
+- **Declined participation means no on-demand relay dial either**, and
+  every reused relay or target session is re-checked against `REALTIME`
+  policy first -- the relay half re-checks the *target* (reported only as
+  `target_unreachable`) and the forwarding peer, not just the requester.
 - **A forward stays reserved (and counted) across the upstream attach**,
   and a dial or attach that outlives the reservation is dropped, never
   turned into a late rendezvous. The relay half claims only *named*

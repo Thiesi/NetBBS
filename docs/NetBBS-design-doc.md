@@ -1937,7 +1937,15 @@ parses frames), and `live_relay_idle_timeout_seconds` (120, a dumb
 "no bytes either way" timer the endpoints' own ping/pong keeps from
 firing). One leg closing tears down the other. Reject reasons are a
 closed set: `not_serving`, `invalid_target`, `target_unreachable`,
-`at_capacity`, `pending_full`, `declined`, `timeout`, `attach_failed`.
+`at_capacity`, `pending_full`, `declined`, `timeout`, `attach_failed`,
+`policy_refused` (the requester's own standing session no longer passes
+the relay's `REALTIME` policy; a *target* that no longer passes is
+reported to the requester only as `target_unreachable`). Every relay
+answer echoes the requester's `relay_request` message id as `request_id`;
+an invitation's message id is echoed by the target's agreement or
+decline; a forwarding relay's upstream request id is echoed on the
+upstream's answers -- so no answer to an earlier, expired attempt can
+ever settle a fresh one for the same pair.
 
 These frames make the real-time application protocol **version 3**: a
 version-2 peer cannot reject an unknown frame type with a bounded strike
