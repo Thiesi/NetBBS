@@ -401,6 +401,7 @@ def build_endpoint_descriptor(
     outgoing_only: bool,
     created_at: str,
     relays: list[str] | None = None,
+    live_relays: list[str] | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -443,6 +444,13 @@ def build_endpoint_descriptor(
         payload["addresses"] = addresses
     if relays:
         payload["relays"] = relays
+    if live_relays:
+        # Issue #270: the reliable nodes this node currently stands by at
+        # for live relay (`netbbs.link.realtime_direct`), so a peer that
+        # cannot dial this node knows which relay to meet it at. Same
+        # "omitted when empty" convention as `relays`; a stale entry only
+        # ever costs a failed rendezvous.
+        payload["live_relays"] = live_relays
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

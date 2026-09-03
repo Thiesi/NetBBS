@@ -2553,9 +2553,15 @@ async def request_peer_list(
 
     recorded = node.handle_peer_list(peer_fingerprint, message)
     for candidate_fingerprint in recorded:
-        await lane.run(
-            save_candidate_descriptor, candidate_fingerprint, node.candidate_descriptors[candidate_fingerprint]
-        )
+        if candidate_fingerprint in node.peers:
+            # Issue #270: a known peer's descriptor refreshed secondhand
+            # (verified against its own signing key) -- persist the peer
+            # record itself so the refresh survives a restart.
+            await lane.run(save_peer, node.peers[candidate_fingerprint])
+        else:
+            await lane.run(
+                save_candidate_descriptor, candidate_fingerprint, node.candidate_descriptors[candidate_fingerprint]
+            )
     return recorded
 
 

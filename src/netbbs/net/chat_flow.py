@@ -1062,15 +1062,33 @@ class _SwitchTo:
 
 
 @dataclass(frozen=True)
+class RemotePrivateTarget:
+    """Issue #270: a `/private user@node-fingerprint` counterpart on a
+    linked node -- every plain line goes out as a live direct message."""
+
+    username: str
+    node_fingerprint: str
+
+    @property
+    def address(self) -> str:
+        return f"{self.username}@{self.node_fingerprint}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.username}@{self.node_fingerprint[:12]}…"
+
+
+@dataclass(frozen=True)
 class _EnterPrivate:
     """Enter private-conversation mode targeting `target` — `/private
     <user>`'s meaning. Unlike `_ToPicker`/`_SwitchTo`, this
     never propagates past `send_loop` — it's consumed entirely there,
     updating its own local `private_target` variable, since entering
     private mode doesn't change anything about *which channel* the loop
-    is running in."""
+    is running in. `target` is a local `User`, or a `RemotePrivateTarget`
+    for a user on a linked node (issue #270)."""
 
-    target: User
+    target: User | RemotePrivateTarget
 
 
 @dataclass(frozen=True)
@@ -1314,6 +1332,34 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
     if not target_name:
         await _show_usage(ctx.session, "private")
         return None
+
+    if "@" in target_name:
+        # Issue #270: private mode with a user on a linked node.
+        from netbbs.net.link_direct import check_live_reachability, parse_remote_address
+
+        parsed = parse_remote_address(target_name)
+        if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
+            await ctx.session.write_line(
+                colored("Address a linked node's user as user@node-fingerprint (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
+            )
+            return None
+        remote_user, _node_prefix = parsed
+        # Like the local path's online check: the conversation is only
+        # announced once a live session exists and the user is online
+        # there -- never discovered on the first composed line.
+        resolved = await check_live_reachability(ctx.session, target_name, link_context=ctx.link_context)
+        if resolved is None:
+            return None
+        remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved)
+        close_hint = menu_key("/close", "")
+        await ctx.session.write_line(
+            colored(
+                f"Entering private conversation with {sanitize_text(remote.label)} (live, over NetBBS Link). "
+                f"Type {close_hint} to return.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        return _EnterPrivate(remote)
 
     target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
@@ -2352,7 +2398,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "join": ("/join <channel>", "Switch to another chat channel."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
     "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-fingerprint for a linked node)."),
-    "private": ("/private <user>", "Enter a private conversation with an online user."),
+    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-fingerprint for a linked node)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),
@@ -3440,7 +3486,7 @@ async def _chat_loop(
             # is always a command attempt" rule) -- only *non-slash* lines change
             # meaning, routed to the private conversation instead of posted
             # to the channel.
-            private_target: User | None = None
+            private_target: User | RemotePrivateTarget | None = None
 
             async def list_candidates(candidates: Sequence[str], line_text: str, cursor: int) -> None:
                 await _print_candidates_and_redraw_input(
@@ -3564,6 +3610,25 @@ async def _chat_loop(
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                                 link_context=link_context,
                             )
+                            if isinstance(private_target, RemotePrivateTarget):
+                                # Issue #270: each line is one live direct
+                                # message; a refusal (peer gone, unreachable)
+                                # is printed by the send flow and ends the
+                                # mode, the same way a local target going
+                                # offline does.
+                                from netbbs.net.link_direct import SendOutcome, send_live_direct_message
+
+                                outcome = await send_live_direct_message(
+                                    session, lane, user, private_target.address, line, link_context=link_context,
+                                )
+                                if outcome is SendOutcome.UNREACHABLE:
+                                    # The counterpart is gone: leave the mode, and say
+                                    # so, before the next line could go to the channel.
+                                    private_target = None
+                                    await session.write_line(
+                                        colored(f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
+                                    )
+                                continue
                             if not presence.is_online(private_target.username):
                                 await session.write_line(
                                     colored(

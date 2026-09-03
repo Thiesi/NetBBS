@@ -1101,3 +1101,21 @@ def test_relay_consent_response_to_dict_from_dict_roundtrip(relay_signing):
     restored = RelayConsentResponse.from_dict(original.to_dict())
     assert restored.payload["accepted"] is True
     assert verify_relay_consent_response(restored, relay_signing.verify_key)
+
+
+def test_endpoint_descriptor_live_relays_included_when_given(node_signing):
+    """Issue #270: the reliable nodes this node stands by at for live
+    relay -- omitted when empty, like `relays`."""
+    descriptor = build_endpoint_descriptor(
+        signing_identity=node_signing, subject_fingerprint="subject-fp", addresses=None, outgoing_only=True,
+        created_at="2026-01-01T00:00:00Z", live_relays=["relay-fp-1"],
+    )
+    assert descriptor.payload["live_relays"] == ["relay-fp-1"]
+    assert verify_endpoint_descriptor(descriptor, node_signing.verify_key)
+    restored = EndpointDescriptor.from_dict(descriptor.to_dict())
+    assert restored.payload["live_relays"] == ["relay-fp-1"]
+    bare = build_endpoint_descriptor(
+        signing_identity=node_signing, subject_fingerprint="subject-fp", addresses=None, outgoing_only=True,
+        created_at="2026-01-01T00:00:00Z", live_relays=[],
+    )
+    assert "live_relays" not in bare.payload

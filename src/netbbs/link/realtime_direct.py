@@ -122,6 +122,56 @@ def _peer_http_addresses(node: LinkNode, fingerprint: str) -> set[tuple[str, int
     }
 
 
+# A descriptor is signed but its *contents* are the peer's claim: cap how
+# many relays this node will ever try on a peer's say-so, and reject any
+# entry that could not be a fingerprint (the wire bound for a real-time
+# ID is 128 bytes).
+MAX_ADVERTISED_LIVE_RELAYS = 8
+_MAX_FINGERPRINT_BYTES = 128
+
+
+def advertised_live_relays(node: LinkNode, fingerprint: str) -> list[str]:
+    """The live relays `fingerprint` advertises standing by at (issue
+    #270, `EndpointDescriptor.payload["live_relays"]`), from whichever of
+    its completed peer record or peer-list candidate descriptor is newer
+    -- an outgoing-only node's descriptor may only ever be learned
+    secondhand. Bounded and validated: a malformed field reads as empty,
+    never as an error, and at most `MAX_ADVERTISED_LIVE_RELAYS` entries
+    are ever returned."""
+    peer = node.peers.get(fingerprint)
+    candidates = [d for d in (
+        peer.descriptor if peer is not None else None, node.candidate_descriptors.get(fingerprint),
+    ) if d is not None]
+    if not candidates:
+        return []
+    descriptor = max(candidates, key=lambda d: str(d.payload.get("created_at", "")))
+    relays = descriptor.payload.get("live_relays")
+    if not isinstance(relays, list):
+        return []
+    valid: list[str] = []
+    for entry in relays:
+        if not isinstance(entry, str) or not entry or len(entry.encode("utf-8")) > _MAX_FINGERPRINT_BYTES:
+            continue
+        if entry not in valid:
+            valid.append(entry)
+        if len(valid) >= MAX_ADVERTISED_LIVE_RELAYS:
+            break
+    return valid
+
+
+class AnchorState:
+    """Issue #270: which reliable nodes this node is currently standing
+    by at -- maintained by `run_reliable_anchor_connectors`, read by the
+    hello provider to advertise `live_relays` (filtered to those with a
+    session actually up right now)."""
+
+    def __init__(self) -> None:
+        self.anchored: set[str] = set()
+
+    def live(self, registry: LinkRealtimeSessionRegistry) -> list[str]:
+        return sorted(fp for fp in self.anchored if registry.get(fp) is not None)
+
+
 class LiveDirectChat:
     """See module docstring. One per node, owned by `netbbs.__main__`
     alongside the `LiveChannelBridge`, which routes `direct_message`
@@ -153,10 +203,15 @@ class LiveDirectChat:
     # -- outbound ------------------------------------------------------------
 
     async def ensure_session(self, fingerprint: str) -> LinkRealtimeSession:
-        """A live session with `fingerprint`, established if needed:
-        registry first, then a direct dial of every advertised real-time
-        address, then a rendezvous through every live relay session this
-        node holds with a reliable node. Raises `DirectChatUnreachable`."""
+        """A live session with `fingerprint`, established if needed, in
+        this order (design doc §8.10.3): the registry; a direct dial of
+        every advertised real-time address; a single-hop rendezvous at
+        each relay the target advertises standing by at (reusing a
+        session or dialing that relay directly -- it is a full peer);
+        a single-hop rendezvous at each of this node's own anchors; and
+        finally a chained rendezvous, asking each own anchor to forward
+        toward each of the target's advertised relays (issue #270).
+        Raises `DirectChatUnreachable`."""
         if fingerprint == self._identity.fingerprint:
             raise DirectChatUnreachable(fingerprint, "self")
         # A session can outlive a trust change (§8.10.2's "checked again"
@@ -183,6 +238,9 @@ class LiveDirectChat:
                 # gets the explicit notice, never Decision 3's refusal.
                 raise
             except Exception as exc:
+                winner = self._registry.get(fingerprint)
+                if winner is not None:
+                    return winner  # a simultaneous inbound session won the tiebreak
                 _logger.info("direct real-time dial of %s at %s:%d failed: %s", fingerprint[:12], host, port, exc)
                 continue
             await self._track_session(session)
@@ -190,22 +248,83 @@ class LiveDirectChat:
         if self._relay_client is None:
             raise DirectChatUnreachable(fingerprint, "no_relay_client")
         last_reason = "no_relay"
-        for relay_session in await self._relay_sessions():
+        target_relays = [fp for fp in advertised_live_relays(self._node, fingerprint) if fp != self._identity.fingerprint]
+        own_anchors = await self._relay_sessions()
+        # 1. Meet at a relay the target stands by at, reaching it ourselves.
+        unreachable_relays: list[str] = []
+        for relay_fingerprint in target_relays:
+            relay_session = await self._reach_relay(relay_fingerprint)
+            if relay_session is None:
+                unreachable_relays.append(relay_fingerprint)
+                continue
             try:
                 return await self._relay_client.request_bridge(relay_session, fingerprint)
             except RelayRendezvousError as exc:
                 last_reason = exc.reason
-                _logger.info(
-                    "relayed session with %s via %s failed: %s",
-                    fingerprint[:12], relay_session.remote_fingerprint[:12], exc,
-                )
-                continue
+                _logger.info("relayed session with %s via its anchor %s failed: %s", fingerprint[:12], relay_fingerprint[:12], exc)
+        # 2. Meet at one of our own anchors (the target may stand by there too).
+        for relay_session in own_anchors:
+            if relay_session.remote_fingerprint in target_relays:
+                continue  # already tried above
+            try:
+                return await self._relay_client.request_bridge(relay_session, fingerprint)
+            except RelayRendezvousError as exc:
+                last_reason = exc.reason
+                _logger.info("relayed session with %s via %s failed: %s", fingerprint[:12], relay_session.remote_fingerprint[:12], exc)
+        # 3. Chain: ask our own anchor to forward toward a target relay we
+        #    could not reach ourselves.
+        for relay_fingerprint in unreachable_relays:
+            for relay_session in own_anchors:
+                if relay_session.remote_fingerprint == relay_fingerprint:
+                    continue
+                try:
+                    return await self._relay_client.request_bridge(relay_session, fingerprint, via_relay=relay_fingerprint)
+                except RelayRendezvousError as exc:
+                    last_reason = exc.reason
+                    _logger.info(
+                        "chained session with %s via %s -> %s failed: %s",
+                        fingerprint[:12], relay_session.remote_fingerprint[:12], relay_fingerprint[:12], exc,
+                    )
         raise DirectChatUnreachable(fingerprint, last_reason)
 
     async def _peer_allowed(self, fingerprint: str) -> bool:
         return await self._lane.run(
             lambda db: decide_node_action(db, fingerprint, LinkPolicyAction.REALTIME).allowed
         )
+
+    async def _reach_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
+        """A session with relay `fingerprint`: the registry's, or a fresh
+        dial of its advertised real-time address (a relay is a full peer).
+        `None` if this node cannot reach it -- the chained path's cue."""
+        session = self._registry.get(fingerprint)
+        if session is not None:
+            return session
+        for host, port in dialable_realtime_addresses_for_peer(self._node, fingerprint):
+            try:
+                session = await asyncio.wait_for(
+                    dial_realtime_session(
+                        host, port, self._identity, on_frame=self._on_frame, registry=self._registry,
+                        lane=self._lane, enforce_trust_policy=True, expected_fingerprint=fingerprint,
+                    ),
+                    timeout=self._dial_timeout,
+                )
+            except Exception as exc:
+                # A simultaneous inbound session from that relay can win
+                # the duplicate-session tiebreak against this dial; the
+                # admitted winner is exactly the session we wanted.
+                winner = self._registry.get(fingerprint)
+                if winner is not None:
+                    return winner
+                _logger.info("could not reach relay %s at %s:%d: %s", fingerprint[:12], host, port, exc)
+                continue
+            await self._track_session(session)
+            return session
+        return self._registry.get(fingerprint)
+
+    async def connect_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
+        """The relay-server half's hook for reaching an upstream relay when
+        forwarding (issue #270) -- the same recipe, exposed."""
+        return await self._reach_relay(fingerprint)
 
     async def _relay_sessions(self) -> list[LinkRealtimeSession]:
         """Live sessions with reliable nodes (§16 issue #219 Decision 4:
@@ -295,6 +414,7 @@ async def run_reliable_anchor_connectors(
     interval_seconds: float = 60.0,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     stop_event: asyncio.Event | None = None,
+    state: AnchorState | None = None,
 ) -> None:
     """Keep a participating node standing by at every reliable node it
     knows (design doc §8.10.3): a live session to a relay is what makes
@@ -328,6 +448,8 @@ async def run_reliable_anchor_connectors(
                         await connector.stop()  # type: ignore[attr-defined]
                         del started[fingerprint]
                         _logger.info("no longer standing by at %s for live relay", fingerprint[:12])
+                if state is not None:
+                    state.anchored = set(desired)
                 for fingerprint, addresses in desired.items():
                     if fingerprint in started:
                         continue
@@ -348,6 +470,8 @@ async def run_reliable_anchor_connectors(
                 _logger.exception("reliable-node anchor pass failed")
             await sleep(interval_seconds)
     finally:
+        if state is not None:
+            state.anchored = set()
         for connector, _address in started.values():
             try:
                 await connector.stop()  # type: ignore[attr-defined]
@@ -356,7 +480,9 @@ async def run_reliable_anchor_connectors(
 
 
 __all__ = [
+    "AnchorState",
     "DirectChatUnreachable",
+    "advertised_live_relays",
     "IncomingDirectMessage",
     "LiveDirectChat",
     "reliable_node_fingerprints",

@@ -132,7 +132,7 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
     )
 
 
-def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig):
+def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig, live_relays_provider=None):
     """
     Returns a plain callable producing this node's current `HelloMessage`
     on demand (design doc: `LinkServer`'s `own_hello_provider`
@@ -169,7 +169,10 @@ def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig):
                 },
             ]
         return link_node.build_hello(
-            addresses=addresses, outgoing_only=link_config.outgoing_only, created_at=utc_now_iso()
+            addresses=addresses, outgoing_only=link_config.outgoing_only, created_at=utc_now_iso(),
+            # Issue #270: the reliable nodes this node is standing by at,
+            # so a peer that cannot dial us knows where to meet us.
+            live_relays=live_relays_provider() if live_relays_provider is not None else None,
         )
 
     return _provide
@@ -186,6 +189,7 @@ async def _start_servers(
     link_realtime_registry=None,
     link_realtime_bridge=None,
     link_realtime_relay=None,
+    live_relays_provider=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -319,7 +323,7 @@ async def _start_servers(
                     host=config.link.host,
                     port=config.link.port,
                     node=link_node,
-                    own_hello_provider=_build_own_hello_provider(link_node, config.link),
+                    own_hello_provider=_build_own_hello_provider(link_node, config.link, live_relays_provider),
                     lane=link_lane,
                     relay_serving_enabled=config.link.relay_serving_enabled,
                     max_relay_clients=config.link.max_relay_clients,
@@ -698,6 +702,7 @@ async def run(
     link_realtime_relay = None
     link_realtime_relay_client = None
     link_direct_chat = None
+    link_anchor_state = None
     reliable_anchor_task: asyncio.Task | None = None
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
@@ -825,6 +830,7 @@ async def run(
         link_realtime_relay = None
         link_realtime_relay_client = None
         link_direct_chat = None
+        link_anchor_state = None
         if link_node is not None:
             try:
                 from netbbs.link.realtime_channels import LiveChannelBridge
@@ -844,7 +850,7 @@ async def run(
                 # or a relayed session. All three plug into the bridge's
                 # single on_frame seam rather than owning sessions of their
                 # own.
-                from netbbs.link.realtime_direct import LiveDirectChat
+                from netbbs.link.realtime_direct import AnchorState, LiveDirectChat
                 from netbbs.link.realtime_relay import RealtimeRelay, RealtimeRelayClient
                 from netbbs.link.transport import attach_relayed_session, dialable_realtime_addresses_for_peer
                 from netbbs.net.link_direct import build_direct_message_deliverer
@@ -863,6 +869,7 @@ async def run(
                     rendezvous_timeout_seconds=config.link.live_relay_rendezvous_timeout_seconds,
                     idle_timeout_seconds=config.link.live_relay_idle_timeout_seconds,
                     max_bytes_per_second=config.link.live_relay_max_bytes_per_second,
+                    allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(link_node, fp),
                 )
 
                 async def _peer_realtime_allowed(fingerprint: str) -> bool:
@@ -895,11 +902,24 @@ async def run(
                         presence=presence,
                     ),
                 )
+                # Issue #270: the relay half reaches another relay through
+                # the direct-chat layer's own dial recipe when forwarding.
+                link_realtime_relay._connect_relay = link_direct_chat.connect_relay
+                link_anchor_state = AnchorState()
                 link_realtime_bridge.register_frame_handler(link_realtime_relay.owns_frame, link_realtime_relay.handle_frame)
                 link_realtime_bridge.register_frame_handler(
                     link_realtime_relay_client.owns_frame, link_realtime_relay_client.handle_frame
                 )
                 link_realtime_bridge.register_frame_handler(link_direct_chat.owns_frame, link_direct_chat.handle_frame)
+
+        # Issue #270: what this node advertises as `live_relays` in every
+        # hello -- the reliable nodes it is standing by at right now.
+        # Defined here (closing over the state the anchor task keeps up
+        # to date) and handed to both hello providers below.
+        def _live_relays_provider() -> list[str] | None:
+            if link_anchor_state is None or link_realtime_registry is None:
+                return None
+            return link_anchor_state.live(link_realtime_registry) or None
 
         # Design doc §13.11, issue #60: attached once, here, only when
         # Link is actually enabled -- a disabled node has no netbbs.link
@@ -946,7 +966,7 @@ async def run(
             )
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
-            link_realtime_registry, link_realtime_bridge, link_realtime_relay,
+            link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
         )
 
         # Design doc: the piece that makes this node
@@ -985,7 +1005,7 @@ async def run(
                 link_sync_task = asyncio.create_task(
                     run_link_sync(
                         link_node, link_sync_session, config.link.seeds,
-                        _build_own_hello_provider(link_node, config.link),
+                        _build_own_hello_provider(link_node, config.link, _live_relays_provider),
                         background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
                         stop_event=link_sync_stop_event,
@@ -1064,6 +1084,7 @@ async def run(
                         registry=link_realtime_registry, on_frame=link_realtime_bridge.on_frame,
                         track_session=link_realtime_bridge.track_session,
                         participation_accepted=participation_accepted, start_connector=_start_anchor_connector,
+                        state=link_anchor_state,
                     ))
 
         # Design doc -- node management, Thiesi's own request: every

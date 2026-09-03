@@ -90,13 +90,20 @@ class _Node:
             bridge_attach=self._attach,
         )
         await self.server.start()
+        from netbbs.link.transport import dialable_realtime_addresses_for_peer
+
         self.relay = RealtimeRelay(
             own_fingerprint=self.identity.fingerprint, registry=self.registry, serving_enabled=serving,
-            attach_address="127.0.0.1", attach_port=self.server.port, **self._relay_kwargs,
+            attach_address="127.0.0.1", attach_port=self.server.port,
+            allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(self.link_node, fp),
+            **self._relay_kwargs,
         )
         self.bridge.register_frame_handler(self.relay.owns_frame, self.relay.handle_frame)
         self._wire_client()
         self.relay._decide_peer_allowed = self._peer_allowed
+        # Issue #270: a serving relay reaches an upstream relay through the
+        # direct-chat layer's own dial recipe, exactly as __main__ wires it.
+        self.relay._connect_relay = self.direct.connect_relay
 
     async def _attach(self, token, reader, writer):
         assert self.relay is not None
@@ -788,6 +795,71 @@ def test_client_refuses_a_ready_whose_attach_address_the_relay_does_not_advertis
             await task
         assert len(calls) == 1
 
+# -- multi-hop (issue #270) ------------------------------------------------------
+
+
+async def _chain_nodes(tmp_path, *, a_can_reach_r2: bool):
+    """Four real nodes: relays R1 and R2 (both serving, both know each
+    other), A standing by at R1 only, B standing by at R2 only. B's hello
+    advertises R2 as its live relay; whether A holds a peer record for R2
+    (and so could dial it directly) is the switch between the single-hop
+    and the chained path."""
+    r1 = _Node(tmp_path, "relay-1")
+    r2 = _Node(tmp_path, "relay-2")
+    a = _Node(tmp_path, "party-a")
+    b = _Node(tmp_path, "party-b")
+    await r1.start_server(serving=True)
+    await r2.start_server(serving=True)
+    a.wire_party()
+    b.wire_party()
+    for node in (r1, r2, a, b):
+        node.trust(*[other for other in (r1, r2, a, b) if other is not node])
+    r1.know_relay(r2, http_port=7863)
+    r2.know_relay(r1, http_port=7862)
+    a.know_relay(r1, http_port=7862)
+    b.know_relay(r2, http_port=7863)
+    if a_can_reach_r2:
+        a.know_relay(r2, http_port=7863)
+    from netbbs.link.reliable_nodes import set_cached_reliable_nodes
+    set_cached_reliable_nodes(a.db, [ReliableNode(name="R1", url="http://127.0.0.1:7862")])
+    set_cached_reliable_nodes(b.db, [ReliableNode(name="R2", url="http://127.0.0.1:7863")])
+    # B tells the world it stands by at R2 (what the anchor task advertises).
+    a.link_node.handle_hello(b.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=[r2.identity.fingerprint],
+    ))
+    await a.connect_to(r1)
+    await b.connect_to(r2)
+    return r1, r2, a, b
+
+
+async def _teardown_all(*nodes):
+    for node in nodes:
+        await node.teardown()
+
+
+def test_chained_bridge_through_two_relays_when_the_requester_cannot_reach_the_targets_anchor(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert session.remote_fingerprint == b.identity.fingerprint and session.is_initiator
+            assert await _wait_until(lambda: b.registry.get(a.identity.fingerprint) is not None)
+            assert r1.relay.active_pairs == 1 and r2.relay.active_pairs == 1
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+            # A never got a session with R2 itself -- the chain did the work.
+            assert a.registry.get(r2.identity.fingerprint) is None
+            await a.direct.send_direct_message(
+                b.identity.fingerprint, to_user_id="bob", from_user_id="alice", from_display_label="Alice",
+                body="two hops", created_at=utc_now_iso(),
+            )
+            assert await _wait_until(lambda: len(b.delivered) == 1)
+            assert b.delivered[0].body == "two hops"
+            # Tearing down one end collapses both relays' bridges.
+            await session.close(reason="test_close")
+            assert await _wait_until(lambda: r1.relay.active_pairs == 0 and r2.relay.active_pairs == 0)
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
     asyncio.run(scenario())
 
 
@@ -812,6 +884,55 @@ def test_ensure_session_rechecks_trust_before_reusing_a_session(tmp_path):
             assert b.delivered == []
         finally:
             await a.teardown(); await b.teardown(); await relay.teardown()
+
+def test_requester_that_can_reach_the_targets_anchor_meets_it_there_with_no_chain(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=True)
+        try:
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert session.remote_fingerprint == b.identity.fingerprint
+            assert r2.relay.active_pairs == 1
+            assert r1.relay.active_pairs == 0 and r1.relay.pending_rendezvous == 0
+            assert a.registry.get(r2.identity.fingerprint) is not None  # A dialed R2 directly
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
+    asyncio.run(scenario())
+
+
+def test_a_forwarded_request_is_never_forwarded_again(tmp_path):
+    """Hop bound: R2 receives a forwarded request for a target it does not
+    hold and answers target_unreachable rather than forwarding on."""
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            await b.registry.close_all(reason="b_leaves_r2")
+            assert await _wait_until(lambda: r2.registry.get(b.identity.fingerprint) is None)
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "target_unreachable"
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
+    asyncio.run(scenario())
+
+
+def test_chained_request_declined_by_the_target_reaches_the_requester(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            subject = TrustSubject.node(a.identity.fingerprint)
+            set_trust_override(
+                b.db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.PROBATIONARY,
+                reason="test", now_iso="2026-09-03T12:00:00+00:00",
+            )
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "declined"
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+        finally:
+            await _teardown_all(a, b, r1, r2)
 
     asyncio.run(scenario())
 
@@ -876,6 +997,17 @@ def test_relay_rechecks_the_requesters_policy_on_every_request(tmp_path):
             assert relay.relay.pending_rendezvous == 0
         finally:
             await a.teardown(); await b.teardown(); await relay.teardown()
+
+def test_relay_without_a_way_to_reach_other_relays_reports_target_unreachable(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            r1.relay._connect_relay = None  # a relay that never chains
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "target_unreachable"
+        finally:
+            await _teardown_all(a, b, r1, r2)
 
     asyncio.run(scenario())
 
@@ -1016,3 +1148,242 @@ def test_malformed_roster_urls_are_skipped_not_fatal(tmp_path):
     ]}).encode())
     assert [n.name for n in parsed] == ["ok"]
     node.lane.close(); node.db.close()
+
+def test_anchor_state_advertises_only_anchors_with_a_live_session(tmp_path):
+    from netbbs.link.realtime_direct import AnchorState, advertised_live_relays
+
+    state = AnchorState()
+    registry = LinkRealtimeSessionRegistry(own_fingerprint="me")
+    state.anchored = {"r1", "r2"}
+    assert state.live(registry) == []
+    node = _Node(tmp_path, "adv")
+    other = _Node(tmp_path, "adv-other")
+    node.link_node.handle_hello(other.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=["r9", ""],
+    ))
+    assert advertised_live_relays(node.link_node, other.identity.fingerprint) == ["r9"]
+    assert advertised_live_relays(node.link_node, "unknown") == []
+    node.lane.close(); node.db.close(); other.lane.close(); other.db.close()
+
+
+# -- code review (PR #271) ---------------------------------------------------------
+
+
+def test_advertised_live_relays_is_bounded_and_tolerates_garbage(tmp_path):
+    from netbbs.link.realtime_direct import MAX_ADVERTISED_LIVE_RELAYS, advertised_live_relays
+
+    node = _Node(tmp_path, "bounded")
+    other = _Node(tmp_path, "bounded-other")
+    many = [f"relay-{i}" for i in range(MAX_ADVERTISED_LIVE_RELAYS + 5)] + ["x" * 200, "", 7]
+    node.link_node.handle_hello(other.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=many,
+    ))
+    result = advertised_live_relays(node.link_node, other.identity.fingerprint)
+    assert result == [f"relay-{i}" for i in range(MAX_ADVERTISED_LIVE_RELAYS)]
+    # A malformed field reads as empty, never an error.
+    node.link_node.peers[other.identity.fingerprint].descriptor.payload["live_relays"] = 42
+    assert advertised_live_relays(node.link_node, other.identity.fingerprint) == []
+    node.lane.close(); node.db.close(); other.lane.close(); other.db.close()
+
+
+def test_forward_reserves_its_pending_slot_before_dialing_upstream():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        gate = asyncio.Event()
+
+        async def slow_connect(via):
+            await gate.wait()
+            return None
+
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1",
+            attach_port=1, max_pending=1, connect_relay=slow_connect,
+        )
+        a, c = _RecordingSession("a"), _RecordingSession("c")
+        registry._sessions.update({"a": a, "c": c})  # both requesters hold live sessions with R1
+        t1 = asyncio.create_task(relay._handle_request(a, "b", via="r2"))
+        await asyncio.sleep(0)
+        assert relay.pending_rendezvous == 1
+        await relay._handle_request(c, "b", via="r2")  # second requester, same target, cap of 1
+        assert c.sent[-1].type == "relay_reject" and c.sent[-1].payload["reason"] == "pending_full"
+        gate.set()
+        await t1
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "target_unreachable"
+        assert relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())
+
+
+def test_upstream_reject_fails_only_the_named_requesters_forward():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+        )
+        from netbbs.link.realtime_relay import _Forward
+        loop = asyncio.get_running_loop()
+        a_sess, c_sess, r2 = _RecordingSession("a"), _RecordingSession("c"), _RecordingSession("r2")
+        registry._sessions.update({"a": a_sess, "c": c_sess, "r2": r2})
+        for requester in ("a", "c"):
+            relay._forwarded[tuple(sorted((requester, "b")))] = _Forward(
+                requester=requester, target="b", upstream="r2", created_at=loop.time(),
+            )
+        reject = build_relay_reject_frame(target_fingerprint="b", reason="pending_full", origin="relay", requester_fingerprint="c")
+        assert relay.owns_frame(r2, reject)
+        await relay.handle_frame(r2, reject)
+        assert [f.requester for f in relay._forwarded.values()] == ["a"]
+        assert c_sess.sent[-1].payload["reason"] == "pending_full" and a_sess.sent == []
+        # An un-named reject that would be ambiguous is not honoured at all.
+        relay._forwarded[("b", "c")] = _Forward(requester="c", target="b", upstream="r2", created_at=loop.time())
+        ambiguous = build_relay_reject_frame(target_fingerprint="b", reason="timeout", origin="relay")
+        assert relay.owns_frame(r2, ambiguous) is False
+
+    asyncio.run(scenario())
+
+
+def test_reach_relay_returns_the_session_that_won_a_simultaneous_dial(tmp_path, monkeypatch):
+    import netbbs.link.realtime_direct as direct_module
+
+    node = _Node(tmp_path, "tiebreak")
+    relay = _Node(tmp_path, "tiebreak-relay")
+    node.wire_party()
+    node.link_node.handle_hello(relay.link_node.build_hello(
+        addresses=[{"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": 9}],
+        outgoing_only=False, created_at=utc_now_iso(),
+    ))
+    winner = object()
+
+    async def losing_dial(*args, **kwargs):
+        node.registry._sessions[relay.identity.fingerprint] = winner  # the inbound session won meanwhile
+        raise RuntimeError("lost the duplicate-session tiebreak")
+
+    monkeypatch.setattr(direct_module, "dial_realtime_session", losing_dial)
+    assert asyncio.run(node.direct._reach_relay(relay.identity.fingerprint)) is winner
+    node.registry._sessions.clear()
+    node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()
+
+
+def test_forwarding_relay_refuses_an_upstream_ready_with_an_unadvertised_attach_address():
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            allowed_attach_addresses=lambda fp: [("127.0.0.1", 7863)] if fp == "r2" else [],
+        )
+        a, r2 = _RecordingSession("a"), _RecordingSession("r2")
+        registry._sessions.update({"a": a, "r2": r2})
+        loop = asyncio.get_running_loop()
+        relay._forwarded[("a", "b")] = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time())
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
+            attach_address="10.0.0.5", attach_port=22, for_fingerprint="a",
+        )
+        assert relay.owns_frame(r2, ready)
+        await relay.handle_frame(r2, ready)
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "attach_failed"
+        assert relay.active_pairs == 0 and relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())
+
+
+# -- Codex round 2 (PR #271) ------------------------------------------------------------
+
+
+def test_forward_stays_reserved_through_the_upstream_attach_and_expires_cleanly():
+    """The forward (and its pending-cap count) survives the attach await;
+    if its timer fires meanwhile the attached socket is closed and no
+    rendezvous is created."""
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        accepted = asyncio.Event(); closed = asyncio.Event()
+
+        async def stall(reader, writer):
+            accepted.set()
+            while await reader.read(4096):
+                pass
+            closed.set(); writer.close()
+
+        server = await asyncio.start_server(stall, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            rendezvous_timeout_seconds=0.3, allowed_attach_addresses=lambda fp: [("127.0.0.1", port)],
+        )
+        a, r2 = _RecordingSession("a"), _RecordingSession("r2")
+        registry._sessions.update({"a": a, "r2": r2})
+        loop = asyncio.get_running_loop()
+        forward = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time(), request_id="req-1")
+        relay._forwarded[("a", "b")] = forward
+        forward.timer = loop.create_task(relay._expire_forward(forward))
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
+            attach_address="127.0.0.1", attach_port=port, for_fingerprint="a",
+        )
+        # Simulate the reservation expiring while the attach is in flight.
+        forward.timer.cancel()
+        original_open = asyncio.open_connection
+
+        async def slow_open(*args, **kwargs):
+            reader, writer = await original_open(*args, **kwargs)
+            await relay._fail_forward(forward, reason="timeout")
+            return reader, writer
+
+        asyncio.open_connection = slow_open
+        try:
+            await relay.handle_frame(r2, ready)
+        finally:
+            asyncio.open_connection = original_open
+        assert relay.pending_rendezvous == 0 and relay.active_pairs == 0
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "timeout"
+        assert a.sent[-1].payload["request_id"] == "req-1"
+        assert await _wait_until(closed.is_set)  # the orphaned upstream socket was closed
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_does_not_send_upstream_after_its_reservation_expired():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        gate = asyncio.Event()
+        upstream = _RecordingSession("r2")
+
+        async def slow_connect(via):
+            await gate.wait()
+            return upstream
+
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            rendezvous_timeout_seconds=0.1, connect_relay=slow_connect,
+        )
+        a = _RecordingSession("a")
+        registry._sessions["a"] = a
+        task = asyncio.create_task(relay._handle_request(a, "b", via="r2", request_id="req-9"))
+        await asyncio.sleep(0.25)  # the reservation times out while the dial is still in flight
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "timeout"
+        gate.set()
+        await task
+        assert upstream.sent == []  # never forwarded after the requester was refused
+        assert relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())
+
+
+def test_relay_half_never_claims_an_unnamed_reject_even_with_a_matching_forward():
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+        )
+        r2 = _RecordingSession("r2")
+        loop = asyncio.get_running_loop()
+        relay._forwarded[("a", "b")] = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time())
+        unnamed = build_relay_reject_frame(target_fingerprint="b", reason="declined", origin="relay")
+        assert relay.owns_frame(r2, unnamed) is False
+        named = build_relay_reject_frame(target_fingerprint="b", reason="declined", origin="relay", requester_fingerprint="a")
+        assert relay.owns_frame(r2, named) is True
+
+    asyncio.run(scenario())

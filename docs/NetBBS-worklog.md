@@ -1794,6 +1794,48 @@ constrain future changes:
   anchor sessions never subscribe, so their presence was stored with no close
   watcher and never answered. `_handle_node_presence_snapshot/_delta` now
   track (idempotent).
+- **Chained bridges (issue #270) classify frames by their fields, never by
+  who sent them alone.** A `relay_request` is: a direct request when
+  `requester == sender`; an invitation when `target == own`; a *forwarded*
+  request when `hops >= 1` and neither of the above. A `relay_ready` with
+  `for_fingerprint` is addressed to a forwarding relay, which correlates it
+  on `(sender, for_fingerprint, peer_fingerprint)`; `relay_reject.origin`
+  plus the forwarded table decides whether the relay half or the party half
+  owns a reject. Adding a hop means adding a field that classifies, not a
+  new frame type (the bump lesson above still applies).
+- **A forwarding relay's upstream leg is a raw pipe with no token of its
+  own.** R1 opens the attach connection to R2 itself, so R1's own
+  rendezvous for the pair carries exactly one attach token (the requester's)
+  and the upstream socket is stored as the "target" leg. `_start_bridge`'s
+  pair-cap re-check and `_fail_rendezvous`'s leg cleanup cover it like any
+  other leg; nothing in `attach()` assumes two tokens.
+- **A known peer's descriptor can be refreshed secondhand, but only when it
+  verifies.** `handle_peer_list` used to ignore any fingerprint already in
+  `peers`; two outgoing-only nodes never exchange a direct hello, so an
+  upgraded peer's `live_relays` could never reach a requester. A newer
+  descriptor for a known peer now replaces the record iff it verifies
+  against the signing key already on file (the same check a repeated
+  hello gets), and `request_peer_list` persists the peer record; a
+  stranger's descriptor stays an unverified candidate as before.
+- **Rejects toward a forwarding relay name the requester.** Two requests
+  through the same upstream toward the same target are otherwise
+  indistinguishable; an un-named reject is honoured only when exactly one
+  forwarded entry matches. A forwarded request reserves its pending slot
+  *before* the upstream dial can yield, so concurrent requesters cannot
+  all pass the cap and then dial.
+- **A forward stays reserved (and counted) across the upstream attach**,
+  and a dial or attach that outlives the reservation is dropped, never
+  turned into a late rendezvous. The relay half claims only *named*
+  upstream rejects (`requester_fingerprint`); an un-named reject is by
+  construction addressed to the node's own party half, so a node that is
+  both relay and party never misroutes one.
+- **A secondhand descriptor refresh runs the same protocol-version gate a
+  hello does** before the record is replaced.
+- **`live_relays` is advertised from `AnchorState`, not the registry
+  alone.** The anchor task sets which reliable nodes it *intends* to stand
+  by at; the hello provider filters that to sessions actually up. A relay
+  that appears in a peer's `live_relays` but refuses this node is an
+  ordinary failed rendezvous, never a trust signal.
 - **Both session handlers must carry the same `LinkContext`.** The SSH
   handler had been constructed without the real-time registry/bridge since
   issue #148 (an SSH caller silently had no live chat); fixed while adding
