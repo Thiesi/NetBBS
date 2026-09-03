@@ -3385,3 +3385,30 @@ def test_handle_hello_still_accepts_a_matching_protocol_version(tmp_path, clock)
     assert record.fingerprint == alice.fingerprint
 
     alice.close()
+
+
+def test_relay_request_and_ready_optional_fields_are_bounded(tmp_path):
+    """Issue #270: via_relay/hops on relay_request and for_fingerprint on
+    relay_ready are optional; hops is capped at the one-forward bound."""
+    from netbbs.link.protocol import REALTIME_RELAY_MAX_HOPS
+
+    frame = build_relay_request_frame(target_fingerprint="b", requester_fingerprint="a", via_relay="r2", hops=1)
+    assert frame.payload == {"target_fingerprint": "b", "requester_fingerprint": "a", "via_relay": "r2", "hops": 1}
+    plain = build_relay_request_frame(target_fingerprint="b", requester_fingerprint="a")
+    assert set(plain.payload) == {"target_fingerprint", "requester_fingerprint"}
+    with pytest.raises(LinkProtocolError):
+        validate_realtime_frame_payload(RealtimeFrame(
+            type="relay_request", message_id="m",
+            payload={"target_fingerprint": "b", "requester_fingerprint": "a", "hops": REALTIME_RELAY_MAX_HOPS + 1},
+        ))
+    with pytest.raises(LinkProtocolError):
+        validate_realtime_frame_payload(RealtimeFrame(
+            type="relay_request", message_id="m",
+            payload={"target_fingerprint": "b", "requester_fingerprint": "a", "extra": 1},
+        ))
+    ready = build_relay_ready_frame(
+        bridge_id="x", peer_fingerprint="b", role="initiator", attach_token="0" * 32, attach_address="h",
+        attach_port=1, for_fingerprint="a",
+    )
+    assert ready.payload["for_fingerprint"] == "a"
+    validate_realtime_frame_payload(ready)

@@ -368,11 +368,12 @@ matter (§7), exercised in-channel by whoever holds it, not from the admin
 console.
 
 `/msg` and `/private` are ephemeral, online-only, and never silently fall
-back to persisted mail. `/msg user@node-fingerprint <text>` (and `[M]essage`
-on a remote entry in Who's online) reaches a user on a linked node the same
-way, over a live session -- direct, or through a live relay when neither
-node can dial the other (design doc §8.10.3); when no live path exists the
-caller is told so plainly and pointed at Link mail. A separate mutual invite/accept direct-chat
+back to persisted mail. `/msg user@node-fingerprint <text>`, `/private
+user@node-fingerprint` (and `[M]essage` on a remote entry in Who's online)
+reach a user on a linked node the same way, over a live session -- direct,
+or through one or two live relays when neither node can dial the other
+(design doc §8.10.3); when no live path exists the caller is told so
+plainly and pointed at Link mail. A separate mutual invite/accept direct-chat
 feature exists alongside these (reachable via the Who screen's
 `[I]nvite to chat`, or `/dm <user>` from inside a channel) — also fully
 ephemeral, no scrollback, and exclusive with channel chat (one active chat

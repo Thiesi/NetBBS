@@ -435,3 +435,104 @@ def test_private_target_going_offline_mid_conversation_is_handled(
     assert "bob is no longer online." in output
     # The "hello" line was never delivered anywhere -- neither live nor mailbox.
     assert mailbox.flush("bob") == []
+
+
+# -- /private user@node (issue #270) ---------------------------------------------
+
+
+class _FakeBridge:
+    """Just enough of `LiveChannelBridge` for `_chat_loop` on an unlinked
+    channel plus the remote presence the send flow consults."""
+
+    def __init__(self, presence: dict) -> None:
+        self._presence = presence
+
+    def remote_node_presence(self) -> dict:
+        return self._presence
+
+    def register_local_interest(self, channel_id, holder) -> bool:
+        return True
+
+    def release_local_interest(self, channel_id, holder) -> bool:
+        return False
+
+    async def broadcast_local_presence_live(self, channel, *, change, username) -> None:
+        return None
+
+    async def broadcast_local_message_live(self, channel, message) -> None:
+        return None
+
+
+class _FakeDirectChat:
+    def __init__(self, *, fail_after: int | None = None) -> None:
+        self.sent: list = []
+        self._fail_after = fail_after
+
+    async def ensure_session(self, fingerprint: str):
+        from netbbs.link.realtime_direct import DirectChatUnreachable
+
+        if self._fail_after is not None and len(self.sent) >= self._fail_after:
+            raise DirectChatUnreachable(fingerprint, "no_relay")
+        return object()
+
+    async def send_direct_message(self, fingerprint: str, **kw) -> None:
+        self.sent.append((fingerprint, kw))
+
+
+class _FakeLinkContext:
+    def __init__(self, fingerprint: str, direct_chat) -> None:
+        self.realtime_bridge = _FakeBridge({fingerprint: {"bob": "bob"}})
+        self.direct_chat = direct_chat
+        self.realtime_registry = None
+        self.link_node = type("_N", (), {"peers": {fingerprint: None}})()
+
+
+async def _run_linked(lane, hub, presence, mailbox, channel, user, lines, *, link_context):
+    session = FakeSession(lines)
+    history = InputHistory()
+    await asyncio.wait_for(
+        chat_flow._chat_loop(session, lane, hub, presence, mailbox, history, channel, user, link_context=link_context),
+        timeout=2,
+    )
+    return session
+
+
+def test_private_with_a_remote_target_sends_each_line_live(lane, hub, presence, mailbox, alice, channel):
+    fingerprint = "remote-node-fingerprint-abc123"
+    direct = _FakeDirectChat()
+    session = asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        [f"/private bob@{fingerprint[:12]}", "hello over there", "second line", "/close", "/quit"],
+        link_context=_FakeLinkContext(fingerprint, direct),
+    ))
+    text = _written(session)
+    assert "Entering private conversation with bob@remote-node-" in text
+    assert [kw["body"] for _fp, kw in direct.sent] == ["hello over there", "second line"]
+    assert all(fp == fingerprint for fp, _kw in direct.sent)
+    assert direct.sent[0][1]["to_user_id"] == "bob"
+    assert "(sent to bob@" in text
+
+
+def test_private_with_a_remote_target_ends_the_mode_when_the_peer_becomes_unreachable(
+    lane, hub, presence, mailbox, alice, channel
+):
+    fingerprint = "remote-node-fingerprint-abc123"
+    direct = _FakeDirectChat(fail_after=1)
+    session = asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        [f"/private bob@{fingerprint[:12]}", "first", "second", "/close", "/quit"],
+        link_context=_FakeLinkContext(fingerprint, direct),
+    ))
+    text = _written(session)
+    assert len(direct.sent) == 1
+    assert "can't be reached for live chat right now" in text
+    # After the refusal the mode ended: /close reports nothing to close.
+    assert "not in a private conversation" in text.lower() or "/close" in text
+
+
+def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mailbox, alice, channel):
+    session = asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
+        link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
+    ))
+    assert "No unique linked node starts with" in _written(session)

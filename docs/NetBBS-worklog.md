@@ -1794,6 +1794,26 @@ constrain future changes:
   anchor sessions never subscribe, so their presence was stored with no close
   watcher and never answered. `_handle_node_presence_snapshot/_delta` now
   track (idempotent).
+- **Chained bridges (issue #270) classify frames by their fields, never by
+  who sent them alone.** A `relay_request` is: a direct request when
+  `requester == sender`; an invitation when `target == own`; a *forwarded*
+  request when `hops >= 1` and neither of the above. A `relay_ready` with
+  `for_fingerprint` is addressed to a forwarding relay, which correlates it
+  on `(sender, for_fingerprint, peer_fingerprint)`; `relay_reject.origin`
+  plus the forwarded table decides whether the relay half or the party half
+  owns a reject. Adding a hop means adding a field that classifies, not a
+  new frame type (the bump lesson above still applies).
+- **A forwarding relay's upstream leg is a raw pipe with no token of its
+  own.** R1 opens the attach connection to R2 itself, so R1's own
+  rendezvous for the pair carries exactly one attach token (the requester's)
+  and the upstream socket is stored as the "target" leg. `_start_bridge`'s
+  pair-cap re-check and `_fail_rendezvous`'s leg cleanup cover it like any
+  other leg; nothing in `attach()` assumes two tokens.
+- **`live_relays` is advertised from `AnchorState`, not the registry
+  alone.** The anchor task sets which reliable nodes it *intends* to stand
+  by at; the hello provider filters that to sessions actually up. A relay
+  that appears in a peer's `live_relays` but refuses this node is an
+  ordinary failed rendezvous, never a trust signal.
 - **Both session handlers must carry the same `LinkContext`.** The SSH
   handler had been constructed without the real-time registry/bridge since
   issue #148 (an SSH caller silently had no live chat); fixed while adding

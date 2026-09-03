@@ -706,13 +706,30 @@ def _validate_close_payload(payload: dict, *, path: str) -> None:
     _validate_bounded_text(payload["reason"], path=f"{path}.reason", max_bytes=_REALTIME_MAX_CLOSE_REASON_BYTES)
 
 
+# Issue #270: a chained bridge is at most two relays deep. `hops` counts
+# how many relays have already forwarded a request; a relay forwards only
+# a request with hops == 0 and never forwards one with hops == 1.
+REALTIME_RELAY_MAX_HOPS = 1
+
+
 def _validate_relay_request_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"target_fingerprint", "requester_fingerprint"}:
-        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint and requester_fingerprint")
+    required = {"target_fingerprint", "requester_fingerprint"}
+    optional = {"via_relay", "hops"}
+    keys = set(payload)
+    if not required <= keys or not keys <= required | optional:
+        raise LinkProtocolError(
+            f"{path} must contain target_fingerprint and requester_fingerprint (optionally via_relay, hops)"
+        )
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
     _validate_bounded_id(payload["requester_fingerprint"], path=f"{path}.requester_fingerprint")
     if payload["target_fingerprint"] == payload["requester_fingerprint"]:
         raise LinkProtocolError(f"{path} target and requester must differ")
+    if "via_relay" in payload:
+        _validate_bounded_id(payload["via_relay"], path=f"{path}.via_relay")
+    if "hops" in payload:
+        hops = payload["hops"]
+        if type(hops) is not int or not 0 <= hops <= REALTIME_RELAY_MAX_HOPS:
+            raise LinkProtocolError(f"{path}.hops must be an integer between 0 and {REALTIME_RELAY_MAX_HOPS}")
 
 
 def _validate_optional_request_id(payload: dict, *, path: str) -> None:
@@ -734,9 +751,15 @@ def _validate_relay_waiting_payload(payload: dict, *, path: str) -> None:
 def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
     expected = {"bridge_id", "peer_fingerprint", "role", "attach_token", "attach_address", "attach_port"}
     keys = set(payload)
-    if not expected <= keys or not keys <= expected | {"request_id"}:
-        raise LinkProtocolError(f"{path} must contain exactly {', '.join(sorted(expected))} (optionally request_id)")
+    if not expected <= keys or not keys <= expected | {"request_id", "for_fingerprint"}:
+        raise LinkProtocolError(
+            f"{path} must contain exactly {', '.join(sorted(expected))} (optionally request_id, for_fingerprint)"
+        )
     _validate_optional_request_id(payload, path=path)
+    if "for_fingerprint" in payload:
+        # Issue #270: a ready handed to a *forwarding relay* names whom
+        # the leg is on behalf of, so that relay can correlate it.
+        _validate_bounded_id(payload["for_fingerprint"], path=f"{path}.for_fingerprint")
     _validate_bounded_id(payload["bridge_id"], path=f"{path}.bridge_id")
     _validate_bounded_id(payload["peer_fingerprint"], path=f"{path}.peer_fingerprint")
     _validate_bounded_id(payload["attach_token"], path=f"{path}.attach_token")
@@ -917,11 +940,16 @@ def build_scrollback_snapshot_frame(
 
 
 def build_relay_request_frame(
-    *, target_fingerprint: str, requester_fingerprint: str, message_id: str | None = None,
+    *, target_fingerprint: str, requester_fingerprint: str, via_relay: str | None = None,
+    hops: int | None = None, message_id: str | None = None,
 ) -> RealtimeFrame:
+    payload: dict = {"target_fingerprint": target_fingerprint, "requester_fingerprint": requester_fingerprint}
+    if via_relay is not None:
+        payload["via_relay"] = via_relay
+    if hops:
+        payload["hops"] = hops
     frame = RealtimeFrame(
-        type="relay_request", message_id=message_id or new_realtime_message_id(),
-        payload={"target_fingerprint": target_fingerprint, "requester_fingerprint": requester_fingerprint},
+        type="relay_request", message_id=message_id or new_realtime_message_id(), payload=payload,
     )
     validate_realtime_frame_payload(frame)
     return frame
@@ -942,7 +970,8 @@ def build_relay_waiting_frame(
 
 def build_relay_ready_frame(
     *, bridge_id: str, peer_fingerprint: str, role: str, attach_token: str,
-    attach_address: str, attach_port: int, request_id: str | None = None, message_id: str | None = None,
+    attach_address: str, attach_port: int, request_id: str | None = None,
+    for_fingerprint: str | None = None, message_id: str | None = None,
 ) -> RealtimeFrame:
     payload: dict = {
         "bridge_id": bridge_id, "peer_fingerprint": peer_fingerprint, "role": role,
@@ -950,6 +979,8 @@ def build_relay_ready_frame(
     }
     if request_id is not None:
         payload["request_id"] = request_id
+    if for_fingerprint is not None:
+        payload["for_fingerprint"] = for_fingerprint
     frame = RealtimeFrame(
         type="relay_ready", message_id=message_id or new_realtime_message_id(), payload=payload,
     )
@@ -1659,7 +1690,8 @@ class LinkNode:
         return self.relay_state.relays_serving_me
 
     def build_hello(
-        self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str
+        self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str,
+        live_relays: list[str] | None = None,
     ) -> HelloMessage:
         """Build this node's own hello bundle. `addresses`/
         `outgoing_only`/`created_at` are the caller's to supply (node
@@ -1679,6 +1711,7 @@ class LinkNode:
             outgoing_only=outgoing_only,
             created_at=created_at,
             relays=list(self.relay_state.relays_serving_me.keys()) or None,
+            live_relays=live_relays or None,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),

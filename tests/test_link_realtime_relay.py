@@ -97,6 +97,9 @@ class _Node:
         self.bridge.register_frame_handler(self.relay.owns_frame, self.relay.handle_frame)
         self._wire_client()
         self.relay._decide_peer_allowed = self._peer_allowed
+        # Issue #270: a serving relay reaches an upstream relay through the
+        # direct-chat layer's own dial recipe, exactly as __main__ wires it.
+        self.relay._connect_relay = self.direct.connect_relay
 
     async def _attach(self, token, reader, writer):
         assert self.relay is not None
@@ -788,6 +791,71 @@ def test_client_refuses_a_ready_whose_attach_address_the_relay_does_not_advertis
             await task
         assert len(calls) == 1
 
+# -- multi-hop (issue #270) ------------------------------------------------------
+
+
+async def _chain_nodes(tmp_path, *, a_can_reach_r2: bool):
+    """Four real nodes: relays R1 and R2 (both serving, both know each
+    other), A standing by at R1 only, B standing by at R2 only. B's hello
+    advertises R2 as its live relay; whether A holds a peer record for R2
+    (and so could dial it directly) is the switch between the single-hop
+    and the chained path."""
+    r1 = _Node(tmp_path, "relay-1")
+    r2 = _Node(tmp_path, "relay-2")
+    a = _Node(tmp_path, "party-a")
+    b = _Node(tmp_path, "party-b")
+    await r1.start_server(serving=True)
+    await r2.start_server(serving=True)
+    a.wire_party()
+    b.wire_party()
+    for node in (r1, r2, a, b):
+        node.trust(*[other for other in (r1, r2, a, b) if other is not node])
+    r1.know_relay(r2, http_port=7863)
+    r2.know_relay(r1, http_port=7862)
+    a.know_relay(r1, http_port=7862)
+    b.know_relay(r2, http_port=7863)
+    if a_can_reach_r2:
+        a.know_relay(r2, http_port=7863)
+    from netbbs.link.reliable_nodes import set_cached_reliable_nodes
+    set_cached_reliable_nodes(a.db, [ReliableNode(name="R1", url="http://127.0.0.1:7862")])
+    set_cached_reliable_nodes(b.db, [ReliableNode(name="R2", url="http://127.0.0.1:7863")])
+    # B tells the world it stands by at R2 (what the anchor task advertises).
+    a.link_node.handle_hello(b.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=[r2.identity.fingerprint],
+    ))
+    await a.connect_to(r1)
+    await b.connect_to(r2)
+    return r1, r2, a, b
+
+
+async def _teardown_all(*nodes):
+    for node in nodes:
+        await node.teardown()
+
+
+def test_chained_bridge_through_two_relays_when_the_requester_cannot_reach_the_targets_anchor(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert session.remote_fingerprint == b.identity.fingerprint and session.is_initiator
+            assert await _wait_until(lambda: b.registry.get(a.identity.fingerprint) is not None)
+            assert r1.relay.active_pairs == 1 and r2.relay.active_pairs == 1
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+            # A never got a session with R2 itself -- the chain did the work.
+            assert a.registry.get(r2.identity.fingerprint) is None
+            await a.direct.send_direct_message(
+                b.identity.fingerprint, to_user_id="bob", from_user_id="alice", from_display_label="Alice",
+                body="two hops", created_at=utc_now_iso(),
+            )
+            assert await _wait_until(lambda: len(b.delivered) == 1)
+            assert b.delivered[0].body == "two hops"
+            # Tearing down one end collapses both relays' bridges.
+            await session.close(reason="test_close")
+            assert await _wait_until(lambda: r1.relay.active_pairs == 0 and r2.relay.active_pairs == 0)
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
     asyncio.run(scenario())
 
 
@@ -812,6 +880,55 @@ def test_ensure_session_rechecks_trust_before_reusing_a_session(tmp_path):
             assert b.delivered == []
         finally:
             await a.teardown(); await b.teardown(); await relay.teardown()
+
+def test_requester_that_can_reach_the_targets_anchor_meets_it_there_with_no_chain(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=True)
+        try:
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert session.remote_fingerprint == b.identity.fingerprint
+            assert r2.relay.active_pairs == 1
+            assert r1.relay.active_pairs == 0 and r1.relay.pending_rendezvous == 0
+            assert a.registry.get(r2.identity.fingerprint) is not None  # A dialed R2 directly
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
+    asyncio.run(scenario())
+
+
+def test_a_forwarded_request_is_never_forwarded_again(tmp_path):
+    """Hop bound: R2 receives a forwarded request for a target it does not
+    hold and answers target_unreachable rather than forwarding on."""
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            await b.registry.close_all(reason="b_leaves_r2")
+            assert await _wait_until(lambda: r2.registry.get(b.identity.fingerprint) is None)
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "target_unreachable"
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+        finally:
+            await _teardown_all(a, b, r1, r2)
+
+    asyncio.run(scenario())
+
+
+def test_chained_request_declined_by_the_target_reaches_the_requester(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            subject = TrustSubject.node(a.identity.fingerprint)
+            set_trust_override(
+                b.db, subject, TrustDimension.RESOURCE_BEHAVIOR, TrustState.PROBATIONARY,
+                reason="test", now_iso="2026-09-03T12:00:00+00:00",
+            )
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "declined"
+            assert r1.relay.pending_rendezvous == 0 and r2.relay.pending_rendezvous == 0
+        finally:
+            await _teardown_all(a, b, r1, r2)
 
     asyncio.run(scenario())
 
@@ -876,6 +993,17 @@ def test_relay_rechecks_the_requesters_policy_on_every_request(tmp_path):
             assert relay.relay.pending_rendezvous == 0
         finally:
             await a.teardown(); await b.teardown(); await relay.teardown()
+
+def test_relay_without_a_way_to_reach_other_relays_reports_target_unreachable(tmp_path):
+    async def scenario():
+        r1, r2, a, b = await _chain_nodes(tmp_path, a_can_reach_r2=False)
+        try:
+            r1.relay._connect_relay = None  # a relay that never chains
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "target_unreachable"
+        finally:
+            await _teardown_all(a, b, r1, r2)
 
     asyncio.run(scenario())
 
@@ -1016,3 +1144,19 @@ def test_malformed_roster_urls_are_skipped_not_fatal(tmp_path):
     ]}).encode())
     assert [n.name for n in parsed] == ["ok"]
     node.lane.close(); node.db.close()
+
+def test_anchor_state_advertises_only_anchors_with_a_live_session(tmp_path):
+    from netbbs.link.realtime_direct import AnchorState, advertised_live_relays
+
+    state = AnchorState()
+    registry = LinkRealtimeSessionRegistry(own_fingerprint="me")
+    state.anchored = {"r1", "r2"}
+    assert state.live(registry) == []
+    node = _Node(tmp_path, "adv")
+    other = _Node(tmp_path, "adv-other")
+    node.link_node.handle_hello(other.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=["r9", ""],
+    ))
+    assert advertised_live_relays(node.link_node, other.identity.fingerprint) == ["r9"]
+    assert advertised_live_relays(node.link_node, "unknown") == []
+    node.lane.close(); node.db.close(); other.lane.close(); other.db.close()

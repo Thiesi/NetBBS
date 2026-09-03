@@ -124,9 +124,11 @@ between NetBBS nodes, opt-in and disabled by default. Currently working:
   outgoing-only node (behind NAT, no port-forward) can still be reached;
 - live relay for real-time chat between two nodes that can't dial each
   other (a raw-socket proxy below the Noise layer at any full peer that
-  serves relay, anchored at the project's reliable nodes), and Link-wide
-  live private messages: `/msg user@node-fingerprint` in chat, or
-  `[M]essage` on a remote entry in Who's online;
+  serves relay, anchored at the project's reliable nodes, chaining
+  through a second relay when the two sides anchor at different ones),
+  and Link-wide live private messages: `/msg` or `/private`
+  `user@node-fingerprint` in chat, or `[M]essage` on a remote entry in
+  Who's online;
 - an operator-facing `[L]ink status`/`[O]utbox`/`[D]iagnostic log`
   SysOp surface, backup/restore (including a staged, validated,
   interruption-recoverable restore), quotas on every

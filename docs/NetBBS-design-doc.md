@@ -1384,7 +1384,7 @@ Bootstrap sources are combined, not exclusive:
 3. the live reliable-nodes roster, fetched daily from
    `https://www.netbbs.org/reliable-nodes.json` and preferred over the
    fallback once any fetch has succeeded -- one list serving default seeds,
-   asynchronous relay candidates, and the future live-relay anchor, and
+   asynchronous relay candidates, and the live-relay anchors (§8.10.3), and
    dialed only after the SysOp accepts reliable-node participation;
 4. signed/verified peer-list exchange after contact;
 5. bounded fallback attempts to discovered candidates when normal seeds fail.
@@ -1971,12 +1971,33 @@ node-presence snapshot is itself what makes the receiving side track a
 session that never subscribes to a channel, so the presence is answered
 and later cleared. A remote user list is not a caller's to probe.
 
-Caller-facing (Decision 3): `/msg user@node-fingerprint <text>` in chat
-and `[M]essage` on a remote entry in Who's online. When no path exists,
-whatever the reason, the caller sees one reason-free refusal -- "can't be
-reached for live chat right now" -- pointing at Link mail; nothing fails
-silently. `/private`, `/dm` invites, and multi-hop (relay-of-relay) stay
-local/direct only in this vertical.
+**Anchor advertisement and chained bridges (issue #270).** A node's
+signed endpoint descriptor carries an optional `live_relays` list -- the
+reliable nodes it is currently standing by at (§8.3; omitted when empty,
+like `relays`) -- refreshed with every hello. Session establishment then
+tries, in order: the registry; a direct dial; a single-hop rendezvous at
+each relay the *target* advertises (reusing a session or dialing that
+relay directly, since a relay is a full peer); a single-hop rendezvous at
+each of the node's own anchors; and, only for a target relay the node
+could not reach itself, a chained rendezvous: `relay_request {target,
+requester, via_relay}` to its own anchor R1, which reuses or dials R2 and
+forwards the request with `hops: 1`. R2 runs the ordinary rendezvous with
+the target, treating R1's session as the requester's side, and its
+`relay_ready` to R1 names `for_fingerprint` (whom the leg is for). R1
+attaches to R2 as a raw leg -- no handshake; it is a pipe -- issues the
+requester its own `relay_ready`, and splices the two legs: A–R1–R2–B,
+Noise still end to end, both relays seeing ciphertext only. A forwarded
+request is never forwarded again (`hops` is capped at one), so a chain
+is at most two relays; each relay counts its bridge against its own pair
+cap and applies its own byte-rate and idle bounds, and every failure
+along the chain surfaces to the requester as an explicit `relay_reject`.
+
+Caller-facing (Decision 3): `/msg user@node-fingerprint <text>` and
+`/private user@node-fingerprint` in chat, and `[M]essage` on a remote
+entry in Who's online. When no path exists, whatever the reason, the
+caller sees one reason-free refusal -- "can't be reached for live chat
+right now" -- pointing at Link mail; nothing fails silently. Cross-node
+`/dm` invites stay local-only in this vertical.
 
 ---
 
@@ -5738,6 +5759,42 @@ a SysOp's authenticated login — each choice checking its own state so an
 upgraded node is asked only what it never answered. Still open: Reliable
 Link's own operational configuration (relay-serving is already on by
 default; live-relay capacity planning waits for issue #168).
+
+### Issue #270 — multi-hop live relay and cross-node /private
+
+**Goal:** close the two gaps §8.10.3's first vertical left open --
+relay-of-relay live sessions and the private-conversation mode across
+nodes -- without reopening the raw-proxy decision (§16 "Issue #168").
+
+**Decision 1 (locked in) — three steps, all shipped together:** anchor
+advertisement (`live_relays` in the signed endpoint descriptor),
+dial-the-anchor (a requester that can reach the target's advertised relay
+meets it there, single hop), and the chained bridge (two relays, A–R1–R2–B)
+only when the requester cannot reach any of the target's anchors. Most
+cross-anchor cases never chain; chaining is the resilience path, not the
+common one.
+
+**Decision 2 (locked in) — discovery is the target's advertised anchors,
+not relay-side search.** The requester names the relay to forward toward
+(`via_relay`), taken from the target's own descriptor. A relay-side
+fan-out ("ask every reliable node whether B is there") was rejected: it
+turns one request into up to a roster's worth, adds latency, and needs no
+descriptor change only at the cost of search traffic on every miss.
+
+**Decision 3 (locked in) — hop bound of one forward.** A forwarded request
+(`hops: 1`) is never forwarded again, so a chain is at most two relays and
+every relay's own caps and byte/idle bounds apply per hop. Longer chains
+would need routing state no relay currently keeps and are not a v1 need.
+
+**Decision 4 (locked in) — `/private user@node-fingerprint` ships; cross-
+node `/dm` invites do not.** Private mode rides the existing live
+direct-message path line by line (small); a cross-node fullscreen direct
+chat needs mutual invite/accept frames and a shared room spanning two
+nodes -- a separate step, roughly the size of the direct-message vertical.
+
+All frame additions (`via_relay`, `hops`, `for_fingerprint`) ride real-time
+protocol v3, unreleased at the time, so no further bump was needed.
+Normative description: §8.10.3.
 
 ### Deliberately deferred without active issue
 
