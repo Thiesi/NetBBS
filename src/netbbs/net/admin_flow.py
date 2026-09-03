@@ -3885,7 +3885,7 @@ async def _draw_managed_dns_status(
     status (design doc §16, issue #201) -- shows whatever `netbbs.net.
     managed_dns_flow`'s register/release flows already set. Returns the
     current status so `_managed_dns_status_screen` knows whether to
-    offer `[R]egister` or `[L] Release` without re-reading it a second
+    offer `[R]egister` or `Re[l]ease` without re-reading it a second
     time."""
     opt_in = await lane.run(get_managed_dns_opt_in)
     name = await lane.run(get_managed_dns_registered_name)
