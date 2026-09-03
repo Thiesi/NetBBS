@@ -3619,13 +3619,18 @@ async def _chat_loop(
                                 # is printed by the send flow and ends the
                                 # mode, the same way a local target going
                                 # offline does.
-                                from netbbs.net.link_direct import send_live_direct_message
+                                from netbbs.net.link_direct import SendOutcome, send_live_direct_message
 
-                                sent = await send_live_direct_message(
+                                outcome = await send_live_direct_message(
                                     session, lane, user, private_target.address, line, link_context=link_context,
                                 )
-                                if not sent:
+                                if outcome is SendOutcome.UNREACHABLE:
+                                    # The counterpart is gone: leave the mode, and say
+                                    # so, before the next line could go to the channel.
                                     private_target = None
+                                    await session.write_line(
+                                        colored(f"Returned to #{sanitize_text(channel.name)}.", fg_color=MUTED_COLOR)
+                                    )
                                 continue
                             if not presence.is_online(private_target.username):
                                 await session.write_line(

@@ -23,6 +23,7 @@ from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG, LinkRealtimeSessio
 from netbbs.messaging_preferences import set_accepts_direct_messages
 from netbbs.net.link_direct import (
     UNREACHABLE_NOTE,
+    SendOutcome,
     build_direct_message_deliverer,
     parse_remote_address,
     resolve_node_fingerprint,
@@ -91,8 +92,8 @@ def _send(rig: _Rig, address: str, body: str, *, context=None) -> tuple[bool, st
             session, rig.lane, rig.user, address, body, link_context=rig.context() if context is None else context,
         )
 
-    ok = asyncio.run(scenario())
-    return ok, "".join(session.written)
+    outcome = asyncio.run(scenario())
+    return outcome is SendOutcome.SENT, "".join(session.written)
 
 
 def test_parse_remote_address():

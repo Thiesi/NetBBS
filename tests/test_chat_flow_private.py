@@ -536,3 +536,21 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
     assert "No unique linked node starts with" in _written(session)
+
+
+def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):
+    """Code review (PR #271): an overlong line is refused but the mode
+    stays open -- the corrected next line must go privately, never to
+    the channel."""
+    fingerprint = "remote-node-fingerprint-abc123"
+    direct = _FakeDirectChat()
+    session = asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        [f"/private bob@{fingerprint[:12]}", "x" * 4001, "the corrected line", "/close", "/quit"],
+        link_context=_FakeLinkContext(fingerprint, direct),
+    ))
+    text = _written(session)
+    assert "Message too long" in text
+    assert [kw["body"] for _fp, kw in direct.sent] == ["the corrected line"]
+    scrollback = get_scrollback(db, channel)
+    assert all(m.kind in ("join", "leave") for m in scrollback)

@@ -774,9 +774,17 @@ def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
 def _validate_relay_reject_payload(payload: dict, *, path: str) -> None:
     required = {"target_fingerprint", "reason", "origin"}
     keys = set(payload)
-    if not required <= keys or not keys <= required | {"request_id"}:
-        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint, reason, and origin (optionally request_id)")
+    if not required <= keys or not keys <= required | {"requester_fingerprint", "request_id"}:
+        raise LinkProtocolError(
+            f"{path} must contain exactly target_fingerprint, reason, and origin "
+            "(optionally requester_fingerprint, request_id)"
+        )
     _validate_optional_request_id(payload, path=path)
+    if "requester_fingerprint" in payload:
+        # Issue #270: a reject sent to a *forwarding relay* names whose
+        # request it answers, so two requests through the same upstream
+        # toward the same target are never confused.
+        _validate_bounded_id(payload["requester_fingerprint"], path=f"{path}.requester_fingerprint")
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
     if payload["reason"] not in _REALTIME_RELAY_REJECT_REASONS:
         raise LinkProtocolError(f"{path}.reason is not a known relay rejection reason")
@@ -989,10 +997,12 @@ def build_relay_ready_frame(
 
 
 def build_relay_reject_frame(
-    *, target_fingerprint: str, reason: str, origin: str, request_id: str | None = None,
-    message_id: str | None = None,
+    *, target_fingerprint: str, reason: str, origin: str, requester_fingerprint: str | None = None,
+    request_id: str | None = None, message_id: str | None = None,
 ) -> RealtimeFrame:
     payload: dict = {"target_fingerprint": target_fingerprint, "reason": reason, "origin": origin}
+    if requester_fingerprint is not None:
+        payload["requester_fingerprint"] = requester_fingerprint
     if request_id is not None:
         payload["request_id"] = request_id
     frame = RealtimeFrame(
@@ -1859,11 +1869,38 @@ class LinkNode:
                 continue
             if candidate_fingerprint == self.identity.fingerprint:
                 continue
+            if candidate_fingerprint in self.peers:
+                # Issue #270: a known peer's descriptor *can* be refreshed
+                # secondhand -- an outgoing-only peer never re-hellos this
+                # node directly, yet its advertised live relays change.
+                # Unlike a stranger's, this descriptor is verifiable: the
+                # peer's current signing key is on file, so a newer,
+                # correctly signed descriptor replaces the record exactly
+                # as a repeated hello would; anything else is ignored.
+                if self._refresh_known_peer_descriptor(candidate_fingerprint, descriptor):
+                    recorded.append(candidate_fingerprint)
+                continue
             if self.peer_directory.record_candidate(
                 candidate_fingerprint, descriptor, max_candidates=_MAX_CANDIDATE_DESCRIPTORS
             ):
                 recorded.append(candidate_fingerprint)
         return recorded
+
+    def _refresh_known_peer_descriptor(self, fingerprint: str, descriptor: EndpointDescriptor) -> bool:
+        peer = self.peers[fingerprint]
+        if str(descriptor.payload.get("created_at", "")) <= str(peer.descriptor.payload.get("created_at", "")):
+            return False
+        try:
+            signing_verify_key = self._resolve_sender_signing_key(peer, fingerprint, "peer-list descriptor")
+        except (LinkProtocolError, NodeIdentityError):
+            return False
+        if not verify_endpoint_descriptor(descriptor, signing_verify_key):
+            return False
+        self.peers[fingerprint] = PeerRecord(
+            fingerprint=peer.fingerprint, root_public_key=peer.root_public_key,
+            transitions=peer.transitions, descriptor=descriptor,
+        )
+        return True
 
     def handle_relay_consent_request(self, sender_fingerprint: str, request: RelayConsentRequest) -> None:
         """

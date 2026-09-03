@@ -1160,3 +1160,100 @@ def test_anchor_state_advertises_only_anchors_with_a_live_session(tmp_path):
     assert advertised_live_relays(node.link_node, other.identity.fingerprint) == ["r9"]
     assert advertised_live_relays(node.link_node, "unknown") == []
     node.lane.close(); node.db.close(); other.lane.close(); other.db.close()
+
+
+# -- code review (PR #271) ---------------------------------------------------------
+
+
+def test_advertised_live_relays_is_bounded_and_tolerates_garbage(tmp_path):
+    from netbbs.link.realtime_direct import MAX_ADVERTISED_LIVE_RELAYS, advertised_live_relays
+
+    node = _Node(tmp_path, "bounded")
+    other = _Node(tmp_path, "bounded-other")
+    many = [f"relay-{i}" for i in range(MAX_ADVERTISED_LIVE_RELAYS + 5)] + ["x" * 200, "", 7]
+    node.link_node.handle_hello(other.link_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(), live_relays=many,
+    ))
+    result = advertised_live_relays(node.link_node, other.identity.fingerprint)
+    assert result == [f"relay-{i}" for i in range(MAX_ADVERTISED_LIVE_RELAYS)]
+    # A malformed field reads as empty, never an error.
+    node.link_node.peers[other.identity.fingerprint].descriptor.payload["live_relays"] = 42
+    assert advertised_live_relays(node.link_node, other.identity.fingerprint) == []
+    node.lane.close(); node.db.close(); other.lane.close(); other.db.close()
+
+
+def test_forward_reserves_its_pending_slot_before_dialing_upstream():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        gate = asyncio.Event()
+
+        async def slow_connect(via):
+            await gate.wait()
+            return None
+
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1",
+            attach_port=1, max_pending=1, connect_relay=slow_connect,
+        )
+        a, c = _RecordingSession("a"), _RecordingSession("c")
+        registry._sessions.update({"a": a, "c": c})  # both requesters hold live sessions with R1
+        t1 = asyncio.create_task(relay._handle_request(a, "b", via="r2"))
+        await asyncio.sleep(0)
+        assert relay.pending_rendezvous == 1
+        await relay._handle_request(c, "b", via="r2")  # second requester, same target, cap of 1
+        assert c.sent[-1].type == "relay_reject" and c.sent[-1].payload["reason"] == "pending_full"
+        gate.set()
+        await t1
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "target_unreachable"
+        assert relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())
+
+
+def test_upstream_reject_fails_only_the_named_requesters_forward():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+        )
+        from netbbs.link.realtime_relay import _Forward
+        loop = asyncio.get_running_loop()
+        a_sess, c_sess, r2 = _RecordingSession("a"), _RecordingSession("c"), _RecordingSession("r2")
+        registry._sessions.update({"a": a_sess, "c": c_sess, "r2": r2})
+        for requester in ("a", "c"):
+            relay._forwarded[tuple(sorted((requester, "b")))] = _Forward(
+                requester=requester, target="b", upstream="r2", created_at=loop.time(),
+            )
+        reject = build_relay_reject_frame(target_fingerprint="b", reason="pending_full", origin="relay", requester_fingerprint="c")
+        assert relay.owns_frame(r2, reject)
+        await relay.handle_frame(r2, reject)
+        assert [f.requester for f in relay._forwarded.values()] == ["a"]
+        assert c_sess.sent[-1].payload["reason"] == "pending_full" and a_sess.sent == []
+        # An un-named reject that would be ambiguous is not honoured at all.
+        relay._forwarded[("b", "c")] = _Forward(requester="c", target="b", upstream="r2", created_at=loop.time())
+        ambiguous = build_relay_reject_frame(target_fingerprint="b", reason="timeout", origin="relay")
+        assert relay.owns_frame(r2, ambiguous) is False
+
+    asyncio.run(scenario())
+
+
+def test_reach_relay_returns_the_session_that_won_a_simultaneous_dial(tmp_path, monkeypatch):
+    import netbbs.link.realtime_direct as direct_module
+
+    node = _Node(tmp_path, "tiebreak")
+    relay = _Node(tmp_path, "tiebreak-relay")
+    node.wire_party()
+    node.link_node.handle_hello(relay.link_node.build_hello(
+        addresses=[{"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": 9}],
+        outgoing_only=False, created_at=utc_now_iso(),
+    ))
+    winner = object()
+
+    async def losing_dial(*args, **kwargs):
+        node.registry._sessions[relay.identity.fingerprint] = winner  # the inbound session won meanwhile
+        raise RuntimeError("lost the duplicate-session tiebreak")
+
+    monkeypatch.setattr(direct_module, "dial_realtime_session", losing_dial)
+    assert asyncio.run(node.direct._reach_relay(relay.identity.fingerprint)) is winner
+    node.registry._sessions.clear()
+    node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()

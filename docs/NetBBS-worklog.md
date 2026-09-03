@@ -1809,6 +1809,20 @@ constrain future changes:
   and the upstream socket is stored as the "target" leg. `_start_bridge`'s
   pair-cap re-check and `_fail_rendezvous`'s leg cleanup cover it like any
   other leg; nothing in `attach()` assumes two tokens.
+- **A known peer's descriptor can be refreshed secondhand, but only when it
+  verifies.** `handle_peer_list` used to ignore any fingerprint already in
+  `peers`; two outgoing-only nodes never exchange a direct hello, so an
+  upgraded peer's `live_relays` could never reach a requester. A newer
+  descriptor for a known peer now replaces the record iff it verifies
+  against the signing key already on file (the same check a repeated
+  hello gets), and `request_peer_list` persists the peer record; a
+  stranger's descriptor stays an unverified candidate as before.
+- **Rejects toward a forwarding relay name the requester.** Two requests
+  through the same upstream toward the same target are otherwise
+  indistinguishable; an un-named reject is honoured only when exactly one
+  forwarded entry matches. A forwarded request reserves its pending slot
+  *before* the upstream dial can yield, so concurrent requesters cannot
+  all pass the cap and then dial.
 - **`live_relays` is advertised from `AnchorState`, not the registry
   alone.** The anchor task sets which reliable nodes it *intends* to stand
   by at; the hello provider filters that to sessions actually up. A relay

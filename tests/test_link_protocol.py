@@ -3412,3 +3412,37 @@ def test_relay_request_and_ready_optional_fields_are_bounded(tmp_path):
     )
     assert ready.payload["for_fingerprint"] == "a"
     validate_realtime_frame_payload(ready)
+
+
+def test_handle_peer_list_refreshes_a_known_peers_newer_verified_descriptor(tmp_path, clock):
+    """Code review (PR #271): an outgoing-only peer never re-hellos this node
+    directly, so its advertised live relays must be refreshable secondhand
+    -- but only when the newer descriptor verifies against the signing key
+    already on file for that peer."""
+    from netbbs.link.protocol import LinkNode, PeerListMessage
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    me = LinkNode(identity=bootstrap_node_identity("me"))
+    bob = LinkNode(identity=bootstrap_node_identity("bob"))
+    carol = LinkNode(identity=bootstrap_node_identity("carol"))
+    me.handle_hello(bob.build_hello(addresses=None, outgoing_only=True, created_at="2026-09-03T10:00:00+00:00"))
+    me.handle_hello(carol.build_hello(
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": 7862}], outgoing_only=False,
+        created_at="2026-09-03T10:00:00+00:00",
+    ))
+    newer = bob.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T11:00:00+00:00", live_relays=["relay-fp"],
+    ).descriptor
+    recorded = me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[newer]))
+    assert recorded == [bob.identity.fingerprint]
+    assert me.peers[bob.identity.fingerprint].descriptor.payload["live_relays"] == ["relay-fp"]
+    # Older: ignored. Forged (signed by someone else): ignored.
+    older = bob.build_hello(addresses=None, outgoing_only=True, created_at="2026-09-03T09:00:00+00:00").descriptor
+    assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[older])) == []
+    from netbbs.link.events import build_endpoint_descriptor
+    forged = build_endpoint_descriptor(
+        signing_identity=carol.identity.signing_key, subject_fingerprint=bob.identity.fingerprint, addresses=None,
+        outgoing_only=True, created_at="2026-09-03T12:00:00+00:00", live_relays=["evil"],
+    )
+    assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[forged])) == []
+    assert me.peers[bob.identity.fingerprint].descriptor.payload["live_relays"] == ["relay-fp"]

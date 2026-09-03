@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from enum import Enum
+
 from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import list_channels
@@ -40,6 +42,18 @@ if TYPE_CHECKING:
 # the peer sends it the moment it tracks the session, so this is a
 # scheduling delay, not a network round trip.
 _PRESENCE_SETTLE_SECONDS = 1.0
+
+class SendOutcome(str, Enum):
+    """What `send_live_direct_message` did. `LINE_REJECTED` means *this
+    line* was refused (too long, blank, a bad address) while the
+    counterpart may be perfectly reachable -- a private-conversation mode
+    must stay open on it; `UNREACHABLE` means the counterpart itself
+    cannot be reached or is not online, which ends the mode."""
+
+    SENT = "sent"
+    LINE_REJECTED = "line_rejected"
+    UNREACHABLE = "unreachable"
+
 
 UNREACHABLE_NOTE = (
     "can't be reached for live chat right now. Link mail still works: "
@@ -92,28 +106,28 @@ async def send_live_direct_message(
     body: str,
     *,
     link_context: LinkContext | None,
-) -> bool:
+) -> SendOutcome:
     """Send `body` to `address` (`user@node`) live. Writes the outcome to
-    `session`; returns whether it was sent."""
+    `session` and returns it (see `SendOutcome`)."""
     parsed = parse_remote_address(address)
     if parsed is None:
         await session.write_line(colored("Address a linked node's user as user@node-fingerprint.", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.LINE_REJECTED
     target_user, node_prefix = parsed
     if link_context is None or link_context.direct_chat is None or link_context.realtime_bridge is None:
         await session.write_line(colored("This node isn't on NetBBS Link, so there is nobody remote to message.", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.UNREACHABLE
     if not body.strip():
         await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.LINE_REJECTED
     if len(body.encode("utf-8")) > MAX_DIRECT_MESSAGE_BODY_BYTES:
         await session.write_line(
             colored(f"Message too long -- a live message is at most {MAX_DIRECT_MESSAGE_BODY_BYTES} bytes.", fg_color=MUTED_COLOR)
         )
-        return False
+        return SendOutcome.LINE_REJECTED
     if len(target_user.encode("utf-8")) > MAX_REMOTE_USER_BYTES:
         await session.write_line(colored("That user name is too long to be a NetBBS account.", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.LINE_REJECTED
 
     resolved = resolve_node_fingerprint(link_context, node_prefix)
     if isinstance(resolved, list):
@@ -126,7 +140,7 @@ async def send_live_direct_message(
             await session.write_line(
                 colored(f"{sanitize_text(node_prefix)!r} matches more than one node ({shown}) -- give more of the fingerprint.", fg_color=MUTED_COLOR)
             )
-        return False
+        return SendOutcome.UNREACHABLE
     fingerprint = resolved
     label = f"{sanitize_text(target_user)}@{sanitize_text(fingerprint[:12])}…"
 
@@ -136,13 +150,13 @@ async def send_live_direct_message(
         await direct_chat.ensure_session(fingerprint)
     except DirectChatUnreachable:
         await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.UNREACHABLE
     except RealtimeProtocolVersionError:
         await session.write_line(colored(
             f"{sanitize_text(fingerprint[:12])}… uses an incompatible real-time protocol version -- "
             "upgrade one of the nodes. Link mail still works.", fg_color=MUTED_COLOR,
         ))
-        return False
+        return SendOutcome.UNREACHABLE
 
     # The peer pushes its node-presence snapshot as soon as it tracks the
     # session; give a brand-new session a moment to deliver it so "not
@@ -157,10 +171,10 @@ async def send_live_direct_message(
         await session.write_line(
             colored(f"Couldn't confirm who is online at {sanitize_text(fingerprint[:12])}… just now -- try again in a moment.", fg_color=MUTED_COLOR)
         )
-        return False
+        return SendOutcome.UNREACHABLE
     if target_user.lower() not in {name.lower() for name in online}:
         await session.write_line(colored(f"{label} is not currently online on that node.", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.UNREACHABLE
 
     sender_label = sanitize_text(await lane.run(display_label, user))
     try:
@@ -170,12 +184,12 @@ async def send_live_direct_message(
         )
     except (DirectChatUnreachable, LinkTransportError):
         await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.UNREACHABLE
     except LinkProtocolError as exc:
         await session.write_line(colored(f"Couldn't send that: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-        return False
+        return SendOutcome.LINE_REJECTED
     await session.write_line(colored(f"(sent to {label})", fg_color=MUTED_COLOR))
-    return True
+    return SendOutcome.SENT
 
 
 def build_direct_message_deliverer(

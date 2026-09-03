@@ -122,17 +122,41 @@ def _peer_http_addresses(node: LinkNode, fingerprint: str) -> set[tuple[str, int
     }
 
 
+# A descriptor is signed but its *contents* are the peer's claim: cap how
+# many relays this node will ever try on a peer's say-so, and reject any
+# entry that could not be a fingerprint (the wire bound for a real-time
+# ID is 128 bytes).
+MAX_ADVERTISED_LIVE_RELAYS = 8
+_MAX_FINGERPRINT_BYTES = 128
+
+
 def advertised_live_relays(node: LinkNode, fingerprint: str) -> list[str]:
     """The live relays `fingerprint` advertises standing by at (issue
-    #270, `EndpointDescriptor.payload["live_relays"]`), from its completed
-    peer record or a peer-list candidate descriptor -- an outgoing-only
-    node's descriptor may only ever be learned secondhand."""
+    #270, `EndpointDescriptor.payload["live_relays"]`), from whichever of
+    its completed peer record or peer-list candidate descriptor is newer
+    -- an outgoing-only node's descriptor may only ever be learned
+    secondhand. Bounded and validated: a malformed field reads as empty,
+    never as an error, and at most `MAX_ADVERTISED_LIVE_RELAYS` entries
+    are ever returned."""
     peer = node.peers.get(fingerprint)
-    descriptor = peer.descriptor if peer is not None else node.candidate_descriptors.get(fingerprint)
-    if descriptor is None:
+    candidates = [d for d in (
+        peer.descriptor if peer is not None else None, node.candidate_descriptors.get(fingerprint),
+    ) if d is not None]
+    if not candidates:
         return []
-    relays = descriptor.payload.get("live_relays") or []
-    return [fp for fp in relays if isinstance(fp, str) and fp]
+    descriptor = max(candidates, key=lambda d: str(d.payload.get("created_at", "")))
+    relays = descriptor.payload.get("live_relays")
+    if not isinstance(relays, list):
+        return []
+    valid: list[str] = []
+    for entry in relays:
+        if not isinstance(entry, str) or not entry or len(entry.encode("utf-8")) > _MAX_FINGERPRINT_BYTES:
+            continue
+        if entry not in valid:
+            valid.append(entry)
+        if len(valid) >= MAX_ADVERTISED_LIVE_RELAYS:
+            break
+    return valid
 
 
 class AnchorState:
@@ -214,6 +238,9 @@ class LiveDirectChat:
                 # gets the explicit notice, never Decision 3's refusal.
                 raise
             except Exception as exc:
+                winner = self._registry.get(fingerprint)
+                if winner is not None:
+                    return winner  # a simultaneous inbound session won the tiebreak
                 _logger.info("direct real-time dial of %s at %s:%d failed: %s", fingerprint[:12], host, port, exc)
                 continue
             await self._track_session(session)
@@ -282,11 +309,17 @@ class LiveDirectChat:
                     timeout=self._dial_timeout,
                 )
             except Exception as exc:
+                # A simultaneous inbound session from that relay can win
+                # the duplicate-session tiebreak against this dial; the
+                # admitted winner is exactly the session we wanted.
+                winner = self._registry.get(fingerprint)
+                if winner is not None:
+                    return winner
                 _logger.info("could not reach relay %s at %s:%d: %s", fingerprint[:12], host, port, exc)
                 continue
             await self._track_session(session)
             return session
-        return None
+        return self._registry.get(fingerprint)
 
     async def connect_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
         """The relay-server half's hook for reaching an upstream relay when
