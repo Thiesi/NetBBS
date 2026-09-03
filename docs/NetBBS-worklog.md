@@ -3666,4 +3666,15 @@ replacement before changing `link.advertised_host`.
 Authenticated node-profile observations are remotely influenced retained
 state. Keep both a per-peer bound and a global bound, and check collisions on
 profile changes as well as first sight; a familiar name adopted by an already-
-known fingerprint is still a cryptographic-identity warning.
+known fingerprint is still a cryptographic-identity warning. Retained previous
+names participate in that collision check because familiarity outlives the
+current descriptor. An exact full fingerprint always resolves before any name
+claim, and an empty administrative reference never acts as a fingerprint
+prefix.
+
+The node-side managed-DNS updater must reconcile rename state from both bearer
+credentials and the service heartbeat response, not rely solely on the local
+configuration transaction: a crash can occur after credential replacement but
+before the new and previous names are committed. While the service has a
+pending replacement, `/release` rejects both registrations; the explicit
+cancel-rename operation is the only safe way to unwind that pair.

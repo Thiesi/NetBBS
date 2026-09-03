@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 import asyncio
 from aiohttp import ClientSession
 
-from netbbs.managed_dns.client import ManagedDnsError, heartbeat
+from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
 )
@@ -29,13 +29,13 @@ from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
-    get_previous_name,
     get_registered_name,
     get_registration_status,
     get_service_url,
     set_last_contact_at,
     set_previous_name,
     set_previous_status,
+    set_registered_name,
     set_registration_status,
 )
 from netbbs.storage.database import Database
@@ -91,15 +91,21 @@ async def run_scheduled_managed_dns_updater(
                 credential = load_credential(credential_path_for(db.path))
                 if credential is not None:
                     previous_credential = load_credential(previous_credential_path_for(db.path))
-                    if get_previous_name(db) is not None and previous_credential is not None:
-                        await _send_heartbeat(db, base_url, previous_credential, apply_result=False)
-                    await _send_heartbeat(db, base_url, credential)
+                    previous_result = None
+                    if previous_credential is not None:
+                        previous_result = await _send_heartbeat(base_url, previous_credential)
+                    result = await _send_heartbeat(base_url, credential)
+                    if result is not None:
+                        _apply_heartbeat_result(
+                            db, result, previous_result=previous_result,
+                            has_previous_credential=previous_credential is not None,
+                        )
         await sleep(interval_seconds)
 
 
 async def _send_heartbeat(
-    db: Database, base_url: str, credential: str, *, apply_result: bool = True,
-) -> None:
+    base_url: str, credential: str,
+) -> HeartbeatResult | None:
     try:
         # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY, same as
         # every other outbound call this project makes to project-
@@ -112,12 +118,38 @@ async def _send_heartbeat(
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
-        return
-    if not apply_result:
-        return
+        return None
+    return result
+
+
+def _apply_heartbeat_result(
+    db: Database, result: HeartbeatResult, *, previous_result: HeartbeatResult | None,
+    has_previous_credential: bool,
+) -> None:
+    """Apply authoritative service state and repair an interrupted local rename."""
+    set_registered_name(db, result.name)
     set_registration_status(db, RegistrationStatus(result.status))
     set_last_contact_at(db, utc_now_iso())
-    if result.status == RegistrationStatus.MATURED.value and get_previous_name(db) is not None:
+
+    previous_name = result.previous_name
+    if previous_name is None and previous_result is not None and previous_result.name != result.name:
+        previous_name = previous_result.name
+
+    if result.status == RegistrationStatus.MATURED.value:
+        set_previous_name(db, None)
+        set_previous_status(db, None)
+        if has_previous_credential:
+            delete_credential(previous_credential_path_for(db.path))
+    elif previous_name is not None:
+        set_previous_name(db, previous_name)
+        set_previous_status(
+            db,
+            RegistrationStatus(previous_result.status) if previous_result is not None else None,
+        )
+    elif has_previous_credential:
+        # The file can be left behind if a crash happens after copying the old
+        # credential but before installing a replacement. Both heartbeats then
+        # authenticate the same registration, so the extra copy is redundant.
         set_previous_name(db, None)
         set_previous_status(db, None)
         delete_credential(previous_credential_path_for(db.path))

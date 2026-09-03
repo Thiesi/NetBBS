@@ -642,14 +642,16 @@ def test_fullscreen_mail_delivery_failure_keeps_draft_recoverable(tmp_path, monk
 # -- compose: Link addresses --------------------------------------------------
 
 
-def _link_context_with_known_peer(db, node_identity, peer_identity):
+def _link_context_with_known_peer(
+    db, node_identity, peer_identity, *, friendly_name="Farpoint",
+):
     descriptor = build_endpoint_descriptor(
         signing_identity=peer_identity.signing_key,
         subject_fingerprint=peer_identity.fingerprint,
         addresses=None,
         outgoing_only=True,
         created_at="2026-01-01T00:00:00+00:00",
-        friendly_name="Farpoint",
+        friendly_name=friendly_name,
         canonical_dns_name="farpoint.example.org",
     )
     save_peer(
@@ -709,6 +711,30 @@ def test_compose_resolves_a_friendly_or_dns_node_name_before_sending(tmp_path):
         assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
         lane.close()
         db.close()
+
+
+def test_compose_allows_at_signs_in_a_friendly_node_name(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identity = bootstrap_node_identity("farpoint")
+    link_context = _link_context_with_known_peer(
+        db, node_identity, remote_identity, friendly_name="Cats@Night",
+    )
+    session = FakeSession(
+        keys=["c", "s", "b"], lines=["bob@Cats@Night", "Hello", "Named route", ""]
+    )
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    row = db.connection.execute(
+        "SELECT recipient_remote_address FROM mail_messages"
+    ).fetchone()
+    assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
+    lane.close()
+    db.close()
 
 
 def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp_path):

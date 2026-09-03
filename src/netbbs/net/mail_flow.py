@@ -524,7 +524,7 @@ async def _compose_mail(
             continue
 
         if link_context is not None and "@" in recipient_text:
-            remote_user, node_reference = recipient_text.rsplit("@", 1)
+            remote_user, node_reference = recipient_text.split("@", 1)
             resolved = await lane.run(resolve_stored_peer_reference, node_reference)
             if isinstance(resolved, list):
                 if resolved:

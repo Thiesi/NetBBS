@@ -9,6 +9,7 @@ from netbbs.link.node_profiles import (
     list_identity_observations,
     record_peer_identity_observation,
     resolve_peer_reference,
+    resolve_stored_peer_reference,
 )
 from netbbs.link.protocol import LinkNode
 from netbbs.link.store import save_peer
@@ -46,6 +47,24 @@ def test_resolver_prefers_dns_and_refuses_ambiguous_friendly_names(tmp_path):
     assert resolve_peer_reference([alice, bob], "two.example.org") is bob
     assert resolve_peer_reference([alice, bob], "The Anchor") == [alice, bob]
     assert resolve_peer_reference([alice, bob], alice.fingerprint[:12]) is alice
+
+
+def test_exact_fingerprint_cannot_be_shadowed_by_a_friendly_name(db, tmp_path):
+    alice = _peer(tmp_path, "alice", "Alice", "alice.example.org")
+    impostor = _peer(tmp_path, "impostor", alice.fingerprint, "impostor.example.org")
+    save_peer(db, alice)
+    save_peer(db, impostor)
+
+    assert resolve_peer_reference([alice, impostor], alice.fingerprint) is alice
+    assert resolve_stored_peer_reference(db, alice.fingerprint) == alice.fingerprint
+
+
+def test_blank_reference_never_resolves_to_the_only_peer(db, tmp_path):
+    alice = _peer(tmp_path, "alice", "Alice", "alice.example.org")
+    save_peer(db, alice)
+
+    assert resolve_peer_reference([alice], "  ") == []
+    assert resolve_stored_peer_reference(db, "  ") == []
 
 
 def test_same_fingerprint_rename_is_informational(db, tmp_path):
@@ -104,6 +123,29 @@ def test_existing_peer_adopting_another_peers_name_is_security_notice(db, tmp_pa
     notice = list_identity_observations(db)[0]
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.previous_fingerprint == first.fingerprint
+
+
+def test_new_peer_adopting_a_retained_previous_name_is_security_notice(db, tmp_path):
+    alice_identity = bootstrap_node_identity("alice")
+    alice_node = LinkNode(identity=alice_identity)
+    old_alice = alice_node.handle_hello(alice_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Old Anchor", canonical_dns_name="alice.example.org",
+    ))
+    save_peer(db, old_alice)
+    renamed_alice = alice_node.handle_hello(alice_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="New Anchor", canonical_dns_name="alice.example.org",
+    ))
+    save_peer(db, renamed_alice)
+
+    impostor = _peer(tmp_path, "impostor", "Old Anchor", "impostor.example.org")
+    save_peer(db, impostor)
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.severity == "security"
+    assert notice.previous_fingerprint == alice_identity.fingerprint
 
 
 def test_identity_observation_history_is_bounded_per_peer(db, tmp_path):

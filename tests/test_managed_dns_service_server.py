@@ -136,6 +136,28 @@ def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
     assert get_registration_by_name(db, "new-name") is None
 
 
+def test_pending_rename_blocks_release_of_both_names(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            old_release = await _release(server, credential=original["credential"])
+            new_release = await _release(server, credential=replacement["credential"])
+            return old_release, new_release
+        finally:
+            await server.stop()
+
+    (old_status, old_body), (new_status, new_body) = asyncio.run(scenario())
+    assert old_status == new_status == 409
+    assert "cancelled" in old_body["error"]
+    assert "cancelled" in new_body["error"]
+    assert get_registration_by_name(db, "old-name").status == "pending"
+    assert get_registration_by_name(db, "new-name").status == "pending"
+
+
 def test_rename_respects_the_global_active_registration_cap(db):
     async def scenario():
         server = await _start_server(db, cumulative_cap=1)

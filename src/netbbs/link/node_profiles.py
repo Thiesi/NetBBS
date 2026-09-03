@@ -112,7 +112,12 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
 def resolve_peer_reference(peers, reference: str):
     """Resolve DNS, a unique friendly name, or a fingerprint prefix."""
     needle = reference.strip().lower().rstrip(".")
+    if not needle:
+        return []
     values = [peer for peer in peers if peer is not None]
+    exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == needle]
+    if exact_fingerprint:
+        return exact_fingerprint[0]
     exact_dns = [peer for peer in values if identity_for_peer(peer).dns_name == needle]
     if exact_dns:
         return exact_dns[0] if len(exact_dns) == 1 else exact_dns
@@ -148,10 +153,15 @@ def identity_for_fingerprint(db: Database, fingerprint: str) -> NodeDisplayIdent
 def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[str]:
     """Resolve a UI-entered DNS/friendly/technical reference from persisted peers."""
     needle = reference.strip().lower().rstrip(".")
+    if not needle:
+        return []
     identities = [
         _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
         for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peers")
     ]
+    exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == needle]
+    if exact_fingerprint:
+        return exact_fingerprint[0]
     dns_matches = [item.fingerprint for item in identities if item.dns_name == needle]
     if dns_matches:
         return dns_matches[0] if len(dns_matches) == 1 else dns_matches
@@ -198,6 +208,39 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         if same_dns or same_name:
             collision = known
             break
+
+    # A name remains familiar after its owner renames. Check the bounded
+    # authenticated observation history as well as current descriptors so a
+    # different key cannot quietly take over a recently-used presentation.
+    if collision is None:
+        for row in db.connection.execute(
+            """
+            SELECT node_fingerprint, friendly_name, previous_friendly_name,
+                   canonical_dns_name, previous_dns_name
+            FROM link_node_identity_observations
+            WHERE node_fingerprint <> ?
+            ORDER BY id DESC
+            """,
+            (peer.fingerprint,),
+        ):
+            historical_names = {
+                value.lower() for value in (row["friendly_name"], row["previous_friendly_name"])
+                if value and value != "Unnamed linked node"
+            }
+            historical_dns = {
+                value for value in (row["canonical_dns_name"], row["previous_dns_name"])
+                if value
+            }
+            if (
+                current.friendly_name.lower() in historical_names
+                or bool(current.dns_name and current.dns_name in historical_dns)
+            ):
+                collision = NodeDisplayIdentity(
+                    row["node_fingerprint"],
+                    row["friendly_name"] or row["previous_friendly_name"] or "Unknown linked node",
+                    row["canonical_dns_name"] or row["previous_dns_name"],
+                )
+                break
 
     if collision is not None:
         kind = "cryptographic_identity_changed"

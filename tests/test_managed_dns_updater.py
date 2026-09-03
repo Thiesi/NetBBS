@@ -19,6 +19,8 @@ from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_last_contact_at,
+    get_previous_name,
+    get_registered_name,
     get_registration_status,
     set_node_fingerprint,
     set_opt_in,
@@ -139,6 +141,45 @@ def test_updater_heartbeats_both_names_while_a_rename_is_pending(tmp_path):
     db, old, new = asyncio.run(scenario())
     assert old.last_contact_at is not None
     assert new.last_contact_at is not None
+    assert get_registration_status(db) is RegistrationStatus.PENDING
+    db.close()
+
+
+def test_updater_repairs_a_rename_interrupted_before_local_state_commit(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, base_url)
+            async with aiohttp.ClientSession() as session:
+                original = await register(
+                    session, base_url, name="old-name", node_fingerprint="fp-1", dynamic=False,
+                )
+                replacement = await rename(
+                    session, base_url, name="new-name", credential=original.credential,
+                )
+
+            # Simulate a crash after the two credential files were installed,
+            # but before the corresponding configuration transaction committed.
+            set_registered_name(db, original.name)
+            set_registration_status(db, RegistrationStatus.PENDING)
+            save_credential(credential_path_for(db.path), replacement.credential)
+            save_credential(previous_credential_path_for(db.path), original.credential)
+
+            sleep_calls = _fake_sleep_recorder()
+            await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]))
+            return db
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db = asyncio.run(scenario())
+    assert get_registered_name(db) == "new-name"
+    assert get_previous_name(db) == "old-name"
     assert get_registration_status(db) is RegistrationStatus.PENDING
     db.close()
 

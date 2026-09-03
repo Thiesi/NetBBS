@@ -757,6 +757,15 @@ class ManagedDnsServer:
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
 
+        if (
+            registration.replaces_name is not None
+            or get_replacement_for_name(self._db, registration.name) is not None
+        ):
+            return web.json_response(
+                {"error": "a pending rename must be cancelled before either name can be released"},
+                status=409,
+            )
+
         if registration.status == "matured":
             if not await self._delete_record(registration.name):
                 return web.json_response(

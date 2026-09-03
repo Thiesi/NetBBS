@@ -2030,7 +2030,7 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
         ]
         await session.write_line(
             colored(
-                f"\r\n{_trust_subject_name(selected, labels.get(selected.node_fingerprint))}",
+                f"\r\n{sanitize_text(_trust_subject_name(selected, labels.get(selected.node_fingerprint)))}",
                 fg_color=await lane.run(effective_header_color_256), bold=True,
             )
         )
@@ -2295,7 +2295,9 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
     )
     for anchor in anchors:
         identity = await lane.run(identity_for_fingerprint, anchor.fingerprint)
-        await session.write_line(f"{identity.label}: {anchor.reason}")
+        await session.write_line(
+            f"{sanitize_text(identity.label)}: {sanitize_text(anchor.reason)}"
+        )
     while True:
         await session.write(
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
@@ -2348,7 +2350,8 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
         scopes = ", ".join(f"{d.value}:{c}" for d, c in reporter.scopes) or "no scopes"
         identity = await lane.run(identity_for_fingerprint, reporter.fingerprint)
         await session.write_line(
-            f"{identity.label} domain={reporter.domain_id} scopes={scopes} "
+            f"{sanitize_text(identity.label)} domain={sanitize_text(reporter.domain_id)} "
+            f"scopes={sanitize_text(scopes)} "
             f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
         )
     while True:
@@ -2400,7 +2403,9 @@ async def _attestation_authorities_screen(
     for authority in authorities:
         identity = await lane.run(identity_for_fingerprint, authority.fingerprint)
         await session.write_line(
-            f"{identity.label} scope={','.join(authority.attributes)} -- {authority.reason}"
+            f"{sanitize_text(identity.label)} "
+            f"scope={sanitize_text(','.join(authority.attributes))} -- "
+            f"{sanitize_text(authority.reason)}"
         )
     if not authorities:
         await session.write_line(
