@@ -177,7 +177,11 @@ _MAX_SEEN_TRUST_PULL_NONCES = 4096
 # new frames arrived. Bumping the version instead makes a mixed pair fail
 # once, at the authenticated handshake, with the caller-visible "upgrade
 # one of the nodes" message issue #263 established.
-REALTIME_PROTOCOL_VERSION = 3
+# Version 4 makes relay-attempt correlation part of the wire contract:
+# relay_request agreements and party declines echo the invitation id. A v3
+# relay rejects that new optional field, so claiming v3 compatibility would
+# turn the required upgrade into an opaque rendezvous timeout.
+REALTIME_PROTOCOL_VERSION = 4
 _REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024

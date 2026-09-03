@@ -1753,7 +1753,10 @@ constrain future changes:
   first record before the responder handshake; `establish_noise_xx_
   responder(first_message=...)` exists so that peek is never a double
   read. A listener without a relay closes an attach connection unread.
-- **Version 3, not "new types without a bump".** `RealtimeFrame.__post_init__`
+- **Version 3, then version 4 -- never "new fields/types without a bump".**
+  Version 4 makes the invitation-id echo on agreements/declines mandatory;
+  a version-3 relay rejects that new field, so compatibility would otherwise
+  degrade to an opaque timeout. `RealtimeFrame.__post_init__`
   rejects an unknown type *before* `_reader_loop`'s strike-counting block, so
   an older peer closes the whole session on the first new frame. Any future
   frame-type addition is a version bump for the same reason; the "extend the

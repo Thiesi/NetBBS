@@ -1947,13 +1947,13 @@ decline; a forwarding relay's upstream request id is echoed on the
 upstream's answers -- so no answer to an earlier, expired attempt can
 ever settle a fresh one for the same pair.
 
-These frames make the real-time application protocol **version 3**: a
-version-2 peer cannot reject an unknown frame type with a bounded strike
-(the type check runs before the strike path and closes the whole
-session), so a mixed pair fails once at the authenticated handshake with
-the same caller-visible upgrade notice version 2 introduced, rather than
-dropping a shared channel subscription or a relay anchor on every
-attempt. A `relay_reject` carries `origin` (`relay` or `party`) so a node
+These frames made the real-time application protocol **version 3**; requiring
+the invitation id on party agreements and declines makes it **version 4**.
+A version-3 relay rejects that new field, just as a version-2 peer cannot
+accept the version-3 frame types, so mixed versions fail once at the
+authenticated handshake with the caller-visible upgrade notice rather than
+timing out a rendezvous or dropping a shared channel/relay-anchor session.
+A `relay_reject` carries `origin` (`relay` or `party`) so a node
 that is both a relay and a party can never misroute one. Every relay
 frame a party honours is correlated: a `relay_ready` or `relay_reject`
 counts only from the relay this node asked, for the target it asked

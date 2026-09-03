@@ -255,9 +255,15 @@ class LiveDirectChat:
         last_reason = "no_relay"
         target_relays = [fp for fp in advertised_live_relays(self._node, fingerprint) if fp != self._identity.fingerprint]
         own_anchors: list[LinkRealtimeSession] = []
+        participation_accepted = await self._lane.run(_participation_accepted)
+        roster = await self._lane.run(effective_reliable_nodes)
+        observed = await self._lane.run(get_observed_reliable_identities)
+        reliable_fingerprints = set(reliable_node_fingerprints(self._node, roster, observed))
         # 1. Meet at a relay the target stands by at, reaching it ourselves.
         unreachable_relays: list[str] = []
         for relay_fingerprint in target_relays:
+            if relay_fingerprint in reliable_fingerprints and not participation_accepted:
+                continue  # participation opt-out includes target-advertised project relays
             relay_session = await self._reach_relay(relay_fingerprint)
             if relay_session is None:
                 unreachable_relays.append(relay_fingerprint)
@@ -266,6 +272,10 @@ class LiveDirectChat:
                 return await self._relay_client.request_bridge(relay_session, fingerprint)
             except RelayRendezvousError as exc:
                 last_reason = exc.reason
+                if relay_fingerprint in reliable_fingerprints:
+                    # We reached one of our own roster anchors. Retain it as
+                    # a chain source even though its direct rendezvous failed.
+                    own_anchors.append(relay_session)
                 _logger.info("relayed session with %s via its anchor %s failed: %s", fingerprint[:12], relay_fingerprint[:12], exc)
         # 2. Meet at our own anchors. Dial lazily, but after a reachable
         # anchor cannot bridge the target continue to the next roster entry.

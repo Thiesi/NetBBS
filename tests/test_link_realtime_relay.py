@@ -1669,6 +1669,68 @@ def test_establishment_tries_the_next_reliable_anchor_after_bridge_failure(tmp_p
     asyncio.run(scenario())
 
 
+def test_overlapping_target_relay_remains_available_as_a_chain_anchor(tmp_path, monkeypatch):
+    async def scenario():
+        import netbbs.link.realtime_direct as direct_module
+        node = _Node(tmp_path, "overlapping-relay")
+        node.wire_party()
+        target = "target"
+        r1 = _RecordingSession("r1")
+        calls = []
+        monkeypatch.setattr(direct_module, "advertised_live_relays", lambda *_: ["r1", "r2"])
+        monkeypatch.setattr(direct_module, "reliable_node_fingerprints", lambda *_: ["r1"])
+
+        async def reach_relay(fingerprint):
+            return r1 if fingerprint == "r1" else None
+
+        async def relay_sessions(*, exclude=None):
+            return []
+
+        class RelayClient:
+            async def request_bridge(self, relay, fingerprint, **kwargs):
+                calls.append((relay.remote_fingerprint, kwargs.get("via_relay")))
+                if kwargs.get("via_relay") is None:
+                    raise RelayRendezvousError("target_unreachable")
+                return "chained"
+
+        node.direct._reach_relay = reach_relay
+        node.direct._relay_sessions = relay_sessions
+        node.direct._relay_client = RelayClient()
+        try:
+            assert await node.direct._establish(target) == "chained"
+            assert calls == [("r1", None), ("r1", "r2")]
+        finally:
+            node.lane.close(); node.db.close()
+
+    asyncio.run(scenario())
+
+
+def test_declined_participation_skips_a_target_advertised_reliable_relay(tmp_path, monkeypatch):
+    async def scenario():
+        import netbbs.link.realtime_direct as direct_module
+        from netbbs.link.onboarding import Participation, set_participation
+        node = _Node(tmp_path, "target-relay-optout")
+        node.wire_party()
+        set_participation(node.db, Participation.DECLINED)
+        monkeypatch.setattr(direct_module, "advertised_live_relays", lambda *_: ["reliable"])
+        monkeypatch.setattr(direct_module, "reliable_node_fingerprints", lambda *_: ["reliable"])
+        reached = []
+
+        async def reach_relay(fingerprint):
+            reached.append(fingerprint)
+            return _RecordingSession(fingerprint)
+
+        node.direct._reach_relay = reach_relay
+        try:
+            with pytest.raises(DirectChatUnreachable):
+                await node.direct._establish("target")
+            assert reached == []
+        finally:
+            node.lane.close(); node.db.close()
+
+    asyncio.run(scenario())
+
+
 def test_direct_dial_closes_its_socket_when_cancelled_mid_handshake():
     async def scenario():
         seen_eof = asyncio.Event()
