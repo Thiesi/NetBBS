@@ -3644,3 +3644,17 @@ given invocation by prepending the worktree's own `src/` via
 `PYTHONPATH` (`PYTHONPATH="$(pwd)/src" .venv/Scripts/python.exe -m
 pytest ...`), which takes priority over the editable install's
 site-packages entry.
+### Link node presentation identity
+
+Link fingerprints remain the sole cryptographic identity, trust, protocol, and
+persistence key even though ordinary UI uses the friendly name and canonical
+DNS claim from the signed endpoint descriptor. Treat both names as mutable
+authenticated presentation. Same-fingerprint name changes preserve identity;
+reuse of a friendly or DNS name by a new fingerprint must remain visible as a
+non-blocking security warning and must never inherit trust automatically.
+
+Managed `netbbs.org` renames are make-before-break. Keep the old registration
+and its bearer credential until the new name has matured and its DNS record was
+successfully published; backup/restore must carry both credential files during
+that interval. External DNS remains operator-managed: publish its replacement
+before changing `link.advertised_host`.

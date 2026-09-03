@@ -22,16 +22,23 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from netbbs.managed_dns.credential import credential_path_for, load_credential, save_credential
+from netbbs.managed_dns.credential import (
+    credential_path_for, delete_credential, load_credential, previous_credential_path_for,
+    save_credential,
+)
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_node_fingerprint,
     get_opt_in,
+    get_previous_name,
+    get_previous_status,
     get_registered_name,
     get_service_url,
     set_dynamic,
     set_opt_in,
+    set_previous_name,
+    set_previous_status,
     set_registered_name,
     set_registration_status,
 )
@@ -284,3 +291,95 @@ async def release_registration(session: Session, lane: DatabaseLane) -> None:
 
     await lane.run(set_registration_status, RegistrationStatus(result.status))
     await session.write_line(colored(f"Released {name}.netbbs.org.", fg_color=MUTED_COLOR))
+
+
+async def rename_registration(session: Session, lane: DatabaseLane) -> None:
+    """Start an authenticated managed-name transition without releasing the old name."""
+    old_name = await lane.run(get_registered_name)
+    previous_name = await lane.run(get_previous_name)
+    if old_name is None:
+        await session.write_line(colored("Register a managed name first.", fg_color=MUTED_COLOR))
+        return
+    if previous_name is not None:
+        await session.write_line(colored("A managed-DNS name change is already pending.", fg_color=MUTED_COLOR))
+        return
+    await session.write(f"New subdomain name for {sanitize_text(old_name)}.netbbs.org: ")
+    new_name = (await session.read_line()).strip()
+    if not new_name:
+        return
+    if not await prompt_yes_no(
+        session,
+        f"Change name from {sanitize_text(old_name)}.netbbs.org to {sanitize_text(new_name)}.netbbs.org?",
+        default=False,
+    ):
+        return
+    base_url = await lane.run(get_service_url)
+    primary_path = credential_path_for(lane.path)
+    old_credential = load_credential(primary_path)
+    if base_url is None or old_credential is None:
+        await session.write_line(colored("Cannot change name -- missing service URL or credential.", fg_color=MUTED_COLOR))
+        return
+    try:
+        from aiohttp import ClientSession
+        from netbbs.managed_dns.client import ManagedDnsError, rename
+    except ModuleNotFoundError:
+        await session.write_line(colored("Changing a name requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
+        return
+    try:
+        async with ClientSession(trust_env=True) as http_session:
+            result = await rename(http_session, base_url, name=new_name, credential=old_credential)
+    except ManagedDnsError as exc:
+        await session.write_line(colored(f"Name change failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
+        return
+    save_credential(previous_credential_path_for(lane.path), old_credential)
+    save_credential(primary_path, result.credential)
+    await lane.run(set_previous_name, result.previous_name)
+    await lane.run(set_previous_status, RegistrationStatus(result.previous_status))
+    await lane.run(set_registered_name, result.name)
+    await lane.run(set_registration_status, RegistrationStatus.PENDING)
+    await session.write_line(
+        colored(
+            f"Reserved {result.name}.netbbs.org. {result.previous_name}.netbbs.org remains active "
+            "until the replacement matures.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+
+
+async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> None:
+    new_name = await lane.run(get_registered_name)
+    old_name = await lane.run(get_previous_name)
+    old_status = await lane.run(get_previous_status)
+    if new_name is None or old_name is None:
+        await session.write_line(colored("No managed-DNS name change is pending.", fg_color=MUTED_COLOR))
+        return
+    if not await prompt_yes_no(
+        session, f"Cancel the change to {sanitize_text(new_name)}.netbbs.org?", default=False,
+    ):
+        return
+    base_url = await lane.run(get_service_url)
+    primary_path = credential_path_for(lane.path)
+    replacement_credential = load_credential(primary_path)
+    old_credential = load_credential(previous_credential_path_for(lane.path))
+    if base_url is None or replacement_credential is None or old_credential is None:
+        await session.write_line(colored("Cannot cancel -- required service or credential state is missing.", fg_color=MUTED_COLOR))
+        return
+    try:
+        from aiohttp import ClientSession
+        from netbbs.managed_dns.client import ManagedDnsError, cancel_rename
+    except ModuleNotFoundError:
+        await session.write_line(colored("Cancelling a name change requires NetBBS's optional HTTP support.", fg_color=MUTED_COLOR))
+        return
+    try:
+        async with ClientSession(trust_env=True) as http_session:
+            result = await cancel_rename(http_session, base_url, credential=replacement_credential)
+    except ManagedDnsError as exc:
+        await session.write_line(colored(f"Cancellation failed: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
+        return
+    save_credential(primary_path, old_credential)
+    delete_credential(previous_credential_path_for(lane.path))
+    await lane.run(set_registered_name, result.previous_name)
+    await lane.run(set_registration_status, RegistrationStatus(result.previous_status) if result.previous_status else old_status)
+    await lane.run(set_previous_name, None)
+    await lane.run(set_previous_status, None)
+    await session.write_line(colored(f"Kept {result.previous_name}.netbbs.org; the name change was cancelled.", fg_color=MUTED_COLOR))

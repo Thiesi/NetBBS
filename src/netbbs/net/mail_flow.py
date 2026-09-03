@@ -118,7 +118,7 @@ async def browse_mail(
     """Entry point from the main menu's `[E]-mail` option.
 
     `link_context` (design doc), if given, lets `_compose_mail`
-    recognize a `user@node-fingerprint` address and send a Link message
+    recognize a `user@node-name-or-dns` address and send a Link message
     instead of ordinary local mail -- `None` whenever this node has Link
     disabled, the same convention `netbbs.link.boards.LinkContext`
     itself already establishes for boards."""
@@ -408,7 +408,7 @@ async def _compose_mail(
 ) -> None:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@
-    node-fingerprint` address (design doc) in addition to a
+    node-name-or-dns` address (design doc) in addition to a
     plain local username -- routed to `netbbs.link.mail.compose_link_
     message` instead of `netbbs.mail.send_mail`. Only checked on the
     fresh-compose path: a reply always targets an already-resolved
@@ -432,7 +432,7 @@ async def _compose_mail(
         recipient_text = prefill_recipient.username
         await session.write_line(f"To: {sanitize_text(recipient_text)}")
     else:
-        prompt = "username or user@node-fingerprint" if link_context is not None else "username"
+        prompt = "username or user@node-name-or-dns" if link_context is not None else "username"
         while True:
             await session.write(f"\r\nTo ({prompt}): ")
             recipient_text = (await session.read_line()).strip()

@@ -56,8 +56,10 @@ from services.managed_dns.store import (
     count_registrations,
     count_registrations_for_node,
     clear_last_known_address,
+    complete_rename,
     delete_expired_registrations,
     delete_registration,
+    delete_pending_replacement,
     get_registration_by_credential_hash,
     get_registration_by_name,
     hash_credential,
@@ -234,6 +236,8 @@ class ManagedDnsServer:
         app.router.add_post("/register", self._handle_register)
         app.router.add_post("/heartbeat", self._handle_heartbeat)
         app.router.add_post("/release", self._handle_release)
+        app.router.add_post("/rename", self._handle_rename)
+        app.router.add_post("/cancel-rename", self._handle_cancel_rename)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -495,6 +499,96 @@ class ManagedDnsServer:
         set_last_known_address(self._db, name, address)
         return True
 
+    async def _handle_rename(self, request: web.Request) -> web.Response:
+        """Reserve a replacement while the authenticated old name stays live."""
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
+        credential = body.get("credential")
+        raw_name = body.get("name")
+        if not isinstance(credential, str) or not credential or not isinstance(raw_name, str):
+            return web.json_response(
+                {"error": "request must contain a string credential and string name"}, status=400
+            )
+        try:
+            name = normalize_name(raw_name)
+        except InvalidNameError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if is_reserved(name):
+            return web.json_response({"error": f"{name!r} is a reserved name"}, status=403)
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            current = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if current is None or current.status not in _ACTIVE_STATUSES:
+                return web.json_response({"error": "unknown or inactive registration"}, status=401)
+            if current.replaces_name is not None:
+                return web.json_response({"error": "a rename is already pending"}, status=409)
+            if name == current.name:
+                return web.json_response({"error": "the replacement name is unchanged"}, status=400)
+            if get_registration_by_name(self._db, name) is not None:
+                return web.json_response({"error": f"{name!r} is already registered or reserved"}, status=409)
+            if not self._rate_limiter.allow():
+                return web.json_response(
+                    {"error": "too many registrations right now -- try again shortly"}, status=429
+                )
+            tokens, last_refill = self._rate_limiter.snapshot()
+            save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
+            secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
+            created_at = self._clock().isoformat()
+            try:
+                replacement = insert_registration(
+                    self._db, name=name, credential_hash=hash_credential(secret),
+                    node_fingerprint=current.node_fingerprint, dynamic=current.dynamic,
+                    created_at=created_at, replaces_name=current.name,
+                )
+            except sqlite3.IntegrityError:
+                return web.json_response({"error": "a rename is already pending"}, status=409)
+            return web.json_response(
+                {
+                    "name": replacement.name, "previous_name": current.name,
+                    "previous_status": current.status,
+                    "credential": secret, "status": replacement.status,
+                    "created_at": replacement.created_at,
+                },
+                status=201,
+            )
+
+    async def _handle_cancel_rename(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict) or not isinstance(body.get("credential"), str):
+            return web.json_response({"error": "request must contain a string credential"}, status=400)
+        credential = body["credential"]
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            replacement = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if (
+                replacement is None or replacement.status not in ("pending", "abandoned")
+                or replacement.replaces_name is None
+            ):
+                return web.json_response({"error": "unknown or inactive rename"}, status=401)
+            previous_name = replacement.replaces_name
+            if not delete_pending_replacement(self._db, replacement.name):
+                return web.json_response({"error": "rename is no longer pending"}, status=409)
+            return web.json_response(
+                {
+                    "name": replacement.name, "previous_name": previous_name,
+                    "previous_status": get_registration_by_name(self._db, previous_name).status,
+                    "status": "cancelled",
+                }
+            )
+
     def _observed_address(self, request: web.Request) -> str | None:
         if self._trust_x_forwarded_for:
             forwarded = request.headers.get("X-Forwarded-For")
@@ -549,8 +643,34 @@ class ManagedDnsServer:
 
         newly_matured = False
         status = registration.status
-        if status == "pending":
-            if now - datetime.fromisoformat(contact_started_at) >= timedelta(seconds=self._min_age_seconds):
+        if status == "pending" and now - datetime.fromisoformat(contact_started_at) >= timedelta(
+            seconds=self._min_age_seconds
+        ):
+            if registration.replaces_name is not None:
+                observed_address = self._observed_address(request)
+                if observed_address and await self._best_effort_publish(registration.name, observed_address):
+                    old = get_registration_by_name(self._db, registration.replaces_name)
+                    if old is not None and old.status == "matured" and not await self._delete_record(old.name):
+                        return web.json_response(
+                            {
+                                "name": registration.name, "previous_name": old.name,
+                                "status": "pending", "last_known_address": observed_address,
+                            }
+                        )
+                    complete_rename(
+                        self._db, registration.name, registration.replaces_name,
+                        matured_at=now_iso, released_at=now_iso,
+                    )
+                    status = "matured"
+                    newly_matured = True
+                else:
+                    return web.json_response(
+                        {
+                            "name": registration.name, "previous_name": registration.replaces_name,
+                            "status": "pending", "last_known_address": registration.last_known_address,
+                        }
+                    )
+            else:
                 mark_matured(self._db, registration.name, matured_at=now_iso)
                 status = "matured"
                 newly_matured = True
@@ -577,9 +697,10 @@ class ManagedDnsServer:
             if await self._best_effort_publish(registration.name, observed_address):
                 last_known_address = observed_address
 
-        return web.json_response(
-            {"name": registration.name, "status": status, "last_known_address": last_known_address}
-        )
+        result = {"name": registration.name, "status": status, "last_known_address": last_known_address}
+        if registration.replaces_name is not None:
+            result["previous_name"] = registration.replaces_name
+        return web.json_response(result)
 
     async def _handle_release(self, request: web.Request) -> web.Response:
         """Voluntary release (design doc §16 Decision 5). The DNS record

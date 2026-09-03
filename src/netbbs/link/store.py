@@ -344,6 +344,9 @@ def save_peer(db: Database, peer: PeerRecord) -> None:
     second explicit cleanup call to keep the on-disk candidate table
     from resurrecting someone who's now a real peer after a restart.
     """
+    from netbbs.link.node_profiles import record_peer_identity_observation
+
+    record_peer_identity_observation(db, peer)
     db.connection.execute(
         """
         INSERT INTO link_peers (fingerprint, root_public_key, transitions_json, descriptor_json, updated_at)

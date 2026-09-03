@@ -2733,7 +2733,7 @@ def test_transfer_board_origin_flow(db, lane, sysop):
     inputs = [
         "m", "m", "l", "0", "1",  # navigate to board detail
         "t",  # [T]ransfer origin
-        peer.fingerprint,  # new origin's fingerprint
+        "0", "1",  # select the only peer by friendly name
         "y",  # confirm
         "b", "b", "b", "b",
     ]
@@ -6067,7 +6067,31 @@ def test_managed_dns_status_offers_release_when_active(db, lane, sysop):
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Re[l]ease" in text
+    assert "Change [n]ame" in text
     assert "[R]egister" in text
+
+
+def test_managed_dns_pending_rename_offers_cancel_change_without_hotkey_collisions(db, lane, sysop):
+    from netbbs.managed_dns.state import (
+        OptIn,
+        RegistrationStatus,
+        set_opt_in,
+        set_previous_name,
+        set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "newboard")
+    set_previous_name(db, "oldboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "[C]ancel change" in text
+    assert "Change [n]ame" not in text
+    assert "Re[l]ease" not in text
 
 
 def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(db, lane, sysop):
@@ -6223,7 +6247,8 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
-    assert link_context.node_identity.fingerprint in text
+    assert "Node: " in _visible(text)
+    assert link_context.node_identity.fingerprint not in text
     assert "Mode: " in text
     assert "[OUTGOING ONLY]" in text
     assert "Configured seeds: 1" in text

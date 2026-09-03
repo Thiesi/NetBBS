@@ -173,9 +173,9 @@ def test_send_refuses_when_presence_says_the_user_is_not_online_there(tmp_path):
 def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     rig = _Rig(tmp_path)
     ok, text = _send(rig, "bob@nope", "hi")
-    assert not ok and "No linked node this board knows starts with" in text
+    assert not ok and "No linked node this board knows as 'nope'" in text
     ok, text = _send(rig, "bob", "hi")
-    assert not ok and "user@node-fingerprint" in text
+    assert not ok and "user@node-name-or-dns" in text
     ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(node_identity=rig.identity, link_node=rig.link_node))
     assert not ok and "isn't on NetBBS Link" in text
     rig.close()
@@ -206,7 +206,7 @@ def test_deliverer_queues_for_an_online_recipient_and_drops_otherwise(tmp_path):
     assert asyncio.run(deliver(message)) is True
     queued = mailbox.flush(bob_session)
     assert len(queued) == 1
-    assert "Private message from Alice@ffffffffffff" in queued[0][0]
+    assert "Private message from Alice@Unknown linked node" in queued[0][0]
     assert "\x1b[31m" not in queued[0][0].split("Private message from")[1]
     # Opted out: dropped even while online.
     set_accepts_direct_messages(rig.db, bob, False)

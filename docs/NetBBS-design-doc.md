@@ -493,12 +493,31 @@ foreign-key policy.
 
 ### 4.4 Human-facing Link addresses
 
-The native cross-node address is:
+The normal human-facing cross-node address is:
 
-`user@node-fingerprint`
+`user@friendly-name` or, where a friendly name is ambiguous,
+`user@canonical-dns-name`
 
-The node fingerprint is derived from the node’s long-lived root identity, not a
-DNS name. Network location may change without changing identity.
+Link endpoint descriptors carry both claims inside the node-signed hello
+bundle. User-facing screens show the friendly name, qualified by the canonical
+DNS name where useful, and do not expose fingerprints by default. DNS names are
+unique routing names, but neither a friendly name nor DNS is cryptographic
+identity authority.
+
+The underlying address and every protocol/persistence relationship remain
+`user@node-fingerprint`. A full fingerprint is available as **Technical
+identity** in the relevant SysOp detail view and remains accepted as an
+advanced/backward-compatible input. Friendly-name resolution must be unique;
+an ambiguous name is refused with a request to use the DNS name.
+
+Peers retain authenticated observations of all three values. A friendly-name
+change under the same fingerprint is an informational continuity notice. A DNS
+change under the same fingerprint is a more prominent routing notice. Reuse of
+a familiar friendly or DNS name by a different fingerprint is a strong
+cryptographic-identity warning: the UI explains that recovery/replacement may
+be legitimate but impersonation is possible, and it does not prevent the user
+from continuing. Presentation names never transfer trust or reputation between
+fingerprints.
 
 ### 4.5 Identity tiers
 
@@ -566,6 +585,11 @@ Routine operational-key rotation and compromise response do not change the
 node address. Root-key loss or compromise has no cryptographic recovery in the
 current design. Social/M-of-N recovery remains a possible future extension, not
 an assumed capability.
+
+Replacing the root identity necessarily changes the fingerprint and is treated
+as a new cryptographic identity. Keeping the same friendly or DNS name makes
+that replacement recognizable to humans but does not establish continuity;
+peers raise the strong warning above and continue to permit interaction.
 
 Root and operational keys are generated at initial bootstrap. Rotation is a
 guided SysOp action. Root-key custody is part of ordinary node backup and

@@ -137,6 +137,20 @@ Before pointing real SysOps at this instance:
 3. Release it and confirm the record is gone (`dig` returns nothing)
    but a *different* registrant's `/register` for the same name is
    still rejected until `MANAGED_DNS_COOLDOWN_SECONDS` elapses.
+4. Rename the test registration with `POST /rename`. Confirm the old
+   record stays published while the new name is pending, then heartbeat
+   the new credential after the age gate and confirm the new record is
+   published before the old record is removed. Exercise `POST
+   /cancel-rename` during a second pending rename and confirm the old
+   registration and credential remain valid.
+
+The node SysOp menu exposes these as `Change [n]ame` and `[C]ancel
+change`, alongside `[R]egister` and `Re[l]ease`. The rename is deliberately
+make-before-break: the service reserves and matures the new name while the old
+one remains canonical. Only the heartbeat which successfully publishes the new
+record releases the old registration. Names in any other DNS infrastructure are
+never registered or released by this service; operators update that DNS first,
+then change the node's configured advertised host.
 
 Every automated test in `tests/test_managed_dns_*.py` runs against
 `LoggingDnsProvider` only -- none of them exercise real BIND. This

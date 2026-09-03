@@ -77,6 +77,7 @@ from netbbs.files.categories import (
 )
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
+from netbbs.link.node_profiles import identity_for_peer
 from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
@@ -823,7 +824,9 @@ async def _browse_remote_files(
 
     def render_description(remote_file: RemoteFile) -> str:
         status = "[LOCAL] already fetched" if remote_file.fetched_file_id is not None else "[REMOTE] not yet fetched"
-        return f"{_format_size(remote_file.size_bytes)} — {status} — from {remote_file.origin_fingerprint[:12]}…"
+        peer = link_context.link_node.peers.get(remote_file.origin_fingerprint)
+        origin = identity_for_peer(peer).label if peer is not None else "unknown linked node"
+        return f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
 
     selected = await pick_item(
         session,

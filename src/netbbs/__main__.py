@@ -132,7 +132,9 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
     )
 
 
-def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig, live_relays_provider=None):
+def _build_own_hello_provider(
+    link_node: LinkNode, link_config: LinkConfig, db: Database, live_relays_provider=None,
+):
     """
     Returns a plain callable producing this node's current `HelloMessage`
     on demand (design doc: `LinkServer`'s `own_hello_provider`
@@ -150,6 +152,9 @@ def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig, live
     """
 
     def _provide() -> HelloMessage:
+        from netbbs.config import get_node_display_name
+        from netbbs.link.node_profiles import own_canonical_dns_name
+
         addresses = None
         if not link_config.outgoing_only:
             from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG
@@ -173,6 +178,8 @@ def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig, live
             # Issue #270: the reliable nodes this node is standing by at,
             # so a peer that cannot dial us knows where to meet us.
             live_relays=live_relays_provider() if live_relays_provider is not None else None,
+            friendly_name=get_node_display_name(db),
+            canonical_dns_name=own_canonical_dns_name(db, link_config.advertised_host),
         )
 
     return _provide
@@ -323,7 +330,7 @@ async def _start_servers(
                     host=config.link.host,
                     port=config.link.port,
                     node=link_node,
-                    own_hello_provider=_build_own_hello_provider(link_node, config.link, live_relays_provider),
+                    own_hello_provider=_build_own_hello_provider(link_node, config.link, db, live_relays_provider),
                     lane=link_lane,
                     relay_serving_enabled=config.link.relay_serving_enabled,
                     max_relay_clients=config.link.max_relay_clients,
@@ -1005,7 +1012,7 @@ async def run(
                 link_sync_task = asyncio.create_task(
                     run_link_sync(
                         link_node, link_sync_session, config.link.seeds,
-                        _build_own_hello_provider(link_node, config.link, _live_relays_provider),
+                        _build_own_hello_provider(link_node, config.link, db, _live_relays_provider),
                         background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
                         stop_event=link_sync_stop_event,

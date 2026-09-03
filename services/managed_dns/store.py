@@ -93,6 +93,17 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Allow one authenticated, pending replacement name to mature alongside the current "
+            "canonical registration during a bounded managed-DNS rename."
+        ),
+        sql="""
+        ALTER TABLE registrations ADD COLUMN replaces_name TEXT;
+        CREATE UNIQUE INDEX idx_registrations_one_pending_replacement
+            ON registrations(replaces_name) WHERE replaces_name IS NOT NULL AND status = 'pending';
+        """,
+    ),
 ]
 
 
@@ -169,6 +180,7 @@ class Registration:
     released_at: str | None
     last_known_address: str | None
     contact_started_at: str | None
+    replaces_name: str | None
 
 
 def _row_to_registration(row: sqlite3.Row) -> Registration:
@@ -184,11 +196,13 @@ def _row_to_registration(row: sqlite3.Row) -> Registration:
         released_at=row["released_at"],
         last_known_address=row["last_known_address"],
         contact_started_at=row["contact_started_at"],
+        replaces_name=row["replaces_name"],
     )
 
 
 def insert_registration(
-    db: Database, *, name: str, credential_hash: str, node_fingerprint: str, dynamic: bool, created_at: str
+    db: Database, *, name: str, credential_hash: str, node_fingerprint: str, dynamic: bool, created_at: str,
+    replaces_name: str | None = None,
 ) -> Registration:
     """Insert a brand-new `pending` registration. Raises `sqlite3.
     IntegrityError` if `name` is already taken -- callers enforcing
@@ -198,10 +212,10 @@ def insert_registration(
     db.connection.execute(
         """
         INSERT INTO registrations
-            (name, credential_hash, node_fingerprint, status, dynamic, created_at)
-        VALUES (?, ?, ?, 'pending', ?, ?)
+            (name, credential_hash, node_fingerprint, status, dynamic, created_at, replaces_name)
+        VALUES (?, ?, ?, 'pending', ?, ?, ?)
         """,
-        (name, credential_hash, node_fingerprint, int(dynamic), created_at),
+        (name, credential_hash, node_fingerprint, int(dynamic), created_at, replaces_name),
     )
     db.connection.commit()
     return get_registration_by_name(db, name)
@@ -295,6 +309,31 @@ def mark_released(db: Database, name: str, *, released_at: str) -> None:
         (released_at, name),
     )
     db.connection.commit()
+
+
+def complete_rename(db: Database, new_name: str, old_name: str, *, matured_at: str, released_at: str) -> None:
+    """Commit the local half of a provider-completed DNS rename atomically."""
+    with db.connection:
+        db.connection.execute(
+            "UPDATE registrations SET status = 'matured', matured_at = ?, replaces_name = NULL "
+            "WHERE name = ? AND status = 'pending' AND replaces_name = ?",
+            (matured_at, new_name, old_name),
+        )
+        db.connection.execute(
+            "UPDATE registrations SET status = 'released', released_at = ? "
+            "WHERE name = ? AND status IN ('pending', 'matured')",
+            (released_at, old_name),
+        )
+
+
+def delete_pending_replacement(db: Database, name: str) -> bool:
+    cursor = db.connection.execute(
+        "DELETE FROM registrations WHERE name = ? AND status IN ('pending', 'abandoned') "
+        "AND replaces_name IS NOT NULL",
+        (name,),
+    )
+    db.connection.commit()
+    return cursor.rowcount == 1
 
 
 def reclaim(

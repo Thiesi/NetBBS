@@ -96,6 +96,7 @@ class HeartbeatResult:
     name: str
     status: str
     last_known_address: str | None
+    previous_name: str | None = None
 
 
 async def heartbeat(
@@ -126,13 +127,88 @@ async def heartbeat(
     name_value = body.get("name")
     status_value = body.get("status")
     address_value = body.get("last_known_address")
+    previous_name_value = body.get("previous_name")
     if (
         not isinstance(name_value, str) or not name_value
         or status_value not in (RegistrationStatus.PENDING.value, RegistrationStatus.MATURED.value)
         or (address_value is not None and not isinstance(address_value, str))
+        or (previous_name_value is not None and not isinstance(previous_name_value, str))
     ):
         raise ManagedDnsError(f"malformed heartbeat response from {url}: invalid fields")
-    return HeartbeatResult(name_value, status_value, address_value)
+    return HeartbeatResult(name_value, status_value, address_value, previous_name_value)
+
+
+@dataclass(frozen=True)
+class RenameResult:
+    name: str
+    previous_name: str
+    credential: str
+    status: str
+    created_at: str
+    previous_status: str
+
+
+async def rename(
+    session: ClientSession, base_url: str, *, name: str, credential: str,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RenameResult:
+    url = f"{base_url}/rename"
+    try:
+        async with session.post(
+            url, json={"name": name, "credential": credential}, timeout=ClientTimeout(total=timeout),
+        ) as response:
+            if response.status != 201:
+                text = await response.text()
+                raise ManagedDnsError(f"rename to {name!r} failed: HTTP {response.status}: {text}")
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ManagedDnsError(f"malformed rename response from {url}: expected an object")
+    values = (body.get("name"), body.get("previous_name"), body.get("credential"), body.get("created_at"))
+    previous_status = body.get("previous_status")
+    if (
+        not all(isinstance(value, str) and value for value in values) or body.get("status") != "pending"
+        or previous_status not in ("pending", "matured")
+    ):
+        raise ManagedDnsError(f"malformed rename response from {url}: invalid fields")
+    return RenameResult(values[0], values[1], values[2], "pending", values[3], previous_status)
+
+
+@dataclass(frozen=True)
+class CancelRenameResult:
+    name: str
+    previous_name: str
+    status: str
+    previous_status: str
+
+
+async def cancel_rename(
+    session: ClientSession, base_url: str, *, credential: str,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> CancelRenameResult:
+    url = f"{base_url}/cancel-rename"
+    try:
+        async with session.post(
+            url, json={"credential": credential}, timeout=ClientTimeout(total=timeout),
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise ManagedDnsError(f"cancel rename failed: HTTP {response.status}: {text}")
+            body = await response.json(loads=strict_json_loads)
+    except (ClientError, TimeoutError, ValueError) as exc:
+        raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ManagedDnsError(f"malformed cancel-rename response from {url}: expected an object")
+    name_value, previous_name = body.get("name"), body.get("previous_name")
+    previous_status = body.get("previous_status")
+    if (
+        not isinstance(name_value, str) or not name_value or not isinstance(previous_name, str)
+        or not previous_name or body.get("status") != "cancelled"
+        or previous_status not in ("pending", "matured")
+    ):
+        raise ManagedDnsError(f"malformed cancel-rename response from {url}: invalid fields")
+    return CancelRenameResult(name_value, previous_name, "cancelled", previous_status)
 
 
 @dataclass(frozen=True)

@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.managed_dns.credential import credential_path_for, load_credential
+from netbbs.managed_dns.credential import credential_path_for, load_credential, previous_credential_path_for
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
+    get_previous_name,
     get_registered_name,
     get_registration_status,
     get_service_url,
@@ -19,7 +20,10 @@ from netbbs.managed_dns.state import (
     set_opt_in,
     set_service_url,
 )
-from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in, register_via_prompt, release_registration
+from netbbs.net.managed_dns_flow import (
+    cancel_registration_rename, offer_managed_dns_opt_in, register_via_prompt,
+    release_registration, rename_registration,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from services.managed_dns.server import ManagedDnsServer
@@ -384,4 +388,35 @@ def test_register_via_prompt_accepting_standard_ports_shows_no_caveat(tmp_path):
     db, session = asyncio.run(scenario())
     assert get_registered_name(db) == "myboard"
     assert not any("won't be part of the promise" in line for line in session.written)
+    db.close()
+
+
+def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["old-name", "n", "n"]), lane)
+            old_credential = load_credential(credential_path_for(db.path))
+            await rename_registration(FakeSession(["new-name", "y"]), lane)
+            assert get_registered_name(db) == "new-name"
+            assert get_previous_name(db) == "old-name"
+            assert load_credential(previous_credential_path_for(db.path)) == old_credential
+            await cancel_registration_rename(FakeSession(["y"]), lane)
+            lane.close()
+            return db, old_credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, old_credential = asyncio.run(scenario())
+    assert get_registered_name(db) == "old-name"
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == old_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
     db.close()

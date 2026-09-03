@@ -84,7 +84,10 @@ from pathlib import Path
 from netbbs import __version__
 from netbbs.config import get_config, set_config
 from netbbs.link.node_identity import NodeIdentity, NodeIdentityError
-from netbbs.managed_dns.credential import credential_path_for as _managed_dns_credential_path_for
+from netbbs.managed_dns.credential import (
+    credential_path_for as _managed_dns_credential_path_for,
+    previous_credential_path_for as _managed_dns_previous_credential_path_for,
+)
 from netbbs.operational_history import record_operational_run
 from netbbs.selfupdate import snapshot_database
 from netbbs.storage.database import Database
@@ -248,6 +251,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
     for extra_path in (
         _ssh_host_key_path_for(db_path),
         _managed_dns_credential_path_for(db_path),
+        _managed_dns_previous_credential_path_for(db_path),
         _welcome_banner_path_for(db_path),
         _main_menu_banner_path_for(db_path),
         _logoff_banner_path_for(db_path),
@@ -440,6 +444,8 @@ def _process_is_running(pid: int) -> bool:
     rather than blocking restore indefinitely on a platform quirk --
     the existing write-lock probe and the documented "stop the node
     first" operator precondition remain the backstops."""
+    if pid == os.getpid():
+        return True
     if os.name == "posix":
         try:
             os.kill(pid, 0)
@@ -532,6 +538,8 @@ def _restore_switch_plan(staging_dir: Path, db_path: Path, identity_dir: Path) -
             live_path = db_path.parent / entry.name
             if entry.name.endswith("_managed_dns_credential"):
                 live_path = _managed_dns_credential_path_for(db_path)
+            elif entry.name.endswith("_managed_dns_previous_credential"):
+                live_path = _managed_dns_previous_credential_path_for(db_path)
             plan.append((entry.name, entry, live_path))
 
     return plan

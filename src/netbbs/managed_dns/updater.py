@@ -22,15 +22,20 @@ import asyncio
 from aiohttp import ClientSession
 
 from netbbs.managed_dns.client import ManagedDnsError, heartbeat
-from netbbs.managed_dns.credential import credential_path_for, load_credential
+from netbbs.managed_dns.credential import (
+    credential_path_for, delete_credential, load_credential, previous_credential_path_for,
+)
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
+    get_previous_name,
     get_registered_name,
     get_registration_status,
     get_service_url,
     set_last_contact_at,
+    set_previous_name,
+    set_previous_status,
     set_registration_status,
 )
 from netbbs.storage.database import Database
@@ -105,3 +110,7 @@ async def _send_heartbeat(db: Database, base_url: str, credential: str) -> None:
         return
     set_registration_status(db, RegistrationStatus(result.status))
     set_last_contact_at(db, utc_now_iso())
+    if result.status == RegistrationStatus.MATURED.value and get_previous_name(db) is not None:
+        set_previous_name(db, None)
+        set_previous_status(db, None)
+        delete_credential(previous_credential_path_for(db.path))

@@ -120,7 +120,8 @@ def test_who_annotates_a_remote_participant_with_its_linked_node(lane, hub, pres
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/who", "/quit"], link_context=link_context))
     text = _written_text(session)
     assert "Remote User" in text
-    assert f"on linked node {origin_fingerprint[:12]}" in text
+    assert "on a linked node" in text
+    assert origin_fingerprint[:12] not in text
 
 
 def test_names_includes_a_remote_participant_unannotated(lane, hub, presence, alice, channel, node_identity):

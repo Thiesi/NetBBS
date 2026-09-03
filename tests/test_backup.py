@@ -48,6 +48,10 @@ def _managed_dns_credential_path(db_path):
     return db_path.parent / f"{db_path.stem}_managed_dns_credential"
 
 
+def _managed_dns_previous_credential_path(db_path):
+    return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
+
+
 def _welcome_banner_path(db_path):
     return db_path.parent / f"{db_path.stem}_welcome_banner.ans"
 
@@ -109,6 +113,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 
     _ssh_host_key_path(db_path).write_bytes(b"fake ssh host key")
     _managed_dns_credential_path(db_path).write_text("fake managed-dns credential")
+    _managed_dns_previous_credential_path(db_path).write_text("fake previous managed-dns credential")
     _welcome_banner_path(db_path).write_text("fake banner")
     _main_menu_banner_path(db_path).write_text("fake masthead")
     _logoff_banner_path(db_path).write_text("fake logoff banner")
@@ -136,6 +141,7 @@ def test_create_backup_captures_all_thirteen_artifacts(tmp_path, db_path, identi
     assert (destination / "identity" / "transitions.json").exists()
     assert (destination / f"{db_path.stem}_ssh_host_key").read_bytes() == b"fake ssh host key"
     assert (destination / f"{db_path.stem}_managed_dns_credential").read_text() == "fake managed-dns credential"
+    assert (destination / f"{db_path.stem}_managed_dns_previous_credential").read_text() == "fake previous managed-dns credential"
     assert (destination / f"{db_path.stem}_welcome_banner.ans").read_text() == "fake banner"
     assert (destination / f"{db_path.stem}_main_menu_banner.ans").read_text() == "fake masthead"
     assert (destination / f"{db_path.stem}_logoff_banner.ans").read_text() == "fake logoff banner"
@@ -251,6 +257,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     shutil.rmtree(identity_dir)
     _ssh_host_key_path(db_path).unlink()
     _managed_dns_credential_path(db_path).unlink()
+    _managed_dns_previous_credential_path(db_path).unlink()
     _welcome_banner_path(db_path).unlink()
     _main_menu_banner_path(db_path).unlink()
     _logoff_banner_path(db_path).unlink()
@@ -266,6 +273,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     assert (identity_dir / "root.identity").exists()
     assert _ssh_host_key_path(db_path).read_bytes() == b"fake ssh host key"
     assert _managed_dns_credential_path(db_path).read_text() == "fake managed-dns credential"
+    assert _managed_dns_previous_credential_path(db_path).read_text() == "fake previous managed-dns credential"
     assert _welcome_banner_path(db_path).read_text() == "fake banner"
     assert _main_menu_banner_path(db_path).read_text() == "fake masthead"
     assert _logoff_banner_path(db_path).read_text() == "fake logoff banner"
@@ -500,7 +508,9 @@ def test_restore_rebases_managed_dns_credential_to_a_different_database_stem(
     restore_backup(source=source, db_path=target_db, identity_dir=target_identity)
 
     assert _managed_dns_credential_path(target_db).read_text() == "fake managed-dns credential"
+    assert _managed_dns_previous_credential_path(target_db).read_text() == "fake previous managed-dns credential"
     assert not (target_db.parent / f"{db_path.stem}_managed_dns_credential").exists()
+    assert not (target_db.parent / f"{db_path.stem}_managed_dns_previous_credential").exists()
 
 
 def test_restore_backup_no_staging_or_state_files_left_behind_on_success(tmp_path, db_path, identity_dir):

@@ -58,6 +58,8 @@ LAST_CONTACT_AT_CONFIG_KEY = "managed_dns_last_contact_at"
 DYNAMIC_CONFIG_KEY = "managed_dns_dynamic"
 NODE_FINGERPRINT_CONFIG_KEY = "managed_dns_node_fingerprint"
 SERVICE_URL_CONFIG_KEY = "managed_dns_service_url"
+PREVIOUS_NAME_CONFIG_KEY = "managed_dns_previous_name"
+PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
 
 
 def get_opt_in(db: Database) -> OptIn:
@@ -128,6 +130,23 @@ def get_registered_name(db: Database) -> str | None:
 
 def set_registered_name(db: Database, name: str | None) -> None:
     set_config(db, NAME_CONFIG_KEY, name or "")
+
+
+def get_previous_name(db: Database) -> str | None:
+    return get_config(db, PREVIOUS_NAME_CONFIG_KEY) or None
+
+
+def set_previous_name(db: Database, name: str | None) -> None:
+    set_config(db, PREVIOUS_NAME_CONFIG_KEY, name or "")
+
+
+def get_previous_status(db: Database) -> RegistrationStatus | None:
+    value = get_config(db, PREVIOUS_STATUS_CONFIG_KEY)
+    return RegistrationStatus(value) if value else None
+
+
+def set_previous_status(db: Database, status: RegistrationStatus | None) -> None:
+    set_config(db, PREVIOUS_STATUS_CONFIG_KEY, status.value if status else "")
 
 
 def get_registration_status(db: Database) -> RegistrationStatus:

@@ -139,6 +139,7 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
+from netbbs.link.node_profiles import identity_for_peer
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -1063,11 +1064,12 @@ class _SwitchTo:
 
 @dataclass(frozen=True)
 class RemotePrivateTarget:
-    """Issue #270: a `/private user@node-fingerprint` counterpart on a
+    """Issue #270: a `/private user@node-name-or-dns` counterpart on a
     linked node -- every plain line goes out as a live direct message."""
 
     username: str
     node_fingerprint: str
+    node_label: str
 
     @property
     def address(self) -> str:
@@ -1075,7 +1077,7 @@ class RemotePrivateTarget:
 
     @property
     def label(self) -> str:
-        return f"{self.username}@{self.node_fingerprint[:12]}…"
+        return f"{self.username}@{self.node_label}"
 
 
 @dataclass(frozen=True)
@@ -1296,7 +1298,7 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     target_name, body = parts
 
     if "@" in target_name:
-        # Issue #168: `user@node-fingerprint` reaches a user on a linked
+        # Issue #168: `user@node-name-or-dns` reaches a user on a linked
         # node live, over a direct or relayed real-time session. Lazy
         # import: link_direct imports this module for delivery helpers.
         from netbbs.net.link_direct import send_live_direct_message
@@ -1340,7 +1342,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         parsed = parse_remote_address(target_name)
         if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
             await ctx.session.write_line(
-                colored("Address a linked node's user as user@node-fingerprint (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
+                colored("Address a linked node's user as user@node-name-or-dns (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
             )
             return None
         remote_user, _node_prefix = parsed
@@ -1350,7 +1352,9 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         resolved = await check_live_reachability(ctx.session, target_name, link_context=ctx.link_context)
         if resolved is None:
             return None
-        remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved)
+        peer = ctx.link_context.link_node.peers.get(resolved)
+        node_label = identity_for_peer(peer).label if peer is not None else "linked node"
+        remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved, node_label=node_label)
         close_hint = menu_key("/close", "")
         await ctx.session.write_line(
             colored(
@@ -2145,7 +2149,9 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
             suffix = ""
         await ctx.session.write_line(f"{label}{suffix}")
     for label, fingerprint in remote_entries:
-        node_note = f" (on linked node {fingerprint[:12]}…)" if fingerprint else " (on a linked node)"
+        peer = ctx.link_context.link_node.peers.get(fingerprint) if ctx.link_context is not None else None
+        node_name = identity_for_peer(peer).label if peer is not None else None
+        node_note = f" (on linked node {node_name})" if node_name else " (on a linked node)"
         await ctx.session.write_line(f"{label}{node_note}")
 
 
@@ -2397,8 +2403,8 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
     "join": ("/join <channel>", "Switch to another chat channel."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
-    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-fingerprint for a linked node)."),
-    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-fingerprint for a linked node)."),
+    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-name-or-dns for a linked node)."),
+    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),

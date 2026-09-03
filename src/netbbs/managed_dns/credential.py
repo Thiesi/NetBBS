@@ -35,6 +35,11 @@ def credential_path_for(db_path: Path) -> Path:
     return db_path.parent / f"{db_path.stem}_managed_dns_credential"
 
 
+def previous_credential_path_for(db_path: Path) -> Path:
+    """Temporary old credential retained while a managed rename is pending."""
+    return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
+
+
 def save_credential(path: Path, secret: str) -> None:
     """Write `secret` to `path`, owner-only (0600), atomically.
 

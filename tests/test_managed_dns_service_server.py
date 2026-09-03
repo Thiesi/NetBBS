@@ -71,6 +71,71 @@ async def _heartbeat(server: ManagedDnsServer, *, credential: str, headers: dict
             return response.status, await response.json()
 
 
+async def _rename(server: ManagedDnsServer, *, credential: str, name: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/rename", json={"credential": credential, "name": name}
+        ) as response:
+            return response.status, await response.json()
+
+
+async def _cancel_rename(server: ManagedDnsServer, *, credential: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/cancel-rename", json={"credential": credential}
+        ) as response:
+            return response.status, await response.json()
+
+
+def test_rename_keeps_old_name_active_until_replacement_matures(db):
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+
+    async def scenario():
+        nonlocal now
+        provider = LoggingDnsProvider()
+        server = await _start_server(db, dns_provider=provider, clock=lambda: now, min_age_seconds=60)
+        try:
+            original = await _register(server, name="old-name", dynamic=True)
+            await _heartbeat(server, credential=original["credential"])
+            now += timedelta(seconds=61)
+            await _heartbeat(server, credential=original["credential"])
+            status, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            old_during = get_registration_by_name(db, "old-name")
+            await _heartbeat(server, credential=replacement["credential"])
+            now += timedelta(seconds=61)
+            heartbeat_status, completed = await _heartbeat(server, credential=replacement["credential"])
+            return status, heartbeat_status, replacement, completed, old_during
+        finally:
+            await server.stop()
+
+    status, heartbeat_status, replacement, completed, old_during = asyncio.run(scenario())
+    assert status == 201
+    assert heartbeat_status == 200
+    assert old_during.status == "matured"
+    assert replacement["previous_name"] == "old-name"
+    assert completed["status"] == "matured"
+    assert get_registration_by_name(db, "old-name").status == "released"
+    assert get_registration_by_name(db, "new-name").status == "matured"
+
+
+def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            status, body = await _cancel_rename(server, credential=replacement["credential"])
+            return status, body
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["previous_name"] == "old-name"
+    assert get_registration_by_name(db, "old-name").status == "pending"
+    assert get_registration_by_name(db, "new-name") is None
+
+
 def test_register_creates_a_pending_registration(db):
     async def scenario():
         server = await _start_server(db)

@@ -17,6 +17,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
+from netbbs.link.node_profiles import identity_for_fingerprint
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
@@ -180,7 +181,7 @@ def _who_entry_name(entry: _WhoEntry) -> str:
 
 def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
     if isinstance(entry, _RemoteWhoEntry):
-        return f"on linked node {entry.node_fingerprint[:12]}…"
+        return f"on linked node {identity_for_fingerprint(db, entry.node_fingerprint).label}"
     when = format_for_display(entry.connected_at, db)
     return f"connected since {when}"
 
@@ -287,9 +288,8 @@ async def _caller_who_screen(
                 )
             )
             return
-        await session.write(
-            f"Message to {sanitize_text(selected.username)}@{sanitize_text(selected.node_fingerprint[:12])}…: "
-        )
+        node_label = identity_for_fingerprint(db, selected.node_fingerprint).label
+        await session.write(f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: ")
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))

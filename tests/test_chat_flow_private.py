@@ -510,7 +510,7 @@ def test_private_with_a_remote_target_sends_each_line_live(lane, hub, presence, 
         link_context=_FakeLinkContext(fingerprint, direct),
     ))
     text = _written(session)
-    assert "Entering private conversation with bob@remote-node-" in text
+    assert "Entering private conversation with bob@linked node" in text
     assert [kw["body"] for _fp, kw in direct.sent] == ["hello over there", "second line"]
     assert all(fp == fingerprint for fp, _kw in direct.sent)
     assert direct.sent[0][1]["to_user_id"] == "bob"
@@ -539,7 +539,7 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
-    assert "No linked node this board knows starts with" in _written(session)
+    assert "No linked node this board knows as 'nope'" in _written(session)
 
 
 def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):

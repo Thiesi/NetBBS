@@ -699,7 +699,7 @@ def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp
     lane = DatabaseLane(db_path)
     asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
 
-    assert "node-fingerprint" in _written_text(session)
+    assert "node-name-or-dns" in _written_text(session)
     lane.close()
     db.close()
 
