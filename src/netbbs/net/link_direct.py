@@ -120,7 +120,7 @@ def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str
 
 def _node_label(link_context: LinkContext, fingerprint: str) -> str:
     peer = link_context.link_node.peers.get(fingerprint)
-    return identity_for_peer(peer).label if peer is not None else "linked node"
+    return identity_for_peer(peer).label if peer is not None else fingerprint
 
 
 async def check_live_reachability(

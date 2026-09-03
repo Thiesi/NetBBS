@@ -1807,14 +1807,10 @@ class LinkNode:
                 f"different subject ({message.descriptor.payload.get('subject_fingerprint')!r})"
             )
 
-        from netbbs.link.node_profiles import normalize_dns_name, normalize_friendly_name
+        from netbbs.link.node_profiles import profile_claims_are_canonical
 
-        friendly_name = message.descriptor.payload.get("friendly_name")
-        if friendly_name is not None and normalize_friendly_name(friendly_name) != friendly_name:
-            raise LinkProtocolError(f"hello from {claimed_fingerprint} carries an invalid friendly name")
-        canonical_dns_name = message.descriptor.payload.get("canonical_dns_name")
-        if canonical_dns_name is not None and normalize_dns_name(canonical_dns_name) != canonical_dns_name:
-            raise LinkProtocolError(f"hello from {claimed_fingerprint} carries an invalid canonical DNS name")
+        if not profile_claims_are_canonical(message.descriptor.payload):
+            raise LinkProtocolError(f"hello from {claimed_fingerprint} carries invalid profile claims")
 
         existing = self.peers.get(claimed_fingerprint)
         if existing is not None and message.descriptor.payload["created_at"] < existing.descriptor.payload["created_at"]:
@@ -1921,6 +1917,9 @@ class LinkNode:
         except (LinkProtocolError, NodeIdentityError):
             return False
         if not verify_endpoint_descriptor(descriptor, signing_verify_key):
+            return False
+        from netbbs.link.node_profiles import profile_claims_are_canonical
+        if not profile_claims_are_canonical(descriptor.payload):
             return False
         self.peers[fingerprint] = PeerRecord(
             fingerprint=peer.fingerprint, root_public_key=peer.root_public_key,

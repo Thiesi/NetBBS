@@ -6272,18 +6272,22 @@ def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sy
         friendly_name="Old Name",
     ))
     save_peer(db, first)
-    changed = peer_node.handle_hello(peer_node.build_hello(
-        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
-        friendly_name="New Name",
-    ))
-    save_peer(db, changed)
+    for index in range(6):
+        changed = peer_node.handle_hello(peer_node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-03T13:0{index}:00+00:00",
+            friendly_name=f"New Name {index}",
+        ))
+        save_peer(db, changed)
     link_context.link_node.peers[changed.fingerprint] = changed
 
     session = FakeSession(["s", "l", "y", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Identity changes acknowledged." in _written_text(session)
-    assert list_identity_observations(db) == []
+    remaining = list_identity_observations(db)
+    assert len(remaining) == 1
+    assert remaining[0].previous_friendly_name == "Old Name"
 
 
 def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):

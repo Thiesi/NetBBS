@@ -799,9 +799,13 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     string, even one that once came from a verified user, must never
     itself be treated as proof.
     """
-    if message.link_event_json is not None:
+    if message.link_content_id is not None and message.link_event_json is None:
         try:
-            payload = json.loads(message.link_event_json)["envelope"]["payload"]
+            row = db.connection.execute(
+                "SELECT envelope_json FROM link_events WHERE content_id = ?",
+                (message.link_content_id,),
+            ).fetchone()
+            payload = json.loads(row["envelope_json"])["envelope"]["payload"]
             remote_author = payload["author"]
             fingerprint = remote_author["home_node_fingerprint"]
             identity = identity_for_fingerprint(db, fingerprint)
@@ -1303,23 +1307,14 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     online-only private message. Scoped as a chat-context command only,
     matching every other chat command — no parallel main-menu entry point.
     """
-    parts = args.split(maxsplit=1)
-    if "@" in args and ctx.link_context is not None:
-        # Friendly node names may contain spaces. Walk possible boundaries
-        # longest-first and use the first complete, uniquely resolvable node
-        # reference; local usernames themselves cannot contain whitespace.
-        from netbbs.net.link_direct import parse_remote_address, resolve_node_fingerprint
-
-        words = args.split()
-        for boundary in range(len(words) - 1, 0, -1):
-            candidate = " ".join(words[:boundary])
-            parsed = parse_remote_address(candidate)
-            if parsed is None:
-                continue
-            resolved = resolve_node_fingerprint(ctx.link_context, parsed[1])
-            if not isinstance(resolved, list):
-                parts = [candidate, " ".join(words[boundary:])]
-                break
+    if args.startswith('"'):
+        closing_quote = args.find('"', 1)
+        parts = (
+            [args[1:closing_quote], args[closing_quote + 1:].strip()]
+            if closing_quote > 1 and args[closing_quote + 1:].strip() else []
+        )
+    else:
+        parts = args.split(maxsplit=1)
     if len(parts) < 2:
         await _show_usage(ctx.session, "msg")
         return
@@ -2433,7 +2428,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
     "join": ("/join <channel>", "Switch to another chat channel."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
-    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-name-or-dns for a linked node)."),
+    "msg": ("/msg <user> <text>", "Send a one-off private message; quote a user@node name containing spaces."),
     "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),

@@ -13,7 +13,8 @@ from netbbs.link.node_profiles import (
     own_canonical_dns_name,
 )
 from netbbs.managed_dns.state import (
-    RegistrationStatus, set_registered_name, set_registration_status,
+    RegistrationStatus, set_previous_name, set_previous_status, set_registered_name,
+    set_registration_status,
 )
 from netbbs.link.protocol import LinkNode
 from netbbs.link.store import save_peer
@@ -51,6 +52,24 @@ def test_resolver_prefers_dns_and_refuses_ambiguous_friendly_names(tmp_path):
     assert resolve_peer_reference([alice, bob], "two.example.org") is bob
     assert resolve_peer_reference([alice, bob], "The Anchor") == [alice, bob]
     assert resolve_peer_reference([alice, bob], alice.fingerprint[:12]) is alice
+
+
+def test_resolver_preserves_terminal_periods_in_friendly_names(db, tmp_path):
+    dotted = _peer(tmp_path, "dotted", "The Anchor.", "dotted.example.org")
+    plain = _peer(tmp_path, "plain", "The Anchor", "plain.example.org")
+    save_peer(db, dotted)
+    save_peer(db, plain)
+
+    assert resolve_peer_reference([dotted, plain], "The Anchor.") is dotted
+    assert resolve_stored_peer_reference(db, "The Anchor.") == dotted.fingerprint
+
+
+def test_friendly_name_reserves_label_delimiter_and_invisible_controls():
+    from netbbs.link.node_profiles import normalize_friendly_name
+
+    assert normalize_friendly_name("Trusted Node · honest.example.org") is None
+    assert normalize_friendly_name("Anchor\x9b31m") is None
+    assert normalize_friendly_name("Anchor\u202eevil") is None
 
 
 def test_exact_fingerprint_cannot_be_shadowed_by_a_friendly_name(db, tmp_path):
@@ -123,6 +142,15 @@ def test_dns_claim_colliding_with_another_peers_friendly_name_is_security_notice
 def test_pending_initial_managed_name_is_not_advertised_before_publication(db):
     set_registered_name(db, "reserved-name")
     set_registration_status(db, RegistrationStatus.PENDING)
+
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
+
+
+def test_pending_rename_does_not_advertise_an_unpublished_previous_name(db):
+    set_registered_name(db, "replacement")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "also-pending")
+    set_previous_status(db, RegistrationStatus.PENDING)
 
     assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
 

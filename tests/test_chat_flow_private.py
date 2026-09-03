@@ -163,7 +163,7 @@ def test_msg_resolves_a_friendly_node_name_containing_spaces(
     monkeypatch.setattr("netbbs.net.link_direct.send_live_direct_message", fake_send)
     asyncio.run(_run(
         lane, hub, presence, mailbox, channel, alice,
-        ["/msg bob@The Rusty Anchor hello there", "/quit"], link_context=context,
+        ['/msg "bob@The Rusty Anchor" hello there', "/quit"], link_context=context,
     ))
 
     assert sent == [("bob@The Rusty Anchor", "hello there")]

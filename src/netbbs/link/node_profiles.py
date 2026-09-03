@@ -10,9 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address
 import json
+import unicodedata
 
 from netbbs.managed_dns.state import (
-    RegistrationStatus, get_previous_name, get_registered_name, get_registration_status,
+    RegistrationStatus, get_previous_name, get_previous_status, get_registered_name,
+    get_registration_status,
 )
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -56,7 +58,7 @@ def normalize_friendly_name(value: object) -> str | None:
     value = value.strip()
     if not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH:
         return None
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+    if "·" in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
         return None
     return value
 
@@ -82,6 +84,15 @@ def normalize_dns_name(value: object) -> str | None:
     return value
 
 
+def profile_claims_are_canonical(payload: dict) -> bool:
+    friendly_name = payload.get("friendly_name")
+    canonical_dns_name = payload.get("canonical_dns_name")
+    return (
+        (friendly_name is None or normalize_friendly_name(friendly_name) == friendly_name)
+        and (canonical_dns_name is None or normalize_dns_name(canonical_dns_name) == canonical_dns_name)
+    )
+
+
 def identity_for_peer(peer) -> NodeDisplayIdentity:
     if peer is None:
         return NodeDisplayIdentity("", "Unknown linked node", None)
@@ -102,7 +113,10 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
     managed_name = get_registered_name(db)
     status = get_registration_status(db)
     previous_name = get_previous_name(db)
-    if previous_name and status is RegistrationStatus.PENDING:
+    if (
+        previous_name and status is RegistrationStatus.PENDING
+        and get_previous_status(db) is RegistrationStatus.MATURED
+    ):
         return f"{previous_name}.netbbs.org"
     if managed_name and status is RegistrationStatus.MATURED:
         return f"{managed_name}.netbbs.org"
@@ -111,20 +125,21 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
 
 def resolve_peer_reference(peers, reference: str):
     """Resolve DNS, a unique friendly name, or a fingerprint prefix."""
-    needle = reference.strip().lower().rstrip(".")
-    if not needle:
+    name_needle = reference.strip().lower()
+    if not name_needle:
         return []
+    dns_needle = name_needle.rstrip(".")
     values = [peer for peer in peers if peer is not None]
-    exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == needle]
+    exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    exact_dns = [peer for peer in values if identity_for_peer(peer).dns_name == needle]
+    exact_dns = [peer for peer in values if identity_for_peer(peer).dns_name == dns_needle]
     if exact_dns:
         return exact_dns[0] if len(exact_dns) == 1 else exact_dns
-    exact_name = [peer for peer in values if identity_for_peer(peer).friendly_name.lower() == needle]
+    exact_name = [peer for peer in values if identity_for_peer(peer).friendly_name.lower() == name_needle]
     if exact_name:
         return exact_name[0] if len(exact_name) == 1 else exact_name
-    fingerprints = [peer for peer in values if peer.fingerprint.lower().startswith(needle)]
+    fingerprints = [peer for peer in values if peer.fingerprint.lower().startswith(name_needle)]
     return fingerprints[0] if len(fingerprints) == 1 else fingerprints
 
 
@@ -152,23 +167,27 @@ def identity_for_fingerprint(db: Database, fingerprint: str) -> NodeDisplayIdent
 
 def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[str]:
     """Resolve a UI-entered DNS/friendly/technical reference from persisted peers."""
-    needle = reference.strip().lower().rstrip(".")
-    if not needle:
+    name_needle = reference.strip().lower()
+    if not name_needle:
         return []
+    dns_needle = name_needle.rstrip(".")
     identities = [
         _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
         for row in db.connection.execute("SELECT fingerprint, descriptor_json FROM link_peers")
     ]
-    exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == needle]
+    exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    dns_matches = [item.fingerprint for item in identities if item.dns_name == needle]
+    dns_matches = [item.fingerprint for item in identities if item.dns_name == dns_needle]
     if dns_matches:
         return dns_matches[0] if len(dns_matches) == 1 else dns_matches
-    name_matches = [item.fingerprint for item in identities if item.friendly_name.lower() == needle]
+    name_matches = [item.fingerprint for item in identities if item.friendly_name.lower() == name_needle]
     if name_matches:
         return name_matches[0] if len(name_matches) == 1 else name_matches
-    fingerprint_matches = [item.fingerprint for item in identities if item.fingerprint.lower().startswith(needle)]
+    fingerprint_matches = [
+        item.fingerprint for item in identities
+        if item.fingerprint.lower().startswith(name_needle)
+    ]
     return fingerprint_matches[0] if len(fingerprint_matches) == 1 else fingerprint_matches
 
 

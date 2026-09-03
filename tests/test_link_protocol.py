@@ -3445,6 +3445,13 @@ def test_handle_peer_list_refreshes_a_known_peers_newer_verified_descriptor(tmp_
         outgoing_only=True, created_at="2026-09-03T12:00:00+00:00", live_relays=["evil"],
     )
     assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[forged])) == []
+    invalid_profile = bob.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="Trusted · honest.example.org",
+    ).descriptor
+    assert me.handle_peer_list(
+        carol.identity.fingerprint, PeerListMessage(descriptors=[invalid_profile])
+    ) == []
     assert me.peers[bob.identity.fingerprint].descriptor.payload["live_relays"] == ["relay-fp"]
 
 

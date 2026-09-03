@@ -3708,3 +3708,17 @@ Pending managed-DNS replacements are cleaned up with unconditional idempotent
 provider deletion during cancellation and abandonment. A null local publication
 marker cannot prove that the provider mutation never happened because the
 service may have crashed between those two operations.
+
+Friendly node names reserve the UI's middle-dot label delimiter and reject
+Unicode control/format characters, including C1 terminal controls and bidi
+overrides. Apply this canonical profile validation to every authenticated
+descriptor ingress, including verified peer-list refreshes. Resolver input
+normalizes a trailing dot only for DNS comparison, never for friendly-name or
+fingerprint comparison. Spaced `/msg` addresses require explicit double quotes
+around the complete `user@node name` target so message words can never be
+reinterpreted as a longer peer name.
+
+When a managed-DNS rename retry finds its same-target replacement abandoned,
+reactivate that row as pending before rotating and returning its credential.
+During a pending rename, advertise the previous managed name only when its
+saved status proves it had already matured and been published.

@@ -542,6 +542,10 @@ class ManagedDnsServer:
                 if existing_replacement.name != name:
                     return web.json_response({"error": "a rename is already pending"}, status=409)
                 secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
+                replacement_status = existing_replacement.status
+                if existing_replacement.status == "abandoned":
+                    reclaim(self._db, existing_replacement.name, matured=False)
+                    replacement_status = "pending"
                 replace_registration_credential(
                     self._db, existing_replacement.name, hash_credential(secret)
                 )
@@ -549,7 +553,7 @@ class ManagedDnsServer:
                     {
                         "name": existing_replacement.name, "previous_name": current.name,
                         "previous_status": current.status, "credential": secret,
-                        "status": existing_replacement.status,
+                        "status": replacement_status,
                         "created_at": existing_replacement.created_at,
                     },
                     status=201,

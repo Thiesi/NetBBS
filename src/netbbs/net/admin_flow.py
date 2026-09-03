@@ -4303,7 +4303,7 @@ async def _link_status_screen(
             session, "Acknowledge these identity changes and stop repeating their notices?",
             default=False,
         ):
-            for notice in identity_notices:
+            for notice in identity_notices[:5]:
                 await lane.run(dismiss_identity_observation, notice.id)
             await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
 

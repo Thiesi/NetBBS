@@ -15,7 +15,9 @@ import pytest
 
 from services.managed_dns.dns_provider import DnsProviderError, LoggingDnsProvider
 from services.managed_dns.server import ManagedDnsServer
-from services.managed_dns.store import Database, get_registration_by_name, hash_credential
+from services.managed_dns.store import (
+    Database, get_registration_by_name, hash_credential, mark_abandoned,
+)
 
 
 @pytest.fixture
@@ -204,6 +206,30 @@ def test_lost_rename_response_can_be_retried_and_cancelled_with_old_credential(d
     assert cancel_status == 200
     assert cancelled["previous_name"] == "old-name"
     assert get_registration_by_name(db, "new-name") is None
+
+
+def test_lost_rename_retry_reclaims_an_abandoned_replacement(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "new-name", released_at="2026-09-03T12:00:00+00:00")
+            retry_status, retried = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            heartbeat_status, heartbeat_body = await _heartbeat(
+                server, credential=retried["credential"]
+            )
+            return retry_status, retried, heartbeat_status, heartbeat_body
+        finally:
+            await server.stop()
+
+    retry_status, retried, heartbeat_status, heartbeat_body = asyncio.run(scenario())
+    assert retry_status == 201
+    assert retried["status"] == "pending"
+    assert heartbeat_status == 200
+    assert heartbeat_body["name"] == "new-name"
 
 
 class _FailOldNameDeleteProvider(LoggingDnsProvider):
