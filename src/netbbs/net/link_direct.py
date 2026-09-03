@@ -299,12 +299,7 @@ def build_direct_message_deliverer(
         target, live, node_identity, identity_notice = await lane.run(_lookup)
         if target is None or not presence.is_online(target.username):
             return False
-        node_label = (
-            node_identity.label
-            if node_identity.friendly_name != "Unknown linked node"
-            else message.from_node_fingerprint
-        )
-        origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(node_label)}"
+        origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(node_identity.label)}"
         notice = colored(
             f"*** Private message from {origin}: {sanitize_text(message.body)}", fg_color=MUTED_COLOR, bold=True,
         )

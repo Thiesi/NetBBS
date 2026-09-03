@@ -38,8 +38,12 @@ from netbbs.managed_dns.state import (
     get_service_url,
     set_dynamic,
     set_opt_in,
+    get_previous_published,
+    get_published,
     set_previous_name,
+    set_previous_published,
     set_previous_status,
+    set_published,
     set_registered_name,
     set_registration_status,
 )
@@ -234,6 +238,10 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
     save_credential(credential_path_for(lane.path), result.credential)
     await lane.run(set_registered_name, result.name)
     await lane.run(set_registration_status, RegistrationStatus(result.status))
+    # Publication is only ever confirmed by a heartbeat's reported
+    # address -- a reclaim that comes back `matured` may still have had
+    # its republish fail, so the next heartbeat decides.
+    await lane.run(set_published, False)
     await lane.run(set_dynamic, dynamic)
     await lane.run(set_opt_in, OptIn.ACCEPTED)
 
@@ -338,8 +346,10 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     save_credential(primary_path, result.credential)
     await lane.run(set_previous_name, result.previous_name)
     await lane.run(set_previous_status, RegistrationStatus(result.previous_status))
+    await lane.run(set_previous_published, await lane.run(get_published))
     await lane.run(set_registered_name, result.name)
     await lane.run(set_registration_status, RegistrationStatus.PENDING)
+    await lane.run(set_published, False)
     delete_credential(transition_credential_path_for(lane.path))
     await session.write_line(
         colored(
@@ -385,6 +395,8 @@ async def cancel_registration_rename(session: Session, lane: DatabaseLane) -> No
     delete_credential(previous_credential_path_for(lane.path))
     await lane.run(set_registered_name, result.previous_name)
     await lane.run(set_registration_status, RegistrationStatus(result.previous_status) if result.previous_status else old_status)
+    await lane.run(set_published, await lane.run(get_previous_published))
     await lane.run(set_previous_name, None)
     await lane.run(set_previous_status, None)
+    await lane.run(set_previous_published, False)
     await session.write_line(colored(f"Kept {result.previous_name}.netbbs.org; the name change was cancelled.", fg_color=MUTED_COLOR))

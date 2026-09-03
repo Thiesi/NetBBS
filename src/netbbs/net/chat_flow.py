@@ -808,10 +808,7 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
             payload = json.loads(row["envelope_json"])["envelope"]["payload"]
             remote_author = payload["author"]
             fingerprint = remote_author["home_node_fingerprint"]
-            identity = identity_for_fingerprint(db, fingerprint)
-            node_label = (
-                identity.label if identity.friendly_name != "Unknown linked node" else fingerprint
-            )
+            node_label = identity_for_fingerprint(db, fingerprint).label
             return sanitize_text(f"{remote_author['local_user_id']}@{node_label}")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             pass
@@ -2173,7 +2170,10 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
         await ctx.session.write_line(f"{label}{suffix}")
     for label, fingerprint in remote_entries:
         peer = ctx.link_context.link_node.peers.get(fingerprint) if ctx.link_context is not None else None
-        node_name = identity_for_peer(peer).label if peer is not None else None
+        # An authenticated session with no persisted peer record still
+        # has a technical identity -- show it, as the directory and
+        # direct-message paths do, so two such nodes stay distinguishable.
+        node_name = identity_for_peer(peer).label if peer is not None else fingerprint
         node_note = (
             f" (on linked node {sanitize_text(node_name)})" if node_name else " (on a linked node)"
         )

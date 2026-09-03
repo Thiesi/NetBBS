@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from services.managed_dns.store import (
+    cancel_pending_replacement,
     Database,
     MIGRATIONS,
     count_registrations,
@@ -348,4 +349,49 @@ def test_delete_registration_removes_the_row(tmp_path):
     _insert(db)
     delete_registration(db, "myboard")
     assert get_registration_by_name(db, "myboard") is None
+    db.close()
+
+
+def test_cancel_pending_replacement_revives_the_previous_row_in_the_same_transaction(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="old-name")
+    _insert(db, name="new-name", replaces_name="old-name")
+    mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+
+    assert cancel_pending_replacement(
+        db, "new-name", "old-name", revive_previous=True, contact_at="2026-09-04T00:00:00+00:00",
+    )
+
+    assert get_registration_by_name(db, "new-name") is None
+    revived = get_registration_by_name(db, "old-name")
+    assert revived.status == "pending"  # never matured, so back into the age gate
+    assert revived.released_at is None
+    assert revived.last_contact_at == revived.contact_started_at == "2026-09-04T00:00:00+00:00"
+    assert not db.connection.in_transaction
+    db.close()
+
+
+def test_cancel_pending_replacement_restores_matured_for_a_previously_live_row(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="old-name")
+    mark_matured(db, "old-name", matured_at="2026-09-02T01:00:00+00:00")
+    _insert(db, name="new-name", replaces_name="old-name")
+    mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+
+    assert cancel_pending_replacement(
+        db, "new-name", "old-name", revive_previous=True, contact_at="2026-09-04T00:00:00+00:00",
+    )
+    assert get_registration_by_name(db, "old-name").status == "matured"
+    db.close()
+
+
+def test_cancel_pending_replacement_changes_nothing_when_no_rename_is_pending(tmp_path):
+    db = Database(tmp_path / "managed_dns.db")
+    _insert(db, name="old-name")
+    mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+
+    assert not cancel_pending_replacement(
+        db, "never-reserved", "old-name", revive_previous=True, contact_at="2026-09-04T00:00:00+00:00",
+    )
+    assert get_registration_by_name(db, "old-name").status == "abandoned"
     db.close()

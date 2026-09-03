@@ -330,10 +330,7 @@ async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str
     if "@" not in message.sender_label:
         return message.sender_label
     user_id, fingerprint = message.sender_label.split("@", 1)
-    identity = await lane.run(identity_for_fingerprint, fingerprint)
-    node_label = (
-        identity.label if identity.friendly_name != "Unknown linked node" else fingerprint
-    )
+    node_label = (await lane.run(identity_for_fingerprint, fingerprint)).label
     return f"{user_id}@{node_label}"
 
 

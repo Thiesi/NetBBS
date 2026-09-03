@@ -44,6 +44,7 @@ from netbbs.communities import (
     get_effective_min_write_level,
     get_effective_name_requirement,
 )
+from netbbs.link.node_profiles import present_link_author_label
 from netbbs.link.boards import (
     LinkContext,
     queue_board_post_edit_if_linked,
@@ -912,12 +913,17 @@ def _author_display_name(db: Database, post: Post, *, name_requirement: str | No
     *current* `display_name` there for the ordinary case would quietly
     break that property, since `display_name` (unlike `username`) is
     actually mutable.
+
+    The one resolution that *is* applied: a Link-carried post's
+    `user@<home-node-fingerprint>` label is presented by the home node's
+    current friendly identity (`present_link_author_label`) -- the
+    fingerprint stays in persistence, the presentation follows renames.
     """
     if name_requirement == "verified_and_displayed":
         author = get_user_by_id(db, post.author_user_id)
         if author is not None:
             return format_name_for_resource(db, author, name_requirement=name_requirement)
-    return sanitize_text(post.author_label)
+    return sanitize_text(present_link_author_label(db, post.author_label))
 
 
 def _render_quoted_body(body: str, width: int) -> str:

@@ -60,6 +60,8 @@ NODE_FINGERPRINT_CONFIG_KEY = "managed_dns_node_fingerprint"
 SERVICE_URL_CONFIG_KEY = "managed_dns_service_url"
 PREVIOUS_NAME_CONFIG_KEY = "managed_dns_previous_name"
 PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
+PUBLISHED_CONFIG_KEY = "managed_dns_published"
+PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
 
 
 def get_opt_in(db: Database) -> OptIn:
@@ -147,6 +149,29 @@ def get_previous_status(db: Database) -> RegistrationStatus | None:
 
 def set_previous_status(db: Database, status: RegistrationStatus | None) -> None:
     set_config(db, PREVIOUS_STATUS_CONFIG_KEY, status.value if status else "")
+
+
+def get_published(db: Database) -> bool:
+    """Whether the service last confirmed a published DNS record for the
+    registered name (a heartbeat reporting a `last_known_address`).
+    Distinct from `matured`: the service matures a registration before
+    its first provider upsert, so a matured name can still have no
+    record -- and must not be advertised as this node's canonical DNS
+    name until it does (`netbbs.link.node_profiles.own_canonical_dns_name`)."""
+    return get_config(db, PUBLISHED_CONFIG_KEY) == "1"
+
+
+def set_published(db: Database, published: bool) -> None:
+    set_config(db, PUBLISHED_CONFIG_KEY, "1" if published else "0")
+
+
+def get_previous_published(db: Database) -> bool:
+    """`get_published` for the previous name while a rename is pending."""
+    return get_config(db, PREVIOUS_PUBLISHED_CONFIG_KEY) == "1"
+
+
+def set_previous_published(db: Database, published: bool) -> None:
+    set_config(db, PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if published else "0")
 
 
 def get_registration_status(db: Database) -> RegistrationStatus:

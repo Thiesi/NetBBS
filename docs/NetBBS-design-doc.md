@@ -505,10 +505,18 @@ unique routing names, but neither a friendly name nor DNS is cryptographic
 identity authority.
 
 The underlying address and every protocol/persistence relationship remain
-`user@node-fingerprint`. A full fingerprint is available as **Technical
+`user@node-fingerprint`. Durable linked content -- channel scrollback, mail,
+carried board posts, fetched Link files -- therefore persists the fingerprint
+and resolves the home node's *current* friendly identity when rendered, so a
+benign rename is followed and nothing stored has to be rewritten. A node with
+no authenticated profile (one that has never been admitted, or is known only by
+an administratively configured fingerprint) is shown by that fingerprint rather
+than a shared placeholder. A full fingerprint is available as **Technical
 identity** in the relevant SysOp detail view and remains accepted as an
 advanced/backward-compatible input. Friendly-name resolution must be unique;
-an ambiguous name is refused with a request to use the DNS name.
+an ambiguous name is refused with a request to use the DNS name. Friendly
+names are compared in one Unicode normalization form (NFC), so canonically
+equivalent spellings are one name, never two claims.
 
 Peers retain authenticated observations of all three values. A friendly-name
 change under the same fingerprint is an informational continuity notice. A DNS

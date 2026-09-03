@@ -187,8 +187,7 @@ def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
 
 
 def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
-    identity = identity_for_fingerprint(db, entry.node_fingerprint)
-    return identity.label if identity.friendly_name != "Unknown linked node" else entry.node_fingerprint
+    return identity_for_fingerprint(db, entry.node_fingerprint).label
 
 
 def _remote_who_entries(link_context: LinkContext | None) -> list[_RemoteWhoEntry]:

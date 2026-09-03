@@ -77,7 +77,7 @@ from netbbs.files.categories import (
 )
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
-from netbbs.link.node_profiles import identity_for_peer
+from netbbs.link.node_profiles import identity_for_peer, present_link_author_label
 from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
@@ -964,12 +964,15 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
     plain historical `uploader_label` unchanged, for the identical
     reason (a mutable `display_name` must not retroactively rewrite an
     already-uploaded entry's attribution). Still `db`-first, unchanged
-    -- see this module's own docstring for why."""
+    -- see this module's own docstring for why. A fetched Link file's
+    `remote@<origin-fingerprint>` label is presented by the origin
+    node's current friendly identity, exactly as a carried post's
+    author is."""
     if name_requirement == "verified_and_displayed":
         uploader = get_user_by_id(db, entry.uploader_user_id)
         if uploader is not None:
             return format_name_for_resource(db, uploader, name_requirement=name_requirement)
-    return sanitize_text(entry.uploader_label)
+    return sanitize_text(present_link_author_label(db, entry.uploader_label))
 
 
 async def _render_file_page(

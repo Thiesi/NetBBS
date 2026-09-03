@@ -30,7 +30,7 @@ from netbbs.__main__ import (
 )
 from netbbs.net.shutdown import SequenceScheduler
 from netbbs.auth.users import SYSOP_LEVEL, create_user
-from netbbs.config import set_node_display_name
+from netbbs.config import get_node_display_name, set_config, set_node_display_name
 from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.enforcement import ensure_node_subject
 from netbbs.link.node_identity import bootstrap_node_identity
@@ -1336,6 +1336,45 @@ def test_link_enabled_with_placeholder_display_name_raises_startup_error(tmp_pat
             await run(config, shutdown_event=asyncio.Event())
 
     asyncio.run(scenario())
+
+
+def test_link_enabled_with_a_legacy_invalid_display_name_raises_startup_error(tmp_path):
+    """A name persisted before setter validation existed never went
+    through it. Link would sign and advertise it while every updated
+    peer refuses the claim -- so it is refused here, naming the fix."""
+    config = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 0),
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+    )
+    db = Database(config.db_path)
+    set_config(db, "node_display_name", "Legacy · Node")  # bypasses today's setter, as an old release did
+    db.close()
+
+    async def scenario():
+        with pytest.raises(StartupError, match="cannot be advertised"):
+            await run(config, shutdown_event=asyncio.Event())
+
+    asyncio.run(scenario())
+
+
+def test_link_enabled_canonicalizes_a_legacy_display_name_in_place(tmp_path):
+    """A persisted name that only needs its Unicode form fixed is
+    migrated rather than refused, so an upgrade never strands a node."""
+    config = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 0),
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+    )
+    db = Database(config.db_path)
+    set_config(db, "node_display_name", "Cafe\u0301 Node")
+    db.close()
+
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+    db = Database(config.db_path)
+    assert get_node_display_name(db) == "Caf\u00e9 Node"
+    db.close()
 
 
 def test_placeholder_display_name_is_fine_for_a_local_only_node(tmp_path):

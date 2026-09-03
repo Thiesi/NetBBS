@@ -345,14 +345,42 @@ def complete_rename(db: Database, new_name: str, old_name: str, *, matured_at: s
         )
 
 
-def delete_pending_replacement(db: Database, name: str) -> bool:
-    cursor = db.connection.execute(
-        "DELETE FROM registrations WHERE name = ? AND status IN ('pending', 'abandoned') "
-        "AND replaces_name IS NOT NULL",
-        (name,),
-    )
-    db.connection.commit()
-    return cursor.rowcount == 1
+def cancel_pending_replacement(
+    db: Database, name: str, previous_name: str, *, revive_previous: bool, contact_at: str,
+) -> bool:
+    """Cancel a rename in one transaction: remove the replacement row
+    and, when `revive_previous` is set, reactivate the `abandoned`
+    previous registration in the same commit -- never one without the
+    other, so a crash between the two can't leave a node with no active
+    row and no credential the service still honours (the replacement's
+    row gone, the previous one still inactive).
+
+    The revived row restores whichever status it actually had before it
+    was abandoned (`matured_at IS NOT NULL`, the same rule `reclaim`
+    follows) -- a registration abandoned while still `pending` re-enters
+    the age gate rather than being promoted straight to `matured`. Its
+    contact window restarts at `contact_at`, as `services.managed_dns.
+    server._reclaim` restarts it for an abandoned reclaim.
+
+    Returns whether the replacement row was actually removed; `False`
+    means the rename was no longer pending and nothing changed."""
+    with db.connection:
+        cursor = db.connection.execute(
+            "DELETE FROM registrations WHERE name = ? AND status IN ('pending', 'abandoned') "
+            "AND replaces_name IS NOT NULL",
+            (name,),
+        )
+        if cursor.rowcount != 1:
+            return False
+        if revive_previous:
+            db.connection.execute(
+                "UPDATE registrations SET "
+                "status = CASE WHEN matured_at IS NULL THEN 'pending' ELSE 'matured' END, "
+                "released_at = NULL, last_contact_at = ?, contact_started_at = ? "
+                "WHERE name = ? AND status = 'abandoned'",
+                (contact_at, contact_at, previous_name),
+            )
+    return True
 
 
 def reclaim(

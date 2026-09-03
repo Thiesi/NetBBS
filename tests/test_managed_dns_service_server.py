@@ -16,7 +16,8 @@ import pytest
 from services.managed_dns.dns_provider import DnsProviderError, LoggingDnsProvider
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import (
-    Database, get_registration_by_name, hash_credential, mark_abandoned,
+    Database, get_registration_by_credential_hash, get_registration_by_name, hash_credential,
+    mark_abandoned,
 )
 
 
@@ -250,13 +251,48 @@ def test_abandoned_rename_retry_obeys_the_active_registration_cap(db):
     assert get_registration_by_name(db, "new-name").status == "abandoned"
 
 
-def test_cancel_rename_reactivates_an_abandoned_previous_name(db):
+def test_cancel_rename_revives_a_never_matured_previous_name_into_the_age_gate(db):
+    """A previous name abandoned while still `pending` comes back
+    `pending`: cancellation restores the real maturation history rather
+    than promoting a name that never cleared the minimum-contact age."""
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
     async def scenario():
-        server = await _start_server(db)
+        server = await _start_server(db, clock=clock, min_age_seconds=60)
         try:
             original = await _register(server, name="old-name")
             _, replacement = await _rename(server, credential=original["credential"], name="new-name")
             mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            cancelled = await _cancel_rename(server, credential=replacement["credential"])
+            first = await _heartbeat(server, credential=original["credential"])
+            clock.now += timedelta(seconds=61)
+            second = await _heartbeat(server, credential=original["credential"])
+            return cancelled, first, second
+        finally:
+            await server.stop()
+
+    (cancel_status, body), (_, first_body), (_, second_body) = asyncio.run(scenario())
+    assert cancel_status == 200
+    assert body["previous_status"] == "pending"
+    assert first_body["name"] == "old-name"
+    assert first_body["status"] == "pending"
+    assert second_body["status"] == "matured"
+
+
+def test_cancel_rename_revives_a_matured_previous_name_and_republishes_it(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+    provider = LoggingDnsProvider()
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, min_age_seconds=60, dns_provider=provider)
+        try:
+            original = await _register(server, name="old-name")
+            await _heartbeat(server, credential=original["credential"])
+            clock.now += timedelta(seconds=61)
+            await _heartbeat(server, credential=original["credential"])
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            provider.records.pop("old-name.netbbs.org.", None)  # what the sweep does on abandonment
             cancelled = await _cancel_rename(server, credential=replacement["credential"])
             heartbeat_result = await _heartbeat(server, credential=original["credential"])
             return cancelled, heartbeat_result
@@ -268,6 +304,94 @@ def test_cancel_rename_reactivates_an_abandoned_previous_name(db):
     assert body["previous_status"] == "matured"
     assert heartbeat_body["name"] == "old-name"
     assert get_registration_by_name(db, "old-name").status == "matured"
+    assert "old-name.netbbs.org." in provider.records
+
+
+def test_cancel_rename_reviving_an_abandoned_name_obeys_the_cumulative_cap(db):
+    """Both sides abandoned means neither counted; other registrations
+    may have filled the service since, so reviving the previous row is
+    admission of one more active registration and is capped like one."""
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=2)
+        try:
+            original = await _register(server, name="old-name", node_fingerprint="fp-1")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            mark_abandoned(db, "new-name", released_at="2026-09-03T12:00:00+00:00")
+            await _register(server, name="second", node_fingerprint="fp-2")
+            await _register(server, name="third", node_fingerprint="fp-3")
+            return await _cancel_rename(server, credential=replacement["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "capacity" in body["error"]
+    assert get_registration_by_name(db, "old-name").status == "abandoned"
+    assert get_registration_by_name(db, "new-name").status == "abandoned"
+
+
+def test_cancel_rename_reviving_an_abandoned_name_obeys_the_per_node_cap(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name", node_fingerprint="fp-1")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            mark_abandoned(db, "new-name", released_at="2026-09-03T12:00:00+00:00")
+            await _register(server, name="fresh-name", node_fingerprint="fp-1")
+            return await _cancel_rename(server, credential=replacement["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 403
+    assert "already has an active" in body["error"]
+    assert get_registration_by_name(db, "old-name").status == "abandoned"
+
+
+def test_cancel_rename_swapping_a_pending_replacement_is_capacity_neutral(db):
+    """The still-active pending replacement leaves as the previous row
+    returns: the count never rises, so a full service must not refuse."""
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=2)
+        try:
+            original = await _register(server, name="old-name", node_fingerprint="fp-1")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            await _register(server, name="second", node_fingerprint="fp-2")
+            return await _cancel_rename(server, credential=replacement["credential"])
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 200
+    assert body["previous_status"] == "pending"
+    assert get_registration_by_name(db, "new-name") is None
+    assert get_registration_by_name(db, "old-name").status == "pending"
+
+
+def test_cancel_rename_removes_the_replacement_and_revives_the_previous_row_together(db):
+    """Removing the replacement and reviving the previous row commit as
+    one transaction -- after cancellation the previous credential is the
+    one the service honours, and the replacement's is gone, never a state
+    where neither authenticates."""
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            _, replacement = await _rename(server, credential=original["credential"], name="new-name")
+            mark_abandoned(db, "old-name", released_at="2026-09-03T12:00:00+00:00")
+            await _cancel_rename(server, credential=replacement["credential"])
+            return original["credential"], replacement["credential"]
+        finally:
+            await server.stop()
+
+    original_credential, replacement_credential = asyncio.run(scenario())
+    assert get_registration_by_credential_hash(db, hash_credential(replacement_credential)) is None
+    revived = get_registration_by_credential_hash(db, hash_credential(original_credential))
+    assert revived is not None and revived.status == "pending" and revived.released_at is None
+    assert not db.connection.in_transaction
 
 
 class _FailOldNameDeleteProvider(LoggingDnsProvider):

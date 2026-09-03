@@ -14,8 +14,8 @@ import re
 import unicodedata
 
 from netbbs.managed_dns.state import (
-    RegistrationStatus, get_previous_name, get_previous_status, get_registered_name,
-    get_registration_status,
+    RegistrationStatus, get_previous_name, get_previous_published, get_previous_status,
+    get_published, get_registered_name, get_registration_status,
 )
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -26,6 +26,8 @@ MAX_CANONICAL_DNS_NAME_LENGTH = 253
 MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
 MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
 _NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
+UNKNOWN_NODE_NAME = "Unknown linked node"
+UNNAMED_NODE_NAME = "Unnamed linked node"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,13 @@ class NodeDisplayIdentity:
 
     @property
     def label(self) -> str:
+        """The caller-facing presentation. A node with no authenticated
+        profile at all (an administratively configured fingerprint this
+        node has never admitted) has only its technical identity, so the
+        fingerprint is shown rather than a placeholder that would make
+        every such node look the same."""
+        if self.friendly_name == UNKNOWN_NODE_NAME and self.fingerprint:
+            return self.fingerprint
         return f"{self.friendly_name} · {self.dns_name}" if self.dns_name else self.friendly_name
 
 
@@ -54,10 +63,22 @@ class NodeIdentityObservation:
     dismissed_at: str | None
 
 
+def name_key(value: str) -> str:
+    """Comparison key for a friendly or DNS name: one Unicode form (NFC)
+    and one case, so a precomposed and a combining-accent spelling of the
+    same name -- identical on every terminal -- can never be two
+    distinct claims."""
+    return unicodedata.normalize("NFC", value).lower()
+
+
 def normalize_friendly_name(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    value = value.strip()
+    # NFC is the canonical form: a peer's claim must arrive already in
+    # it (`profile_claims_are_canonical`) and the local setter stores
+    # it (`netbbs.config.canonical_node_display_name`), so canonically
+    # equivalent spellings compare equal everywhere below.
+    value = unicodedata.normalize("NFC", value.strip())
     if not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH:
         return None
     if "·" in value or '"' in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
@@ -101,9 +122,9 @@ def is_node_fingerprint(value: str) -> bool:
 
 def identity_for_peer(peer) -> NodeDisplayIdentity:
     if peer is None:
-        return NodeDisplayIdentity("", "Unknown linked node", None)
+        return NodeDisplayIdentity("", UNKNOWN_NODE_NAME, None)
     if peer.descriptor is None:
-        return NodeDisplayIdentity(peer.fingerprint, "Unnamed linked node", None)
+        return NodeDisplayIdentity(peer.fingerprint, UNNAMED_NODE_NAME, None)
     payload = peer.descriptor.payload
     friendly = normalize_friendly_name(payload.get("friendly_name"))
     dns_name = normalize_dns_name(payload.get("canonical_dns_name"))
@@ -112,26 +133,33 @@ def identity_for_peer(peer) -> NodeDisplayIdentity:
             dns_name = normalize_dns_name(address.get("address")) if isinstance(address, dict) else None
             if dns_name:
                 break
-    return NodeDisplayIdentity(peer.fingerprint, friendly or "Unnamed linked node", dns_name)
+    return NodeDisplayIdentity(peer.fingerprint, friendly or UNNAMED_NODE_NAME, dns_name)
 
 
 def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | None:
+    """The DNS name this node advertises as its own. A managed name is
+    claimed only once the service has confirmed a published record for
+    it (`matured` alone is not enough: the service matures a
+    registration *before* its first provider upsert, and a failed
+    upsert leaves it matured with no record) -- until then the
+    configured host stays advertised rather than being replaced by a
+    name nobody can resolve yet."""
     managed_name = get_registered_name(db)
     status = get_registration_status(db)
     previous_name = get_previous_name(db)
     if (
         previous_name and status is RegistrationStatus.PENDING
-        and get_previous_status(db) is RegistrationStatus.MATURED
+        and get_previous_status(db) is RegistrationStatus.MATURED and get_previous_published(db)
     ):
         return f"{previous_name}.netbbs.org"
-    if managed_name and status is RegistrationStatus.MATURED:
+    if managed_name and status is RegistrationStatus.MATURED and get_published(db):
         return f"{managed_name}.netbbs.org"
     return normalize_dns_name(advertised_host)
 
 
 def resolve_peer_reference(peers, reference: str):
     """Resolve DNS, a unique friendly name, or a fingerprint prefix."""
-    name_needle = reference.strip().lower()
+    name_needle = name_key(reference.strip())
     if not name_needle:
         return []
     dns_needle = name_needle.rstrip(".")
@@ -142,7 +170,7 @@ def resolve_peer_reference(peers, reference: str):
     exact_dns = [peer for peer in values if identity_for_peer(peer).dns_name == dns_needle]
     if exact_dns:
         return exact_dns[0] if len(exact_dns) == 1 else exact_dns
-    exact_name = [peer for peer in values if identity_for_peer(peer).friendly_name.lower() == name_needle]
+    exact_name = [peer for peer in values if name_key(identity_for_peer(peer).friendly_name) == name_needle]
     if exact_name:
         return exact_name[0] if len(exact_name) == 1 else exact_name
     fingerprints = [peer for peer in values if peer.fingerprint.lower().startswith(name_needle)]
@@ -152,7 +180,7 @@ def resolve_peer_reference(peers, reference: str):
 def _identity_from_descriptor_json(fingerprint: str, raw: str) -> NodeDisplayIdentity:
     data = json.loads(raw)
     payload = data.get("envelope", {}).get("payload", {})
-    friendly = normalize_friendly_name(payload.get("friendly_name")) or "Unnamed linked node"
+    friendly = normalize_friendly_name(payload.get("friendly_name")) or UNNAMED_NODE_NAME
     dns_name = normalize_dns_name(payload.get("canonical_dns_name"))
     if dns_name is None:
         for address in payload.get("addresses") or ():
@@ -167,13 +195,27 @@ def identity_for_fingerprint(db: Database, fingerprint: str) -> NodeDisplayIdent
         "SELECT descriptor_json FROM link_peers WHERE fingerprint = ?", (fingerprint,)
     ).fetchone()
     if row is None:
-        return NodeDisplayIdentity(fingerprint, "Unknown linked node", None)
+        return NodeDisplayIdentity(fingerprint, UNKNOWN_NODE_NAME, None)
     return _identity_from_descriptor_json(fingerprint, row["descriptor_json"])
+
+
+def present_link_author_label(db: Database, label: str) -> str:
+    """Render a persisted `user@<home-node-fingerprint>` label by its home
+    node's *current* friendly identity. Persistence keeps the technical
+    identity (design doc §4.4) -- a carried board post or fetched Link
+    file must still read correctly after its home node renames -- so the
+    friendly presentation is resolved at render time, never stored. Any
+    other label (a local account, or a suffix that isn't a complete node
+    fingerprint) is returned unchanged."""
+    user_id, separator, node = label.rpartition("@")
+    if not separator or not is_node_fingerprint(node):
+        return label
+    return f"{user_id}@{identity_for_fingerprint(db, node).label}"
 
 
 def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[str]:
     """Resolve a UI-entered DNS/friendly/technical reference from persisted peers."""
-    name_needle = reference.strip().lower()
+    name_needle = name_key(reference.strip())
     if not name_needle:
         return []
     dns_needle = name_needle.rstrip(".")
@@ -187,7 +229,7 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
     dns_matches = [item.fingerprint for item in identities if item.dns_name == dns_needle]
     if dns_matches:
         return dns_matches[0] if len(dns_matches) == 1 else dns_matches
-    name_matches = [item.fingerprint for item in identities if item.friendly_name.lower() == name_needle]
+    name_matches = [item.fingerprint for item in identities if name_key(item.friendly_name) == name_needle]
     if name_matches:
         return name_matches[0] if len(name_matches) == 1 else name_matches
     fingerprint_matches = [
@@ -221,8 +263,8 @@ def record_peer_identity_observation(db: Database, peer) -> None:
     previous_dns = previous.dns_name if previous else None
     collision = None
     current_claims = {
-        value.lower() for value in (current.friendly_name, current.dns_name)
-        if value and value != "Unnamed linked node"
+        name_key(value) for value in (current.friendly_name, current.dns_name)
+        if value and value != UNNAMED_NODE_NAME
     }
     for row in db.connection.execute(
         "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
@@ -230,8 +272,8 @@ def record_peer_identity_observation(db: Database, peer) -> None:
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
         known_claims = {
-            value.lower() for value in (known.friendly_name, known.dns_name)
-            if value and value != "Unnamed linked node"
+            name_key(value) for value in (known.friendly_name, known.dns_name)
+            if value and value != UNNAMED_NODE_NAME
         }
         if current_claims & known_claims:
             collision = known
@@ -252,10 +294,10 @@ def record_peer_identity_observation(db: Database, peer) -> None:
             (peer.fingerprint,),
         ):
             historical_claims = {
-                value.lower() for value in (
+                name_key(value) for value in (
                     row["friendly_name"], row["previous_friendly_name"],
                     row["canonical_dns_name"], row["previous_dns_name"],
-                ) if value and value != "Unnamed linked node"
+                ) if value and value != UNNAMED_NODE_NAME
             }
             matched_claims = current_claims & historical_claims
             if matched_claims:
@@ -263,10 +305,10 @@ def record_peer_identity_observation(db: Database, peer) -> None:
                 collision = NodeDisplayIdentity(
                     row["node_fingerprint"],
                     current.friendly_name
-                    if current.friendly_name.lower() == matched_claim
-                    else row["friendly_name"] or row["previous_friendly_name"] or "Unknown linked node",
+                    if name_key(current.friendly_name) == matched_claim
+                    else row["friendly_name"] or row["previous_friendly_name"] or UNKNOWN_NODE_NAME,
                     current.dns_name
-                    if current.dns_name and current.dns_name.lower() == matched_claim
+                    if current.dns_name and name_key(current.dns_name) == matched_claim
                     else row["canonical_dns_name"] or row["previous_dns_name"],
                 )
                 break

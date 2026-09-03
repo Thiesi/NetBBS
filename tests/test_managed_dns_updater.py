@@ -20,7 +20,9 @@ from netbbs.managed_dns.state import (
     RegistrationStatus,
     get_last_contact_at,
     get_previous_name,
+    get_previous_published,
     get_previous_status,
+    get_published,
     get_registered_name,
     get_registration_status,
     set_node_fingerprint,
@@ -323,4 +325,42 @@ def test_updater_logs_and_continues_on_an_unreachable_service(tmp_path):
     db, sleep_calls = asyncio.run(scenario())
     assert get_last_contact_at(db) is None  # the failed attempt never updated local state
     assert sleep_calls == [900.0]  # the loop kept going, not crashed
+    db.close()
+
+
+def test_updater_records_publication_only_when_the_service_reports_an_address(tmp_path):
+    """`matured` is not "published": the service matures a registration
+    before its first provider upsert. Only a reported address confirms a
+    record exists, for the registered name and for a pending rename's
+    previous name alike."""
+    from netbbs.managed_dns.client import HeartbeatResult
+    from netbbs.managed_dns.updater import _apply_heartbeat_result
+
+    db = Database(tmp_path / "node.db")
+    _apply_heartbeat_result(
+        db, HeartbeatResult("myboard", "matured", None), previous_result=None, has_previous_credential=False,
+    )
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert not get_published(db)
+
+    _apply_heartbeat_result(
+        db, HeartbeatResult("myboard", "matured", "127.0.0.1"), previous_result=None, has_previous_credential=False,
+    )
+    assert get_published(db)
+
+    _apply_heartbeat_result(
+        db,
+        HeartbeatResult("new-name", "pending", None, "myboard"),
+        previous_result=HeartbeatResult("myboard", "matured", "127.0.0.1"),
+        has_previous_credential=True,
+    )
+    assert not get_published(db)
+    assert get_previous_status(db) is RegistrationStatus.MATURED
+    assert get_previous_published(db)
+
+    _apply_heartbeat_result(
+        db, HeartbeatResult("new-name", "matured", "127.0.0.1"), previous_result=None, has_previous_credential=True,
+    )
+    assert get_published(db)
+    assert not get_previous_published(db)
     db.close()

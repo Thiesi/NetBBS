@@ -185,6 +185,34 @@ def _build_own_hello_provider(
     return _provide
 
 
+def _validate_persisted_node_display_name(db: Database) -> None:
+    """A display name persisted by an older release never went through
+    today's `set_node_display_name` validation, yet Link signs and
+    advertises it -- and every updated peer refuses a non-canonical
+    claim, which would break Link with no local explanation. So, before
+    Link starts: a name that only needs canonicalizing (Unicode form,
+    surrounding whitespace) is migrated in place and logged; one that
+    can't be (a reserved or invisible character) is refused here, with
+    the fix named, the same way the placeholder name is."""
+    from netbbs.config import canonical_node_display_name, get_node_display_name, set_node_display_name
+
+    persisted = get_node_display_name(db)
+    try:
+        canonical = canonical_node_display_name(persisted)
+    except ValueError as exc:
+        raise StartupError(
+            f"NetBBS Link is enabled but this node's display name {persisted!r} cannot be "
+            f"advertised to other nodes ({exc}). Set a new one first (SysOp console: Settings > "
+            "Node name, reachable offline via `python -m netbbs.admin`), then start again."
+        ) from exc
+    if canonical != persisted:
+        set_node_display_name(db, canonical)
+        _logger.info(
+            "Canonicalized this node's persisted display name for NetBBS Link (%r -> %r)",
+            persisted, canonical,
+        )
+
+
 async def _start_servers(
     config: NodeConfig,
     db: Database,
@@ -800,6 +828,8 @@ async def run(
                 "Node name, reachable offline via `python -m netbbs.admin`), then start "
                 "again. A node that doesn't use Link needs no name."
             )
+        if config.link.enabled:
+            _validate_persisted_node_display_name(db)
 
         # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs

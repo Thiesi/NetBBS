@@ -59,7 +59,7 @@ from services.managed_dns.store import (
     complete_rename,
     delete_expired_registrations,
     delete_registration,
-    delete_pending_replacement,
+    cancel_pending_replacement,
     get_registration_by_credential_hash,
     get_registration_by_name,
     get_replacement_for_name,
@@ -620,16 +620,56 @@ class ManagedDnsServer:
             previous = get_registration_by_name(self._db, previous_name)
             if previous is None:
                 return web.json_response({"error": "previous registration no longer exists"}, status=409)
+            revive_previous = previous.status == "abandoned"
+            if revive_previous:
+                # Swapping a still-active pending replacement for its
+                # previous row is capacity-neutral. Reviving an abandoned
+                # previous row behind an *abandoned* replacement is not:
+                # neither side counted while both were inactive, so this
+                # is admission of one more active registration and gets
+                # the same per-node and service-wide checks as any other.
+                replacement_active = 1 if replacement.status in _ACTIVE_STATUSES else 0
+                active_for_node = count_registrations_for_node(
+                    self._db, previous.node_fingerprint, statuses=_ACTIVE_STATUSES
+                )
+                if active_for_node - replacement_active >= _MAX_REGISTRATIONS_PER_NODE:
+                    return web.json_response(
+                        {"error": "this node already has an active managed-DNS registration"}, status=403
+                    )
+                if (
+                    count_registrations(self._db, statuses=_ACTIVE_STATUSES) - replacement_active
+                    >= self._cumulative_cap
+                ):
+                    return web.json_response(
+                        {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                    )
             if not await self._delete_record(replacement.name):
                 return web.json_response(
                     {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
                 )
-            if not delete_pending_replacement(self._db, replacement.name):
+            now_iso = self._clock().isoformat()
+            if not cancel_pending_replacement(
+                self._db, replacement.name, previous_name,
+                revive_previous=revive_previous, contact_at=now_iso,
+            ):
                 return web.json_response({"error": "rename is no longer pending"}, status=409)
             previous_status = previous.status
-            if previous_status == "abandoned":
-                reclaim(self._db, previous_name, matured=True)
-                previous_status = "matured"
+            if revive_previous:
+                # The row keeps its real maturation history: abandoned
+                # while still pending means back into the age gate, not
+                # a promotion past it.
+                previous_status = "matured" if previous.matured_at is not None else "pending"
+                if previous_status == "matured":
+                    # Same shape as `_reclaim`: a revived live name needs
+                    # its record back now (the sweep deleted it on
+                    # abandonment); on failure, clear the stale address
+                    # so the next heartbeat republishes.
+                    observed_address = self._observed_address(request)
+                    if not (
+                        observed_address
+                        and await self._best_effort_publish(previous_name, observed_address)
+                    ):
+                        clear_last_known_address(self._db, previous_name)
             return web.json_response(
                 {
                     "name": replacement.name, "previous_name": previous_name,

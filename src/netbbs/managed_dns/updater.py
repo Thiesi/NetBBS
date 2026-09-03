@@ -35,7 +35,9 @@ from netbbs.managed_dns.state import (
     get_service_url,
     set_last_contact_at,
     set_previous_name,
+    set_previous_published,
     set_previous_status,
+    set_published,
     set_registered_name,
     set_registration_status,
 )
@@ -140,6 +142,9 @@ def _apply_heartbeat_result(
     """Apply authoritative service state and repair an interrupted local rename."""
     set_registered_name(db, result.name)
     set_registration_status(db, RegistrationStatus(result.status))
+    # A reported address is the service's confirmation that a record is
+    # actually published; `matured` alone is not (see state.get_published).
+    set_published(db, result.last_known_address is not None)
     set_last_contact_at(db, utc_now_iso())
 
     previous_name = result.previous_name
@@ -149,16 +154,19 @@ def _apply_heartbeat_result(
     if result.status == RegistrationStatus.MATURED.value:
         set_previous_name(db, None)
         set_previous_status(db, None)
+        set_previous_published(db, False)
         if has_previous_credential:
             delete_credential(previous_credential_path_for(db.path))
     elif previous_name is not None:
         set_previous_name(db, previous_name)
         if previous_result is not None:
             set_previous_status(db, RegistrationStatus(previous_result.status))
+            set_previous_published(db, previous_result.last_known_address is not None)
     elif has_previous_credential:
         # The file can be left behind if a crash happens after copying the old
         # credential but before installing a replacement. Both heartbeats then
         # authenticate the same registration, so the extra copy is redundant.
         set_previous_name(db, None)
         set_previous_status(db, None)
+        set_previous_published(db, False)
         delete_credential(previous_credential_path_for(db.path))

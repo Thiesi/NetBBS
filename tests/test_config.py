@@ -11,6 +11,8 @@ from netbbs.config import (
     set_config,
     set_invitation_expiry_days,
     set_max_upload_bytes,
+    canonical_node_display_name,
+    get_node_display_name,
     set_node_display_name,
 )
 from netbbs.storage.database import Database
@@ -117,4 +119,14 @@ def test_set_invitation_expiry_days_rejects_non_positive(tmp_path):
         set_invitation_expiry_days(db, 0)
     with pytest.raises(ValueError):
         set_invitation_expiry_days(db, -1)
+    db.close()
+
+
+def test_node_display_name_is_stored_in_unicode_nfc(tmp_path):
+    """A combining-accent spelling and the precomposed one are the same
+    name on every terminal, so only one form is ever advertised."""
+    db = Database(tmp_path / "node.db")
+    set_node_display_name(db, "  Cafe\u0301 Node ")
+    assert get_node_display_name(db) == "Caf\u00e9 Node"
+    assert canonical_node_display_name("Caf\u00e9 Node") == "Caf\u00e9 Node"
     db.close()

@@ -161,15 +161,27 @@ def is_node_display_name_placeholder(db: Database) -> bool:
     return is_placeholder_node_display_name(get_node_display_name(db))
 
 
-def set_node_display_name(db: Database, name: str) -> None:
-    name = name.strip()
+def canonical_node_display_name(name: str) -> str:
+    """Validate `name` and return the exact form Link may advertise:
+    trimmed, in Unicode NFC (so a combining-accent spelling and the
+    precomposed spelling of the same name are one name, never two
+    claims a peer could tell apart -- `netbbs.link.node_profiles.
+    normalize_friendly_name` applies the same rule on admission), and
+    free of the label delimiter `·`, double quotes, and control/format
+    characters that would let a name forge or hide part of a presented
+    identity. Raises `ValueError` naming the problem."""
+    name = unicodedata.normalize("NFC", name.strip())
     if not name:
         raise ValueError("node display name must not be blank")
     if len(name) > MAX_NODE_DISPLAY_NAME_LENGTH:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
     if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
         raise ValueError("node display name contains a reserved or invisible character")
-    set_config(db, NODE_DISPLAY_NAME_CONFIG_KEY, name)
+    return name
+
+
+def set_node_display_name(db: Database, name: str) -> None:
+    set_config(db, NODE_DISPLAY_NAME_CONFIG_KEY, canonical_node_display_name(name))
 
 
 class RegistrationMode(str, Enum):

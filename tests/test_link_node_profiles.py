@@ -5,7 +5,11 @@ import pytest
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.node_profiles import (
     MAX_IDENTITY_OBSERVATIONS_PER_PEER,
+    identity_for_fingerprint,
     identity_for_peer,
+    normalize_friendly_name,
+    present_link_author_label,
+    profile_claims_are_canonical,
     list_identity_observations,
     record_peer_identity_observation,
     resolve_peer_reference,
@@ -14,10 +18,10 @@ from netbbs.link.node_profiles import (
     is_node_fingerprint,
 )
 from netbbs.managed_dns.state import (
-    RegistrationStatus, set_previous_name, set_previous_status, set_registered_name,
-    set_registration_status,
+    RegistrationStatus, set_previous_name, set_previous_published, set_previous_status,
+    set_published, set_registered_name, set_registration_status,
 )
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.store import save_peer
 from netbbs.storage.database import Database
 
@@ -155,6 +159,32 @@ def test_pending_initial_managed_name_is_not_advertised_before_publication(db):
     assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
 
 
+def test_matured_managed_name_is_advertised_only_once_the_service_confirms_a_record(db):
+    """The service matures a registration before its first provider
+    upsert and leaves it matured if that fails -- so `matured` alone
+    must not replace a working configured hostname with a name that has
+    no DNS record yet."""
+    set_registered_name(db, "myboard")
+    set_registration_status(db, RegistrationStatus.MATURED)
+
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
+
+    set_published(db, True)
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "myboard.netbbs.org"
+
+
+def test_pending_rename_advertises_the_previous_name_only_once_it_was_published(db):
+    set_registered_name(db, "replacement")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
+
+    set_previous_published(db, True)
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "old-name.netbbs.org"
+
+
 def test_pending_rename_does_not_advertise_an_unpublished_previous_name(db):
     set_registered_name(db, "replacement")
     set_registration_status(db, RegistrationStatus.PENDING)
@@ -223,3 +253,63 @@ def test_identity_observation_history_is_bounded_per_peer(db, tmp_path):
         (identity.fingerprint,),
     ).fetchone()[0]
     assert count == MAX_IDENTITY_OBSERVATIONS_PER_PEER
+
+
+NFC_NAME = "Caf\u00e9 Anchor"
+NFD_NAME = "Cafe\u0301 Anchor"
+
+
+def test_unicode_equivalent_friendly_names_are_one_claim(db, tmp_path):
+    """Precomposed and combining-accent spellings render identically, so
+    they must be one name everywhere: canonicalized on normalization,
+    refused as a non-canonical claim in a hello, resolved by either
+    spelling, and caught as a collision against retained history."""
+    assert normalize_friendly_name(NFD_NAME) == NFC_NAME
+    assert not profile_claims_are_canonical({"friendly_name": NFD_NAME})
+    assert profile_claims_are_canonical({"friendly_name": NFC_NAME})
+
+    with pytest.raises(LinkProtocolError, match="invalid profile claims"):
+        _peer(tmp_path, "impostor", NFD_NAME, "impostor.example.org")
+
+    alice = _peer(tmp_path, "alice", NFC_NAME, "alice.example.org")
+    save_peer(db, alice)
+    assert resolve_peer_reference([alice], NFD_NAME) is alice
+    assert resolve_stored_peer_reference(db, NFD_NAME) == alice.fingerprint
+
+    # A retained observation from before canonicalization still counts.
+    db.connection.execute(
+        """
+        INSERT INTO link_node_identity_observations
+            (node_fingerprint, previous_fingerprint, friendly_name, previous_friendly_name,
+             canonical_dns_name, previous_dns_name, severity, kind, observed_at)
+        VALUES (?, NULL, ?, NULL, ?, NULL, 'info', 'first_seen', '2026-09-01T00:00:00+00:00')
+        """,
+        ("legacy" * 5 + "ab", NFD_NAME, "legacy.example.org"),
+    )
+    bob = _peer(tmp_path, "bob", NFC_NAME, "bob.example.org")
+    db.connection.execute("DELETE FROM link_peers")
+    record_peer_identity_observation(db, bob)
+    latest = list_identity_observations(db)[0]
+    assert latest.kind == "cryptographic_identity_changed"
+    assert latest.severity == "security"
+
+
+def test_unseen_fingerprint_is_presented_by_its_technical_identity(db):
+    """An administratively configured node this node has never admitted
+    has only its fingerprint -- two such nodes must not both read as the
+    same placeholder in a trust picker."""
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
+    identity = identity_for_fingerprint(db, fingerprint)
+    assert identity.friendly_name == "Unknown linked node"
+    assert identity.label == fingerprint
+
+
+def test_persisted_link_labels_are_presented_by_the_home_nodes_current_identity(db, tmp_path):
+    alice = _peer(tmp_path, "alice", "The Anchor", "anchor.example.org")
+    save_peer(db, alice)
+    unseen = "abcdefghijklmnopqrstuvwxyz234567"
+
+    assert present_link_author_label(db, f"bob@{alice.fingerprint}") == "bob@The Anchor · anchor.example.org"
+    assert present_link_author_label(db, f"remote@{unseen}") == f"remote@{unseen}"
+    assert present_link_author_label(db, "bob") == "bob"
+    assert present_link_author_label(db, "bob@not-a-node-fingerprint") == "bob@not-a-node-fingerprint"
