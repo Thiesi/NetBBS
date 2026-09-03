@@ -177,8 +177,13 @@ class RealtimeRelay:
         max_bytes_per_second: int = LIVE_RELAY_DEFAULT_MAX_BYTES_PER_SECOND,
         decide_peer_allowed: Callable[[str], Awaitable[bool]] | None = None,
         connect_relay: Callable[[str], Awaitable[LinkRealtimeSession | None]] | None = None,
+        allowed_attach_addresses: Callable[[str], list[tuple[str, int]]] | None = None,
     ) -> None:
         self._own = own_fingerprint
+        # Same pin the party side applies (RealtimeRelayClient): an
+        # upstream relay's relay_ready may only send this relay to that
+        # relay's own advertised real-time addresses.
+        self._allowed_attach_addresses = allowed_attach_addresses
         # Issue #270: how this relay reaches another relay to forward a
         # request (registry session or a fresh dial of its advertised
         # real-time address) -- injected by netbbs.__main__; `None` means
@@ -477,6 +482,16 @@ class RealtimeRelay:
         if len(self._bridges) >= self._max_pairs:
             await self._reject(requester_session, target, "at_capacity", request_id=forward.request_id)
             return
+        if self._allowed_attach_addresses is not None:
+            wanted = (str(payload["attach_address"]).lower(), int(payload["attach_port"]))
+            advertised = [(str(h).lower(), int(p)) for h, p in self._allowed_attach_addresses(session.remote_fingerprint)]
+            if wanted not in advertised:
+                _logger.warning(
+                    "upstream relay %s named an attach address it does not advertise (%s:%s); refusing",
+                    session.remote_fingerprint[:12], payload["attach_address"], payload["attach_port"],
+                )
+                await self._reject(requester_session, target, "attach_failed")
+                return
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(payload["attach_address"], payload["attach_port"]),

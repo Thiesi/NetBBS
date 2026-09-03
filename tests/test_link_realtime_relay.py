@@ -90,9 +90,13 @@ class _Node:
             bridge_attach=self._attach,
         )
         await self.server.start()
+        from netbbs.link.transport import dialable_realtime_addresses_for_peer
+
         self.relay = RealtimeRelay(
             own_fingerprint=self.identity.fingerprint, registry=self.registry, serving_enabled=serving,
-            attach_address="127.0.0.1", attach_port=self.server.port, **self._relay_kwargs,
+            attach_address="127.0.0.1", attach_port=self.server.port,
+            allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(self.link_node, fp),
+            **self._relay_kwargs,
         )
         self.bridge.register_frame_handler(self.relay.owns_frame, self.relay.handle_frame)
         self._wire_client()
@@ -1257,3 +1261,27 @@ def test_reach_relay_returns_the_session_that_won_a_simultaneous_dial(tmp_path, 
     assert asyncio.run(node.direct._reach_relay(relay.identity.fingerprint)) is winner
     node.registry._sessions.clear()
     node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()
+
+
+def test_forwarding_relay_refuses_an_upstream_ready_with_an_unadvertised_attach_address():
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            allowed_attach_addresses=lambda fp: [("127.0.0.1", 7863)] if fp == "r2" else [],
+        )
+        a, r2 = _RecordingSession("a"), _RecordingSession("r2")
+        registry._sessions.update({"a": a, "r2": r2})
+        loop = asyncio.get_running_loop()
+        relay._forwarded[("a", "b")] = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time())
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
+            attach_address="10.0.0.5", attach_port=22, for_fingerprint="a",
+        )
+        assert relay.owns_frame(r2, ready)
+        await relay.handle_frame(r2, ready)
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "attach_failed"
+        assert relay.active_pairs == 0 and relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())

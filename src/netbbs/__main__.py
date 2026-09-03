@@ -869,6 +869,7 @@ async def run(
                     rendezvous_timeout_seconds=config.link.live_relay_rendezvous_timeout_seconds,
                     idle_timeout_seconds=config.link.live_relay_idle_timeout_seconds,
                     max_bytes_per_second=config.link.live_relay_max_bytes_per_second,
+                    allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(link_node, fp),
                 )
 
                 async def _peer_realtime_allowed(fingerprint: str) -> bool:
