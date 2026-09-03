@@ -33,6 +33,7 @@ from netbbs.chat.channels import Channel
 from netbbs.communities import get_effective_min_age, get_effective_min_read_level
 from netbbs.files.areas import FileArea, list_file_areas
 from netbbs.link.boards import LinkContext
+from netbbs.mrc.bridge import MrcBridge
 from netbbs.net.board_flow import _show_board
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import InputHistory
@@ -87,6 +88,7 @@ async def _new_scan_screen(
     user: User,
     *,
     link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     Issue #56's activity summary: every board/channel/file area `user`
@@ -202,7 +204,7 @@ async def _new_scan_screen(
     elif selected.kind == "channel":
         await browse_channels(
             session, lane, hub, presence, mailbox, history, user,
-            initial_channel=selected.channel, link_context=link_context,
+            initial_channel=selected.channel, link_context=link_context, mrc_bridge=mrc_bridge,
         )
     else:
         cursor = await lane.run(file_area_read_cursor, user, selected.file_area)
@@ -300,6 +302,7 @@ async def _find_screen(
     user: User,
     *,
     link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     Issue #56's local search: prompts for one free-text query, then
@@ -450,5 +453,5 @@ async def _find_screen(
         else:
             await browse_channels(
                 session, lane, hub, presence, mailbox, history, user,
-                initial_channel=selected.message.channel, link_context=link_context,
+                initial_channel=selected.message.channel, link_context=link_context, mrc_bridge=mrc_bridge,
             )

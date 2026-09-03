@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from netbbs.net.maintenance import MaintenanceMode
 from netbbs.net.session_registry import ActiveSessionRegistry
@@ -319,6 +319,13 @@ class NodeControls:
     graceful_delay_seconds: float
     drain_scheduler: SequenceScheduler = field(default_factory=SequenceScheduler)
     shutdown_scheduler: SequenceScheduler = field(default_factory=SequenceScheduler)
+    # Issue #275: the node's one MRC bridge (`netbbs.mrc.bridge.
+    # MrcBridge`) -- live in-memory node state that only a running node
+    # has, `None` from the standalone `python -m netbbs.admin` CLI,
+    # exactly like `session_registry`. Typed `Any` so this module (the
+    # bottom of the `netbbs.net` import graph) never imports the chat
+    # stack; the real type is annotated at every consumer.
+    mrc_bridge: Any = None
 
 
 async def run_shutdown_sequence(

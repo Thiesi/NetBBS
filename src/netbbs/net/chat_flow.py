@@ -145,6 +145,10 @@ from netbbs.link.node_profiles import (
     identity_for_peer,
     latest_identity_observation,
 )
+from netbbs.mrc.bridge import MrcBridge
+from netbbs.mrc.protocol import MAX_BODY as MRC_MAX_BODY
+from netbbs.mrc.protocol import MAX_CHUNKS as MRC_MAX_CHUNKS
+from netbbs.mrc.settings import get_mrc_mapping
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -228,6 +232,7 @@ async def browse_channels(
     initial_channel: Channel | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     """
     Entry point: browse from the top level, then run the chat loop for
@@ -315,6 +320,7 @@ async def browse_channels(
         action = await _chat_loop(
             session, lane, hub, presence, mailbox, history, channel, user,
             session_registry=session_registry, link_context=link_context, direct_invites=direct_invites,
+            mrc_bridge=mrc_bridge,
         )
         if isinstance(action, _SwitchTo):
             channel = action.channel
@@ -1078,6 +1084,10 @@ class ChatCommandContext:
     # Issue #168: everything `/msg user@node` needs (direct-message layer,
     # peer table, live sessions) -- `None` off-Link, same as the above.
     link_context: LinkContext | None = None
+    # Issue #275: the node's MRC bridge -- `None` when this session has
+    # no running node behind it (standalone tests, admin CLI); the
+    # bridge itself answers "is *this* channel bridged".
+    mrc_bridge: MrcBridge | None = None
 
 
 @dataclass(frozen=True)
@@ -1974,6 +1984,8 @@ async def _handle_me(ctx: ChatCommandContext, args: str) -> ChatAction | None:
     )
     await ctx.session.write_line(await ctx.lane.run(_render_channel_message, ctx.channel, ctx.user, recorded))
     await ctx.hub.broadcast(ctx.channel.name, recorded, exclude={ctx.participant_id})
+    if ctx.mrc_bridge is not None:
+        await _relay_to_mrc(ctx.session, ctx.mrc_bridge, ctx.channel, recorded)
 
 
 async def _handle_nick(ctx: ChatCommandContext, args: str) -> None:
@@ -2143,12 +2155,86 @@ def _remote_roster_entries(ctx: ChatCommandContext) -> list[tuple[str, str]]:
     )
 
 
+def _mrc_roster_entries(ctx: ChatCommandContext) -> list[str]:
+    """Issue #275: MRC users the hub last reported in `ctx.channel`'s
+    room, when this channel is bridged -- the third roster source after
+    local participants and a linked origin's live presence. Self-
+    reported remote names, sanitized; no local `User` row, no away
+    state, same as `_remote_roster_entries`."""
+    if ctx.mrc_bridge is None or not ctx.mrc_bridge.is_bridged(ctx.channel):
+        return []
+    return [sanitize_text(name) for name in ctx.mrc_bridge.remote_roster(ctx.channel)]
+
+
+async def _announce_mrc_bridge(session: Session, mrc_bridge: MrcBridge, channel: Channel, user: User) -> None:
+    mapping = mrc_bridge.mapping_for(channel)
+    status = mrc_bridge.status()
+    if mapping is None:
+        return
+    text = (
+        f"This channel is bridged to MRC room #{sanitize_text(mapping.room)} on "
+        f"{sanitize_text(status.host)} -- your handle {mrc_bridge.nick_for(user.username)!r} is visible "
+        "to everyone on that network."
+    )
+    if not status.connected:
+        text += " The MRC link is currently offline; your messages stay local until it reconnects."
+    await session.write_line(colored(text, fg_color=MUTED_COLOR))
+
+
+async def _relay_to_mrc(session: Session, mrc_bridge: MrcBridge, channel: Channel, recorded: ChannelMessage) -> None:
+    """Hand a just-recorded local message/action to the bridge and tell
+    the sender, quietly, when it did *not* reach MRC -- an offline hub
+    or their own rate bucket -- or was cut short. Never a hard failure:
+    the message is already recorded and delivered locally."""
+    if not mrc_bridge.is_bridged(channel):
+        return
+    relayed, truncated = await mrc_bridge.local_message(channel, recorded)
+    if not relayed:
+        reason = "you're sending faster than MRC allows" if mrc_bridge.status().connected else "the MRC link is offline"
+        await session.write_line(colored(f"(not relayed to MRC: {reason})", fg_color=MUTED_COLOR))
+    elif truncated:
+        await session.write_line(
+            colored(f"(only the first {MRC_MAX_CHUNKS * MRC_MAX_BODY} characters reached MRC)", fg_color=MUTED_COLOR)
+        )
+
+
+async def _handle_mrc(ctx: ChatCommandContext, args: str) -> None:
+    """`/mrc` (issue #275): this channel's bridge at a glance -- room,
+    hub, whether the link is up right now (the status line's `[MRC]`
+    only says *bridged*), and the hub's own roster for the room."""
+    mapping = ctx.mrc_bridge.mapping_for(ctx.channel) if ctx.mrc_bridge is not None else None
+    if ctx.mrc_bridge is None or mapping is None:
+        await ctx.session.write_line(colored("This channel isn't bridged to MRC.", fg_color=MUTED_COLOR))
+        return
+    status = ctx.mrc_bridge.status()
+    transport = "TLS" if status.tls else "plain"
+    await ctx.session.write_line(
+        f"MRC room #{sanitize_text(mapping.room)} via {sanitize_text(status.host)}:{status.port} ({transport}) "
+        f"as {sanitize_text(status.site_name)}"
+    )
+    if mapping.paused:
+        await ctx.session.write_line(colored("Bridge paused by the SysOp -- nothing is relayed either way.", fg_color=MUTED_COLOR))
+    elif not status.enabled:
+        await ctx.session.write_line(colored("MRC is switched off node-wide.", fg_color=MUTED_COLOR))
+    elif status.connected:
+        await ctx.session.write_line(f"Link: {status_badge('CONNECTED', tone='success')}")
+    else:
+        detail = f" -- {sanitize_text(status.last_error)}" if status.last_error else ""
+        await ctx.session.write_line(f"Link: {status_badge(status.state.value.upper(), tone='neutral')}{detail}")
+    roster = _mrc_roster_entries(ctx)
+    if roster:
+        await ctx.session.write_line(f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''} here: " + ", ".join(roster))
+    elif status.connected and not mapping.paused:
+        await ctx.session.write_line(colored("No other MRC users reported in this room yet.", fg_color=MUTED_COLOR))
+
+
 async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
     """`/names` (design doc): a compact, one-line roster
     of `ctx.channel`."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     remote_entries = _remote_roster_entries(ctx)
-    if not usernames and not remote_entries:
+    mrc_entries = _mrc_roster_entries(ctx)
+    if not usernames and not remote_entries and not mrc_entries:
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -2162,6 +2248,7 @@ async def _handle_names(ctx: ChatCommandContext, args: str) -> None:
 
     labels = await ctx.lane.run(_labels)
     labels.extend(label for label, _fingerprint in remote_entries)
+    labels.extend(f"{name} (MRC)" for name in _mrc_roster_entries(ctx))
     await ctx.session.write_line(", ".join(labels))
 
 
@@ -2173,7 +2260,7 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     which linked node they're on."""
     usernames = _roster_usernames(ctx.hub, ctx.channel)
     remote_entries = _remote_roster_entries(ctx)
-    if not usernames and not remote_entries:
+    if not usernames and not remote_entries and not _mrc_roster_entries(ctx):
         await ctx.session.write_line(colored("No one is here.", fg_color=MUTED_COLOR))
         return
 
@@ -2206,6 +2293,8 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
             f" (on linked node {sanitize_text(node_name)})" if node_name else " (on a linked node)"
         )
         await ctx.session.write_line(f"{label}{node_note}")
+    for name in _mrc_roster_entries(ctx):
+        await ctx.session.write_line(f"{name} (on MRC)")
 
 
 async def _handle_list(ctx: ChatCommandContext, args: str) -> None:
@@ -2481,10 +2570,12 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "grantaccess": ("/grantaccess <user>", "Directly grant a user access to this chat channel."),
     "revokeaccess": ("/revokeaccess <user>", "Revoke a user's access to this chat channel."),
     "members": ("/members", "List users with direct access to this chat channel."),
+    "mrc": ("/mrc", "Show this channel's MRC bridge: room, hub link state, and who's there from other BBSes."),
 }
 
 _COMMANDS: dict[str, CommandHandler] = {
     "quit": _handle_quit,
+    "mrc": _handle_mrc,
     "leave": _handle_leave,
     "join": _handle_join,
     "topic": _handle_topic,
@@ -2566,7 +2657,15 @@ def _can_invite(db: Database, channel: Channel, user: User) -> bool:
     return channel.allow_member_invites and is_member(db, channel, user)
 
 
+def _channel_is_mrc_bridged(db: Database, channel: Channel, user: User) -> bool:
+    """Issue #275: `/mrc` is only *suggested* in a channel that has an
+    MRC room mapping at all (paused or not) -- read from the DB, since
+    this predicate runs on the lane thread with no bridge in reach."""
+    return get_mrc_mapping(db, channel) is not None
+
+
 _COMMAND_VISIBILITY: dict[str, Callable[[Database, Channel, User], bool]] = {
+    "mrc": _channel_is_mrc_bridged,
     "mute": _requires_moderate,
     "unmute": _requires_moderate,
     "ban": _requires_moderate,
@@ -2854,11 +2953,12 @@ def _render_chat_status_line(
     whole composed row a solid background band by default and drops it
     specifically when the viewer is away (a deliberately quieter,
     background-less look for "I've stepped back"), so there is nothing
-    here to drop or truncate for it. Deliberately still *not* included:
-    any per-channel "linked vs. local" origin -- that distinction
-    doesn't exist anywhere in the schema yet (NetBBS Link is Phase 3,
-    still private/experimental federation), so there is nothing real to
-    render.
+    here to drop or truncate for it. A channel bridged to an MRC room
+    (issue #275) gets an `[MRC]` span beside its type, read from the DB
+    mapping -- it says *bridged*, not *connected*: this runs on the lane
+    thread with no in-memory bridge in reach, and live hub state is
+    `/mrc`'s job. Still deliberately *not* included: any per-channel
+    "linked vs. local" origin marker.
 
     The clock forces a bare `%H:%M` (`override_format`), not the
     node-configured display format `format_for_display` would otherwise
@@ -2905,6 +3005,10 @@ def _render_chat_status_line(
             _StatusSpan(" away)", fg_color=MUTED_COLOR),
         ],
     ]
+
+    mrc_mapping = get_mrc_mapping(db, channel)
+    if mrc_mapping is not None and mrc_mapping.active:
+        groups[0].append(_StatusSpan("[MRC]", fg_color=CHANNEL_TYPE_COLOR, bold=True))
 
     topic_text = channel.topic or channel.description
     if topic_text:
@@ -3254,6 +3358,7 @@ async def _chat_loop(
     session_registry: ActiveSessionRegistry | None = None,
     link_context: LinkContext | None = None,
     direct_invites: DirectChatInvites | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> ChatAction:
     """
     Real-time chat within `channel`, until the user types /quit, /leave,
@@ -3451,6 +3556,12 @@ async def _chat_loop(
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="join", username=user.username
             )
+        # Issue #275: a bridged channel is the caller's opt-in to appear
+        # on a public, unauthenticated network under their handle -- say
+        # so once, in the join banner, before announcing them to the hub.
+        if mrc_bridge is not None and mrc_bridge.is_bridged(channel):
+            await _announce_mrc_bridge(session, mrc_bridge, channel, user)
+            await mrc_bridge.local_join(channel, user.username)
         if pinned_ui_enabled:
             await _repaint_status_line(
                 session, lane, hub, presence, channel, user,
@@ -3624,6 +3735,7 @@ async def _chat_loop(
                                 direct_invites=direct_invites,
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                                 link_context=link_context,
+                                mrc_bridge=mrc_bridge,
                             )
                             action = await _dispatch_command(ctx, line)
                             if isinstance(action, _EnterPrivate):
@@ -3668,6 +3780,7 @@ async def _chat_loop(
                                 direct_invites=direct_invites,
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
                                 link_context=link_context,
+                                mrc_bridge=mrc_bridge,
                             )
                             if isinstance(private_target, RemotePrivateTarget):
                                 # Issue #270: each line is one live direct
@@ -3769,6 +3882,10 @@ async def _chat_loop(
                                 await link_context.realtime_bridge.broadcast_local_message_live(
                                     channel, recorded_message
                                 )
+                        # Issue #275: the MRC sibling of the live-Link push
+                        # above -- a no-op unless this channel is bridged.
+                        if mrc_bridge is not None:
+                            await _relay_to_mrc(session, mrc_bridge, channel, recorded_message)
                         rendered_self = await lane.run(
                             _render_channel_message, channel, user, recorded_message, self_message=True
                         )
@@ -4070,6 +4187,10 @@ async def _chat_loop(
             await link_context.realtime_bridge.broadcast_local_presence_live(
                 channel, change="leave", username=user.username
             )
+        if mrc_bridge is not None:
+            # After hub.leave above on purpose: the bridge LOGOFFs the
+            # hub only once this account has no session left in here.
+            await mrc_bridge.local_leave(channel, user.username)
 
 
 # -- direct chat: mutual invite/accept 1:1 fullscreen chat (design doc §6.3) --
