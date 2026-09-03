@@ -481,10 +481,14 @@ class _FakeDirectChat:
 
 class _FakeLinkContext:
     def __init__(self, fingerprint: str, direct_chat) -> None:
+        from netbbs.link.node_identity import bootstrap_node_identity
+
         self.realtime_bridge = _FakeBridge({fingerprint: {"bob": "bob"}})
         self.direct_chat = direct_chat
         self.realtime_registry = None
         self.link_node = type("_N", (), {"peers": {fingerprint: None}})()
+        # A plain line posted to the (unlinked) channel consults these.
+        self.node_identity = bootstrap_node_identity("private-test-node")
 
 
 async def _run_linked(lane, hub, presence, mailbox, channel, user, lines, *, link_context):
@@ -535,7 +539,7 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
-    assert "No unique linked node starts with" in _written(session)
+    assert "No linked node this board knows starts with" in _written(session)
 
 
 def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):
@@ -554,3 +558,22 @@ def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presen
     assert [kw["body"] for _fp, kw in direct.sent] == ["the corrected line"]
     scrollback = get_scrollback(db, channel)
     assert all(m.kind in ("join", "leave") for m in scrollback)
+
+
+def test_private_with_an_unreachable_remote_target_is_refused_before_entering_the_mode(
+    lane, hub, presence, mailbox, alice, channel
+):
+    """Codex review (PR #271): the mode is announced only once the live
+    path exists and the user is online there -- never discovered on the
+    first composed line."""
+    fingerprint = "remote-node-fingerprint-abc123"
+    direct = _FakeDirectChat(fail_after=0)
+    session = asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        [f"/private bob@{fingerprint[:12]}", "this must not be sent privately", "/quit"],
+        link_context=_FakeLinkContext(fingerprint, direct),
+    ))
+    text = _written(session)
+    assert "can't be reached for live chat right now" in text
+    assert "Entering private conversation" not in text
+    assert direct.sent == []

@@ -1285,3 +1285,105 @@ def test_forwarding_relay_refuses_an_upstream_ready_with_an_unadvertised_attach_
         assert relay.active_pairs == 0 and relay.pending_rendezvous == 0
 
     asyncio.run(scenario())
+
+
+# -- Codex round 2 (PR #271) ------------------------------------------------------------
+
+
+def test_forward_stays_reserved_through_the_upstream_attach_and_expires_cleanly():
+    """The forward (and its pending-cap count) survives the attach await;
+    if its timer fires meanwhile the attached socket is closed and no
+    rendezvous is created."""
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        accepted = asyncio.Event(); closed = asyncio.Event()
+
+        async def stall(reader, writer):
+            accepted.set()
+            while await reader.read(4096):
+                pass
+            closed.set(); writer.close()
+
+        server = await asyncio.start_server(stall, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            rendezvous_timeout_seconds=0.3, allowed_attach_addresses=lambda fp: [("127.0.0.1", port)],
+        )
+        a, r2 = _RecordingSession("a"), _RecordingSession("r2")
+        registry._sessions.update({"a": a, "r2": r2})
+        loop = asyncio.get_running_loop()
+        forward = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time(), request_id="req-1")
+        relay._forwarded[("a", "b")] = forward
+        forward.timer = loop.create_task(relay._expire_forward(forward))
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
+            attach_address="127.0.0.1", attach_port=port, for_fingerprint="a",
+        )
+        # Simulate the reservation expiring while the attach is in flight.
+        forward.timer.cancel()
+        original_open = asyncio.open_connection
+
+        async def slow_open(*args, **kwargs):
+            reader, writer = await original_open(*args, **kwargs)
+            await relay._fail_forward(forward, reason="timeout")
+            return reader, writer
+
+        asyncio.open_connection = slow_open
+        try:
+            await relay.handle_frame(r2, ready)
+        finally:
+            asyncio.open_connection = original_open
+        assert relay.pending_rendezvous == 0 and relay.active_pairs == 0
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "timeout"
+        assert a.sent[-1].payload["request_id"] == "req-1"
+        assert await _wait_until(closed.is_set)  # the orphaned upstream socket was closed
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_forward_does_not_send_upstream_after_its_reservation_expired():
+    async def scenario():
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        gate = asyncio.Event()
+        upstream = _RecordingSession("r2")
+
+        async def slow_connect(via):
+            await gate.wait()
+            return upstream
+
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+            rendezvous_timeout_seconds=0.1, connect_relay=slow_connect,
+        )
+        a = _RecordingSession("a")
+        registry._sessions["a"] = a
+        task = asyncio.create_task(relay._handle_request(a, "b", via="r2", request_id="req-9"))
+        await asyncio.sleep(0.25)  # the reservation times out while the dial is still in flight
+        assert a.sent[-1].type == "relay_reject" and a.sent[-1].payload["reason"] == "timeout"
+        gate.set()
+        await task
+        assert upstream.sent == []  # never forwarded after the requester was refused
+        assert relay.pending_rendezvous == 0
+
+    asyncio.run(scenario())
+
+
+def test_relay_half_never_claims_an_unnamed_reject_even_with_a_matching_forward():
+    async def scenario():
+        from netbbs.link.realtime_relay import _Forward
+        registry = LinkRealtimeSessionRegistry(own_fingerprint="r1")
+        relay = RealtimeRelay(
+            own_fingerprint="r1", registry=registry, serving_enabled=True, attach_address="127.0.0.1", attach_port=1,
+        )
+        r2 = _RecordingSession("r2")
+        loop = asyncio.get_running_loop()
+        relay._forwarded[("a", "b")] = _Forward(requester="a", target="b", upstream="r2", created_at=loop.time())
+        unnamed = build_relay_reject_frame(target_fingerprint="b", reason="declined", origin="relay")
+        assert relay.owns_frame(r2, unnamed) is False
+        named = build_relay_reject_frame(target_fingerprint="b", reason="declined", origin="relay", requester_fingerprint="a")
+        assert relay.owns_frame(r2, named) is True
+
+    asyncio.run(scenario())

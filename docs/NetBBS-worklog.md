@@ -1823,6 +1823,14 @@ constrain future changes:
   forwarded entry matches. A forwarded request reserves its pending slot
   *before* the upstream dial can yield, so concurrent requesters cannot
   all pass the cap and then dial.
+- **A forward stays reserved (and counted) across the upstream attach**,
+  and a dial or attach that outlives the reservation is dropped, never
+  turned into a late rendezvous. The relay half claims only *named*
+  upstream rejects (`requester_fingerprint`); an un-named reject is by
+  construction addressed to the node's own party half, so a node that is
+  both relay and party never misroutes one.
+- **A secondhand descriptor refresh runs the same protocol-version gate a
+  hello does** before the record is replaced.
 - **`live_relays` is advertised from `AnchorState`, not the registry
   alone.** The anchor task sets which reliable nodes it *intends* to stand
   by at; the hello provider filters that to sessions actually up. A relay

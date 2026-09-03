@@ -1335,7 +1335,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
 
     if "@" in target_name:
         # Issue #270: private mode with a user on a linked node.
-        from netbbs.net.link_direct import parse_remote_address, resolve_node_fingerprint
+        from netbbs.net.link_direct import check_live_reachability, parse_remote_address
 
         parsed = parse_remote_address(target_name)
         if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
@@ -1343,15 +1343,12 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
                 colored("Address a linked node's user as user@node-fingerprint (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
             )
             return None
-        remote_user, node_prefix = parsed
-        resolved = resolve_node_fingerprint(ctx.link_context, node_prefix)
-        if isinstance(resolved, list):
-            await ctx.session.write_line(
-                colored(
-                    f"No unique linked node starts with {sanitize_text(node_prefix)!r} -- give more of the fingerprint.",
-                    fg_color=MUTED_COLOR,
-                )
-            )
+        remote_user, _node_prefix = parsed
+        # Like the local path's online check: the conversation is only
+        # announced once a live session exists and the user is online
+        # there -- never discovered on the first composed line.
+        resolved = await check_live_reachability(ctx.session, target_name, link_context=ctx.link_context)
+        if resolved is None:
             return None
         remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved)
         close_hint = menu_key("/close", "")

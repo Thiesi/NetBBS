@@ -98,6 +98,75 @@ def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str
     return candidates
 
 
+async def check_live_reachability(
+    session: Session,
+    address: str,
+    *,
+    link_context: LinkContext | None,
+) -> str | None:
+    """Resolve `address` (`user@node`), establish (or reuse) a live
+    session with that node, and confirm the user is online there. Writes
+    every refusal to `session` (Decision 3's reason-free note included)
+    and returns the node fingerprint on success, `None` otherwise. Shared
+    by the one-off send and by `/private`, which must know the
+    conversation is viable *before* it tells the caller it has begun."""
+    parsed = parse_remote_address(address)
+    if parsed is None:
+        await session.write_line(colored("Address a linked node's user as user@node-fingerprint.", fg_color=MUTED_COLOR))
+        return None
+    target_user, node_prefix = parsed
+    if link_context is None or link_context.direct_chat is None or link_context.realtime_bridge is None:
+        await session.write_line(colored("This node isn't on NetBBS Link, so there is nobody remote to message.", fg_color=MUTED_COLOR))
+        return None
+    if len(target_user.encode("utf-8")) > MAX_REMOTE_USER_BYTES:
+        await session.write_line(colored("That user name is too long to be a NetBBS account.", fg_color=MUTED_COLOR))
+        return None
+    resolved = resolve_node_fingerprint(link_context, node_prefix)
+    if isinstance(resolved, list):
+        if not resolved:
+            await session.write_line(
+                colored(f"No linked node this board knows starts with {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
+            )
+        else:
+            shown = ", ".join(sanitize_text(fp[:16]) + "…" for fp in resolved[:5])
+            await session.write_line(
+                colored(f"{sanitize_text(node_prefix)!r} matches more than one node ({shown}) -- give more of the fingerprint.", fg_color=MUTED_COLOR)
+            )
+        return None
+    fingerprint = resolved
+    label = f"{sanitize_text(target_user)}@{sanitize_text(fingerprint[:12])}…"
+    direct_chat = link_context.direct_chat
+    bridge = link_context.realtime_bridge
+    try:
+        await direct_chat.ensure_session(fingerprint)
+    except DirectChatUnreachable:
+        await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
+        return None
+    except RealtimeProtocolVersionError:
+        await session.write_line(colored(
+            f"{sanitize_text(fingerprint[:12])}… uses an incompatible real-time protocol version -- "
+            "upgrade one of the nodes. Link mail still works.", fg_color=MUTED_COLOR,
+        ))
+        return None
+    # The peer pushes its node-presence snapshot as soon as it tracks the
+    # session; give a brand-new session a moment to deliver it so "not
+    # online there" is an honest answer, not a race.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PRESENCE_SETTLE_SECONDS
+    while fingerprint not in bridge.remote_node_presence() and loop.time() < deadline:
+        await asyncio.sleep(0.05)
+    online = bridge.remote_node_presence().get(fingerprint)
+    if online is None:
+        await session.write_line(
+            colored(f"Couldn't confirm who is online at {sanitize_text(fingerprint[:12])}… just now -- try again in a moment.", fg_color=MUTED_COLOR)
+        )
+        return None
+    if target_user.lower() not in {name.lower() for name in online}:
+        await session.write_line(colored(f"{label} is not currently online on that node.", fg_color=MUTED_COLOR))
+        return None
+    return fingerprint
+
+
 async def send_live_direct_message(
     session: Session,
     lane: DatabaseLane,
@@ -113,10 +182,7 @@ async def send_live_direct_message(
     if parsed is None:
         await session.write_line(colored("Address a linked node's user as user@node-fingerprint.", fg_color=MUTED_COLOR))
         return SendOutcome.LINE_REJECTED
-    target_user, node_prefix = parsed
-    if link_context is None or link_context.direct_chat is None or link_context.realtime_bridge is None:
-        await session.write_line(colored("This node isn't on NetBBS Link, so there is nobody remote to message.", fg_color=MUTED_COLOR))
-        return SendOutcome.UNREACHABLE
+    target_user, _node_prefix = parsed
     if not body.strip():
         await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
         return SendOutcome.LINE_REJECTED
@@ -128,53 +194,13 @@ async def send_live_direct_message(
     if len(target_user.encode("utf-8")) > MAX_REMOTE_USER_BYTES:
         await session.write_line(colored("That user name is too long to be a NetBBS account.", fg_color=MUTED_COLOR))
         return SendOutcome.LINE_REJECTED
-
-    resolved = resolve_node_fingerprint(link_context, node_prefix)
-    if isinstance(resolved, list):
-        if not resolved:
-            await session.write_line(
-                colored(f"No linked node this board knows starts with {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
-            )
-        else:
-            shown = ", ".join(sanitize_text(fp[:16]) + "…" for fp in resolved[:5])
-            await session.write_line(
-                colored(f"{sanitize_text(node_prefix)!r} matches more than one node ({shown}) -- give more of the fingerprint.", fg_color=MUTED_COLOR)
-            )
+    fingerprint = await check_live_reachability(session, address, link_context=link_context)
+    if fingerprint is None:
         return SendOutcome.UNREACHABLE
-    fingerprint = resolved
+    assert link_context is not None and link_context.direct_chat is not None
     label = f"{sanitize_text(target_user)}@{sanitize_text(fingerprint[:12])}…"
-
     direct_chat = link_context.direct_chat
-    bridge = link_context.realtime_bridge
-    try:
-        await direct_chat.ensure_session(fingerprint)
-    except DirectChatUnreachable:
-        await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
-        return SendOutcome.UNREACHABLE
-    except RealtimeProtocolVersionError:
-        await session.write_line(colored(
-            f"{sanitize_text(fingerprint[:12])}… uses an incompatible real-time protocol version -- "
-            "upgrade one of the nodes. Link mail still works.", fg_color=MUTED_COLOR,
-        ))
-        return SendOutcome.UNREACHABLE
-
-    # The peer pushes its node-presence snapshot as soon as it tracks the
-    # session; give a brand-new session a moment to deliver it so "not
-    # online there" is an honest answer, not a race.
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _PRESENCE_SETTLE_SECONDS
-    while fingerprint not in bridge.remote_node_presence() and loop.time() < deadline:
-        await asyncio.sleep(0.05)
-    online = bridge.remote_node_presence().get(fingerprint)
-    if online is None:
-        # No presence from that node yet: never claim delivery blind.
-        await session.write_line(
-            colored(f"Couldn't confirm who is online at {sanitize_text(fingerprint[:12])}… just now -- try again in a moment.", fg_color=MUTED_COLOR)
-        )
-        return SendOutcome.UNREACHABLE
-    if target_user.lower() not in {name.lower() for name in online}:
-        await session.write_line(colored(f"{label} is not currently online on that node.", fg_color=MUTED_COLOR))
-        return SendOutcome.UNREACHABLE
+    resolved = fingerprint
 
     sender_label = sanitize_text(await lane.run(display_label, user))
     try:

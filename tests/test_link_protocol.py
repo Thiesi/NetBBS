@@ -3446,3 +3446,23 @@ def test_handle_peer_list_refreshes_a_known_peers_newer_verified_descriptor(tmp_
     )
     assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[forged])) == []
     assert me.peers[bob.identity.fingerprint].descriptor.payload["live_relays"] == ["relay-fp"]
+
+
+def test_secondhand_descriptor_refresh_is_gated_on_protocol_version(tmp_path, clock):
+    from netbbs.link.events import EndpointDescriptor, canonical_bytes
+    from netbbs.link.protocol import LinkNode, PeerListMessage
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    me = LinkNode(identity=bootstrap_node_identity("me-v"))
+    bob = LinkNode(identity=bootstrap_node_identity("bob-v"))
+    carol = LinkNode(identity=bootstrap_node_identity("carol-v"))
+    me.handle_hello(bob.build_hello(addresses=None, outgoing_only=True, created_at="2026-09-03T10:00:00+00:00"))
+    me.handle_hello(carol.build_hello(
+        addresses=[{"protocol": "http", "address": "127.0.0.1", "port": 7862}], outgoing_only=False,
+        created_at="2026-09-03T10:00:00+00:00",
+    ))
+    newer = bob.build_hello(addresses=None, outgoing_only=True, created_at="2026-09-03T11:00:00+00:00").descriptor
+    envelope = dict(newer.envelope); envelope["netbbs_protocol"] = 99
+    future = EndpointDescriptor(envelope=envelope, signature=bob.identity.signing_key.sign(canonical_bytes(envelope)))
+    assert me.handle_peer_list(carol.identity.fingerprint, PeerListMessage(descriptors=[future])) == []
+    assert me.peers[bob.identity.fingerprint].descriptor.payload["created_at"] == "2026-09-03T10:00:00+00:00"

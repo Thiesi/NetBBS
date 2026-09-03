@@ -418,6 +418,8 @@ class RealtimeRelay:
         if upstream is None:
             await self._fail_forward(forward, reason="target_unreachable")
             return
+        if self._forwarded.get(key) is not forward:
+            return  # the dial outlived the reservation: the requester was already refused
         try:
             await upstream.send(build_relay_request_frame(
                 target_fingerprint=target, requester_fingerprint=requester, hops=REALTIME_RELAY_MAX_HOPS,
@@ -426,15 +428,19 @@ class RealtimeRelay:
             await self._fail_forward(forward, reason="target_unreachable")
 
     def _matching_forward(self, upstream: str, target: str, requester: str | None) -> _Forward | None:
-        """The forwarded entry an upstream frame answers. With a requester
-        named (every reject this code sends toward a forwarding relay
-        names one), the match is exact; without one, only an unambiguous
-        single match counts -- never fail a bystander's forward."""
-        matches = [
-            f for f in self._forwarded.values()
-            if f.upstream == upstream and f.target == target and (requester is None or f.requester == requester)
-        ]
-        return matches[0] if len(matches) == 1 else None
+        """The forwarded entry an upstream reject answers. Every reject a
+        relay sends toward a *forwarding* relay names the requester; an
+        un-named reject is therefore addressed to this node's own party
+        half (its own request), never to a forward -- the relay half
+        leaves it alone so the two roles can never collide on one
+        upstream/target pair."""
+        if requester is None:
+            return None
+        return next(
+            (f for f in self._forwarded.values()
+             if f.upstream == upstream and f.target == target and f.requester == requester),
+            None,
+        )
 
     async def _expire_forward(self, forward: _Forward) -> None:
         try:
@@ -473,14 +479,12 @@ class RealtimeRelay:
         forward = self._forwarded.get(key)
         if forward is None or forward.upstream != session.remote_fingerprint:
             return
-        del self._forwarded[key]
-        if forward.timer is not None:
-            forward.timer.cancel()
         requester_session = self._registry.get(requester)
         if requester_session is None:
+            await self._fail_forward(forward, reason="target_unreachable")
             return
         if len(self._bridges) >= self._max_pairs:
-            await self._reject(requester_session, target, "at_capacity", request_id=forward.request_id)
+            await self._fail_forward(forward, reason="at_capacity")
             return
         if self._allowed_attach_addresses is not None:
             wanted = (str(payload["attach_address"]).lower(), int(payload["attach_port"]))
@@ -490,8 +494,12 @@ class RealtimeRelay:
                     "upstream relay %s named an attach address it does not advertise (%s:%s); refusing",
                     session.remote_fingerprint[:12], payload["attach_address"], payload["attach_port"],
                 )
-                await self._reject(requester_session, target, "attach_failed")
+                await self._fail_forward(forward, reason="attach_failed")
                 return
+        # The forward stays reserved (and counted) across the attach, so
+        # concurrent requests cannot refill the pending cap underneath it;
+        # its timer keeps running too -- an attach that outlives the
+        # reservation is closed, never turned into a late rendezvous.
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(payload["attach_address"], payload["attach_port"]),
@@ -501,8 +509,14 @@ class RealtimeRelay:
             await writer.drain()
         except Exception as exc:
             _logger.info("could not attach to upstream relay %s: %s", session.remote_fingerprint[:12], exc)
-            await self._reject(requester_session, target, "attach_failed", request_id=forward.request_id)
+            await self._fail_forward(forward, reason="attach_failed")
             return
+        if self._forwarded.get(key) is not forward:
+            _close_writer(writer)  # the reservation expired (and the requester was told) meanwhile
+            return
+        del self._forwarded[key]
+        if forward.timer is not None:
+            forward.timer.cancel()
         loop = asyncio.get_running_loop()
         rendezvous = _Rendezvous(
             bridge_id=secrets.token_hex(16), requester=requester, target=target, created_at=loop.time(),

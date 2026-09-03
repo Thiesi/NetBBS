@@ -1891,6 +1891,10 @@ class LinkNode:
         if str(descriptor.payload.get("created_at", "")) <= str(peer.descriptor.payload.get("created_at", "")):
             return False
         try:
+            # Same gate a repeated hello gets: a descriptor from a later
+            # protocol is refused at the version boundary, never persisted
+            # and re-advertised by a node that does not understand it.
+            self._check_protocol_version(descriptor.envelope, kind="endpoint_descriptor", sender_fingerprint=fingerprint)
             signing_verify_key = self._resolve_sender_signing_key(peer, fingerprint, "peer-list descriptor")
         except (LinkProtocolError, NodeIdentityError):
             return False
