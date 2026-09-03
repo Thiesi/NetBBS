@@ -124,6 +124,7 @@ from netbbs.config import (
     RegistrationMode,
     get_node_display_name,
     get_registration_mode,
+    is_node_display_name_placeholder,
     set_node_display_name,
     set_registration_mode,
 )
@@ -192,7 +193,8 @@ from netbbs.link.remote_attestation import (
     remove_attestation_authority,
     set_remote_attestation_override,
 )
-from netbbs.link.seedlist import get_cached_supplementary_seeds
+from netbbs.link.onboarding import Participation, get_configured_link_enabled, get_participation, set_participation
+from netbbs.link.reliable_nodes import effective_reliable_nodes, reliable_nodes_source
 from netbbs.link.store import load_peer_last_contact
 from netbbs.link.trust import (
     TrustDimension,
@@ -1466,6 +1468,11 @@ async def _system_menu(
             await _node_name_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "j":
+            await session.write_line("")
+            await _link_participation_screen(session, lane, actor)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "t":
             await session.write_line("")
             await _timestamp_settings_screen(session, lane, actor)
@@ -1599,6 +1606,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("M", "astheads & banners"), brief="Welcome/logoff/new-account banners and every masthead"),
         MenuEntry(label=menu_key("C", "olors"), brief="Node-wide accent/header/clock branding"),
         MenuEntry(label=menu_key("N", "ode name"), brief="The name and gradient shown in every screen's own corner"),
+        MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
@@ -1650,6 +1658,124 @@ async def _draw_node_name_screen(
             width=session.terminal_width,
             height=session.terminal_height,
         )
+    )
+    await session.write("Choice: ")
+
+
+async def _link_participation_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """Settings home for the reliable-node participation decision
+    (design doc §16, issue #219): what the SysOp answered on the first-run
+    screen (or never did), what the operator's configuration says about
+    `[link] enabled`, which of the two therefore decides whether Link
+    runs, and the roster this node would dial -- with a single accept/
+    decline action. Reachable whether or not Link is currently running
+    (unlike `_link_status_screen`, which needs a live `link_context`),
+    since changing this is exactly how a SysOp turns Link on from a
+    silent configuration. Takes effect at the next sync pass for the
+    roster and at the next startup for enablement itself."""
+    description_level = await lane.run(menu_description_level, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    while True:
+        await _draw_link_participation_screen(
+            session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color
+        )
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "a":
+            await session.write_line("")
+            if await lane.run(is_node_display_name_placeholder):
+                await session.write_line(
+                    colored(
+                        "Set a node name first (Settings > Node name) -- a node can't join NetBBS "
+                        "Link under the placeholder name.",
+                        fg_color=ERROR_COLOR,
+                    )
+                )
+                continue
+
+            def _accept(db: Database) -> None:
+                set_participation(db, Participation.ACCEPTED)
+                record_action(db, actor=actor, action="set_link_participation", detail="accepted")
+
+            await lane.run(_accept)
+            await session.write_line("Reliable-node participation accepted.")
+        elif choice == "d":
+            await session.write_line("")
+
+            def _decline(db: Database) -> None:
+                set_participation(db, Participation.DECLINED)
+                record_action(db, actor=actor, action="set_link_participation", detail="declined")
+
+            await lane.run(_decline)
+            await session.write_line("Reliable-node participation declined.")
+        else:
+            await session.write(reject_unhandled_key(choice))
+
+
+async def _draw_link_participation_screen(
+    session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
+    unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
+) -> None:
+    def _load(db: Database) -> tuple[Participation, bool | None | str, list, str, bool]:
+        return (
+            get_participation(db), get_configured_link_enabled(db), effective_reliable_nodes(db),
+            reliable_nodes_source(db), is_node_display_name_placeholder(db),
+        )
+
+    participation, configured, reliable, source, placeholder = await lane.run(_load)
+    await session.write_line(
+        "\r\n" + screen_title(
+            "Join NetBBS Link",
+            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed, header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
+    )
+    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    await session.write_line(
+        colored("Participation: ", fg_color=LABEL_COLOR)
+        + badge(participation.value.upper(), tone="success" if participation is Participation.ACCEPTED else "neutral")
+    )
+    if configured is True:
+        config_text = "[link] enabled = true -- Link runs regardless of this answer"
+    elif configured is False:
+        config_text = "[link] enabled = false -- Link stays off regardless of this answer"
+    elif configured is None:
+        config_text = "[link] enabled not set -- this answer decides (applies at the next startup)"
+    else:
+        config_text = "unknown until this node has started once on this version"
+    await session.write_line(colored("Configuration: ", fg_color=LABEL_COLOR) + colored(config_text, fg_color=METADATA_COLOR))
+    await session.write_line(
+        colored("Reliable nodes: ", fg_color=LABEL_COLOR)
+        + colored(f"{len(reliable)} ({source} list)", fg_color=METADATA_COLOR)
+    )
+    for entry in reliable:
+        await session.write_line(f"  {sanitize_text(entry.name)}  {sanitize_text(entry.url)}")
+    if placeholder:
+        await session.write_line(
+            colored("This node still has the placeholder name -- set one under Node name before accepting.", fg_color=ERROR_COLOR)
+        )
+    _write_wrapped = wrap_to_width(
+        "Accepting dials these nodes as seeds after your own configured ones and, for a node that "
+        "can't be reached from the internet directly, uses them as relays. It hands them no say over "
+        "your content and is not a trust decision about anyone (design doc §16, issue #219).",
+        session.terminal_width, break_long_words=False,
+    )
+    for line in _write_wrapped:
+        await session.write_line(colored(line, fg_color=MUTED_COLOR))
+    option_list = []
+    if participation is not Participation.ACCEPTED:
+        option_list.append(MenuEntry(label=menu_key("A", "ccept"), brief="Use the reliable nodes"))
+    if participation is not Participation.DECLINED:
+        option_list.append(MenuEntry(label=menu_key("D", "ecline"), brief="Do not use them"))
+    option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"))
+    await session.write_line(
+        _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
 
@@ -4065,8 +4191,15 @@ async def _link_status_screen(
     else:
         await session.write_line(f"Relaying for: {len(node.relaying_for)} requester(s)")
 
-    cached_seeds = await lane.run(get_cached_supplementary_seeds)
-    await session.write_line(f"Cached supplementary seeds: {len(cached_seeds)}")
+    participation = await lane.run(get_participation)
+    reliable = await lane.run(effective_reliable_nodes)
+    source = await lane.run(reliable_nodes_source)
+    if participation is Participation.ACCEPTED:
+        await session.write_line(
+            f"Reliable nodes: {len(reliable)} ({source} list) -- dialed as seeds after the configured ones"
+        )
+    else:
+        await session.write_line(f"Reliable nodes: not in use (participation {participation.value})")
 
     await session.write_line(f"Linked boards: {len(node.boards)}")
     if config is not None:

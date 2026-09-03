@@ -28,7 +28,8 @@ from netbbs.link.events import build_endpoint_descriptor
 from netbbs.link.mail import compose_link_message
 from netbbs.link.node_identity import bootstrap_node_identity, rotate_operational_key
 from netbbs.link.protocol import HelloMessage, LinkNode, PeerRecord
-from netbbs.link.seedlist import set_cached_supplementary_seeds
+from netbbs.link.onboarding import Participation, set_participation
+from netbbs.link.reliable_nodes import ReliableNode, set_cached_reliable_nodes
 from netbbs.link.sync import run_link_sync
 from netbbs.link.transport import LinkServer
 from netbbs.storage.database import Database
@@ -163,11 +164,12 @@ def test_sync_requests_and_persists_a_seeds_peer_list(tmp_path):
         seed.close()
 
 
-def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tmp_path):
-    """A seed the operator never configured, but that a
-    (simulated) live seed-list refresh already cached, still gets
-    dialed -- proves the per-pass merge actually happens, not just that
-    the cache-read function exists."""
+def test_sync_dials_a_cached_reliable_node_once_participation_is_accepted(tmp_path):
+    """A seed the operator never configured, but that a (simulated)
+    reliable-nodes refresh already cached, still gets dialed once the
+    SysOp has accepted participation (design doc §16, issue #219) --
+    proves the per-pass merge actually happens, not just that the
+    cache-read function exists."""
     dialer_identity = bootstrap_node_identity("dialer")
     seed_identity = bootstrap_node_identity("seed")
     dialer_node = LinkNode(identity=dialer_identity)
@@ -179,9 +181,10 @@ def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tm
         seed_server = await _run_server(seed_node, seed.lane)
         seed_url = f"http://127.0.0.1:{seed_server.port}"
         # Not passed as an operator-configured seed below -- only cached,
-        # as if a prior run_scheduled_seed_refresh pass had already
-        # fetched it.
-        set_cached_supplementary_seeds(dialer.db, [seed_url])
+        # as if a prior run_scheduled_reliable_nodes_refresh pass had
+        # already fetched it, with participation accepted.
+        set_cached_reliable_nodes(dialer.db, [ReliableNode(name="Seed", url=seed_url)])
+        set_participation(dialer.db, Participation.ACCEPTED)
         try:
             async with aiohttp.ClientSession() as session:
                 task = asyncio.create_task(
@@ -197,6 +200,49 @@ def test_sync_dials_a_live_cached_supplementary_seed_not_in_the_operator_list(tm
     try:
         asyncio.run(scenario())
         assert dialer_identity.fingerprint in seed_node.peers  # the dial actually reached the seed
+    finally:
+        dialer.close()
+        seed.close()
+
+
+# -- candidate fallback (design doc §8.3) --------------------------------
+
+
+def test_sync_never_dials_a_reliable_node_while_participation_is_not_accepted(tmp_path):
+    """The inverse of the test above: a cached roster is *not* dialed
+    while participation is declined (or never answered) -- a node
+    upgraded in place must never start dialing project infrastructure
+    until its SysOp says so (design doc §16, issue #219)."""
+    dialer_identity = bootstrap_node_identity("dialer")
+    seed_identity = bootstrap_node_identity("seed")
+    dialer_node = LinkNode(identity=dialer_identity)
+    seed_node = LinkNode(identity=seed_identity)
+    dialer = _NodeDb(tmp_path, "dialer")
+    seed = _NodeDb(tmp_path, "seed")
+
+    async def scenario():
+        seed_server = await _run_server(seed_node, seed.lane)
+        seed_url = f"http://127.0.0.1:{seed_server.port}"
+        # Not passed as an operator-configured seed below -- only cached,
+        # as if a prior run_scheduled_reliable_nodes_refresh pass had
+        # already fetched it, with participation accepted.
+        set_cached_reliable_nodes(dialer.db, [ReliableNode(name="Seed", url=seed_url)])
+        set_participation(dialer.db, Participation.DECLINED)
+        try:
+            async with aiohttp.ClientSession() as session:
+                task = asyncio.create_task(
+                    run_link_sync(
+                        dialer_node, session, [],  # no operator-configured seeds at all
+                        lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
+                    )
+                )
+                await _run_sync_briefly(task)
+        finally:
+            await seed_server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert dialer_identity.fingerprint not in seed_node.peers  # never dialed
     finally:
         dialer.close()
         seed.close()
@@ -315,7 +361,7 @@ def test_sync_falls_back_when_no_seeds_are_configured_at_all(tmp_path):
             async with aiohttp.ClientSession() as session:
                 task = asyncio.create_task(
                     run_link_sync(
-                        dialer_node, session, [],  # zero seeds, zero cached supplementary seeds
+                        dialer_node, session, [],  # zero seeds, participation undecided
                         lambda: _hello_for(dialer_node), dialer.lane, interval_seconds=60.0,
                     )
                 )

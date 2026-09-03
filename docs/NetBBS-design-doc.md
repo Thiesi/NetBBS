@@ -1379,9 +1379,13 @@ boundary translating protocol messages to real HTTP requests and responses.
 Bootstrap sources are combined, not exclusive:
 
 1. operator-configured seeds;
-2. software-shipped fallback seeds;
-3. a live supplementary seed list fetched over the existing GitHub update
-   channel;
+2. the software-shipped reliable-nodes fallback (Reliable Link first; §16,
+   issue #219);
+3. the live reliable-nodes roster, fetched daily from
+   `https://www.netbbs.org/reliable-nodes.json` and preferred over the
+   fallback once any fetch has succeeded -- one list serving default seeds,
+   asynchronous relay candidates, and the future live-relay anchor, and
+   dialed only after the SysOp accepts reliable-node participation;
 4. signed/verified peer-list exchange after contact;
 5. bounded fallback attempts to discovered candidates when normal seeds fail.
 
@@ -3760,7 +3764,7 @@ non-permanent counterpart: a `link_diagnostic_log` table (`id`, `level`,
 `logger_name`, `message`, `created_at`), populated by a small `logging.
 Handler` subclass attached to the `netbbs.link` logger namespace at startup
 (catching every existing `_logger.warning`/`.error` call already scattered
-across `netbbs.link.sync`/`.transport`/`.seedlist` via ordinary logger
+across `netbbs.link.sync`/`.transport`/`.reliable_nodes` via ordinary logger
 propagation — no per-call-site instrumentation needed) at `WARNING` level
 and above only; routine `INFO`-level chatter stays stderr-only, ephemeral,
 exactly as today. Audited every existing call site this handler will now
@@ -3843,14 +3847,14 @@ interrupting a live HTTP call would. Callers that don't pass a
 `stop_event` (`None`, the default) still get the original unconditional
 `asyncio.sleep`, unchanged.
 
-`daybreak_task`/`update_check_task`/`seed_refresh_task` get a narrower
-treatment: none of them talks to a Link peer (`seed_refresh_task` fetches
-this project's own trusted release-hosting infrastructure, not a peer's
+`daybreak_task`/`update_check_task`/`reliable_nodes_refresh_task` get a narrower
+treatment: none of them talks to a Link peer (`reliable_nodes_refresh_task` fetches
+the project's own reliable-nodes roster from `www.netbbs.org`, not a peer's
 Link endpoint, and already retries on its own forgiving 24h cadence), so
 *graceful* draining — letting current work finish rather than aborting
 it — would be solving a problem none of them actually has; all three are
 still cancelled immediately, exactly as before. But `update_check_task`/
-`seed_refresh_task` both reach a blocking `urllib.request.urlopen` call via
+`reliable_nodes_refresh_task` both reach a blocking `urllib.request.urlopen` call via
 `asyncio.to_thread`, and cancelling the *awaiting* coroutine does not stop
 that underlying worker thread, which keeps running the blocking call to
 completion regardless (Python cannot forcibly abort a thread) — the
@@ -5273,6 +5277,11 @@ first authenticated login if bootstrap itself stays a non-interactive
 CLI invocation — with the accept/decline answer persisted so it is
 asked exactly once, not on every subsequent login.
 
+*Default flipped by issue #219 Decision 7:* on the shared first-run screen the
+prompt's bare-Enter default is now accept (both first-run choices are pre-set
+to accept so accepting everything is two keystrokes); an explicit "n" still
+declines, and the decision is recorded once either way.
+
 **Decision 2 (locked in) — the managed-service credential is a separate,
 auto-generated, per-registration secret, not the node's own Ed25519 key.**
 Both the self-hosted path (SysOp supplies their own dynamic-DNS
@@ -5602,13 +5611,37 @@ and bundling them would silently reintroduce the exact consent problem
 that made #201 land on opt-in in the first place, for whichever half of
 that combination a given SysOp didn't actually want.
 
-**Explicitly not decided here — future implementation work when this is
-picked up, not authorized by this entry:** the live-fetched endpoint's
-exact hosting/format/refresh cadence; the first-run screen's actual
-copy; Reliable Link's own operational configuration (relay-serving
-enablement, capacity planning for live-relay bandwidth once #168
-ships); where in the login/setup flow Decision 6's display-name check
-actually lives.
+**Implemented (issue #266), with the previously-open implementation
+choices settled as follows.** The live roster is
+`https://www.netbbs.org/reliable-nodes.json` — a JSON object
+`{"version": 1, "nodes": [{"name", "url"}, ...]}`, served as plain static
+content from the project's own web host (source copy and runbook in
+`services/reliable_nodes/`), fetched once a day by
+`netbbs.link.reliable_nodes.run_scheduled_reliable_nodes_refresh` under the
+same off-switch as the release check, bounded at 32 entries with per-field
+length caps, and rejected as a whole on any other format version so an old
+build keeps its last good copy. A successful fetch *replaces* the built-in
+fallback rather than merging with it, so removing a node from the roster
+actually stops it being dialed. `[link] enabled` is now tri-state: an
+explicit TOML/CLI value always wins; a silent configuration defers to the
+node-wide participation decision (`netbbs.link.onboarding`), resolved once
+at startup, so accepting on the first-run screen turns Link on as an
+outgoing-only node with no port to open. The participation decision also
+gates whether the roster is dialed at all, independently of how Link came
+to be enabled — a node upgraded in place never dials project
+infrastructure until its SysOp says so. Decision 6 is enforced at the
+startup boundary: with Link effectively enabled and the placeholder name,
+`python -m netbbs` refuses with a `StartupError` naming the fix, the same
+shape as the no-SysOp refusal; the first-run screen asks for the name
+before recording an accept so a fresh install never reaches that refusal,
+and the console's `Settings > Join NetBBS Link` screen refuses to accept
+under the placeholder for the same reason. The first-run screen
+(`netbbs.net.onboarding_flow`) lives at the two anchors issue #201's prompt
+already used — `netbbs.admin`'s first-SysOp bootstrap and, as a fallback,
+a SysOp's authenticated login — each choice checking its own state so an
+upgraded node is asked only what it never answered. Still open: Reliable
+Link's own operational configuration (relay-serving is already on by
+default; live-relay capacity planning waits for issue #168).
 
 ### Deliberately deferred without active issue
 

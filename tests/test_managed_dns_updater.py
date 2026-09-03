@@ -1,7 +1,7 @@
 """
 Tests for netbbs.managed_dns.updater (issue #201 Phase 3) -- sleep
 injected so nothing here waits on a real interval, matching tests/
-test_link_seedlist.py's own established shape for exactly this kind of
+test_link_reliable_nodes.py's own established shape for exactly this kind of
 periodic task.
 """
 
@@ -42,7 +42,7 @@ async def _run_one_pass(db, *, sleep_calls, condition, timeout_iterations=200):
     """Runs the updater task until `condition()` is true or `sleep_calls`
     already has an entry (the pass finished, whether or not `condition`
     ever became true -- covers the "this pass was a no-op" scenarios),
-    then cancels it, matching test_link_seedlist.py's own polling
+    then cancels it, matching test_link_reliable_nodes.py's own polling
     convention."""
     fake_sleep, sleep_calls_ref = sleep_calls
     task = asyncio.create_task(

@@ -7079,3 +7079,59 @@ def test_users_compact_panel_fits_four_digit_account_counts():
     text = _visible(_written_text(session))
     assert "1000/1000" in text
     _assert_double_frame_rows_match_border(text, "users_compact_four_digit_accounts")
+
+
+# -- Settings > Join NetBBS Link (design doc §16, issue #219) -----------------
+
+
+def test_join_link_option_appears_in_the_settings_submenu(db, lane, sysop):
+    session = FakeSession(["s", "b", "b"])
+    _run(session, lane, sysop)
+    assert "oin NetBBS Link" in _written_text(session)
+
+
+def test_join_link_screen_shows_the_decision_and_the_built_in_roster(db, lane, sysop):
+    session = FakeSession(["s", "j", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Participation:" in text and "UNDECIDED" in text
+    assert "Reliable nodes: 1 (built-in list)" in text
+    assert "Reliable Link  http://ReLink.NetBBS.org:7862" in text
+    assert "unknown until this node has started once" in text
+
+
+def test_join_link_accept_is_refused_under_the_placeholder_name(db, lane, sysop):
+    from netbbs.link.onboarding import Participation, get_participation
+
+    session = FakeSession(["s", "j", "a", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert get_participation(db) is Participation.UNDECIDED
+    assert "Set a node name first" in _written_text(session)
+
+
+def test_join_link_accept_persists_and_is_audited(db, lane, sysop):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.onboarding import Participation, get_participation, set_configured_link_enabled
+
+    set_node_display_name(db, "Named Node")
+    set_configured_link_enabled(db, None)
+    session = FakeSession(["s", "j", "a", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert get_participation(db) is Participation.ACCEPTED
+    text = _written_text(session)
+    assert "Reliable-node participation accepted." in text
+    assert "this answer decides" in text
+    rows = db.connection.execute(
+        "SELECT action, detail FROM moderation_log WHERE action = 'set_link_participation'"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [("set_link_participation", "accepted")]
+
+
+def test_join_link_decline_persists(db, lane, sysop):
+    from netbbs.link.onboarding import Participation, get_participation
+
+    session = FakeSession(["s", "j", "d", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert get_participation(db) is Participation.DECLINED
+    assert "Reliable-node participation declined." in _written_text(session)
+

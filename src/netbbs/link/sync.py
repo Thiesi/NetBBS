@@ -80,10 +80,12 @@ rather than silently assumed done. A failed peer-list request logs and
 is skipped, same tolerance every other per-seed step in this loop
 already has.
 
-**The per-pass seed list is operator-configured `seeds` plus
-whatever `netbbs.link.seedlist.run_scheduled_seed_refresh` has most
-recently cached**, re-merged every pass (not just once at startup) so a
-live-fetched seed takes effect without a restart.
+**The per-pass seed list is operator-configured `seeds` plus, once the
+SysOp has accepted reliable-node participation (`netbbs.link.
+onboarding`), the effective reliable-nodes roster (`netbbs.link.
+reliable_nodes`: the daily live-fetched list, or the built-in
+fallback)**, re-merged every pass (not just once at startup) so a console
+answer or a refreshed roster takes effect without a restart.
 
 **Candidate fallback**: if every seed in a given pass fails (or none
 were configured/cached at all), `_try_candidate_fallback` tries a small
@@ -160,7 +162,8 @@ from netbbs.link.protocol import HelloMessage, LinkNode, LinkProtocolError
 from netbbs.link.relay_mailbox import RelayableEnvelope
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
-from netbbs.link.seedlist import get_cached_supplementary_seeds
+from netbbs.link.onboarding import participation_accepted
+from netbbs.link.reliable_nodes import effective_reliable_nodes
 from netbbs.link.store import build_inventory_request, delete_relay_consent, save_event, save_peer
 from netbbs.link.transport import (
     LinkTransportError,
@@ -191,6 +194,7 @@ from netbbs.link.work_items import (
     record_failure,
     record_success,
 )
+from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 
 _logger = logging.getLogger(__name__)
@@ -202,6 +206,12 @@ _logger = logging.getLogger(__name__)
 # cleverly), not every entry in node.candidate_descriptors.
 _MAX_CANDIDATE_FALLBACK_ATTEMPTS = 5
 _MAX_TRUST_PULL_PAGES_PER_PASS = 10
+
+
+def _reliable_node_urls_if_accepted(db: Database) -> list[str]:
+    if not participation_accepted(db):
+        return []
+    return [entry.url for entry in effective_reliable_nodes(db)]
 
 
 async def run_link_sync(
@@ -236,13 +246,14 @@ async def run_link_sync(
     config logic a second time.
 
     `seeds` is the *operator-configured* list only (explicit intent
-    always wins) — each pass also merges in whatever `netbbs.
-    link.seedlist.run_scheduled_seed_refresh` has most recently cached
-    (empty until/unless that task is running and Link is enabled), so a
-    node started with zero configured seeds still eventually reaches
-    the network once a live fetch succeeds, without needing a restart.
-    Re-read from the lane every pass, not captured once at startup, or
-    "live" refresh would only ever take effect after a restart.
+    always wins) — each pass also merges in the reliable-nodes roster
+    (`netbbs.link.reliable_nodes.effective_reliable_nodes`), but only
+    while the SysOp's participation decision is "accepted" (`netbbs.
+    link.onboarding`, design doc §16 issue #219), so a node started with
+    zero configured seeds still reaches the network with no
+    configuration at all once its SysOp says so. Re-read from the lane
+    every pass, not captured once at startup, or a console answer or a
+    daily roster refresh would only ever take effect after a restart.
 
     `stop_event` (design doc §13.11, issue #60's graceful-drain piece):
     an optional cooperative stop signal, checked once per pass at the
@@ -288,9 +299,14 @@ async def run_link_sync(
     that gap is what this issue closes.
     """
     while stop_event is None or not stop_event.is_set():
-        supplementary = await lane.run(get_cached_supplementary_seeds)
+        # Design doc §16 (issue #219): the reliable-nodes roster joins the
+        # dial list only once the SysOp has accepted participation --
+        # never merely because the list exists. Re-read from the lane
+        # every pass, not captured at startup, so a console answer (or a
+        # daily roster refresh) takes effect without a restart.
+        reliable = await lane.run(_reliable_node_urls_if_accepted)
         # De-duplicated, order-preserving: operator-configured first.
-        pass_seeds = list(dict.fromkeys(seeds + supplementary))
+        pass_seeds = list(dict.fromkeys(seeds + reliable))
         reached_network = False
         for seed_url in pass_seeds:
             succeeded = await _sync_one_seed(

@@ -30,6 +30,8 @@ from netbbs.__main__ import (
 )
 from netbbs.net.shutdown import SequenceScheduler
 from netbbs.auth.users import SYSOP_LEVEL, create_user
+from netbbs.config import set_node_display_name
+from netbbs.link.onboarding import Participation, set_participation
 from netbbs.link.enforcement import ensure_node_subject
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.protocol import LinkNode, RealtimeFrame
@@ -69,6 +71,12 @@ def _config(tmp_path, *, seed_sysop: bool = True, **overrides) -> NodeConfig:
     if seed_sysop:
         db = Database(config.db_path)
         create_user(db, "sysop", password="hunter2", user_level=SYSOP_LEVEL)
+        # Design doc §16, issue #219 Decision 6: a Link-enabled node
+        # refuses to start under the placeholder display name, and most
+        # tests here enable Link -- name the node once, centrally, the
+        # same way the SysOp is seeded. The one test exercising that
+        # refusal resets the name itself.
+        set_node_display_name(db, "Lifecycle Test Node")
         db.close()
     return config
 
@@ -674,26 +682,26 @@ def test_link_sync_task_is_hard_cancelled_if_a_pass_hangs_past_the_grace_period(
     asyncio.run(scenario())
 
 
-def test_seed_refresh_task_hard_cancelled_if_its_fetch_hangs_past_the_grace_period(tmp_path, monkeypatch):
+def test_reliable_nodes_refresh_task_hard_cancelled_if_its_fetch_hangs_past_the_grace_period(tmp_path, monkeypatch):
     """Code review follow-up: `daybreak_task`/`update_check_task`/
-    `seed_refresh_task` used to be cancelled and awaited with *no*
+    `reliable_nodes_refresh_task` used to be cancelled and awaited with *no*
     bound at all in `run()`'s own teardown -- unlike `link_sync_task`
     above, which at least had one (the wrong one, fixed separately).
     Two of the three reach a blocking `urllib.request.urlopen` call via
     `asyncio.to_thread`, where cancelling the *awaiting* coroutine does
     not stop the underlying worker thread -- an unbounded await on that
     coroutine was a real, not hypothetical, way for one of these to hang
-    shutdown indefinitely. `seed_refresh_task` stands in for both (the
+    shutdown indefinitely. `reliable_nodes_refresh_task` stands in for both (the
     other, `update_check_task`, shares the identical `_default_fetch`-
     via-`to_thread` shape in a different module) -- same real-run,
     real-hang-simulation approach as `link_sync_task`'s own hard-cancel
     test above, not just a unit test of the drain logic in isolation."""
-    import netbbs.link.seedlist as seedlist_module
+    import netbbs.link.reliable_nodes as reliable_nodes_module
 
     async def _hang_forever(*args, **kwargs):
         await asyncio.sleep(999)
 
-    monkeypatch.setattr(seedlist_module, "fetch_supplementary_seeds", _hang_forever)
+    monkeypatch.setattr(reliable_nodes_module, "fetch_reliable_nodes", _hang_forever)
 
     async def scenario():
         config = _config(
@@ -1305,3 +1313,74 @@ def test_default_log_file_rotates_instead_of_growing_without_bound(tmp_path):
     rotated = sorted(tmp_path.glob("netbbs.log.*"))
     assert rotated, "expected at least one rotated backup file"
     assert len(rotated) <= 2, "backupCount=2 must cap the number of retained backups"
+
+
+# -- reliable-node onboarding (design doc §16, issue #219) --------------------
+
+
+def test_link_enabled_with_placeholder_display_name_raises_startup_error(tmp_path):
+    """Decision 6, enforced at the real startup boundary: Link on plus
+    the shipped placeholder name is refused with a StartupError naming
+    the fix, before any listener binds."""
+    config = _config(
+        tmp_path,
+        telnet=TransportConfig(True, "127.0.0.1", 0),
+        link=LinkConfig(enabled=True, host="127.0.0.1", port=0),
+    )
+    db = Database(config.db_path)
+    set_node_display_name(db, "NetBBS")  # back to the placeholder
+    db.close()
+
+    async def scenario():
+        with pytest.raises(StartupError, match="placeholder 'NetBBS'"):
+            await run(config, shutdown_event=asyncio.Event())
+
+    asyncio.run(scenario())
+
+
+def test_placeholder_display_name_is_fine_for_a_local_only_node(tmp_path):
+    """The gate is about Link participation, not local operation: a node
+    with Link off starts normally under the placeholder name."""
+    config = _config(tmp_path, link=LinkConfig(enabled=False))
+    db = Database(config.db_path)
+    set_node_display_name(db, "NetBBS")
+    db.close()
+    asyncio.run(_run_until_ready_then_shut_down(config))
+
+
+def _link_listener_started(caplog) -> bool:
+    return any("NetBBS Link listening on" in record.getMessage() for record in caplog.records)
+
+
+def test_silent_link_config_with_accepted_participation_starts_link(tmp_path, caplog):
+    """A config that never mentions [link] enabled, plus a SysOp who
+    accepted reliable-node participation, runs Link -- the frictionless
+    path the design describes, with no TOML edit."""
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=0))
+    assert config.link.enabled is None
+    db = Database(config.db_path)
+    set_participation(db, Participation.ACCEPTED)
+    db.close()
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert _link_listener_started(caplog)
+    assert any("participation decision" in r.getMessage() for r in caplog.records)
+
+
+def test_silent_link_config_without_acceptance_leaves_link_off(tmp_path, caplog):
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=0))
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert not _link_listener_started(caplog)
+
+
+def test_explicit_link_disabled_wins_over_accepted_participation(tmp_path, caplog):
+    """An operator's explicit `enabled = false` is never overridden by a
+    console answer."""
+    config = _config(tmp_path, link=LinkConfig(enabled=False, host="127.0.0.1", port=0))
+    db = Database(config.db_path)
+    set_participation(db, Participation.ACCEPTED)
+    db.close()
+    with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert not _link_listener_started(caplog)

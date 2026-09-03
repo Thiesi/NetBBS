@@ -101,18 +101,27 @@ class LinkConfig:
     configured seed list -- a plain list of base URLs (e.g.
     `"http://198.51.100.7:7862"`) `netbbs.link.sync`'s background loop
     dials every `sync_interval_seconds`. Just the fixed/operator-
-    configured half of §12's bootstrap model -- `netbbs.link.seedlist.
-    run_scheduled_seed_refresh` fetches a live supplementary
-    list over the same channel `netbbs.selfupdate` uses and
-    `run_link_sync` merges it in every pass, "a supplement to -- never a
-    replacement for" this list, exactly as that design framed
-    it. Empty by default -- Link can run accepting inbound traffic
-    with nothing configured here at all, relying entirely on
-    the live-fetched list (or peer-list-exchange-discovered candidates,
-    once something consumes those) to ever reach the network.
+    configured half of §12's bootstrap model -- `netbbs.link.
+    reliable_nodes` supplies the project's reliable-nodes roster (a
+    built-in fallback plus a daily live fetch from netbbs.org) and
+    `run_link_sync` merges it in every pass once the SysOp accepts
+    participation (`netbbs.link.onboarding`, design doc §16 issue #219),
+    "a supplement to -- never a replacement for" this list. Empty by
+    default -- Link can run accepting inbound traffic with nothing
+    configured here at all, relying entirely on the reliable-nodes
+    roster (or peer-list-exchange-discovered candidates) to ever reach
+    the network.
 
-    Defaults to disabled, matching §15's "Phase 3 is explicitly
-    private/experimental federation" framing -- an operator opts in.
+    `enabled` is tri-state (design doc §16, issue #219): `True`/`False`
+    when the operator set it explicitly (TOML `enabled = ...` or
+    `--enable-link`/`--disable-link`), `None` when the config is silent.
+    An explicit value always wins; a silent config defers to the SysOp's
+    node-wide reliable-node participation decision (`netbbs.link.
+    onboarding.resolve_link_enabled`, resolved once at startup by
+    `netbbs.__main__.run`, which then replaces this field with the
+    effective bool so every downstream consumer keeps reading a plain
+    bool). A node whose config is silent and whose SysOp never accepted
+    therefore stays off, exactly as the old `False` default did.
 
     `relay_serving_enabled`/`max_relay_clients` (design doc §12,
     issue #58) govern this node's own willingness to *act as a
@@ -187,7 +196,7 @@ class LinkConfig:
     collide from small, natural port increments alone.
     """
 
-    enabled: bool = False
+    enabled: bool | None = None
     host: str = "0.0.0.0"
     port: int = 7862
     outgoing_only: bool = True
@@ -274,7 +283,7 @@ class ShutdownConfig:
     # immediate shutdown never had one to spend), versus how long a
     # *background task* gets to notice cancellation before teardown
     # gives up on it and moves on. The other three tasks
-    # (`daybreak_task`/`update_check_task`/`seed_refresh_task`) had *no*
+    # (`daybreak_task`/`update_check_task`/`reliable_nodes_refresh_task`) had *no*
     # bound at all -- a bare `.cancel()` then an unbounded `await`,
     # which cancellation usually satisfies promptly but isn't
     # guaranteed to (two of the three reach a blocking `urllib.request.
@@ -329,7 +338,12 @@ class NodeConfig:
             if not transport.host.strip():
                 raise ConfigError(f"{name}.host must not be empty")
 
-        if self.link.enabled:
+        # `enabled is None` (config silent -- may still become enabled
+        # via the SysOp's participation decision at startup, issue #219)
+        # validates the Link fields too: defaults always pass, and an
+        # operator who set a bad Link value without saying `enabled`
+        # gets the same clear error rather than a surprise at startup.
+        if self.link.enabled is not False:
             if not (1 <= self.link.port <= 65535):
                 raise ConfigError(f"link.port must be between 1 and 65535, got {self.link.port}")
             if not self.link.host.strip():
@@ -655,8 +669,11 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
     seeds = table.get("seeds", current.seeds)
     if not isinstance(seeds, list) or not all(isinstance(item, str) for item in seeds):
         raise ConfigError("link.seeds must be a list of strings")
+    enabled = table.get("enabled", current.enabled)
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ConfigError(f"link.enabled must be true or false, got {enabled!r}")
     return LinkConfig(
-        enabled=bool(table.get("enabled", current.enabled)),
+        enabled=enabled,
         host=str(table.get("host", current.host)),
         port=int(table.get("port", current.port)),
         outgoing_only=bool(table.get("outgoing_only", current.outgoing_only)),

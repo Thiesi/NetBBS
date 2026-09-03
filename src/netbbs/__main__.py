@@ -18,18 +18,21 @@ import logging
 import logging.handlers
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from netbbs.auth.users import count_sysops
 from netbbs.backup import remove_pid_file, write_pid_file
 from netbbs.chat import ChatHub, DirectChatInvites, MessageMailbox, PresenceRegistry
+from netbbs.config import is_node_display_name_placeholder
 from netbbs.files.storage import purge_incoming_staging
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
-from netbbs.link.seedlist import run_scheduled_seed_refresh
+from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_enabled
+from netbbs.link.reliable_nodes import run_scheduled_reliable_nodes_refresh
 from netbbs.link.store import load_link_node
 from netbbs.link.trust import maintain_trust_state
 from netbbs.managed_dns.state import set_node_fingerprint
@@ -673,7 +676,7 @@ async def run(
     # so the shutdown finally block below never needs an extra None check
     # beyond the ones it already has for link_sync_task itself.
     link_sync_stop_event = asyncio.Event()
-    seed_refresh_task: asyncio.Task | None = None
+    reliable_nodes_refresh_task: asyncio.Task | None = None
     link_diagnostic_log_handler: LinkDiagnosticLogHandler | None = None
     # Design doc §8.10.2, issue #148: pre-initialized here, like every
     # other name the `finally` block below reads directly, so an
@@ -718,6 +721,41 @@ async def run(
         # direct-db reasoning load_link_node's own read just below
         # already documents for this exact point in startup.
         set_node_fingerprint(db, node_identity.fingerprint)
+
+        # Design doc §16, issue #219: `config.link.enabled` is tri-state
+        # until here. An explicit TOML/CLI value wins; a silent config
+        # defers to the SysOp's node-wide reliable-node participation
+        # decision. Resolved exactly once, then written back into
+        # `config` as a plain bool so every consumer below (link_node,
+        # the diagnostic handler, _start_servers, the sync task) keeps
+        # its "if config.link.enabled" shape untouched. The configured
+        # tri-state is cached in the database first (same direct-db
+        # reasoning as set_node_fingerprint just above) so the SysOp
+        # console can say truthfully whether the participation answer is
+        # what decides Link on this node.
+        set_configured_link_enabled(db, config.link.enabled)
+        if config.link.enabled is None:
+            effective_link_enabled = resolve_link_enabled(None, db)
+            if effective_link_enabled:
+                _logger.info(
+                    "NetBBS Link enabled by the SysOp's reliable-node participation decision "
+                    "([link] enabled is not set in the configuration)"
+                )
+            config = replace(config, link=replace(config.link, enabled=effective_link_enabled))
+        # Decision 6: a node may not participate in Link under the
+        # shipped placeholder display name -- every default-named node
+        # on a mesh would be indistinguishable in conversation. Refused
+        # here, clearly, naming the fix (the same shape as the no-SysOp
+        # refusal below) rather than starting Link under a name that
+        # violates the invariant. Local-only operation is unaffected.
+        if config.link.enabled and is_node_display_name_placeholder(db):
+            raise StartupError(
+                "NetBBS Link is enabled but this node's display name is still the "
+                "placeholder 'NetBBS' -- every node on the mesh needs a name of its own so "
+                "people can tell boards apart. Set one first (SysOp console: Settings > "
+                "Node name, reachable offline via `python -m netbbs.admin`), then start "
+                "again. A node that doesn't use Link needs no name."
+            )
 
         # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs
@@ -822,8 +860,8 @@ async def run(
         # Not gated on `config.link.seeds` being
         # non-empty -- a node started with zero operator-configured
         # seeds still starts this task, since `run_link_sync` itself
-        # also merges in whatever `run_scheduled_seed_refresh` (below)
-        # most recently cached, and a genuinely empty combined list is
+        # also merges in the reliable-nodes roster (refreshed below)
+        # once participation is accepted, and a genuinely empty combined list is
         # already a harmless no-op pass (nothing to dial, nothing
         # crashes). This is precisely the "brand-new node with no
         # learned peers yet" case the live
@@ -878,27 +916,28 @@ async def run(
                     len(config.link.seeds), config.link.sync_interval_seconds,
                 )
 
-                # Design doc: refreshes the supplementary seed
-                # list `run_link_sync` above merges in every pass. Its
-                # own off switch is `get_auto_update_check_enabled` --
+                # Design doc §8.3/§16 (issue #219): refreshes the
+                # reliable-nodes roster `run_link_sync` above merges in
+                # every pass (once participation is accepted). Its own
+                # off switch is `get_auto_update_check_enabled` --
                 # deliberately the same flag as the release-check task,
                 # not a second Link-specific toggle for a now explicitly
                 # coupled feature (see that function's own docstring).
-                seed_refresh_task = asyncio.create_task(run_scheduled_seed_refresh(db))
+                reliable_nodes_refresh_task = asyncio.create_task(run_scheduled_reliable_nodes_refresh(db))
 
-                def _log_seed_refresh_failure(task: asyncio.Task) -> None:
+                def _log_reliable_nodes_refresh_failure(task: asyncio.Task) -> None:
                     if task.cancelled():
                         return
                     exc = task.exception()
                     if exc is not None:
                         _logger.error(
-                            "Seed-list refresh task failed -- the supplementary seed "
-                            "list will no longer update this node uptime (operator-"
-                            "configured seeds are unaffected)",
+                            "Reliable-nodes refresh task failed -- the roster will no "
+                            "longer update this node uptime (the cached/built-in list and "
+                            "operator-configured seeds are unaffected)",
                             exc_info=exc,
                         )
 
-                seed_refresh_task.add_done_callback(_log_seed_refresh_failure)
+                reliable_nodes_refresh_task.add_done_callback(_log_reliable_nodes_refresh_failure)
 
         # Design doc -- node management, Thiesi's own request: every
         # configured listener/background task above has already started
@@ -920,11 +959,11 @@ async def run(
         # `graceful_delay_seconds` (60s), a number meant for "how long
         # does a human get to notice a shutdown warning," not "how long
         # does a network task get to notice cancellation." Worse,
-        # `daybreak_task`/`update_check_task`/`seed_refresh_task` below
+        # `daybreak_task`/`update_check_task`/`reliable_nodes_refresh_task` below
         # had *no* bound at all -- a bare `.cancel()` then an unbounded
         # `await`, trusting cancellation to propagate promptly through
         # whatever each task happened to be doing. It usually does, but
-        # `update_check_task`/`seed_refresh_task` both reach a blocking
+        # `update_check_task`/`reliable_nodes_refresh_task` both reach a blocking
         # `urllib.request.urlopen` call via `asyncio.to_thread` --
         # cancelling the *awaiting* coroutine there does not stop the
         # underlying worker thread, which keeps running the blocking
@@ -996,7 +1035,7 @@ async def run(
         await _swallow_after(link_sync_task)
         if link_sync_session is not None:
             await link_sync_session.close()
-        await _drain_immediately(seed_refresh_task)
+        await _drain_immediately(reliable_nodes_refresh_task)
         for server in reversed(servers):
             await server.stop()
         # Design doc §8.10.1, issue #148: every live Noise session this

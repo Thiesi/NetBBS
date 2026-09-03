@@ -45,7 +45,7 @@ from netbbs.net.char_input import InputHistory
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.logoff_banner import load_logoff_banner
 from netbbs.net.main_menu import _main_menu
-from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in
+from netbbs.net.onboarding_flow import offer_onboarding
 from netbbs.net.maintenance import LOCKDOWN_MESSAGE, LOCKDOWN_NOTICE, MAINTENANCE_MESSAGE, MaintenanceMode
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
@@ -619,14 +619,16 @@ async def run_authenticated_session(
             )
         )
 
-    # Design doc §16 Decision 1 (issue #201): the fallback anchor for
-    # the managed-DNS opt-in prompt, for a SysOp created by a path that
-    # bypassed netbbs.admin's own interactive bootstrap prompt (e.g. a
-    # scripted provisioning call straight into create_user). Gated on
+    # Design doc §16 (issues #219 Decision 7 and #201 Decision 1): the
+    # fallback anchor for the first-run screen (reliable-node
+    # participation + managed subdomain), for a SysOp created by a path
+    # that bypassed netbbs.admin's own interactive bootstrap prompt (e.g.
+    # a scripted provisioning call straight into create_user), and for a
+    # node upgraded in place whose SysOp has never been asked. Gated on
     # `lane is not None`, matching every other lane-dependent feature in
     # this function's own established degrade-gracefully-in-tests
-    # convention -- `offer_managed_dns_opt_in` is itself a no-op once
-    # any SysOp has already answered it, so this costs nothing on every
+    # convention -- `offer_onboarding` is itself a no-op once every
+    # choice on it has been answered, so this costs nothing on every
     # subsequent login.
     # One InputHistory per connection (design doc),
     # not node-wide like hub/presence/mailbox -- constructed here rather
@@ -662,7 +664,7 @@ async def run_authenticated_session(
         )
     try:
         if lane is not None and meets_level(user, SYSOP_LEVEL):
-            await offer_managed_dns_opt_in(session, lane)
+            await offer_onboarding(session, lane)
 
         # Deliberately after the watcher task above, not alongside the
         # other post-login notices earlier in this function: unlike

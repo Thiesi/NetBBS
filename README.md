@@ -104,8 +104,9 @@ between NetBBS nodes, opt-in and disabled by default. Currently working:
 
 - signed node identity with a root/operational key-lifecycle, and a
   real HTTP+JSON transport (`aiohttp`) between nodes;
-- hello/peer discovery, persisted across restarts, with live
-  supplementary seed-list refresh and peer-list exchange;
+- hello/peer discovery, persisted across restarts, with the
+  reliable-nodes roster (a built-in fallback plus a daily live list from
+  netbbs.org) and peer-list exchange;
 - promoting a local board to Link scope, and carrying a board received
   from a peer — both the board shell and every remote post/edit
   materialize into that node's own real, locally browsable content,
@@ -246,7 +247,7 @@ netbbs/
 │   │                     (`diagnostics.py`), and outgoing-only
 │   │                     reachability (`relay_mailbox.py`/
 │   │                     `relay_selection.py`/`reliability.py`/
-│   │                     `seedlist.py`)
+│   │                     `reliable_nodes.py`/`onboarding.py`)
 │   ├── rendering/        ANSI rendering framework (§4): 256-color/
 │   │                     cursor helpers, text reflow, untrusted-input
 │   │                     sanitization, and the screen-buffer/diff
@@ -379,7 +380,12 @@ enabled = false
 # runs the listener so peers this node dials can reply, without
 # claiming to be reachable from outside; a full peer needs
 # advertised_host (and, if different from port, advertised_port) set.
-enabled = false
+# enabled: set true/false to decide explicitly. Leave it unset (as here)
+# and the SysOp's answer to the first-run "Join NetBBS Link" question
+# decides instead -- accepting runs Link as an outgoing-only node using
+# the project's reliable nodes (Reliable Link first) as seeds and relays,
+# with no port to open. An explicit value here always wins.
+# enabled = false
 host = "0.0.0.0"
 port = 7862
 outgoing_only = true
@@ -390,6 +396,8 @@ outgoing_only = true
 # answers inbound traffic (if enabled) but never originates any.
 seeds = []
 # seeds = ["http://198.51.100.7:7862", "http://203.0.113.9:7862"]
+# The reliable-nodes roster is dialed after these once the SysOp has
+# accepted participation; it supplements this list, never replaces it.
 sync_interval_seconds = 300
 # Whether this node is willing to relay for outgoing-only peers that
 # ask (design doc §12, round 95, issue #58) -- on by default, since an

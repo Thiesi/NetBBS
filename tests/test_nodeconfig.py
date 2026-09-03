@@ -250,9 +250,11 @@ def test_loaded_config_is_validated_end_to_end(tmp_path):
 # -- Link config (design doc §11/§12) -----------------------------------------
 
 
-def test_default_link_config_is_disabled_and_outgoing_only():
+def test_default_link_config_is_unset_and_outgoing_only():
+    # Design doc §16, issue #219: a silent config is `None` (deferred to
+    # the SysOp's participation decision at startup), not `False`.
     config = NodeConfig()
-    assert config.link.enabled is False
+    assert config.link.enabled is None
     assert config.link.outgoing_only is True
 
 

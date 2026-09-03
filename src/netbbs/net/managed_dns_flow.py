@@ -79,8 +79,12 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
         for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
             await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
         await session.write_line("")
+        # Defaults to accept (design doc §16, issue #219 Decision 7: both
+        # first-run choices are pre-set to accept so accepting everything
+        # is two Enter keystrokes) -- a plain "n" still declines, and the
+        # decision is recorded either way so this never re-asks.
         accepted = await prompt_yes_no(
-            session, "Enable managed netbbs.org subdomain hosting for this node?", default=False
+            session, "Enable managed netbbs.org subdomain hosting for this node?", default=True
         )
         await lane.run(set_opt_in, OptIn.ACCEPTED if accepted else OptIn.DECLINED)
 
