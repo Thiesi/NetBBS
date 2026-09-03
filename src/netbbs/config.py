@@ -175,6 +175,8 @@ def canonical_node_display_name(name: str) -> str:
         raise ValueError("node display name must not be blank")
     if len(name) > MAX_NODE_DISPLAY_NAME_LENGTH:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
+    if name.lower() == "unnamed linked node":
+        raise ValueError("node display name is reserved for nodes without a friendly name")
     if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
         raise ValueError("node display name contains a reserved or invisible character")
     return name

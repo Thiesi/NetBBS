@@ -516,7 +516,9 @@ identity** in the relevant SysOp detail view and remains accepted as an
 advanced/backward-compatible input. Friendly-name resolution must be unique;
 an ambiguous name is refused with a request to use the DNS name. Friendly
 names are compared in one Unicode normalization form (NFC), so canonically
-equivalent spellings are one name, never two claims.
+equivalent spellings are one name, never two claims. UI delimiters, invisible
+control/format characters, and the `Unnamed linked node` fallback label are
+reserved and cannot be claimed as friendly names.
 
 Peers retain authenticated observations of all three values. A friendly-name
 change under the same fingerprint is an informational continuity notice. A DNS
@@ -526,6 +528,9 @@ cryptographic-identity warning: the UI explains that recovery/replacement may
 be legitimate but impersonation is possible, and it does not prevent the user
 from continuing. Presentation names never transfer trust or reputation between
 fingerprints.
+An undismissed cryptographic-identity warning continues to be shown at
+interaction boundaries even if a newer benign profile change is observed;
+only SysOp acknowledgement dismisses it.
 
 ### 4.5 Identity tiers
 

@@ -10,6 +10,7 @@ from netbbs.link.node_profiles import (
     normalize_friendly_name,
     present_link_author_label,
     profile_claims_are_canonical,
+    latest_identity_observation,
     list_identity_observations,
     record_peer_identity_observation,
     remember_own_identity_claims,
@@ -78,6 +79,8 @@ def test_friendly_name_reserves_label_delimiter_and_invisible_controls():
     assert normalize_friendly_name("Anchor\x9b31m") is None
     assert normalize_friendly_name("Anchor\u202eevil") is None
     assert normalize_friendly_name('The "Rusty" Anchor') is None
+    assert normalize_friendly_name("Unnamed linked node") is None
+    assert normalize_friendly_name("UNNAMED LINKED NODE") is None
 
 
 def test_unseen_technical_identity_requires_a_complete_node_fingerprint():
@@ -214,6 +217,31 @@ def test_existing_peer_adopting_another_peers_name_is_security_notice(db, tmp_pa
     notice = list_identity_observations(db)[0]
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.previous_fingerprint == first.fingerprint
+
+
+def test_latest_observation_prefers_undismissed_security_over_newer_benign_change(db, tmp_path):
+    anchor = _peer(tmp_path, "anchor", "Anchor", "anchor.example.org")
+    impostor_identity = bootstrap_node_identity("impostor")
+    impostor_node = LinkNode(identity=impostor_identity)
+    initial = impostor_node.handle_hello(impostor_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Other", canonical_dns_name="other.example.org",
+    ))
+    save_peer(db, anchor)
+    save_peer(db, initial)
+    save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="Anchor", canonical_dns_name="other.example.org",
+    )))
+    save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T14:00:00+00:00",
+        friendly_name="Recovered", canonical_dns_name="other.example.org",
+    )))
+
+    latest = latest_identity_observation(db, impostor_identity.fingerprint)
+    assert latest is not None
+    assert latest.kind == "cryptographic_identity_changed"
+    assert latest.severity == "security"
 
 
 @pytest.mark.parametrize(

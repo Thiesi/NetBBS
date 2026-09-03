@@ -30,6 +30,7 @@ from netbbs.managed_dns.state import (
     set_previous_name,
     set_previous_published,
     set_previous_status,
+    set_published,
     set_registered_name,
     set_registration_status,
     set_service_url,
@@ -38,7 +39,7 @@ from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
 from netbbs.storage.database import Database
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import Database as ManagedDnsServerDatabase
-from services.managed_dns.store import get_registration_by_name
+from services.managed_dns.store import get_registration_by_name, mark_abandoned
 
 
 def _fake_sleep_recorder():
@@ -184,7 +185,41 @@ def test_updater_clears_previous_publication_after_authoritative_inactive_respon
     )
     assert get_previous_status(db) is RegistrationStatus.ABANDONED
     assert not get_previous_published(db)
-    assert load_credential(previous_credential_path_for(db.path)) is None
+    assert load_credential(previous_credential_path_for(db.path)) == "inactive-old-secret"
+    db.close()
+
+
+def test_updater_marks_an_authoritatively_inactive_primary_unpublished(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            async with aiohttp.ClientSession() as session:
+                registered = await register(
+                    session, base_url, name="old-name", node_fingerprint="fp-1", dynamic=False,
+                )
+            mark_abandoned(backend_db, "old-name", released_at="2026-09-04T00:00:00+00:00")
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, base_url)
+            set_registered_name(db, "old-name")
+            set_registration_status(db, RegistrationStatus.MATURED)
+            set_published(db, True)
+            save_credential(credential_path_for(db.path), registered.credential)
+
+            sleep_calls = _fake_sleep_recorder()
+            await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]))
+            return db, registered.credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, credential = asyncio.run(scenario())
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    assert not get_published(db)
+    assert load_credential(credential_path_for(db.path)) == credential
     db.close()
 
 

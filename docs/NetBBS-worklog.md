@@ -3750,3 +3750,15 @@ inside the same transaction so a crash cannot suppress the required
 republish. Address-discovery operations, including cancellation revival,
 bypass forward proxies. Backup and restore treat the credential-transition
 journal as recoverable state and restore its absence as well as its presence.
+
+Undismissed cryptographic-identity observations outrank newer benign profile
+changes when choosing the warning shown at an interaction boundary; only
+explicit acknowledgement suppresses them. The `Unnamed linked node` fallback
+is a reserved, case-insensitive sentinel and cannot be advertised as a real
+friendly name.
+
+Managed-DNS HTTP 401 responses are authoritative inactive state: clear the
+corresponding cached publication claim even when no alternate credential is
+live. Keep both bearer secrets during a pending rename, including after either
+row is abandoned, because the replacement credential can still cancel the
+transition and the previous secret is required to use the revived old row.

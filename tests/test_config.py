@@ -45,6 +45,13 @@ def test_node_display_name_rejects_reserved_and_invisible_characters(tmp_path, n
     db.close()
 
 
+def test_node_display_name_reserves_the_unnamed_node_sentinel(tmp_path):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError, match="reserved for nodes without"):
+        set_node_display_name(db, "UNNAMED LINKED NODE")
+    db.close()
+
+
 def test_set_overwrites_existing_value(tmp_path):
     db = Database(tmp_path / "node.db")
     set_config(db, "key", "first")

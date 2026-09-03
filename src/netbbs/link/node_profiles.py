@@ -81,7 +81,10 @@ def normalize_friendly_name(value: object) -> str | None:
     # it (`netbbs.config.canonical_node_display_name`), so canonically
     # equivalent spellings compare equal everywhere below.
     value = unicodedata.normalize("NFC", value.strip())
-    if not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH:
+    if (
+        not value or len(value) > MAX_NODE_FRIENDLY_NAME_LENGTH
+        or name_key(value) == name_key(UNNAMED_NODE_NAME)
+    ):
         return None
     if "·" in value or '"' in value or any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
         return None
@@ -405,7 +408,7 @@ def latest_identity_observation(
         """
         SELECT * FROM link_node_identity_observations
         WHERE node_fingerprint = ? AND dismissed_at IS NULL AND kind <> 'first_seen'
-        ORDER BY id DESC LIMIT 1
+        ORDER BY CASE WHEN severity = 'security' THEN 0 ELSE 1 END, id DESC LIMIT 1
         """,
         (fingerprint,),
     ).fetchone()

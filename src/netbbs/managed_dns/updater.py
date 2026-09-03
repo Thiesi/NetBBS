@@ -117,6 +117,16 @@ async def run_scheduled_managed_dns_updater(
                             db, previous_result, previous_result=None,
                             has_previous_credential=False,
                         )
+                    elif primary_inactive:
+                        # A 401 is authoritative service state, unlike a
+                        # transient transport/provider failure. Preserve the
+                        # bearer secrets for reclaim/cancellation, but stop
+                        # advertising registrations the service withdrew.
+                        set_registration_status(db, RegistrationStatus.ABANDONED)
+                        set_published(db, False)
+                        if previous_inactive and previous_credential is not None:
+                            set_previous_status(db, RegistrationStatus.ABANDONED)
+                            set_previous_published(db, False)
         await sleep(interval_seconds)
 
 
@@ -166,7 +176,6 @@ def _apply_heartbeat_result(
         if previous_inactive:
             set_previous_status(db, RegistrationStatus.ABANDONED)
             set_previous_published(db, False)
-            delete_credential(previous_credential_path_for(db.path))
         elif previous_result is not None:
             set_previous_status(db, RegistrationStatus(previous_result.status))
             set_previous_published(db, previous_result.last_known_address is not None)
