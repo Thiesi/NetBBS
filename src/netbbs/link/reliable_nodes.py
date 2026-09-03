@@ -43,6 +43,7 @@ cache untouched, the same tolerance the old seed list had.
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 import logging
 import urllib.request
@@ -75,6 +76,14 @@ RELIABLE_NODES_FORMAT_VERSION = 1
 MAX_RELIABLE_NODES = 32
 MAX_RELIABLE_NODE_NAME_LENGTH = 64
 MAX_RELIABLE_NODE_URL_LENGTH = 256
+# The whole response body, and the raw entry count the parser will even
+# look at: a roster of 32 short entries is well under 8 KiB, so either
+# limit tripping means the endpoint is not serving a roster at all
+# (captive portal, error page, compromise) -- rejected as a whole, with
+# the last good copy kept, rather than buffered, parsed, and logged
+# entry by entry.
+MAX_RELIABLE_NODES_RESPONSE_BYTES = 64 * 1024
+MAX_RELIABLE_NODES_RAW_ENTRIES = 256
 
 # config key (netbbs.config's generic store) for the most recently
 # successfully-fetched roster. A cache of external, lower-trust data,
@@ -117,16 +126,30 @@ def _default_fetch(url: str) -> bytes:
     regardless of which optional extras are installed)."""
     request = urllib.request.Request(url, headers={"User-Agent": "netbbs-reliable-nodes"})
     with urllib.request.urlopen(request, timeout=30) as response:
-        return response.read()
+        declared = response.headers.get("Content-Length")
+        if declared is not None and declared.isdigit() and int(declared) > MAX_RELIABLE_NODES_RESPONSE_BYTES:
+            raise ReliableNodesError(
+                f"reliable-nodes list response exceeds {MAX_RELIABLE_NODES_RESPONSE_BYTES} bytes"
+            )
+        body = response.read(MAX_RELIABLE_NODES_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RELIABLE_NODES_RESPONSE_BYTES:
+        raise ReliableNodesError(
+            f"reliable-nodes list response exceeds {MAX_RELIABLE_NODES_RESPONSE_BYTES} bytes"
+        )
+    return body
 
 
 def parse_reliable_nodes(raw: bytes | str) -> list[ReliableNode]:
     """Parse one roster document. Split out from the fetch so the exact
     same validation guards a test's injected bytes and the real endpoint's
     response -- there is no second, looser parser anywhere."""
+    if len(raw) > MAX_RELIABLE_NODES_RESPONSE_BYTES:
+        raise ReliableNodesError(
+            f"reliable-nodes list exceeds {MAX_RELIABLE_NODES_RESPONSE_BYTES} bytes"
+        )
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError are both ValueErrors
         raise ReliableNodesError(f"reliable-nodes list returned unparseable JSON: {exc}") from exc
 
     if not isinstance(data, dict):
@@ -142,6 +165,10 @@ def parse_reliable_nodes(raw: bytes | str) -> list[ReliableNode]:
     entries = data.get("nodes")
     if not isinstance(entries, list):
         raise ReliableNodesError("reliable-nodes list is missing its 'nodes' array")
+    if len(entries) > MAX_RELIABLE_NODES_RAW_ENTRIES:
+        raise ReliableNodesError(
+            f"reliable-nodes list has {len(entries)} entries, more than the {MAX_RELIABLE_NODES_RAW_ENTRIES} accepted"
+        )
 
     nodes: list[ReliableNode] = []
     seen_urls: set[str] = set()
@@ -191,24 +218,28 @@ async def fetch_reliable_nodes(*, fetch: Callable[[str], bytes] = _default_fetch
     to_thread` so a real network call never blocks the event loop."""
     try:
         raw = await asyncio.to_thread(fetch, RELIABLE_NODES_URL)
-    except URLError as exc:
-        raise ReliableNodesError(f"could not reach the reliable-nodes list: {exc}") from exc
+    except (URLError, OSError, http.client.HTTPException) as exc:
+        # URLError only wraps the *connect* phase; a stalled or truncated
+        # body surfaces as socket.timeout/ConnectionResetError (OSError)
+        # or IncompleteRead (HTTPException) -- all "the fetch failed."
+        raise ReliableNodesError(f"could not fetch the reliable-nodes list: {exc}") from exc
     return parse_reliable_nodes(raw)
 
 
-def get_cached_reliable_nodes(db: Database) -> list[ReliableNode]:
-    """The most recently successfully-fetched roster, or empty if none
-    has ever been fetched -- never raises. A cache that turns out
-    unreadable is treated as empty (the fallback takes over) rather than
-    as an error, matching the old seed cache's own tolerance."""
+def get_cached_reliable_nodes(db: Database) -> list[ReliableNode] | None:
+    """The most recently successfully-fetched roster, or `None` if none
+    has ever been fetched -- never raises. `None` and an empty list are
+    deliberately distinct: a fetched *empty* roster is the project's way
+    of retiring every built-in entry, and must not fall through to the
+    fallback. A cache that turns out unreadable reads as `None` (the
+    fallback takes over) rather than as an error."""
     raw = get_config(db, CACHED_RELIABLE_NODES_CONFIG_KEY)
     if raw is None:
-        return []
+        return None
     try:
-        nodes = parse_reliable_nodes(raw)
+        return parse_reliable_nodes(raw)
     except ReliableNodesError:
-        return []
-    return nodes
+        return None
 
 
 def set_cached_reliable_nodes(db: Database, nodes: list[ReliableNode]) -> None:
@@ -227,14 +258,14 @@ def effective_reliable_nodes(db: Database) -> list[ReliableNode]:
     project deliberately removed from the live roster must actually
     stop being dialed)."""
     cached = get_cached_reliable_nodes(db)
-    return cached if cached else list(FALLBACK_RELIABLE_NODES)
+    return cached if cached is not None else list(FALLBACK_RELIABLE_NODES)
 
 
 def reliable_nodes_source(db: Database) -> str:
     """Which of the two sources `effective_reliable_nodes` is currently
     returning -- for the SysOp-facing screens, so "1 reliable node" can
     say whether that's the live roster or the built-in fallback."""
-    return "live" if get_cached_reliable_nodes(db) else "built-in"
+    return "live" if get_cached_reliable_nodes(db) is not None else "built-in"
 
 
 async def run_scheduled_reliable_nodes_refresh(
@@ -262,6 +293,14 @@ async def run_scheduled_reliable_nodes_refresh(
                 nodes = await fetch_reliable_nodes(fetch=fetch)
             except ReliableNodesError as exc:
                 _logger.warning("Scheduled reliable-nodes refresh failed: %s", exc)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A single surprising pass must not end the daily refresh
+                # for the rest of the node's uptime (CLAUDE.md: own async
+                # tasks; visible failure) -- logged with the traceback,
+                # then retried on the next pass like any other failure.
+                _logger.exception("Scheduled reliable-nodes refresh failed unexpectedly")
             else:
                 set_cached_reliable_nodes(db, nodes)
         await sleep(interval_seconds)

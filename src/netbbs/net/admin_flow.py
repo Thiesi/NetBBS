@@ -1679,14 +1679,14 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     header_color = await lane.run(effective_header_color_256)
     while True:
-        await _draw_link_participation_screen(
+        participation = await _draw_link_participation_screen(
             session, lane, description_level, redraw_in_place, unicode_style, collapsed, header_color
         )
         choice = (await session.read_key()).lower()
         if choice == "b":
             await session.write_line("")
             return
-        elif choice == "a":
+        elif choice == "a" and participation is not Participation.ACCEPTED:
             await session.write_line("")
             if await lane.run(is_node_display_name_placeholder):
                 await session.write_line(
@@ -1704,7 +1704,7 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
 
             await lane.run(_accept)
             await session.write_line("Reliable-node participation accepted.")
-        elif choice == "d":
+        elif choice == "d" and participation is not Participation.DECLINED:
             await session.write_line("")
 
             def _decline(db: Database) -> None:
@@ -1720,7 +1720,7 @@ async def _link_participation_screen(session: Session, lane: DatabaseLane, actor
 async def _draw_link_participation_screen(
     session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
     unicode_style: bool, collapsed: bool, header_color: int | tuple[int, int, int],
-) -> None:
+) -> Participation:
     def _load(db: Database) -> tuple[Participation, bool | None | str, list, str, bool]:
         return (
             get_participation(db), get_configured_link_enabled(db), effective_reliable_nodes(db),
@@ -1778,6 +1778,7 @@ async def _draw_link_participation_screen(
         _menu_row(option_list, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
+    return participation
 
 
 async def _node_name_screen(session: Session, lane: DatabaseLane, actor: User) -> None:

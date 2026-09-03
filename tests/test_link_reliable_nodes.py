@@ -114,7 +114,7 @@ def test_fetch_wraps_a_transport_failure():
     def failing_fetch(url: str) -> bytes:
         raise URLError("connection refused")
 
-    with pytest.raises(ReliableNodesError, match="could not reach"):
+    with pytest.raises(ReliableNodesError, match="could not fetch"):
         asyncio.run(fetch_reliable_nodes(fetch=failing_fetch))
 
 
@@ -123,9 +123,20 @@ def test_fetch_wraps_a_transport_failure():
 
 def test_fallback_is_used_until_a_fetch_has_ever_succeeded(tmp_path):
     db = Database(tmp_path / "node.db")
-    assert get_cached_reliable_nodes(db) == []
+    assert get_cached_reliable_nodes(db) is None
     assert effective_reliable_nodes(db) == list(FALLBACK_RELIABLE_NODES)
     assert reliable_nodes_source(db) == "built-in"
+
+
+def test_a_fetched_empty_roster_retires_the_fallback(tmp_path):
+    """Code review (PR #267): an empty *fetched* roster is the project's way
+    of retiring every built-in entry -- it must not read as 'never
+    fetched' and fall through to the fallback."""
+    db = Database(tmp_path / "node.db")
+    set_cached_reliable_nodes(db, [])
+    assert get_cached_reliable_nodes(db) == []
+    assert effective_reliable_nodes(db) == []
+    assert reliable_nodes_source(db) == "live"
 
 
 def test_fallback_names_reliable_link_on_its_documented_port():
@@ -158,8 +169,67 @@ def test_an_unreadable_cache_falls_back_instead_of_raising(tmp_path):
 
     db = Database(tmp_path / "node.db")
     set_config(db, CACHED_RELIABLE_NODES_CONFIG_KEY, "{garbage")
-    assert get_cached_reliable_nodes(db) == []
+    assert get_cached_reliable_nodes(db) is None
     assert effective_reliable_nodes(db) == list(FALLBACK_RELIABLE_NODES)
+
+
+def test_parse_rejects_an_oversized_document_or_entry_list_as_a_whole():
+    from netbbs.link.reliable_nodes import MAX_RELIABLE_NODES_RAW_ENTRIES, MAX_RELIABLE_NODES_RESPONSE_BYTES
+
+    too_many = [{"name": "n", "url": "http://n.example"}] * (MAX_RELIABLE_NODES_RAW_ENTRIES + 1)
+    with pytest.raises(ReliableNodesError, match="more than"):
+        parse_reliable_nodes(_doc(too_many))
+    padding = {"version": 1, "nodes": [], "pad": "x" * MAX_RELIABLE_NODES_RESPONSE_BYTES}
+    with pytest.raises(ReliableNodesError, match="exceeds"):
+        parse_reliable_nodes(json.dumps(padding).encode())
+
+
+def test_parse_rejects_undecodable_bytes_as_a_whole():
+    with pytest.raises(ReliableNodesError):
+        parse_reliable_nodes(b"\xff\xfe not utf-8")
+
+
+def test_default_fetch_bounds_the_response_body(monkeypatch):
+    """The real fetcher never buffers more than the cap, whatever the
+    endpoint sends -- driven through a fake urlopen so no network is
+    touched."""
+    import io
+    import urllib.request
+
+    from netbbs.link.reliable_nodes import MAX_RELIABLE_NODES_RESPONSE_BYTES, _default_fetch
+
+    class _Response(io.BytesIO):
+        headers = {"Content-Length": str(MAX_RELIABLE_NODES_RESPONSE_BYTES * 4)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Response(b"x" * (MAX_RELIABLE_NODES_RESPONSE_BYTES * 4)))
+    with pytest.raises(ReliableNodesError, match="exceeds"):
+        _default_fetch(RELIABLE_NODES_URL)
+
+    class _Undeclared(_Response):
+        headers = {}
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Undeclared(b"x" * (MAX_RELIABLE_NODES_RESPONSE_BYTES + 1)))
+    with pytest.raises(ReliableNodesError, match="exceeds"):
+        _default_fetch(RELIABLE_NODES_URL)
+
+
+@pytest.mark.parametrize("exc", [
+    ConnectionResetError("peer reset"),
+    TimeoutError("read timed out"),
+    __import__("http.client").client.IncompleteRead(b"partial"),
+])
+def test_fetch_wraps_read_phase_failures_too(exc):
+    def failing_fetch(url: str) -> bytes:
+        raise exc
+
+    with pytest.raises(ReliableNodesError, match="could not fetch"):
+        asyncio.run(fetch_reliable_nodes(fetch=failing_fetch))
 
 
 # -- run_scheduled_reliable_nodes_refresh (sleep injected) ------------------
@@ -213,7 +283,25 @@ def test_scheduled_refresh_skips_a_pass_when_update_checks_are_disabled(tmp_path
 
     _run_refresh_until(db, fetch, predicate=lambda: False, passes=2)
     assert calls == 0
-    assert get_cached_reliable_nodes(db) == []
+    assert get_cached_reliable_nodes(db) is None
+
+
+def test_scheduled_refresh_survives_an_unexpected_exception_and_keeps_going(tmp_path):
+    """Code review (PR #267): a surprising error in one pass must not end
+    the daily refresh for the rest of the node's uptime."""
+    db = Database(tmp_path / "node.db")
+    calls = 0
+
+    def fetch(url: str) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("something nobody anticipated")
+        return _doc([{"name": "Live", "url": "http://live.example:7862"}])
+
+    _run_refresh_until(db, fetch, predicate=lambda: bool(get_cached_reliable_nodes(db)), passes=3)
+    assert calls >= 2
+    assert get_cached_reliable_nodes(db) == [ReliableNode(name="Live", url="http://live.example:7862")]
 
 
 def test_scheduled_refresh_keeps_the_previous_cache_on_a_failed_fetch(tmp_path):

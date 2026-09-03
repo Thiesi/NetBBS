@@ -7127,6 +7127,22 @@ def test_join_link_accept_persists_and_is_audited(db, lane, sysop):
     assert [tuple(row) for row in rows] == [("set_link_participation", "accepted")]
 
 
+def test_join_link_accept_key_is_inert_once_already_accepted(db, lane, sysop):
+    """Code review (PR #267): the hidden [A] must not write a second audit
+    row when the decision is already accepted."""
+    from netbbs.config import set_node_display_name
+    from netbbs.link.onboarding import Participation, set_participation
+
+    set_node_display_name(db, "Named Node")
+    set_participation(db, Participation.ACCEPTED)
+    session = FakeSession(["s", "j", "a", "b", "b", "b"])
+    _run(session, lane, sysop)
+    rows = db.connection.execute(
+        "SELECT COUNT(*) FROM moderation_log WHERE action = 'set_link_participation'"
+    ).fetchone()
+    assert rows[0] == 0
+
+
 def test_join_link_decline_persists(db, lane, sysop):
     from netbbs.link.onboarding import Participation, get_participation
 
@@ -7134,4 +7150,3 @@ def test_join_link_decline_persists(db, lane, sysop):
     _run(session, lane, sysop)
     assert get_participation(db) is Participation.DECLINED
     assert "Reliable-node participation declined." in _written_text(session)
-

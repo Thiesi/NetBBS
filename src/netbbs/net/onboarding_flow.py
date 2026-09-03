@@ -26,10 +26,12 @@ Shown once, at whichever of the two anchors gets there first --
 (`netbbs.net.login_flow`) as the fallback -- and a no-op once every choice
 on it has been answered. Each choice checks its *own* state, so a node
 upgraded in place whose SysOp already answered the managed-DNS prompt is
-asked only the new question. A node-wide lock serializes the decision
-itself (two SysOps logging in concurrently must not both be asked), and
-is released before anything interactive that could sit at a prompt
-indefinitely, the same shape `offer_managed_dns_opt_in` established.
+asked only the new question. Two SysOps logging in
+concurrently must not both be asked: the first to arrive *claims* the
+question under a short node-wide lock (an in-process marker, since the
+durable decision can't be written until a name exists), the lock is
+released before any prompt, and a second SysOp arriving mid-answer is told
+so and moves on -- never parked silently behind someone else's terminal.
 
 Domain state lives in `netbbs.link.onboarding` (participation) and
 `netbbs.config` (display name); this module is UI only.
@@ -42,8 +44,8 @@ from pathlib import Path
 
 from netbbs.config import (
     MAX_NODE_DISPLAY_NAME_LENGTH,
-    get_node_display_name,
     is_node_display_name_placeholder,
+    is_placeholder_node_display_name,
     set_node_display_name,
 )
 from netbbs.link.onboarding import (
@@ -84,7 +86,15 @@ _NAME_REQUIRED_NOTE = (
     "Settings > Node name to move on.)"
 )
 
+_ANOTHER_SYSOP_NOTE = (
+    "(Another SysOp is answering the NetBBS Link question on this node right "
+    "now -- you'll be asked next time if it's still open.)"
+)
+
 _participation_locks: dict[Path, asyncio.Lock] = {}
+# Nodes (by database path) whose participation question a session is
+# currently answering -- see the module docstring.
+_participation_in_progress: set[Path] = set()
 
 
 async def offer_onboarding(session: Session, lane: DatabaseLane) -> None:
@@ -96,7 +106,6 @@ async def offer_onboarding(session: Session, lane: DatabaseLane) -> None:
         return
 
     if participation_pending:
-        await _write_wrapped(session, _INTRO_BLURB)
         await _offer_participation(session, lane)
 
     if dns_pending:
@@ -106,11 +115,19 @@ async def offer_onboarding(session: Session, lane: DatabaseLane) -> None:
 
 
 async def _offer_participation(session: Session, lane: DatabaseLane) -> None:
-    lock = _participation_locks.setdefault(lane.path.resolve(), asyncio.Lock())
+    key = lane.path.resolve()
+    lock = _participation_locks.setdefault(key, asyncio.Lock())
+    # Claim, then release before the first prompt (module docstring).
     async with lock:
         if await lane.run(get_participation) is not Participation.UNDECIDED:
             return
+        if key in _participation_in_progress:
+            await _write_wrapped(session, _ANOTHER_SYSOP_NOTE)
+            return
+        _participation_in_progress.add(key)
 
+    try:
+        await _write_wrapped(session, _INTRO_BLURB)
         accepted = await prompt_yes_no(
             session, "Join NetBBS Link through the reliable nodes (seeds and relays)?", default=True
         )
@@ -123,16 +140,18 @@ async def _offer_participation(session: Session, lane: DatabaseLane) -> None:
             )
             return
 
-        # Decision 6: accepting is only meaningful under a real name. Ask
-        # for it inside the lock -- the decision isn't durable until the
-        # name is, and a second SysOp arriving mid-prompt should wait for
-        # this answer rather than be asked the same question.
+        # Decision 6: accepting is only meaningful under a real name --
+        # nothing is recorded until one exists.
         if await lane.run(is_node_display_name_placeholder):
             named = await _prompt_for_node_name(session, lane)
             if not named:
                 await _write_wrapped(session, _NAME_REQUIRED_NOTE)
                 return
-        await lane.run(set_participation, Participation.ACCEPTED)
+        async with lock:
+            if await lane.run(get_participation) is Participation.UNDECIDED:
+                await lane.run(set_participation, Participation.ACCEPTED)
+    finally:
+        _participation_in_progress.discard(key)
 
     await _explain_acceptance(session, lane)
 
@@ -151,13 +170,15 @@ async def _prompt_for_node_name(session: Session, lane: DatabaseLane) -> bool:
             if attempt == 0:
                 await session.write_line(colored("A name is needed to join -- try once more, or leave blank to decide later.", fg_color=MUTED_COLOR))
             continue
+        # Checked *before* anything is written: a rejected candidate must
+        # not leak into the durable display name.
+        if is_placeholder_node_display_name(raw):
+            await session.write_line(colored("That's the placeholder itself -- pick a name of your own.", fg_color=MUTED_COLOR))
+            continue
         try:
             await lane.run(set_node_display_name, raw)
         except ValueError as exc:
             await session.write_line(colored(f"Can't use that: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
-            continue
-        if await lane.run(is_node_display_name_placeholder):
-            await session.write_line(colored("That's the placeholder itself -- pick a name of your own.", fg_color=MUTED_COLOR))
             continue
         # Takes effect for new connections; this session's own corner
         # keeps the name it connected with (netbbs.config's documented
@@ -174,7 +195,17 @@ async def _explain_acceptance(session: Session, lane: DatabaseLane) -> None:
     configured = await lane.run(get_configured_link_enabled)
     reliable = await lane.run(effective_reliable_nodes)
     names = ", ".join(sanitize_text(node.name) for node in reliable) or "(none listed)"
-    if configured is False:
+    if configured == "unknown":
+        # netbbs.admin on a database the daemon has never started with --
+        # the screen's primary anchor. The configuration hasn't been read
+        # by anything that could cache it yet, so say exactly that.
+        text = (
+            f"(Saved. If this node's configuration sets [link] enabled explicitly, that "
+            f"decides whether NetBBS Link runs; otherwise your answer turns it on at the next "
+            f"start, as an outgoing-only node -- no port to open -- dialing the reliable "
+            f"nodes: {names}.)"
+        )
+    elif configured is False:
         text = (
             f"(Saved. This node's configuration switches NetBBS Link off explicitly "
             f"([link] enabled = false), so nothing changes until an operator lifts that; "

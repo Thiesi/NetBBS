@@ -30,10 +30,13 @@ place never starts dialing project infrastructure until a SysOp says so.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 
 from netbbs.config import get_config, set_config
 from netbbs.storage.database import Database
+
+_logger = logging.getLogger(__name__)
 
 
 class Participation(str, Enum):
@@ -59,8 +62,19 @@ CONFIGURED_LINK_ENABLED_CONFIG_KEY = "link_configured_enabled"
 
 
 def get_participation(db: Database) -> Participation:
+    """Never raises: this sits on the startup path, every sync pass, and
+    every SysOp login, so an unexpected stored value (a hand edit, a
+    downgrade after a future value is added, a corrupt restore) must read
+    as "not decided" -- which re-asks the SysOp -- rather than take the
+    node down or lock every SysOp out."""
     value = get_config(db, PARTICIPATION_CONFIG_KEY)
-    return Participation(value) if value is not None else Participation.UNDECIDED
+    if value is None:
+        return Participation.UNDECIDED
+    try:
+        return Participation(value)
+    except ValueError:
+        _logger.warning("Ignoring unexpected stored Link participation value %r; treating as undecided", value)
+        return Participation.UNDECIDED
 
 
 def set_participation(db: Database, decision: Participation) -> None:

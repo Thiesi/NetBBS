@@ -494,7 +494,7 @@ def test_link_sync_failures_reach_the_bounded_diagnostic_log(tmp_path):
         try:
             await _open_connection_when_ready("127.0.0.1", 12407)
 
-            # Other Link background tasks (e.g. the scheduled seed-list
+            # Other Link background tasks (e.g. the scheduled reliable-nodes
             # refresh, which also logs a warning trying to reach its own
             # real endpoint) can legitimately write to the same log
             # concurrently -- poll for the *specific* sync.py dial
@@ -1356,7 +1356,9 @@ def test_silent_link_config_with_accepted_participation_starts_link(tmp_path, ca
     """A config that never mentions [link] enabled, plus a SysOp who
     accepted reliable-node participation, runs Link -- the frictionless
     path the design describes, with no TOML edit."""
-    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=0))
+    # A real port: run() re-validates the Link block once a silent config
+    # resolves to enabled, and 0 is not a valid configured port.
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=12420))
     assert config.link.enabled is None
     db = Database(config.db_path)
     set_participation(db, Participation.ACCEPTED)
@@ -1372,6 +1374,37 @@ def test_silent_link_config_without_acceptance_leaves_link_off(tmp_path, caplog)
     with caplog.at_level(logging.INFO, logger="netbbs.__main__"):
         asyncio.run(_run_until_ready_then_shut_down(config))
     assert not _link_listener_started(caplog)
+
+
+def test_silent_config_resolved_to_enabled_still_validates_the_link_block(tmp_path):
+    """Code review (PR #267): the Link checks skipped at config-load time
+    for a silent config run at startup once participation enables Link."""
+    config = _config(tmp_path, link=LinkConfig(host="127.0.0.1", port=12423, sync_interval_seconds=0))
+    db = Database(config.db_path)
+    set_participation(db, Participation.ACCEPTED)
+    db.close()
+
+    async def scenario():
+        with pytest.raises(StartupError, match="sync_interval_seconds"):
+            await run(config, shutdown_event=asyncio.Event())
+
+    asyncio.run(scenario())
+
+
+def test_silent_config_full_peer_via_participation_gets_the_full_peer_warning(tmp_path, caplog):
+    """Code review (PR #267): insecure-binding warnings are logged after the
+    tri-state is resolved, so a participation-enabled full peer is warned
+    exactly like an explicitly configured one."""
+    config = _config(
+        tmp_path,
+        link=LinkConfig(host="127.0.0.1", port=12422, outgoing_only=False, advertised_host="203.0.113.5"),
+    )
+    db = Database(config.db_path)
+    set_participation(db, Participation.ACCEPTED)
+    db.close()
+    with caplog.at_level(logging.WARNING, logger="netbbs.__main__"):
+        asyncio.run(_run_until_ready_then_shut_down(config))
+    assert any("configured as a full peer" in r.getMessage() for r in caplog.records)
 
 
 def test_explicit_link_disabled_wins_over_accepted_participation(tmp_path, caplog):

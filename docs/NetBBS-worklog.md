@@ -1860,9 +1860,14 @@ enabled` (explicit wins; silent config defers to the SysOp's node-wide
 participation decision) -- and then writes the effective bool back into
 `config` with `dataclasses.replace`. Every consumer after that point
 (`load_link_node`, the diagnostic handler, `_start_servers`, the sync task)
-reads a plain bool; nothing else may read the tri-state, and `NodeConfig.
-validate()` treats `None` like `True` for the Link-field checks so a silent
-config with bad Link values fails at config time, not at startup.
+reads a plain bool; nothing else may read the tri-state. `NodeConfig.
+validate()` runs the Link-field checks (`validate_link()`) only for an
+explicit `True` -- a stray `[link]` table must not stop a local-only node
+that loaded fine before -- and `run()` calls `validate_link()` again once a
+silent config resolves to enabled, so a bad Link value still fails clearly
+before anything binds. `describe_insecure_bindings()` is likewise logged
+only after resolution, or a silent-config full peer would never get its
+warning.
 
 The reliable-nodes roster (`netbbs.link.reliable_nodes`) is dialed only
 while `participation_accepted(db)` -- re-read every sync pass, never

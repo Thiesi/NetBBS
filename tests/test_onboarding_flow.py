@@ -107,6 +107,65 @@ def test_typing_the_placeholder_back_in_does_not_count_as_a_name(tmp_path):
     assert "placeholder itself" in _written(session)
 
 
+def test_a_rejected_placeholder_variant_is_never_persisted(tmp_path):
+    """Code review (PR #267): typing 'netbbs' then giving up must leave the
+    stored display name untouched, not case-shifted."""
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.DECLINED)
+    session = FakeSession(["y", "NETBBS", ""])
+    _run(session, db.path)
+    assert get_node_display_name(db) == "NetBBS"
+    assert get_participation(db) is Participation.UNDECIDED
+
+
+def test_acceptance_explanation_is_honest_before_the_daemon_has_ever_started(tmp_path):
+    """Code review (PR #267): netbbs.admin on a fresh database -- the
+    screen's primary anchor -- has no cached configuration to consult and
+    must not promise Link will turn on."""
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.DECLINED)
+    set_node_display_name(db, "Named")
+    session = FakeSession(["y"])
+    _run(session, db.path)
+    text = _written(session)
+    assert "If this node's configuration sets [link] enabled explicitly" in text
+    assert "turns on the next time this node starts" not in text
+
+
+def test_a_second_sysop_arriving_mid_answer_is_told_and_not_parked(tmp_path):
+    """Code review (PR #267): the node-wide claim is released before the
+    first prompt; a concurrent SysOp gets a note, not a silent hang, and
+    the eventual answer is recorded exactly once."""
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.DECLINED)
+    set_node_display_name(db, "Named")
+    gate = asyncio.Event()
+
+    class _BlockingSession(FakeSession):
+        async def read_key(self, echo: bool = True) -> str:
+            await gate.wait()
+            return await super().read_key(echo)
+
+    first = _BlockingSession(["y"])
+    second = FakeSession([])  # any read would raise on exhausted input
+
+    async def scenario():
+        lane = DatabaseLane(db.path)
+        try:
+            task = asyncio.create_task(offer_onboarding(first, lane))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            await offer_onboarding(second, lane)  # returns without prompting
+            gate.set()
+            await task
+        finally:
+            lane.close()
+
+    asyncio.run(scenario())
+    assert "Another SysOp is answering" in _written(second)
+    assert get_participation(db) is Participation.ACCEPTED
+
+
 def test_an_overlong_name_is_rejected_with_the_reason_and_retried(tmp_path):
     db = Database(tmp_path / "node.db")
     set_opt_in(db, OptIn.DECLINED)

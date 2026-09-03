@@ -27,6 +27,19 @@ def test_participation_defaults_to_undecided(tmp_path):
     assert participation_accepted(db) is False
 
 
+def test_an_unexpected_stored_participation_value_reads_as_undecided(tmp_path):
+    """Code review (PR #267): this getter is on the startup path, every
+    sync pass, and every SysOp login -- a bad stored value must never
+    raise."""
+    from netbbs.config import set_config
+    from netbbs.link.onboarding import PARTICIPATION_CONFIG_KEY
+
+    db = Database(tmp_path / "node.db")
+    set_config(db, PARTICIPATION_CONFIG_KEY, "Accepted")
+    assert get_participation(db) is Participation.UNDECIDED
+    assert resolve_link_enabled(None, db) is False
+
+
 def test_participation_round_trips(tmp_path):
     db = Database(tmp_path / "node.db")
     set_participation(db, Participation.ACCEPTED)

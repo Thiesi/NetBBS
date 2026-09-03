@@ -263,6 +263,16 @@ concurrent-writer conflict each look like.
    existing installation (§1a).
 4. Start the service again.
 
+**Upgrading a Link-enabled node from a release before the reliable-nodes
+onboarding (issue #219):** a node with `[link] enabled = true` now refuses
+to start while its display name is still the shipped placeholder
+"NetBBS" (design doc §16 Decision 6 — every node on the mesh needs a name
+of its own). The refusal is a clear startup error naming the fix, but a
+headless service would just restart-loop, so before step 4 set a name
+once, offline: `python -m netbbs.admin --db <db>` → `[S]ettings` →
+`[N]ode name`. Nodes that already have a name, and local-only nodes,
+are unaffected.
+
 On startup, NetBBS compares the database's own recorded schema version
 (SQLite's `PRAGMA user_version`) against what the running build
 expects (`python -m netbbs --version` prints both the release version

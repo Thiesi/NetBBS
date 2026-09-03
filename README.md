@@ -652,12 +652,13 @@ yet. Issue #55's threat model targets that small-trusted-membership
 case specifically, not the open internet.
 
 **2. Create a SysOp on each** (`create_test_user.py <db> <username>
-<password> <level>` — 255 is the SysOp level), then start both from
-their own directories:
+<password> <level> [node-name]` — 255 is the SysOp level; the node name
+is required here because a Link-enabled node refuses to start under the
+placeholder name "NetBBS"), then start both from their own directories:
 
 ```sh
-python scripts/create_test_user.py node-a/netbbs.db alice hunter2 255
-python scripts/create_test_user.py node-b/netbbs.db bob hunter2 255
+python scripts/create_test_user.py node-a/netbbs.db alice hunter2 255 "Node A"
+python scripts/create_test_user.py node-b/netbbs.db bob hunter2 255 "Node B"
 
 (cd node-a && python -m netbbs --config netbbs.toml) &
 (cd node-b && python -m netbbs --config netbbs.toml) &

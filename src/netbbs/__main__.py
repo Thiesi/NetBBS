@@ -416,9 +416,6 @@ async def run(
     need to know anything about that, only that everything is already
     gone by the time it proceeds to `server.stop()`/`db.close()`.
     """
-    for warning in config.describe_insecure_bindings():
-        _logger.warning(warning)
-
     try:
         db = Database(config.db_path)
     except Exception as exc:
@@ -742,6 +739,24 @@ async def run(
                     "([link] enabled is not set in the configuration)"
                 )
             config = replace(config, link=replace(config.link, enabled=effective_link_enabled))
+            if effective_link_enabled:
+                # `NodeConfig.validate()` skips the Link block for a silent
+                # config (a stray [link] table must not stop a local-only
+                # node) -- so it runs here instead, now that Link is
+                # actually going to start, with the same clear message.
+                try:
+                    config.validate_link()
+                except ConfigError as exc:
+                    raise StartupError(
+                        f"NetBBS Link is enabled by the SysOp's participation decision, but the "
+                        f"[link] configuration is invalid: {exc}"
+                    ) from exc
+        # Logged only now, after the tri-state is resolved, so a silent-
+        # config node that becomes a full peer through the participation
+        # decision gets the same full-peer/insecure-binding warnings an
+        # explicitly configured one does.
+        for warning in config.describe_insecure_bindings():
+            _logger.warning(warning)
         # Decision 6: a node may not participate in Link under the
         # shipped placeholder display name -- every default-named node
         # on a mesh would be indistinguishable in conversation. Refused
@@ -865,7 +880,7 @@ async def run(
         # already a harmless no-op pass (nothing to dial, nothing
         # crashes). This is precisely the "brand-new node with no
         # learned peers yet" case the live
-        # seed-list refresh matters most for -- gating the task itself
+        # roster refresh matters most for -- gating the task itself
         # on operator-configured seeds would have made a live-fetched
         # seed unreachable no matter how successfully it was fetched.
         if config.link.enabled and link_node is not None:
