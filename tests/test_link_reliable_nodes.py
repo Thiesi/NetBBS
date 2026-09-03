@@ -314,3 +314,32 @@ def test_scheduled_refresh_keeps_the_previous_cache_on_a_failed_fetch(tmp_path):
 
     _run_refresh_until(db, fetch, predicate=lambda: False, passes=2)
     assert get_cached_reliable_nodes(db) == earlier
+
+
+def test_observed_reliable_identities_round_trip_and_stay_bounded(tmp_path):
+    from netbbs.link.reliable_nodes import (
+        MAX_OBSERVED_RELIABLE_IDENTITIES,
+        get_observed_reliable_identities,
+        record_observed_reliable_identity,
+        reliable_url_key,
+    )
+    db = Database(tmp_path / "observed.db")
+    try:
+        assert get_observed_reliable_identities(db) == {}
+        assert reliable_url_key("http://[::1") is None
+        assert reliable_url_key("https://ReLink.Example") == "https://relink.example:443/"
+        assert reliable_url_key("http://relink.example") == "http://relink.example:80/"
+        assert reliable_url_key("https://mesh.example/node-a") != reliable_url_key("https://mesh.example/node-b")
+        record_observed_reliable_identity(db, "http://ReLink.NetBBS.org:7862", "fp-relink")
+        record_observed_reliable_identity(db, "http://[::1", "ignored")  # malformed: no-op
+        assert get_observed_reliable_identities(db) == {"http://relink.netbbs.org:7862/": "fp-relink"}
+        record_observed_reliable_identity(db, "http://relink.netbbs.org:7862", "fp-rotated")
+        assert get_observed_reliable_identities(db)["http://relink.netbbs.org:7862/"] == "fp-rotated"
+        for i in range(MAX_OBSERVED_RELIABLE_IDENTITIES + 5):
+            record_observed_reliable_identity(db, f"http://n{i}.example:1", f"fp{i}")
+        observed = get_observed_reliable_identities(db)
+        assert len(observed) == MAX_OBSERVED_RELIABLE_IDENTITIES
+        assert "http://relink.netbbs.org:7862/" not in observed  # the oldest went first
+        assert observed[f"http://n{MAX_OBSERVED_RELIABLE_IDENTITIES + 4}.example:1/"] == f"fp{MAX_OBSERVED_RELIABLE_IDENTITIES + 4}"
+    finally:
+        db.close()

@@ -1303,29 +1303,39 @@ async def dial_realtime_session(
     if enforce_trust_policy and lane is None:
         raise ValueError("enforce_trust_policy requires a lane")
     reader, writer = await asyncio.open_connection(host, port)
+    session: LinkRealtimeSession | None = None
     try:
         remote, ciphers = await establish_noise_xx_initiator(
             reader, writer, identity, expected_fingerprint=expected_fingerprint
         )
-    except (LinkTransportError, LinkProtocolError):
-        await _reject_before_session(writer)
+        fingerprint = remote.root_fingerprint
+        if enforce_trust_policy:
+            assert lane is not None
+            allowed = await lane.run(_decide_realtime_admission, fingerprint)
+            if not allowed:
+                raise LinkTransportError(f"real-time session to {fingerprint} refused by local trust policy")
+        session = LinkRealtimeSession(
+            remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
+            is_initiator=True, on_frame=on_frame,
+        )
+        session.start()
+        survived = await registry.admit(session)
+    except BaseException:
+        # Every exit before admission -- handshake/policy failure, or a
+        # caller's own timeout cancelling us mid-way, even after the
+        # session's tasks were started -- must close what nothing else owns.
+        await _abandon_before_admission(session, writer)
         raise
-    fingerprint = remote.root_fingerprint
-    if enforce_trust_policy:
-        assert lane is not None
-        allowed = await lane.run(_decide_realtime_admission, fingerprint)
-        if not allowed:
-            await _reject_before_session(writer)
-            raise LinkTransportError(f"real-time session to {fingerprint} refused by local trust policy")
-    session = LinkRealtimeSession(
-        remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
-        is_initiator=True, on_frame=on_frame,
-    )
-    session.start()
-    survived = await registry.admit(session)
     if not survived:
         raise LinkTransportError(f"real-time session to {fingerprint} lost the duplicate-session tiebreak")
     return session
+
+
+async def _abandon_before_admission(session: "LinkRealtimeSession | None", writer: asyncio.StreamWriter) -> None:
+    if session is not None:
+        await session.close(reason="admission_abandoned")
+    else:
+        await _reject_before_session(writer)
 
 
 async def attach_relayed_session(
@@ -1357,7 +1367,7 @@ async def attach_relayed_session(
     if role not in ("initiator", "responder"):
         raise LinkTransportError(f"unknown relay role {role!r}")
     reader, writer = await asyncio.open_connection(host, port)
-    owned_by_session = False
+    session: LinkRealtimeSession | None = None
     try:
         writer.write(encode_bridge_attach_record(attach_token))
         await writer.drain()
@@ -1382,15 +1392,14 @@ async def attach_relayed_session(
             remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
             is_initiator=(role == "initiator"), on_frame=on_frame,
         )
-        owned_by_session = True
+        session.start()
+        survived = await registry.admit(session)
     except BaseException:
         # Includes cancellation (a caller's own rendezvous timeout firing
-        # mid-handshake): until a session owns the socket, close it here.
-        if not owned_by_session:
-            await _reject_before_session(writer)
+        # mid-handshake or mid-admission): until the registry holds the
+        # session, close whatever was started here.
+        await _abandon_before_admission(session, writer)
         raise
-    session.start()
-    survived = await registry.admit(session)
     if not survived:
         raise LinkTransportError(f"relayed session to {fingerprint} lost the duplicate-session tiebreak")
     return session

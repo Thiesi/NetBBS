@@ -89,7 +89,7 @@ def test_realtime_frame_round_trips_every_message_type(frame_type):
 
 
 def test_realtime_frame_rejects_the_pre_snapshot_identity_protocol_version():
-    assert REALTIME_PROTOCOL_VERSION == 3
+    assert REALTIME_PROTOCOL_VERSION == 4
     with pytest.raises(LinkProtocolError, match="unsupported real-time protocol version"):
         RealtimeFrame.from_json_bytes(
             b'{"version":1,"type":"ping","message_id":"m1","payload":{}}'

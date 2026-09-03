@@ -28,15 +28,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
-from urllib.parse import urlsplit
 
 from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
 from netbbs.link.node_identity import NodeIdentity
 from netbbs.link.protocol import LinkNode, RealtimeFrame, RealtimeProtocolVersionError, build_direct_message_frame
 from netbbs.link.realtime_relay import RealtimeRelayClient, RelayRendezvousError
-from netbbs.link.reliable_nodes import ReliableNode, effective_reliable_nodes
+from netbbs.link.onboarding import participation_accepted as _participation_accepted
+from netbbs.link.reliable_nodes import (
+    ReliableNode,
+    effective_reliable_nodes,
+    get_observed_reliable_identities,
+    reliable_url_key,
+)
 from netbbs.link.transport import (
     LinkRealtimeSession,
     LinkRealtimeSessionRegistry,
@@ -74,52 +79,24 @@ class IncomingDirectMessage:
     created_at: str
 
 
-def _url_host_port(url: str) -> tuple[str, int | None]:
-    """`(hostname, port)` for a roster URL, or `("", None)` for one that
-    does not parse (a non-numeric or out-of-range port, unbalanced IPv6
-    brackets): one malformed roster entry must never abort an anchor
-    pass or a relay lookup."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-        hostname = parts.hostname
-    except ValueError:
-        return "", None
-    if not hostname:
-        return "", None
-    if port is None:
-        port = 443 if parts.scheme == "https" else 80 if parts.scheme == "http" else None
-    return hostname.lower(), port
-
-
-def reliable_node_fingerprints(node: LinkNode, roster: list[ReliableNode]) -> list[str]:
-    """Which known peers are reliable nodes: a roster entry names a Link
-    base URL, a completed hello records the peer's advertised HTTP
-    address -- match host and port. Order follows the roster."""
-    wanted = [hp for hp in (_url_host_port(entry.url) for entry in roster) if hp[0]]
+def reliable_node_fingerprints(
+    node: LinkNode, roster: list[ReliableNode], observed: dict[str, str],
+) -> list[str]:
+    """Which known peers are reliable nodes, in roster order: the peer
+    whose fingerprint was *observed* by this node completing a hello at
+    that roster URL (`netbbs.link.reliable_nodes.record_observed_reliable_
+    identity`, written by the sync loop). A peer's own signed descriptor
+    is never consulted for this -- any completed peer could advertise a
+    roster address and would otherwise become a "reliable node" (and an
+    anchor connector) on its own say-so."""
     found: list[str] = []
-    for fingerprint, peer in node.peers.items():
-        addresses = peer.descriptor.payload.get("addresses") or []
-        for address in addresses:
-            if address.get("protocol") not in ("http", "https"):
-                continue
-            host_port = (str(address.get("address", "")).lower(), address.get("port"))
-            if host_port in wanted and fingerprint not in found:
-                found.append(fingerprint)
-    found.sort(key=lambda fp: next(
-        (i for i, entry in enumerate(roster) if _url_host_port(entry.url) in _peer_http_addresses(node, fp)), 999
-    ))
+    for entry in roster:
+        key = reliable_url_key(entry.url)
+        fingerprint = observed.get(key) if key is not None else None
+        if fingerprint is None or fingerprint not in node.peers or fingerprint in found:
+            continue
+        found.append(fingerprint)
     return found
-
-
-def _peer_http_addresses(node: LinkNode, fingerprint: str) -> set[tuple[str, int | None]]:
-    peer = node.peers.get(fingerprint)
-    if peer is None:
-        return set()
-    return {
-        (str(a.get("address", "")).lower(), a.get("port"))
-        for a in (peer.descriptor.payload.get("addresses") or []) if a.get("protocol") in ("http", "https")
-    }
 
 
 # A descriptor is signed but its *contents* are the peer's claim: cap how
@@ -172,6 +149,12 @@ class AnchorState:
         return sorted(fp for fp in self.anchored if registry.get(fp) is not None)
 
 
+@dataclass
+class _Establishment:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
 class LiveDirectChat:
     """See module docstring. One per node, owned by `netbbs.__main__`
     alongside the `LiveChannelBridge`, which routes `direct_message`
@@ -199,6 +182,10 @@ class LiveDirectChat:
         self._relay_client = relay_client
         self._deliver = deliver
         self._dial_timeout = dial_timeout_seconds
+        # peer fingerprint -> lock serializing establishment: two local
+        # callers messaging the same peer must share one dial, or the
+        # registry's newer-wins rule closes the first caller's session.
+        self._establishing: dict[str, _Establishment] = {}
 
     # -- outbound ------------------------------------------------------------
 
@@ -223,6 +210,24 @@ class LiveDirectChat:
         session = self._registry.get(fingerprint)
         if session is not None:
             return session
+        establishment = self._establishing.setdefault(fingerprint, _Establishment())
+        establishment.users += 1
+        try:
+            async with establishment.lock:
+                # Policy may have changed while this caller waited behind a
+                # slow dial. Recheck before reusing its result or dialing.
+                if not await self._peer_allowed(fingerprint):
+                    raise DirectChatUnreachable(fingerprint, "policy")
+                session = self._registry.get(fingerprint)
+                if session is not None:
+                    return session  # another caller established it while we waited
+                return await self._establish(fingerprint)
+        finally:
+            establishment.users -= 1
+            if establishment.users == 0 and self._establishing.get(fingerprint) is establishment:
+                del self._establishing[fingerprint]
+
+    async def _establish(self, fingerprint: str) -> LinkRealtimeSession:
         for host, port in dialable_realtime_addresses_for_peer(self._node, fingerprint):
             try:
                 session = await asyncio.wait_for(
@@ -249,10 +254,16 @@ class LiveDirectChat:
             raise DirectChatUnreachable(fingerprint, "no_relay_client")
         last_reason = "no_relay"
         target_relays = [fp for fp in advertised_live_relays(self._node, fingerprint) if fp != self._identity.fingerprint]
-        own_anchors = await self._relay_sessions()
+        own_anchors: list[LinkRealtimeSession] = []
+        participation_accepted = await self._lane.run(_participation_accepted)
+        roster = await self._lane.run(effective_reliable_nodes)
+        observed = await self._lane.run(get_observed_reliable_identities)
+        reliable_fingerprints = set(reliable_node_fingerprints(self._node, roster, observed))
         # 1. Meet at a relay the target stands by at, reaching it ourselves.
         unreachable_relays: list[str] = []
         for relay_fingerprint in target_relays:
+            if relay_fingerprint in reliable_fingerprints and not participation_accepted:
+                continue  # participation opt-out includes target-advertised project relays
             relay_session = await self._reach_relay(relay_fingerprint)
             if relay_session is None:
                 unreachable_relays.append(relay_fingerprint)
@@ -261,16 +272,27 @@ class LiveDirectChat:
                 return await self._relay_client.request_bridge(relay_session, fingerprint)
             except RelayRendezvousError as exc:
                 last_reason = exc.reason
+                if relay_fingerprint in reliable_fingerprints:
+                    # We reached one of our own roster anchors. Retain it as
+                    # a chain source even though its direct rendezvous failed.
+                    own_anchors.append(relay_session)
                 _logger.info("relayed session with %s via its anchor %s failed: %s", fingerprint[:12], relay_fingerprint[:12], exc)
-        # 2. Meet at one of our own anchors (the target may stand by there too).
-        for relay_session in own_anchors:
-            if relay_session.remote_fingerprint in target_relays:
-                continue  # already tried above
-            try:
-                return await self._relay_client.request_bridge(relay_session, fingerprint)
-            except RelayRendezvousError as exc:
-                last_reason = exc.reason
-                _logger.info("relayed session with %s via %s failed: %s", fingerprint[:12], relay_session.remote_fingerprint[:12], exc)
+        # 2. Meet at our own anchors. Dial lazily, but after a reachable
+        # anchor cannot bridge the target continue to the next roster entry.
+        tried_anchors: set[str] = set(target_relays)
+        while True:
+            candidates = await self._relay_sessions(exclude=tried_anchors)
+            if not candidates:
+                break
+            for relay_session in candidates:
+                relay_fingerprint = relay_session.remote_fingerprint
+                tried_anchors.add(relay_fingerprint)
+                own_anchors.append(relay_session)
+                try:
+                    return await self._relay_client.request_bridge(relay_session, fingerprint)
+                except RelayRendezvousError as exc:
+                    last_reason = exc.reason
+                    _logger.info("relayed session with %s via %s failed: %s", fingerprint[:12], relay_fingerprint[:12], exc)
         # 3. Chain: ask our own anchor to forward toward a target relay we
         #    could not reach ourselves.
         for relay_fingerprint in unreachable_relays:
@@ -295,7 +317,11 @@ class LiveDirectChat:
     async def _reach_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
         """A session with relay `fingerprint`: the registry's, or a fresh
         dial of its advertised real-time address (a relay is a full peer).
-        `None` if this node cannot reach it -- the chained path's cue."""
+        `None` if this node cannot reach it -- the chained path's cue -- or
+        if local policy no longer allows that relay (a standing session
+        outliving a SysOp block is not a licence to route through it)."""
+        if not await self._peer_allowed(fingerprint):
+            return None
         session = self._registry.get(fingerprint)
         if session is not None:
             return session
@@ -326,22 +352,41 @@ class LiveDirectChat:
         forwarding (issue #270) -- the same recipe, exposed."""
         return await self._reach_relay(fingerprint)
 
-    async def _relay_sessions(self) -> list[LinkRealtimeSession]:
+    async def _relay_sessions(self, *, exclude: set[str] | None = None) -> list[LinkRealtimeSession]:
         """Live sessions with reliable nodes (§16 issue #219 Decision 4:
-        the same roster serves as the live-relay anchor), roster order --
-        dialed on demand when this node holds none yet. A full peer runs
-        no standing anchor unless participation is accepted, and even an
-        anchored node may be between reconnects; a relay is a full peer,
-        so reaching it is an ordinary direct dial."""
+        the same roster serves as the live-relay anchor), roster order.
+        Only while participation is accepted -- declining means never
+        contacting project infrastructure for live relay, a caller's
+        message included. Sessions already up (and still passing local
+        policy) are returned as they are; only when none is up is a
+        reliable node dialed on demand, one candidate at a time. The caller
+        may ask for the next candidate after a reachable relay cannot bridge
+        the target, without eagerly dialing the whole roster."""
+        excluded = exclude or set()
+        if not await self._lane.run(_participation_accepted):
+            return []
         roster = await self._lane.run(effective_reliable_nodes)
+        observed = await self._lane.run(get_observed_reliable_identities)
+        fingerprints = reliable_node_fingerprints(self._node, roster, observed)
         sessions: list[LinkRealtimeSession] = []
-        for fingerprint in reliable_node_fingerprints(self._node, roster):
+        missing: list[str] = []
+        for fingerprint in fingerprints:
+            if fingerprint in excluded:
+                continue
             session = self._registry.get(fingerprint)
             if session is None:
-                session = await self._dial_relay(fingerprint)
-            if session is not None:
+                missing.append(fingerprint)
+            elif await self._peer_allowed(fingerprint):
                 sessions.append(session)
-        return sessions
+        if sessions:
+            return sessions
+        for fingerprint in missing:
+            if not await self._peer_allowed(fingerprint):
+                continue
+            session = await self._dial_relay(fingerprint)
+            if session is not None:
+                return [session]
+        return []
 
     async def _dial_relay(self, fingerprint: str) -> LinkRealtimeSession | None:
         for host, port in dialable_realtime_addresses_for_peer(self._node, fingerprint):
@@ -439,7 +484,8 @@ async def run_reliable_anchor_connectors(
                 desired: dict[str, tuple[str, int]] = {}
                 if await lane.run(participation_accepted):
                     roster = await lane.run(effective_reliable_nodes)
-                    for fingerprint in reliable_node_fingerprints(link_node, roster):
+                    observed = await lane.run(get_observed_reliable_identities)
+                    for fingerprint in reliable_node_fingerprints(link_node, roster, observed):
                         addresses = dialable_realtime_addresses_for_peer(link_node, fingerprint)
                         if addresses:
                             desired[fingerprint] = tuple(addresses)

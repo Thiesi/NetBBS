@@ -163,7 +163,7 @@ from netbbs.link.relay_mailbox import RelayableEnvelope
 from netbbs.link.relay_selection import relays_needing_replacement, select_relay_candidates
 from netbbs.link.reliability import record_dial_outcome
 from netbbs.link.onboarding import participation_accepted
-from netbbs.link.reliable_nodes import effective_reliable_nodes
+from netbbs.link.reliable_nodes import effective_reliable_nodes, record_observed_reliable_identity
 from netbbs.link.store import build_inventory_request, delete_relay_consent, save_event, save_peer
 from netbbs.link.transport import (
     LinkTransportError,
@@ -315,6 +315,7 @@ async def run_link_sync(
                 max_carried_file_areas=max_carried_file_areas,
                 max_remote_files_per_area=max_remote_files_per_area,
                 enforce_trust_policy=enforce_trust_policy,
+                reliable_urls=frozenset(reliable),
             )
             reached_network = reached_network or succeeded
         if not reached_network:
@@ -383,6 +384,7 @@ async def _sync_one_seed(
     max_carried_file_areas: int | None = None,
     max_remote_files_per_area: int | None = None,
     enforce_trust_policy: bool = False,
+    reliable_urls: frozenset[str] = frozenset(),
 ) -> bool:
     """Returns whether the hello itself succeeded -- the bar `run_link_
     sync` uses to decide "did this node reach the network at all this
@@ -395,6 +397,12 @@ async def _sync_one_seed(
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
+    if seed_url in reliable_urls:
+        # Issue #219/#270: the identity behind a reliable-roster URL is what
+        # was *observed* by dialing it -- the only binding the live-relay
+        # anchor and rendezvous code will trust (a peer's own descriptor
+        # can claim any address).
+        await lane.run(record_observed_reliable_identity, seed_url, seed_peer.fingerprint)
 
     if enforce_trust_policy:
         await lane.run(ensure_node_subject, seed_peer.fingerprint)
