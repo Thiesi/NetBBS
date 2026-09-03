@@ -2554,4 +2554,25 @@ MIGRATIONS = [
             ON link_node_identity_observations(canonical_dns_name, id DESC);
         """,
     ),
+    Migration(
+        description=(
+            "Issue #275 (the #165 MRC gateway scoping's implementation): per-channel "
+            "MRC room mapping. channels.mrc_room names the MRC hub room a local "
+            "channel is bridged to (NULL = not bridged -- design doc §16 Decision 2: "
+            "bridging is per-channel, explicit, off by default); channels.mrc_paused "
+            "is the per-bridge disable that keeps the mapping while sending and "
+            "recording nothing. Same 'additive nullable column on channels, read by "
+            "a helper in a Link-adjacent package, never on the Channel dataclass' "
+            "shape as link_genesis_json above (netbbs.mrc.settings). One room maps "
+            "to at most one channel (partial unique index; netbbs.mrc.settings also "
+            "checks case-insensitively before writing, since MRC room names are not "
+            "case-sensitive on the hub). The node-wide hub settings live in "
+            "node_config key/value rows (mrc_*), no new table."
+        ),
+        sql="""
+        ALTER TABLE channels ADD COLUMN mrc_room TEXT;
+        ALTER TABLE channels ADD COLUMN mrc_paused INTEGER NOT NULL DEFAULT 0;
+        CREATE UNIQUE INDEX idx_channels_mrc_room ON channels(mrc_room) WHERE mrc_room IS NOT NULL;
+        """,
+    ),
 ]
