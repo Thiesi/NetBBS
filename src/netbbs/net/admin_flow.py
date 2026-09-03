@@ -237,6 +237,20 @@ from netbbs.link.work_items import (
 )
 from netbbs.moderation.blocklist import BlocklistError, block_user, is_blocked, unblock_user
 from netbbs.moderation.log import list_actions_for_target_user, list_recent_actions, record_action
+from netbbs.mrc.bridge import MrcBridge, MrcState, MrcStatus
+from netbbs.mrc.settings import (
+    MrcChannelMapping,
+    MrcSettings,
+    MrcSettingsError,
+    clear_mrc_room,
+    default_port_for,
+    get_mrc_mapping,
+    list_mrc_mappings,
+    load_mrc_settings,
+    save_mrc_settings,
+    set_mrc_paused,
+    set_mrc_room,
+)
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
@@ -690,7 +704,10 @@ async def admin_menu(
             )
         elif choice in {"c", "m"}:
             await session.write_line("")
-            await _content_menu(session, lane, user, link_context=link_context)
+            await _content_menu(
+                session, lane, user, link_context=link_context,
+                mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+            )
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
             )
@@ -1486,6 +1503,11 @@ async def _system_menu(
             await _timestamp_settings_screen(session, lane, actor)
             stats = await lane.run(_load_settings_stats)
             await _draw_system_menu(session, node_controls, link_context, stats=stats)
+        elif choice == "i":
+            await session.write_line("")
+            await _mrc_settings_screen(session, lane, actor, node_controls=node_controls)
+            stats = await lane.run(_load_settings_stats)
+            await _draw_system_menu(session, node_controls, link_context, stats=stats)
         elif choice == "p":
             await session.write_line("")
             await _trust_menu(session, lane, actor)
@@ -1617,6 +1639,7 @@ async def _draw_system_menu(
         MenuEntry(label=menu_key("J", "oin NetBBS Link"), brief="Reliable-node seeds and relays, on or off"),
         MenuEntry(label=menu_key("U", "pdate"), brief="Software update settings"),
         MenuEntry(label=menu_key("T", "imestamp format"), brief="Node-wide date/time display"),
+        MenuEntry(label=menu_key("I", "nter-BBS chat (MRC)"), brief="Bridge chat channels to the Multi Relay Chat network"),
         MenuEntry(label=menu_key("P", "olicy trust"), brief="Federation trust policy"),
     ]
     option_list.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
@@ -4283,6 +4306,307 @@ async def _timestamp_settings_screen(session: Session, lane: DatabaseLane, actor
     )
 
 
+# -- Inter-BBS chat: MRC bridge (issue #275) ---------------------------------
+
+
+_MRC_STATE_BADGES: dict[MrcState, tuple[str, str]] = {
+    MrcState.CONNECTED: ("CONNECTED", "success"),
+    MrcState.CONNECTING: ("CONNECTING", "neutral"),
+    MrcState.BACKOFF: ("RECONNECTING", "neutral"),
+    MrcState.ERROR: ("ERROR", "neutral"),
+    MrcState.DISABLED: ("OFF", "neutral"),
+}
+
+
+def _mrc_state_line(status: MrcStatus, *, unicode_style: bool) -> str:
+    text, tone = _MRC_STATE_BADGES[status.state]
+    line = status_badge(text, tone=tone, unicode_style=unicode_style)
+    if status.state is MrcState.DISABLED and status.enabled:
+        line += colored("  (enabled, waiting for the node to bring it up)", fg_color=MUTED_COLOR)
+    return line
+
+
+def _optional_text_field(key: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """`text_field`'s blank-keeps convention plus an explicit way to
+    clear an optional value (`-`), since the INFO fields are the only
+    free-text settings on the node a SysOp may legitimately want empty."""
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        current = draft.get(key) or ""
+        await session.write(f"[{current or '(none)'}] (blank = keep, - = clear): ")
+        raw = (await session.read_line()).strip()
+        if raw == "-":
+            draft[key] = ""
+        elif raw:
+            draft[key] = raw
+
+    return prompt
+
+
+async def _mrc_settings_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, node_controls: NodeControls | None
+) -> None:
+    """
+    Issue #275 (design doc §16, issue #165): the node-wide half of MRC
+    configuration -- hub host/port/TLS, the site name this node presents
+    as, and the free-text INFO fields other MRC users see via `/info`.
+    DB-backed (`netbbs.mrc.settings`) and applied live: saving asks the
+    running node's bridge to reload and reconnect, so no restart is
+    ever needed. Which channels are bridged is decided per channel, on
+    each channel's own detail screen -- deliberately not here, so that
+    enabling MRC can never, by itself, put any channel on the network.
+    """
+    current = await lane.run(load_mrc_settings)
+    draft: dict = {
+        "enabled": current.enabled, "host": current.host, "port": current.port, "tls": current.tls,
+        "site_name": current.site_name, "info_sysop": current.info_sysop,
+        "info_description": current.info_description, "info_telnet": current.info_telnet,
+        "info_ssh": current.info_ssh, "info_web": current.info_web,
+    }
+    mrc_bridge = node_controls.mrc_bridge if node_controls is not None else None
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+
+    async def _tls_field(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        was = bool(draft.get("tls"))
+        draft["tls"] = await prompt_yes_no_or_keep(session, "Use TLS to reach the hub?", current=was)
+        # The two well-known hub ports differ only by transport; follow
+        # the toggle unless the SysOp chose a custom port.
+        if draft["tls"] != was and draft.get("port") == default_port_for(was):
+            draft["port"] = default_port_for(draft["tls"])
+
+    def _preamble(draft: dict) -> str:
+        lines = [
+            "Multi Relay Chat is a public, unauthenticated inter-BBS chat network with one central hub. "
+            "Enable it here, then bridge individual channels from each channel's own screen.",
+        ]
+        if mrc_bridge is not None:
+            status = mrc_bridge.status()
+            lines.append("Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
+            if status.last_error:
+                lines.append(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+        else:
+            lines.append(colored("(Changes apply the next time the node runs.)", fg_color=MUTED_COLOR))
+        return "\r\n".join(lines)
+
+    fields = [
+        FieldSpec(
+            key="enabled", hotkey="e", menu_text=menu_key("E", "nabled"), label="Enabled",
+            render=lambda d: "yes" if d["enabled"] else "no",
+            prompt=bool_field("enabled", "Connect this node to the MRC hub?"),
+            brief="Switch the hub link on or off", section="Hub",
+            help="Off by default. Even when on, only channels you bridge individually reach the network.",
+        ),
+        FieldSpec(
+            key="host", hotkey="h", menu_text=menu_key("H", "ost"), label="Hub host",
+            render=lambda d: d["host"], prompt=text_field("host", required=True),
+            brief="The MRC hub to connect to", section="Hub",
+            help="The public hub is mrc.bottomlessabyss.net. Change it only for a private hub.",
+        ),
+        FieldSpec(
+            key="port", hotkey="p", menu_text=menu_key("P", "ort"), label="Hub port",
+            render=lambda d: str(d["port"]), prompt=_int_field("port", "Hub port"),
+            brief="5001 with TLS, 5000 without", section="Hub",
+        ),
+        FieldSpec(
+            key="tls", hotkey="t", menu_text=menu_key("T", "LS"), label="TLS",
+            render=lambda d: "yes" if d["tls"] else "no", prompt=_tls_field,
+            brief="Encrypt the hub connection", section="Hub",
+            help="Recommended. The hub's certificate is verified against the system CA store.",
+        ),
+        FieldSpec(
+            key="site_name", hotkey="n", menu_text=menu_key("N", "ame (site)"), label="Site name",
+            render=lambda d: d["site_name"], prompt=text_field("site_name", required=True),
+            brief="How this BBS is named on MRC", section="Identity",
+            help="Shown next to every caller from this node (nick@site). Printable ASCII, up to 30 characters; spaces become underscores on the wire.",
+        ),
+        FieldSpec(
+            key="info_sysop", hotkey="y", menu_text=menu_key("y", "sOp", prefix="S"), label="SysOp",
+            render=lambda d: d["info_sysop"] or "(none)", prompt=_optional_text_field("info_sysop"),
+            brief="Shown to MRC users via /info", section="Identity",
+        ),
+        FieldSpec(
+            key="info_description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            render=lambda d: d["info_description"] or "(none)", prompt=_optional_text_field("info_description"),
+            brief="One line about this BBS", section="Identity",
+        ),
+        FieldSpec(
+            key="info_telnet", hotkey="l", menu_text=menu_key("l", "net address", prefix="Te"), label="Telnet address",
+            render=lambda d: d["info_telnet"] or "(none)", prompt=_optional_text_field("info_telnet"),
+            brief="host[:port] MRC users can call", section="Advertised addresses",
+        ),
+        FieldSpec(
+            key="info_ssh", hotkey="a", menu_text=menu_key("a", "ddress", prefix="SSH "), label="SSH address",
+            render=lambda d: d["info_ssh"] or "(none)", prompt=_optional_text_field("info_ssh"),
+            brief="host[:port] for SSH callers", section="Advertised addresses",
+        ),
+        FieldSpec(
+            key="info_web", hotkey="w", menu_text=menu_key("W", "eb address"), label="Web address",
+            render=lambda d: d["info_web"] or "(none)", prompt=_optional_text_field("info_web"),
+            brief="URL of the web/xterm.js front door", section="Advertised addresses",
+        ),
+    ]
+
+    async def save(draft: dict) -> MrcSettings:
+        candidate = MrcSettings(
+            enabled=bool(draft["enabled"]), host=str(draft["host"]), port=int(draft["port"]), tls=bool(draft["tls"]),
+            site_name=str(draft["site_name"]), info_sysop=str(draft["info_sysop"]),
+            info_description=str(draft["info_description"]), info_telnet=str(draft["info_telnet"]),
+            info_ssh=str(draft["info_ssh"]), info_web=str(draft["info_web"]),
+        )
+
+        def _persist(db: Database) -> MrcSettings:
+            saved = save_mrc_settings(db, candidate)
+            record_action(
+                db, actor=actor, action="set_mrc_settings",
+                detail=f"enabled={saved.enabled} hub={saved.host}:{saved.port} tls={saved.tls} site={saved.site_name!r}",
+            )
+            return saved
+
+        saved = await lane.run(_persist)
+        if mrc_bridge is not None:
+            await mrc_bridge.reload_settings()
+        return saved
+
+    saved = await edit_resource_draft(
+        session, lane,
+        title="Inter-BBS chat (MRC)",
+        fields=fields, draft=draft, save=save, error_type=MrcSettingsError,
+        save_menu_text=menu_key("S", "ave & apply"),
+        back_menu_text=menu_key("B", "ack"),
+        preamble=_preamble,
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
+        unicode_style=unicode_style,
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if saved is None:
+        return
+    if mrc_bridge is None:
+        await session.write_line("Saved. Applies the next time the node runs.")
+        return
+    status = mrc_bridge.status()
+    await session.write_line("Saved and applied. Link now: " + _mrc_state_line(status, unicode_style=unicode_style))
+    if status.last_error:
+        await session.write_line(colored(f"Last error: {sanitize_text(status.last_error)}", fg_color=MUTED_COLOR))
+
+
+async def _draw_mrc_status(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    header_color = await lane.run(effective_header_color_256)
+    await session.write_line(
+        "\r\n"
+        + screen_title(
+            "Chat bridge (MRC)",
+            breadcrumb=(session.node_display_name, "Node"),
+            subtitle="This node's link to the Multi Relay Chat network, live.",
+            width=session.terminal_width,
+            clear=redraw_in_place,
+            unicode_style=unicode_style, collapsed=collapsed,
+            header_color=header_color,
+            node_name_gradient=session.node_name_gradient,
+        )
+    )
+    mrc_bridge = node_controls.mrc_bridge
+    if mrc_bridge is None:
+        await session.write_line(
+            empty_state(
+                "Not available here",
+                detail="The MRC bridge lives inside the running node; the standalone admin CLI can't see it.",
+                width=session.terminal_width, header_color=header_color,
+            )
+        )
+        await session.write_line("\r\n" + menu_key("B", "ack"))
+        return
+    status = mrc_bridge.status()
+    mappings = await lane.run(list_mrc_mappings)
+    if not status.enabled:
+        await session.write_line(
+            empty_state(
+                "MRC is off",
+                detail="Enable it under Settings > Inter-BBS chat (MRC), then bridge channels from each channel's screen.",
+                width=session.terminal_width, header_color=header_color,
+            )
+        )
+    else:
+        await session.write_line(_mrc_state_line(status, unicode_style=unicode_style))
+        transport = "TLS" if status.tls else "plain"
+        await session.write_line(
+            colored("Hub: ", fg_color=LABEL_COLOR)
+            + colored(f"{sanitize_text(status.host)}:{status.port} ({transport})", fg_color=METADATA_COLOR)
+        )
+        await session.write_line(
+            colored("Site name: ", fg_color=LABEL_COLOR) + colored(sanitize_text(status.site_name), fg_color=METADATA_COLOR)
+        )
+        if status.connected_since is not None:
+            display_format, display_timezone = await lane.run(resolve_display_preferences)
+            when = format_for_display(
+                status.connected_since, override_format=display_format, override_timezone=display_timezone
+            )
+            await session.write_line(colored("Connected since: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
+        if status.last_error:
+            await session.write_line(
+                colored("Last error: ", fg_color=LABEL_COLOR) + colored(sanitize_text(status.last_error), fg_color=METADATA_COLOR)
+            )
+        await session.write_line(
+            colored("Connection attempts: ", fg_color=LABEL_COLOR) + colored(str(status.attempts), fg_color=METADATA_COLOR)
+            + colored("  Callers announced: ", fg_color=LABEL_COLOR) + colored(str(status.participants), fg_color=METADATA_COLOR)
+        )
+        await session.write_line(
+            colored("Dropped lines: ", fg_color=LABEL_COLOR)
+            + colored(f"{status.dropped_outbound} outbound, {status.dropped_inbound} inbound", fg_color=METADATA_COLOR)
+        )
+    if not mappings:
+        await session.write_line(colored("\r\nNo channel is bridged to an MRC room yet.", fg_color=MUTED_COLOR))
+    else:
+        await session.write_line("\r\nBridged channels:")
+        for mapping in mappings:
+            state = "paused" if mapping.paused else "bridged"
+            roster = mrc_bridge.remote_roster(mapping.channel)
+            who = f"{len(roster)} MRC user{'s' if len(roster) != 1 else ''}"
+            if roster:
+                who += ": " + ", ".join(sanitize_text(name) for name in roster[:12])
+                if len(roster) > 12:
+                    who += ", ..."
+            await session.write_line(
+                f"  {sanitize_text(mapping.channel.name)} -> #{sanitize_text(mapping.room)} ({state}) -- {who}"
+            )
+    actions = []
+    if status.enabled:
+        actions.append(menu_key("R", "econnect now"))
+    actions.append(menu_key("S", "ettings"))
+    actions.append(menu_key("B", "ack"))
+    await session.write_line("\r\n" + "    ".join(actions))
+
+
+async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+    """Issue #275: the "what is the bridge doing right now" screen §16
+    left open -- read-only apart from `[R]econnect now` (a settings
+    reload, which drops and redials the hub) and a jump to Settings."""
+    await _draw_mrc_status(session, lane, actor, node_controls)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "r" and node_controls.mrc_bridge is not None and node_controls.mrc_bridge.status().enabled:
+            await session.write_line("")
+            await lane.run(record_action, actor=actor, action="reconnect_mrc")
+            await node_controls.mrc_bridge.reload_settings()
+            await session.write_line("Reconnecting...")
+            await _draw_mrc_status(session, lane, actor, node_controls)
+        elif choice == "s":
+            await session.write_line("")
+            await _mrc_settings_screen(session, lane, actor, node_controls=node_controls)
+            await _draw_mrc_status(session, lane, actor, node_controls)
+        else:
+            await session.write(reject_unhandled_key(choice))
+
+
 # -- Link status (issue #60, narrow scope) -----------------------------------
 
 
@@ -5020,6 +5344,10 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await session.write_line("")
             await _lock_and_drain_screen(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
+        elif choice == "c":
+            await session.write_line("")
+            await _mrc_status_screen(session, lane, actor, node_controls)
+            await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -5059,6 +5387,7 @@ async def _draw_node_menu(
                 MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
                 MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
+                MenuEntry(label=menu_key("C", "hat bridge (MRC)"), brief="Inter-BBS chat link status"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Operations"),
             ],
             description_level,
@@ -8744,7 +9073,8 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 
 
 async def _content_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     def _load_stats(db: Database) -> dict[str, Any]:
         all_boards = list_boards(db)
@@ -8798,7 +9128,7 @@ async def _content_menu(
             await _draw_content_menu(session, stats=stats)
         elif choice == "n":
             await session.write_line("")
-            await _channel_menu(session, lane, actor, link_context=link_context)
+            await _channel_menu(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
         elif choice == "c":
@@ -11941,7 +12271,8 @@ async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User,
 
 
 async def _channel_menu(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -11963,7 +12294,7 @@ async def _channel_menu(
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
-            await _list_channels_screen(session, lane, actor, link_context=link_context)
+            await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         else:
@@ -12197,7 +12528,8 @@ async def _channel_screen(
 
 
 async def _list_channels_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     channels = await lane.run(list_channels)
     selected = await pick_item(
@@ -12214,7 +12546,7 @@ async def _list_channels_screen(
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is not None:
-        await _channel_detail_screen(session, lane, actor, selected, link_context=link_context)
+        await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge)
 
 
 def _channel_description(channel: Channel) -> str:
@@ -12227,14 +12559,24 @@ def _channel_description(channel: Channel) -> str:
 
 
 async def _channel_detail_screen(
-    session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, link_context: LinkContext | None = None
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, link_context: LinkContext | None = None,
+    mrc_bridge: MrcBridge | None = None,
 ) -> None:
     linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
+    mrc_mapping = await lane.run(get_mrc_mapping, channel)
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+
+    async def _redraw() -> None:
+        await _draw_channel_detail(
+            session, lane, channel, linked=linked, link_context=link_context, mrc_mapping=mrc_mapping,
+            description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
+            collapsed=collapsed,
+        )
+
+    await _redraw()
     while True:
         choice = (await session.read_key()).lower()
 
@@ -12246,22 +12588,30 @@ async def _channel_detail_screen(
             updated = await _channel_screen(session, lane, actor, existing=channel)
             if updated is not None:
                 channel = updated
-            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _redraw()
         elif choice == "d":
             await session.write_line("")
             deleted = await _delete_channel_screen(session, lane, actor, channel)
             if deleted:
                 return
-            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _redraw()
         elif choice == "r":
             await session.write_line("")
             await _channel_restrictions_screen(session, lane, actor, channel)
-            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _redraw()
         elif choice == "l" and link_context is not None and not linked:
             await session.write_line("")
             await _link_channel_screen(session, lane, actor, channel, link_context)
             linked = await lane.run(is_channel_linked, channel)
-            await _draw_channel_detail(session, lane, channel, linked=linked, link_context=link_context, description_level=description_level, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed)
+            await _redraw()
+        elif choice == "m":
+            await session.write_line("")
+            mrc_mapping = await _mrc_room_screen(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
+            await _redraw()
+        elif choice == "p" and mrc_mapping is not None:
+            await session.write_line("")
+            mrc_mapping = await _toggle_mrc_pause(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
+            await _redraw()
         else:
             await session.write(reject_unhandled_key(choice))
 
@@ -12273,6 +12623,7 @@ async def _draw_channel_detail(
     *,
     linked: bool = False,
     link_context: LinkContext | None = None,
+    mrc_mapping: MrcChannelMapping | None = None,
     description_level: str = "off",
     redraw_in_place: bool = False,
     unicode_style: bool = False,
@@ -12302,6 +12653,11 @@ async def _draw_channel_detail(
     )
     if link_context is not None:
         await session.write_line(f"Linked: {'yes' if linked else 'no'}")
+    if mrc_mapping is None:
+        await session.write_line("MRC room: none (not bridged)")
+    else:
+        state = "paused" if mrc_mapping.paused else "bridged"
+        await session.write_line(f"MRC room: #{sanitize_text(mrc_mapping.room)} ({state})")
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this channel's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this channel"),
@@ -12309,12 +12665,111 @@ async def _draw_channel_detail(
     ]
     if link_context is not None and not linked:
         options.append(MenuEntry(label=menu_key("L", "ink this chat channel"), brief="Share it via NetBBS Link"))
+    options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
+    if mrc_mapping is not None:
+        if mrc_mapping.paused:
+            options.append(MenuEntry(label=menu_key("P", "ause MRC bridge", prefix="Un"), brief="Resume relaying to MRC"))
+        else:
+            options.append(MenuEntry(label=menu_key("P", "ause MRC bridge"), brief="Keep the mapping, relay nothing"))
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the list"))
     await session.write_line(
         "\r\n"
         + _menu_row(options, description_level, width=session.terminal_width, height=session.terminal_height)
     )
     await session.write("Choice: ")
+
+
+async def _mrc_room_screen(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, current: MrcChannelMapping | None,
+    *, mrc_bridge: MrcBridge | None,
+) -> MrcChannelMapping | None:
+    """Issue #275 (design doc §16, #165 Decision 2): map this channel to
+    one MRC room, or unmap it -- the SysOp's explicit, per-channel
+    opt-in; nothing is ever bridged by default. Applied live through
+    the running node's bridge when there is one."""
+    shown = f"#{sanitize_text(current.room)}" if current is not None else "none"
+    await session.write_line(
+        colored(
+            "Everything said in this channel will be relayed to that MRC room, and every caller "
+            "in it appears on the MRC network under their own handle.",
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(f"MRC room [{shown}] (blank = keep, - = unbridge): ")
+    raw = (await session.read_line()).strip()
+    if not raw:
+        return current
+    if raw == "-":
+        if current is None:
+            return None
+
+        def _clear(db: Database) -> None:
+            clear_mrc_room(db, channel)
+            record_action(
+                db, actor=actor, action="clear_mrc_room", object_type="channel", object_id=channel.id,
+                detail=f"was #{current.room}",
+            )
+
+        await lane.run(_clear)
+        if mrc_bridge is not None:
+            await mrc_bridge.refresh_channel_mappings()
+        await session.write_line(f"Channel {channel.name!r} is no longer bridged to MRC.")
+        return None
+
+    def _set(db: Database) -> MrcChannelMapping:
+        mapping = set_mrc_room(db, channel, raw)
+        record_action(
+            db, actor=actor, action="set_mrc_room", object_type="channel", object_id=channel.id,
+            detail=f"#{mapping.room}",
+        )
+        return mapping
+
+    try:
+        mapping = await lane.run(_set)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return current
+    if mrc_bridge is not None:
+        await mrc_bridge.refresh_channel_mappings()
+    await session.write_line(f"Channel {channel.name!r} is now bridged to MRC room #{mapping.room}.")
+    settings = await lane.run(load_mrc_settings)
+    if not settings.enabled:
+        await session.write_line(
+            colored(
+                "MRC is switched off node-wide -- nothing is relayed until you enable it under "
+                "Settings > Inter-BBS chat (MRC).",
+                fg_color=MUTED_COLOR,
+            )
+        )
+    return mapping
+
+
+async def _toggle_mrc_pause(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, current: MrcChannelMapping,
+    *, mrc_bridge: MrcBridge | None,
+) -> MrcChannelMapping:
+    """The per-bridge disable §16 left open: keep the mapping, relay
+    nothing either way, without touching MRC node-wide."""
+    paused = not current.paused
+
+    def _apply(db: Database) -> MrcChannelMapping:
+        mapping = set_mrc_paused(db, channel, paused)
+        record_action(
+            db, actor=actor, action="pause_mrc_bridge" if paused else "resume_mrc_bridge",
+            object_type="channel", object_id=channel.id, detail=f"#{mapping.room}",
+        )
+        return mapping
+
+    try:
+        mapping = await lane.run(_apply)
+    except MrcSettingsError as exc:
+        await session.write_line(colored(str(exc), fg_color=MUTED_COLOR))
+        return current
+    if mrc_bridge is not None:
+        await mrc_bridge.refresh_channel_mappings()
+    verb = "paused" if paused else "resumed"
+    await session.write_line(f"MRC bridge for {channel.name!r} {verb}.")
+    return mapping
 
 
 async def _channel_restrictions_screen(session: Session, lane: DatabaseLane, actor: User, channel: Channel) -> None:
