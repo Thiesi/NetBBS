@@ -89,7 +89,7 @@ def test_realtime_frame_round_trips_every_message_type(frame_type):
 
 
 def test_realtime_frame_rejects_the_pre_snapshot_identity_protocol_version():
-    assert REALTIME_PROTOCOL_VERSION == 2
+    assert REALTIME_PROTOCOL_VERSION == 3
     with pytest.raises(LinkProtocolError, match="unsupported real-time protocol version"):
         RealtimeFrame.from_json_bytes(
             b'{"version":1,"type":"ping","message_id":"m1","payload":{}}'
@@ -194,7 +194,7 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
             bridge_id="bridge", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
             attach_address="203.0.113.5", attach_port=8862,
         ),
-        build_relay_reject_frame(target_fingerprint="b", reason="declined"),
+        build_relay_reject_frame(target_fingerprint="b", reason="declined", origin="party"),
         build_direct_message_frame(
             to_user_id="bob", from_user_id="alice", from_display_label="Alice", body="hi",
             created_at="2026-01-01T00:00:00+00:00",

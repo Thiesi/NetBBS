@@ -229,9 +229,9 @@ def test_relay_and_direct_message_frames_validate_their_shapes():
         attach_address="127.0.0.1", attach_port=7863,
     )
     validate_realtime_frame_payload(ready)
-    assert build_relay_reject_frame(target_fingerprint="x", reason="declined").payload["reason"] == "declined"
+    assert build_relay_reject_frame(target_fingerprint="x", reason="declined", origin="party").payload["reason"] == "declined"
     with pytest.raises(LinkProtocolError):
-        build_relay_reject_frame(target_fingerprint="x", reason="because")
+        build_relay_reject_frame(target_fingerprint="x", reason="because", origin="relay")
     with pytest.raises(LinkProtocolError):
         build_relay_request_frame(target_fingerprint="same", requester_fingerprint="same")
     with pytest.raises(LinkProtocolError):
@@ -522,9 +522,221 @@ def test_relay_client_request_is_rejected_by_a_relay_reject_frame_without_socket
         task = asyncio.create_task(client.request_bridge(session, "peer"))
         await asyncio.sleep(0)
         assert sent and sent[0].type == "relay_request"
-        await client.handle_frame(session, build_relay_reject_frame(target_fingerprint="peer", reason="at_capacity"))
+        await client.handle_frame(session, build_relay_reject_frame(target_fingerprint="peer", reason="at_capacity", origin="relay"))
         with pytest.raises(RelayRendezvousError) as excinfo:
             await task
         assert excinfo.value.reason == "at_capacity"
 
     asyncio.run(scenario())
+
+
+# -- code review (PR #269) -------------------------------------------------------
+
+
+class _RecordingSession:
+    def __init__(self, fingerprint: str) -> None:
+        self.remote_fingerprint = fingerprint
+        self.sent: list = []
+
+    async def send(self, frame):
+        self.sent.append(frame)
+
+
+def _client(establish_calls: list, *, timeout: float = 1.0) -> RealtimeRelayClient:
+    async def _establish(**kw):
+        establish_calls.append(kw)
+        raise RuntimeError("no socket in this test")
+
+    return RealtimeRelayClient(
+        own_fingerprint="me", registry=LinkRealtimeSessionRegistry(own_fingerprint="me"),
+        establish_session=_establish, decide_peer_allowed=lambda fp: asyncio.sleep(0, result=True),
+        rendezvous_timeout_seconds=timeout,
+    )
+
+
+def test_client_ignores_relay_ready_it_never_asked_for_or_agreed_to():
+    """An authenticated peer must not be able to make this node open an
+    outbound connection to an address of its choosing."""
+    async def scenario():
+        calls: list = []
+        client = _client(calls)
+        stranger = _RecordingSession("stranger")
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="victim", role="responder", attach_token="0" * 32,
+            attach_address="10.0.0.5", attach_port=22,
+        )
+        assert client.owns_frame(stranger, ready) is False
+        # Even if routed anyway, nothing attaches.
+        await client.handle_frame(stranger, ready)
+        await asyncio.sleep(0.05)
+        assert calls == []
+        # A reject from a peer that is not the relay we asked is ignored too.
+        relay = _RecordingSession("relay")
+        task = asyncio.create_task(client.request_bridge(relay, "peer"))
+        await asyncio.sleep(0)
+        reject = build_relay_reject_frame(target_fingerprint="peer", reason="declined", origin="relay")
+        assert client.owns_frame(stranger, reject) is False
+        assert client.owns_frame(relay, reject) is True
+        await client.handle_frame(relay, reject)
+        with pytest.raises(RelayRendezvousError) as excinfo:
+            await task
+        assert excinfo.value.reason == "declined"
+
+    asyncio.run(scenario())
+
+
+def test_client_honours_relay_ready_only_from_the_relay_it_asked_and_once():
+    async def scenario():
+        calls: list = []
+        client = _client(calls)
+        relay = _RecordingSession("relay")
+        task = asyncio.create_task(client.request_bridge(relay, "peer"))
+        await asyncio.sleep(0)
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="peer", role="initiator", attach_token="0" * 32,
+            attach_address="127.0.0.1", attach_port=1,
+        )
+        assert client.owns_frame(_RecordingSession("other"), ready) is False
+        assert client.owns_frame(relay, ready) is True
+        await client.handle_frame(relay, ready)
+        await client.handle_frame(relay, ready)  # duplicate: no second attach
+        with pytest.raises(RelayRendezvousError) as excinfo:
+            await task
+        assert excinfo.value.reason == "attach_failed"
+        assert len(calls) == 1 and calls[0]["expected_fingerprint"] == "peer"
+
+    asyncio.run(scenario())
+
+
+def test_client_accepted_invitation_authorizes_a_ready_from_that_relay_within_the_timeout():
+    async def scenario():
+        calls: list = []
+        client = _client(calls, timeout=0.2)
+        relay = _RecordingSession("relay")
+        await client.handle_frame(relay, build_relay_request_frame(target_fingerprint="me", requester_fingerprint="alice"))
+        assert relay.sent and relay.sent[-1].type == "relay_request"
+        ready = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="alice", role="responder", attach_token="0" * 32,
+            attach_address="127.0.0.1", attach_port=1,
+        )
+        assert client.owns_frame(_RecordingSession("other-relay"), ready) is False
+        assert client.owns_frame(relay, ready) is True
+        await asyncio.sleep(0.3)  # past the deadline: the acceptance expires
+        client._expire_accepted()
+        assert client.owns_frame(relay, ready) is False
+        assert calls == []
+
+    asyncio.run(scenario())
+
+
+def test_two_concurrent_waiters_both_get_a_typed_timeout_not_a_cancellation():
+    async def scenario():
+        client = _client([], timeout=0.2)
+        relay = _RecordingSession("relay")
+        first = asyncio.create_task(client.request_bridge(relay, "peer"))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(client.request_bridge(relay, "peer"))
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        assert all(isinstance(r, RelayRendezvousError) and r.reason == "timeout" for r in results), results
+        assert client._waiting == {}
+
+    asyncio.run(scenario())
+
+
+def test_pair_cap_is_enforced_when_the_bridge_would_start_not_only_at_request_time(tmp_path):
+    async def scenario():
+        relay, a, b = await _three_nodes(tmp_path, relay_kwargs={"max_concurrent_pairs": 1})
+        try:
+            # Fake an already-running bridge so the request-time check passes
+            # (0 < 1 at request time is what the relay would see with a
+            # concurrent rendezvous racing it) but the start-time check fails.
+            from netbbs.link.realtime_relay import _Bridge
+            loop = asyncio.get_running_loop()
+            relay.relay._bridges["occupied"] = _Bridge(bridge_id="occupied", pair=("x", "y"), legs={}, last_activity=loop.time())
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "at_capacity"
+        finally:
+            relay.relay._bridges.pop("occupied", None)
+            await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_presence_from_a_dialed_in_session_is_tracked_and_cleared_on_close(tmp_path):
+    """A session that only ever dials in (no subscribe) still gets tracked
+    on the receiving side, so its presence is answered and later cleared."""
+    async def scenario():
+        relay, a, b = await _three_nodes(tmp_path)
+        try:
+            assert await _wait_until(lambda: a.identity.fingerprint in relay.bridge.remote_node_presence())
+            # ... and the relay answered with its own snapshot, so A knows R's roster too.
+            assert await _wait_until(lambda: relay.identity.fingerprint in a.bridge.remote_node_presence())
+            await a.registry.close_all(reason="a_leaves")
+            assert await _wait_until(lambda: a.identity.fingerprint not in relay.bridge.remote_node_presence())
+        finally:
+            await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_anchor_connectors_are_reconciled_when_participation_or_roster_changes(tmp_path):
+    from netbbs.link.onboarding import Participation, set_participation
+    from netbbs.link.realtime_direct import run_reliable_anchor_connectors
+    from netbbs.link.reliable_nodes import set_cached_reliable_nodes
+
+    node = _Node(tmp_path, "anchoring")
+    relay = _Node(tmp_path, "anchor-relay")
+    relay_hello = relay.link_node.build_hello(
+        addresses=[
+            {"protocol": "http", "address": "127.0.0.1", "port": 7862},
+            {"protocol": LINK_REALTIME_PROTOCOL_TAG, "address": "127.0.0.1", "port": 9001},
+        ],
+        outgoing_only=False, created_at=utc_now_iso(),
+    )
+    node.link_node.handle_hello(relay_hello)
+    set_cached_reliable_nodes(node.db, ROSTER)
+    set_participation(node.db, Participation.ACCEPTED)
+    events: list = []
+
+    class _Connector:
+        def __init__(self, host, port):
+            self.address = (host, port)
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+            events.append(("stop", self.address))
+
+    def start_connector(**kw):
+        events.append(("start", (kw["host"], kw["port"])))
+        return _Connector(kw["host"], kw["port"])
+
+    passes = 0
+    stop_event = asyncio.Event()
+
+    async def fake_sleep(_):
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            set_participation(node.db, Participation.DECLINED)   # pass 2 must stop it
+        elif passes == 2:
+            set_participation(node.db, Participation.ACCEPTED)   # pass 3 restarts it
+        elif passes == 3:
+            stop_event.set()
+        await asyncio.sleep(0)
+
+    async def scenario():
+        await run_reliable_anchor_connectors(
+            node_identity=node.identity, link_node=node.link_node, lane=node.lane, registry=node.registry,
+            on_frame=node.bridge.on_frame, track_session=node.bridge.track_session,
+            participation_accepted=lambda db: set_participation and __import__("netbbs.link.onboarding", fromlist=["participation_accepted"]).participation_accepted(db),
+            start_connector=start_connector, interval_seconds=0, sleep=fake_sleep, stop_event=stop_event,
+        )
+
+    asyncio.run(scenario())
+    assert events == [
+        ("start", ("127.0.0.1", 9001)), ("stop", ("127.0.0.1", 9001)),
+        ("start", ("127.0.0.1", 9001)), ("stop", ("127.0.0.1", 9001)),  # final stop: task exit owns them
+    ]
+    node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()

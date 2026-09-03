@@ -183,7 +183,10 @@ class RealtimeRelay:
         if frame.type == "relay_request":
             return frame.payload["requester_fingerprint"] == session.remote_fingerprint
         if frame.type == "relay_reject":
-            return _pair_key(session.remote_fingerprint, frame.payload["target_fingerprint"]) in self._pending
+            if frame.payload["origin"] != "party":
+                return False
+            pending = self._pending.get(_pair_key(session.remote_fingerprint, frame.payload["target_fingerprint"]))
+            return pending is not None and pending.target == session.remote_fingerprint
         return False
 
     async def handle_frame(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
@@ -195,10 +198,10 @@ class RealtimeRelay:
     async def _handle_request(self, session: LinkRealtimeSession, target: str) -> None:
         requester = session.remote_fingerprint
         if not self._serving:
-            await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason="not_serving"))
+            await self._reject(session, target, "not_serving")
             return
         if target == self._own or target == requester:
-            await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason="invalid_target"))
+            await self._reject(session, target, "invalid_target")
             return
         key = _pair_key(requester, target)
         pending = self._pending.get(key)
@@ -214,13 +217,13 @@ class RealtimeRelay:
             return
         target_session = self._registry.get(target)
         if target_session is None:
-            await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason="target_unreachable"))
+            await self._reject(session, target, "target_unreachable")
             return
         if len(self._bridges) >= self._max_pairs:
-            await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason="at_capacity"))
+            await self._reject(session, target, "at_capacity")
             return
         if len(self._pending) >= self._max_pending:
-            await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason="pending_full"))
+            await self._reject(session, target, "pending_full")
             return
         loop = asyncio.get_running_loop()
         rendezvous = _Rendezvous(
@@ -293,7 +296,10 @@ class RealtimeRelay:
             session = self._registry.get(fingerprint)
             if session is None:
                 continue
-            await self._send(session, build_relay_reject_frame(target_fingerprint=other, reason=reason))
+            await self._reject(session, other, reason)
+
+    async def _reject(self, session: LinkRealtimeSession, target: str, reason: str) -> None:
+        await self._send(session, build_relay_reject_frame(target_fingerprint=target, reason=reason, origin="relay"))
 
     async def _send(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         try:
@@ -318,10 +324,18 @@ class RealtimeRelay:
             return False  # a second attach for the same side is not a retry we honour
         rendezvous.legs[fingerprint] = (reader, writer)
         if len(rendezvous.legs) == 2:
-            self._start_bridge(rendezvous)
+            await self._start_bridge(rendezvous)
         return True
 
-    def _start_bridge(self, rendezvous: _Rendezvous) -> None:
+    async def _start_bridge(self, rendezvous: _Rendezvous) -> None:
+        # The pair cap is re-checked here, not only when the rendezvous was
+        # created: up to max_pending rendezvous can be waiting at once, and
+        # every one of them passed the request-time check against a count
+        # that has since grown. Exceeding it here is an explicit reject,
+        # never a silently oversized relay.
+        if len(self._bridges) >= self._max_pairs:
+            await self._fail_rendezvous(rendezvous, reason="at_capacity")
+            return
         key = _pair_key(rendezvous.requester, rendezvous.target)
         self._pending.pop(key, None)
         for token in rendezvous.tokens.values():
@@ -401,9 +415,10 @@ class RealtimeRelay:
     async def close(self) -> None:
         for rendezvous in list(self._pending.values()):
             await self._fail_rendezvous(rendezvous, reason="attach_failed")
-        for bridge in list(self._bridges.values()):
+        bridges = list(self._bridges.values())
+        tasks = [task for bridge in bridges for task in bridge.tasks]
+        for bridge in bridges:
             await self._close_bridge(bridge, reason="local_shutdown")
-        tasks = [task for bridge in self._bridges.values() for task in bridge.tasks]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -436,6 +451,15 @@ class RealtimeRelayClient:
     into a fresh, fully authenticated `LinkRealtimeSession` with the
     counterpart that the registry then holds exactly like a direct one.
 
+    Every relay frame this node honours is *correlated*: a `relay_ready`
+    or `relay_reject` counts only if it comes from the relay this node
+    asked (for a target it asked about) or the relay whose invitation it
+    accepted (for that inviter), within the rendezvous timeout. Anything
+    else from any peer is ignored -- an authenticated peer must never be
+    able to make this node open outbound connections to an address of
+    its choosing, nor cancel a rendezvous it is not part of. At most one
+    attach is ever in flight per counterpart.
+
     `establish_session` is injected: it opens the attach connection,
     runs the Noise handshake in the given role against the expected
     peer, applies local trust policy, and admits the session -- the
@@ -461,56 +485,110 @@ class RealtimeRelayClient:
         self._decide_peer_allowed = decide_peer_allowed
         self._on_session = on_session
         self._timeout = rendezvous_timeout_seconds
-        # target fingerprint -> future resolved with the established
-        # session, or failed with RelayRendezvousError.
-        self._waiting: dict[str, asyncio.Future] = {}
-        self._attaching: set[asyncio.Task] = set()
+        # target fingerprint -> (relay fingerprint asked, future resolved
+        # with the established session or failed with RelayRendezvousError)
+        self._waiting: dict[str, tuple[str, asyncio.Future]] = {}
+        # inviter fingerprint -> (relay fingerprint the invitation came
+        # over, deadline) for invitations this node agreed to and is now
+        # expecting a relay_ready for.
+        self._accepted: dict[str, tuple[str, float]] = {}
+        # counterpart fingerprint -> the one attach task in flight for it.
+        self._attaching: dict[str, asyncio.Task] = {}
 
     async def request_bridge(self, relay: LinkRealtimeSession, target: str) -> LinkRealtimeSession:
         """Ask `relay` to bridge this node to `target`; returns the
         authenticated session with `target` or raises
-        `RelayRendezvousError`. One outstanding request per target."""
+        `RelayRendezvousError`. Concurrent callers for the same target
+        share one request; each waits under its own timeout, and a
+        timeout fails the shared future with a typed error so every
+        waiter sees the same `RelayRendezvousError`, never a bare
+        cancellation."""
         loop = asyncio.get_running_loop()
         existing = self._waiting.get(target)
-        if existing is not None:
-            return await asyncio.shield(existing)
-        future: asyncio.Future = loop.create_future()
-        self._waiting[target] = future
+        if existing is None:
+            future: asyncio.Future = loop.create_future()
+            self._waiting[target] = (relay.remote_fingerprint, future)
+            try:
+                await relay.send(
+                    build_relay_request_frame(target_fingerprint=target, requester_fingerprint=self._own)
+                )
+            except LinkTransportError as exc:
+                self._settle(target, RelayRendezvousError("relay_unreachable", str(exc)))
+                raise RelayRendezvousError("relay_unreachable", str(exc)) from exc
+        else:
+            _, future = existing
         try:
-            await relay.send(build_relay_request_frame(target_fingerprint=target, requester_fingerprint=self._own))
-            return await asyncio.wait_for(future, timeout=self._timeout)
-        except LinkTransportError as exc:
-            if isinstance(exc, RelayRendezvousError):
-                raise
-            raise RelayRendezvousError("relay_unreachable", str(exc)) from exc
+            return await asyncio.wait_for(asyncio.shield(future), timeout=self._timeout)
         except TimeoutError as exc:
+            self._settle(target, RelayRendezvousError("timeout"))
             raise RelayRendezvousError("timeout") from exc
-        finally:
-            if self._waiting.get(target) is future:
-                del self._waiting[target]
+
+    def _settle(self, target: str, error: BaseException | None = None, result=None) -> None:
+        entry = self._waiting.pop(target, None)
+        if entry is None:
+            return
+        _, future = entry
+        if future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(result)
 
     def owns_frame(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> bool:
+        sender = session.remote_fingerprint
+        payload = frame.payload
         if frame.type == "relay_request":
-            return frame.payload["target_fingerprint"] == self._own
-        return frame.type in {"relay_waiting", "relay_ready", "relay_reject"}
+            return payload["target_fingerprint"] == self._own
+        if frame.type == "relay_waiting":
+            entry = self._waiting.get(payload["target_fingerprint"])
+            return entry is not None and entry[0] == sender
+        if frame.type == "relay_reject":
+            if payload["origin"] != "relay":
+                return False
+            entry = self._waiting.get(payload["target_fingerprint"])
+            return entry is not None and entry[0] == sender
+        if frame.type == "relay_ready":
+            peer = payload["peer_fingerprint"]
+            entry = self._waiting.get(peer)
+            if entry is not None and entry[0] == sender:
+                return True
+            accepted = self._accepted.get(peer)
+            return accepted is not None and accepted[0] == sender
+        return False
 
     async def handle_frame(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
+        self._expire_accepted()
         if frame.type == "relay_request":
             await self._handle_invitation(session, frame.payload["requester_fingerprint"])
         elif frame.type == "relay_waiting":
             pass  # informational; the request's own timeout bounds the wait
         elif frame.type == "relay_reject":
-            self._fail(frame.payload["target_fingerprint"], frame.payload["reason"])
+            self._settle(frame.payload["target_fingerprint"], RelayRendezvousError(frame.payload["reason"]))
         elif frame.type == "relay_ready":
-            self._spawn_attach(session, frame.payload)
+            # Defensive re-check: handle_frame must be as strict as
+            # owns_frame even if a caller routes a frame here directly.
+            if self.owns_frame(session, frame):
+                self._spawn_attach(frame.payload)
+
+    def _expire_accepted(self) -> None:
+        now = asyncio.get_running_loop().time()
+        for peer, (_relay, deadline) in list(self._accepted.items()):
+            if now > deadline:
+                del self._accepted[peer]
 
     async def _handle_invitation(self, relay: LinkRealtimeSession, requester: str) -> None:
         if requester == self._own or self._registry.get(requester) is not None:
-            await self._reply(relay, build_relay_reject_frame(target_fingerprint=requester, reason="declined"))
+            await self._reply(relay, build_relay_reject_frame(
+                target_fingerprint=requester, reason="declined", origin="party",
+            ))
             return
         if not await self._decide_peer_allowed(requester):
-            await self._reply(relay, build_relay_reject_frame(target_fingerprint=requester, reason="declined"))
+            await self._reply(relay, build_relay_reject_frame(
+                target_fingerprint=requester, reason="declined", origin="party",
+            ))
             return
+        self._accepted[requester] = (relay.remote_fingerprint, asyncio.get_running_loop().time() + self._timeout)
         await self._reply(relay, build_relay_request_frame(target_fingerprint=requester, requester_fingerprint=self._own))
 
     async def _reply(self, relay: LinkRealtimeSession, frame: RealtimeFrame) -> None:
@@ -519,17 +597,16 @@ class RealtimeRelayClient:
         except LinkTransportError:
             pass
 
-    def _fail(self, target: str, reason: str) -> None:
-        future = self._waiting.get(target)
-        if future is not None and not future.done():
-            future.set_exception(RelayRendezvousError(reason))
+    def _spawn_attach(self, payload: dict) -> None:
+        peer = payload["peer_fingerprint"]
+        if peer in self._attaching:
+            return  # one attach per counterpart; a duplicate ready is not a retry
+        self._accepted.pop(peer, None)
+        task = asyncio.get_running_loop().create_task(self._attach(payload))
+        self._attaching[peer] = task
+        task.add_done_callback(lambda _t, peer=peer: self._attaching.pop(peer, None))
 
-    def _spawn_attach(self, relay: LinkRealtimeSession, payload: dict) -> None:
-        task = asyncio.get_running_loop().create_task(self._attach(relay, payload))
-        self._attaching.add(task)
-        task.add_done_callback(self._attaching.discard)
-
-    async def _attach(self, relay: LinkRealtimeSession, payload: dict) -> None:
+    async def _attach(self, payload: dict) -> None:
         peer = payload["peer_fingerprint"]
         try:
             session = await asyncio.wait_for(
@@ -544,24 +621,20 @@ class RealtimeRelayClient:
         except Exception as exc:
             detail = str(exc)
             _logger.info("relayed session with %s could not be established: %s", peer[:12], detail)
-            future = self._waiting.get(peer)
-            if future is not None and not future.done():
-                future.set_exception(RelayRendezvousError("attach_failed", detail))
+            self._settle(peer, RelayRendezvousError("attach_failed", detail))
             return
         if self._on_session is not None:
             await self._on_session(session)
-        future = self._waiting.get(peer)
-        if future is not None and not future.done():
-            future.set_result(session)
+        self._settle(peer, result=session)
 
     async def close(self) -> None:
-        for future in self._waiting.values():
-            if not future.done():
-                future.set_exception(RelayRendezvousError("local_shutdown"))
-        for task in list(self._attaching):
+        for target in list(self._waiting):
+            self._settle(target, RelayRendezvousError("local_shutdown"))
+        tasks = list(self._attaching.values())
+        for task in tasks:
             task.cancel()
-        if self._attaching:
-            await asyncio.gather(*self._attaching, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def frame_is_relay_traffic(frame: RealtimeFrame) -> bool:

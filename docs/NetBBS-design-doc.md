@@ -1939,6 +1939,20 @@ firing). One leg closing tears down the other. Reject reasons are a
 closed set: `not_serving`, `invalid_target`, `target_unreachable`,
 `at_capacity`, `pending_full`, `declined`, `timeout`, `attach_failed`.
 
+These frames make the real-time application protocol **version 3**: a
+version-2 peer cannot reject an unknown frame type with a bounded strike
+(the type check runs before the strike path and closes the whole
+session), so a mixed pair fails once at the authenticated handshake with
+the same caller-visible upgrade notice version 2 introduced, rather than
+dropping a shared channel subscription or a relay anchor on every
+attempt. A `relay_reject` carries `origin` (`relay` or `party`) so a node
+that is both a relay and a party can never misroute one. Every relay
+frame a party honours is correlated: a `relay_ready` or `relay_reject`
+counts only from the relay this node asked, for the target it asked
+about, or from the relay whose invitation it accepted, within the
+rendezvous timeout -- an authenticated peer can never make a node open an
+outbound connection to an address of its choosing.
+
 **Live direct messages.** `direct_message {to_user_id, from_user_id,
 from_display_label, body, created_at}` is one private line between a
 user on the sending node and a user on the receiving node, over whichever
@@ -1950,8 +1964,12 @@ receiving node re-checks the sending node's `REALTIME` policy at delivery,
 then delivers exactly as a local `/msg` does (live chat sessions via the
 hub, every other session via the mailbox); an unknown, opted-out, or
 offline recipient is dropped silently -- the sender already checked the
-peer's node-wide presence, which the peer pushes the moment the session
-is tracked, and a remote user list is not a caller's to probe.
+peer's node-wide presence (a node that has not yet pushed its presence
+gets "couldn't confirm who is online there", never a blind send), which
+the peer pushes the moment the session is tracked -- and receiving a
+node-presence snapshot is itself what makes the receiving side track a
+session that never subscribes to a channel, so the presence is answered
+and later cleared. A remote user list is not a caller's to probe.
 
 Caller-facing (Decision 3): `/msg user@node-fingerprint <text>` in chat
 and `[M]essage` on a remote entry in Who's online. When no path exists,

@@ -113,6 +113,7 @@ def test_resolve_node_fingerprint_by_unique_prefix_case_insensitively(tmp_path):
 def test_send_delivers_when_the_peer_is_reachable(tmp_path):
     rig = _Rig(tmp_path)
     fp = rig.peer_identity.fingerprint
+    rig.bridge._remote_node_presence[fp] = {"Bob": "Bob"}  # case-insensitive match
     ok, text = _send(rig, f"bob@{fp[:12]}", "hi there")
     assert ok
     assert rig.direct.sent[0][0] == fp
@@ -131,6 +132,29 @@ def test_send_refuses_reason_free_when_unreachable(tmp_path):
     assert UNREACHABLE_NOTE in text
     assert "no_relay" not in text
     assert "Link mail" in text
+    rig.close()
+
+
+def test_send_never_claims_delivery_without_presence_from_that_node(tmp_path):
+    """Code review (PR #269): with no presence snapshot from the peer, the
+    guard must refuse rather than send blind and print '(sent ...)'."""
+    rig = _Rig(tmp_path)
+    ok, text = _send(rig, f"bob@{rig.peer_identity.fingerprint[:12]}", "hi")
+    assert not ok
+    assert "Couldn't confirm who is online" in text
+    assert rig.direct.sent == []
+    rig.close()
+
+
+def test_send_refuses_an_overlong_body_or_user_with_a_plain_notice(tmp_path):
+    rig = _Rig(tmp_path)
+    fp = rig.peer_identity.fingerprint
+    rig.bridge._remote_node_presence[fp] = {"bob": "bob"}
+    ok, text = _send(rig, f"bob@{fp[:12]}", "x" * 4001)
+    assert not ok and "Message too long" in text
+    ok, text = _send(rig, f"{'u' * 129}@{fp[:12]}", "hi")
+    assert not ok and "too long to be a NetBBS account" in text
+    assert rig.direct.sent == []
     rig.close()
 
 

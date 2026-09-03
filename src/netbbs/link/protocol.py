@@ -168,16 +168,23 @@ _MAX_SEEN_TRUST_PULL_NONCES = 4096
 # events. Version 1 peers would misinterpret those rows, so mixed versions
 # fail at the version boundary rather than accumulating protocol strikes for
 # payloads both sides believe belong to the same version.
-REALTIME_PROTOCOL_VERSION = 2
+#
+# Version 3 (issue #168) adds the relay rendezvous and direct-message frame
+# types. A version-2 peer does not merely reject an unknown type with a
+# bounded strike: `RealtimeFrame.from_json_bytes` raises before the strike
+# path, so the whole session -- possibly a shared channel subscription or
+# an outgoing-only node's relay anchor -- would drop every time one of the
+# new frames arrived. Bumping the version instead makes a mixed pair fail
+# once, at the authenticated handshake, with the caller-visible "upgrade
+# one of the nodes" message issue #263 established.
+REALTIME_PROTOCOL_VERSION = 3
 _REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
 # Issue #168 (design doc §16 Decision 4): the live-relay rendezvous
-# frames and the direct-message frame join the existing family without
-# a protocol-version bump -- an older peer rejects an unknown type with
-# a bounded protocol error and no side effect, which is exactly the
-# right failure for "this peer can't relay / can't receive live direct
-# messages yet."
+# frames and the direct-message frame join the existing family; see the
+# REALTIME_PROTOCOL_VERSION comment below for why that still needed a
+# version bump.
 REALTIME_FRAME_TYPES = frozenset(
     {"subscribe", "unsubscribe", "presence_snapshot", "presence_delta",
      "node_presence_snapshot", "node_presence_delta",
@@ -203,6 +210,11 @@ _REALTIME_PRESENCE_CHANGES = frozenset({"join", "leave"})
 # short reason codes, a bridge/attach token, and a role.
 _REALTIME_MAX_DIRECT_MESSAGE_BODY_BYTES = _REALTIME_MAX_CHANNEL_MESSAGE_BODY_BYTES
 _REALTIME_RELAY_ROLES = frozenset({"initiator", "responder"})
+# Who a relay_reject comes from: the relay answering a request it was
+# asked to serve, or the invited party answering an invitation. The two
+# travel over the same session shape in both directions, so without this
+# discriminator a node that is both a relay and a party could misroute one.
+_REALTIME_RELAY_REJECT_ORIGINS = frozenset({"relay", "party"})
 _REALTIME_RELAY_REJECT_REASONS = frozenset(
     {"not_serving", "invalid_target", "target_unreachable", "at_capacity", "pending_full",
      "declined", "timeout", "attach_failed"}
@@ -725,11 +737,13 @@ def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
 
 
 def _validate_relay_reject_payload(payload: dict, *, path: str) -> None:
-    if set(payload) != {"target_fingerprint", "reason"}:
-        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint and reason")
+    if set(payload) != {"target_fingerprint", "reason", "origin"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint, reason, and origin")
     _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
     if payload["reason"] not in _REALTIME_RELAY_REJECT_REASONS:
         raise LinkProtocolError(f"{path}.reason is not a known relay rejection reason")
+    if payload["origin"] not in _REALTIME_RELAY_REJECT_ORIGINS:
+        raise LinkProtocolError(f"{path}.origin must be relay or party")
 
 
 def _validate_direct_message_payload(payload: dict, *, path: str) -> None:
@@ -920,10 +934,12 @@ def build_relay_ready_frame(
     return frame
 
 
-def build_relay_reject_frame(*, target_fingerprint: str, reason: str, message_id: str | None = None) -> RealtimeFrame:
+def build_relay_reject_frame(
+    *, target_fingerprint: str, reason: str, origin: str, message_id: str | None = None,
+) -> RealtimeFrame:
     frame = RealtimeFrame(
         type="relay_reject", message_id=message_id or new_realtime_message_id(),
-        payload={"target_fingerprint": target_fingerprint, "reason": reason},
+        payload={"target_fingerprint": target_fingerprint, "reason": reason, "origin": origin},
     )
     validate_realtime_frame_payload(frame)
     return frame

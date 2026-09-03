@@ -1753,6 +1753,23 @@ constrain future changes:
   first record before the responder handshake; `establish_noise_xx_
   responder(first_message=...)` exists so that peek is never a double
   read. A listener without a relay closes an attach connection unread.
+- **Version 3, not "new types without a bump".** `RealtimeFrame.__post_init__`
+  rejects an unknown type *before* `_reader_loop`'s strike-counting block, so
+  an older peer closes the whole session on the first new frame. Any future
+  frame-type addition is a version bump for the same reason; the "extend the
+  frozenset without bumping" pattern the #168 design entry cited was wrong.
+- **A party honours only correlated relay frames** (`RealtimeRelayClient.
+  owns_frame`): `relay_ready`/`relay_reject` from the relay it asked for the
+  target it asked, or from the relay whose invitation it accepted (bounded by
+  the rendezvous timeout), one attach in flight per counterpart. Without this
+  any REALTIME-admitted peer could drive unbounded outbound connections to
+  attacker-chosen addresses; `relay_reject.origin` exists so a node that is
+  both relay and party can classify a reject.
+- **Receiving a node-presence snapshot tracks the session.** Server-side
+  `track_session` used to be reached only via `subscribe`; direct-message and
+  anchor sessions never subscribe, so their presence was stored with no close
+  watcher and never answered. `_handle_node_presence_snapshot/_delta` now
+  track (idempotent).
 - **Both session handlers must carry the same `LinkContext`.** The SSH
   handler had been constructed without the real-time registry/bridge since
   issue #148 (an SSH caller silently had no live chat); fixed while adding

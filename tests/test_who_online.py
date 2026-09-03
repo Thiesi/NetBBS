@@ -448,6 +448,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         link_context = _FakeLinkContext(
             _FakeBridge({fingerprint: {"erin": "erin"}}), direct_chat=direct, known_fingerprints=(fingerprint,),
         )
+        # (presence for that node is present, so the honest-delivery guard passes)
         lane = DatabaseLane(database.path)
         session = FakeSession(["w", "0", "1", "hello erin", "l", "y"])
         node_controls.session_registry.enter(session)

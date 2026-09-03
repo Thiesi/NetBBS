@@ -21,6 +21,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import list_channels
 from netbbs.chat.nick import display_label
+from netbbs.link.protocol import LinkProtocolError
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
 from netbbs.messaging_preferences import accepts_direct_messages
@@ -44,6 +45,11 @@ UNREACHABLE_NOTE = (
     "can't be reached for live chat right now. Link mail still works: "
     "[M]ail from the main menu, addressed user@node-fingerprint."
 )
+# The wire bounds (netbbs.link.protocol's direct_message validator), checked
+# here first so a caller gets a plain notice instead of a protocol error
+# escaping the chat loop.
+MAX_DIRECT_MESSAGE_BODY_BYTES = 4000
+MAX_REMOTE_USER_BYTES = 128
 
 
 def parse_remote_address(text: str) -> tuple[str, str] | None:
@@ -100,6 +106,14 @@ async def send_live_direct_message(
     if not body.strip():
         await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
         return False
+    if len(body.encode("utf-8")) > MAX_DIRECT_MESSAGE_BODY_BYTES:
+        await session.write_line(
+            colored(f"Message too long -- a live message is at most {MAX_DIRECT_MESSAGE_BODY_BYTES} bytes.", fg_color=MUTED_COLOR)
+        )
+        return False
+    if len(target_user.encode("utf-8")) > MAX_REMOTE_USER_BYTES:
+        await session.write_line(colored("That user name is too long to be a NetBBS account.", fg_color=MUTED_COLOR))
+        return False
 
     resolved = resolve_node_fingerprint(link_context, node_prefix)
     if isinstance(resolved, list):
@@ -132,7 +146,13 @@ async def send_live_direct_message(
     while fingerprint not in bridge.remote_node_presence() and loop.time() < deadline:
         await asyncio.sleep(0.05)
     online = bridge.remote_node_presence().get(fingerprint)
-    if online is not None and target_user not in online:
+    if online is None:
+        # No presence from that node yet: never claim delivery blind.
+        await session.write_line(
+            colored(f"Couldn't confirm who is online at {sanitize_text(fingerprint[:12])}… just now -- try again in a moment.", fg_color=MUTED_COLOR)
+        )
+        return False
+    if target_user.lower() not in {name.lower() for name in online}:
         await session.write_line(colored(f"{label} is not currently online on that node.", fg_color=MUTED_COLOR))
         return False
 
@@ -144,6 +164,9 @@ async def send_live_direct_message(
         )
     except (DirectChatUnreachable, LinkTransportError):
         await session.write_line(colored(f"{label} {UNREACHABLE_NOTE}", fg_color=MUTED_COLOR))
+        return False
+    except LinkProtocolError as exc:
+        await session.write_line(colored(f"Couldn't send that: {sanitize_text(str(exc))}", fg_color=MUTED_COLOR))
         return False
     await session.write_line(colored(f"(sent to {label})", fg_color=MUTED_COLOR))
     return True

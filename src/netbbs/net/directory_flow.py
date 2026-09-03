@@ -281,13 +281,15 @@ async def _caller_who_screen(
         if lane is None or link_context is None or link_context.direct_chat is None:
             await session.write_line(
                 colored(
-                    f"{selected.username} is connected to a different linked node -- live messaging "
-                    "isn't available from this session.",
+                    f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
+                    "messaging isn't available from this session.",
                     fg_color=MUTED_COLOR,
                 )
             )
             return
-        await session.write(f"Message to {selected.username}@{selected.node_fingerprint[:12]}…: ")
+        await session.write(
+            f"Message to {sanitize_text(selected.username)}@{sanitize_text(selected.node_fingerprint[:12])}…: "
+        )
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))

@@ -699,7 +699,6 @@ async def run(
     link_realtime_relay_client = None
     link_direct_chat = None
     reliable_anchor_task: asyncio.Task | None = None
-    reliable_anchor_connectors: list = []
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
@@ -1054,7 +1053,6 @@ async def run(
                             expected_fingerprint=kw["expected_fingerprint"], on_session=kw["track_session"],
                         )
                         connector.start()
-                        reliable_anchor_connectors.append(connector)
                         return connector
 
                     reliable_anchor_task = asyncio.create_task(run_reliable_anchor_connectors(
@@ -1171,9 +1169,9 @@ async def run(
         # bridge`'s own per-session watcher tasks (issue #148's "own
         # async tasks" rule).
         if link_realtime_registry is not None:
+            # The anchor task owns its connectors and stops them in its
+            # own finally block when cancelled.
             await _drain_immediately(reliable_anchor_task)
-            for connector in reliable_anchor_connectors:
-                await connector.stop()
             if link_realtime_relay_client is not None:
                 await link_realtime_relay_client.close()
             if link_realtime_relay is not None:

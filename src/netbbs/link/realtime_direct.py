@@ -76,7 +76,10 @@ class IncomingDirectMessage:
 
 def _url_host_port(url: str) -> tuple[str, int | None]:
     parts = urlsplit(url)
-    return (parts.hostname or "").lower(), parts.port
+    port = parts.port
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80 if parts.scheme == "http" else None
+    return (parts.hostname or "").lower(), port
 
 
 def reliable_node_fingerprints(node: LinkNode, roster: list[ReliableNode]) -> list[str]:
@@ -251,29 +254,48 @@ async def run_reliable_anchor_connectors(
     `interval_seconds` as hellos complete and the roster refreshes.
     Only while reliable-node participation is accepted -- declining it
     means never contacting project infrastructure for this either."""
-    started: dict[str, object] = {}
-    while stop_event is None or not stop_event.is_set():
-        try:
-            if await lane.run(participation_accepted):
-                roster = await lane.run(effective_reliable_nodes)
-                for fingerprint in reliable_node_fingerprints(link_node, roster):
+    # fingerprint -> (connector, (host, port)) -- reconciled every pass
+    # against what participation, the roster, and the peer's current
+    # advertised address say *now*: a declined participation, a node
+    # dropped from the roster, or a changed address stops (and, for the
+    # last, restarts) that connector, never only future ones.
+    started: dict[str, tuple[object, tuple[str, int]]] = {}
+    try:
+        while stop_event is None or not stop_event.is_set():
+            try:
+                desired: dict[str, tuple[str, int]] = {}
+                if await lane.run(participation_accepted):
+                    roster = await lane.run(effective_reliable_nodes)
+                    for fingerprint in reliable_node_fingerprints(link_node, roster):
+                        addresses = dialable_realtime_addresses_for_peer(link_node, fingerprint)
+                        if addresses:
+                            desired[fingerprint] = addresses[0]
+                for fingerprint, (connector, address) in list(started.items()):
+                    if desired.get(fingerprint) != address:
+                        await connector.stop()  # type: ignore[attr-defined]
+                        del started[fingerprint]
+                        _logger.info("no longer standing by at %s for live relay", fingerprint[:12])
+                for fingerprint, (host, port) in desired.items():
                     if fingerprint in started:
                         continue
-                    addresses = dialable_realtime_addresses_for_peer(link_node, fingerprint)
-                    if not addresses:
-                        continue
-                    host, port = addresses[0]
-                    started[fingerprint] = start_connector(
+                    connector = start_connector(
                         host=host, port=port, identity=node_identity, on_frame=on_frame, registry=registry,
                         lane=lane, enforce_trust_policy=True, expected_fingerprint=fingerprint,
                         track_session=track_session,
                     )
+                    started[fingerprint] = (connector, (host, port))
                     _logger.info("standing by at reliable node %s (%s:%d) for live relay", fingerprint[:12], host, port)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _logger.exception("reliable-node anchor pass failed")
-        await sleep(interval_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _logger.exception("reliable-node anchor pass failed")
+            await sleep(interval_seconds)
+    finally:
+        for connector, _address in started.values():
+            try:
+                await connector.stop()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
 
 __all__ = [

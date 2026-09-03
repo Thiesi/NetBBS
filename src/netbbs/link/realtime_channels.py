@@ -591,6 +591,13 @@ class LiveChannelBridge:
     async def _handle_node_presence_snapshot(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         if not await self._node_realtime_allowed(session.remote_fingerprint):
             return
+        # Issue #168: a session that arrives for a direct message or a
+        # relay anchor never subscribes to a channel, so this is the first
+        # (and only) place the receiving side learns it exists. Tracking
+        # here is what spawns the close-watcher that clears this presence
+        # again, and what sends *our* snapshot back so the peer's own
+        # "is that user online there" check has an answer. Idempotent.
+        await self.track_session(session)
         entries = frame.payload["entries"][:_MAX_PRESENCE_SNAPSHOT_ENTRIES]
         self._remote_node_presence[session.remote_fingerprint] = {
             entry["user_id"]: entry["display_label"] for entry in entries
@@ -599,6 +606,7 @@ class LiveChannelBridge:
     async def _handle_node_presence_delta(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         if not await self._node_realtime_allowed(session.remote_fingerprint):
             return
+        await self.track_session(session)
         online = self._remote_node_presence.setdefault(session.remote_fingerprint, {})
         user_id = frame.payload["user_id"]
         if frame.payload["change"] == "join":
