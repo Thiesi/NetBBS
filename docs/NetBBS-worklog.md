@@ -1830,16 +1830,20 @@ constrain future changes:
   HTTP address against the roster -- any completed peer could claim a roster
   address and become an anchor/approved relay on its own say-so. A test
   that wants a node treated as reliable must record the observed identity,
-  not just advertise the address.
+  not just advertise the address. The observation key includes normalized
+  scheme, authority, and path: one authority may host multiple roster nodes.
 - **Three attempt ids, all echoed:** the requester's `relay_request` id on
   every relay answer; the invitation's id on the target's agreement/decline
   (`_Rendezvous.invitation_id`); the forwarding relay's upstream request id
   on the upstream's answers (`_Forward.upstream_request_id`). A retry with
   a new id supersedes a still-pending stale rendezvous instead of being
-  parked behind it.
+  parked behind it; after supersession, an id-less legacy agreement or
+  decline is ambiguous and ignored.
 - **Session establishment is serialized per peer** (`LiveDirectChat.
   _establishing`): the registry's newer-wins rule would otherwise let a
   second concurrent dial close the first caller's fresh session. Both
+  waiters and the winner re-check policy inside the lock, and the
+  reference-counted lock entry is retired when the last user leaves. Both
   `dial_realtime_session` and `attach_relayed_session` close whatever they
   started on *any* exit before admission, cancellation included.
 - **Declined participation means no on-demand relay dial either**, and

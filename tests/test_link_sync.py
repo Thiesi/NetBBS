@@ -205,7 +205,9 @@ def test_sync_dials_a_cached_reliable_node_once_participation_is_accepted(tmp_pa
         # The identity observed at the roster URL is what binds "reliable
         # node" to a peer for live relay/anchoring -- recorded by the dial.
         from netbbs.link.reliable_nodes import get_observed_reliable_identities
-        assert get_observed_reliable_identities(dialer.db) == {f"127.0.0.1:{ports[0]}": seed_identity.fingerprint}
+        assert get_observed_reliable_identities(dialer.db) == {
+            f"http://127.0.0.1:{ports[0]}/": seed_identity.fingerprint,
+        }
     finally:
         dialer.close()
         seed.close()

@@ -118,6 +118,7 @@ class _Rendezvous:
     # The requester's own relay_request message_id, echoed on every
     # answer so a late answer never lands on a fresh attempt.
     request_id: str | None = None
+    correlation_required: bool = False
     # Issue #270: the fingerprint whose *session* carries the requester's
     # side -- the requester itself for a direct request, or the forwarding
     # relay for a chained one. Readiness/rejection for the requester's side
@@ -320,8 +321,11 @@ class RealtimeRelay:
             return
         key = _pair_key(requester, target)
         pending = self._pending.get(key)
+        superseded = False
         if pending is not None:
             if pending.target == requester and not pending.target_agreed:
+                if pending.correlation_required and answering is None:
+                    return  # an id-less legacy answer is ambiguous after retry
                 if answering is not None and pending.invitation_id is not None and answering != pending.invitation_id:
                     return  # an agreement to an earlier, expired invitation -- not this attempt's
                 # The invited party agreeing: both sides are now present.
@@ -334,6 +338,7 @@ class RealtimeRelay:
                 # rendezvous is closed -- its answers would be ignored anyway
                 # -- and a new one opens below in its place.
                 await self._fail_rendezvous(pending, reason="timeout")
+                superseded = True
             else:
                 # A repeat of the same attempt (or a duplicate agreement):
                 # restate the wait, never a second rendezvous.
@@ -360,6 +365,7 @@ class RealtimeRelay:
             return
         await self._open_rendezvous(
             session, requester=requester, target=target, requester_via=None, request_id=request_id,
+            correlation_required=superseded,
         )
 
     async def _handle_forwarded_request(
@@ -399,7 +405,7 @@ class RealtimeRelay:
 
     async def _open_rendezvous(
         self, requester_session: LinkRealtimeSession, *, requester: str, target: str, requester_via: str | None,
-        request_id: str | None = None,
+        request_id: str | None = None, correlation_required: bool = False,
     ) -> None:
         target_session = self._registry.get(target)
         assert target_session is not None
@@ -414,6 +420,7 @@ class RealtimeRelay:
         rendezvous = _Rendezvous(
             bridge_id=secrets.token_hex(16), requester=requester, target=target, created_at=loop.time(),
             request_id=request_id,
+            correlation_required=correlation_required,
             requester_via=requester_via,
         )
         self._pending[_pair_key(requester, target)] = rendezvous
@@ -601,6 +608,8 @@ class RealtimeRelay:
     async def _handle_party_reject(self, session: LinkRealtimeSession, other: str, answering: str | None) -> None:
         pending = self._pending.get(_pair_key(session.remote_fingerprint, other))
         if pending is None or pending.target != session.remote_fingerprint:
+            return
+        if pending.correlation_required and answering is None:
             return
         if answering is not None and pending.invitation_id is not None and answering != pending.invitation_id:
             return  # a decline of an earlier, expired invitation -- not this attempt's

@@ -90,7 +90,7 @@ MAX_RELIABLE_NODES_RAW_ENTRIES = 256
 # successfully-fetched roster. A cache of external, lower-trust data,
 # never conflated with the operator's own `LinkConfig.seeds`.
 CACHED_RELIABLE_NODES_CONFIG_KEY = "link_cached_reliable_nodes"
-# url key ("host:port", lower-case) -> node fingerprint that answered a
+# normalized URL key -> node fingerprint that answered a
 # hello *at that roster URL*. A peer's own signed descriptor can claim any
 # address it likes, so "which peer is the reliable node" is bound to the
 # identity observed by dialing the roster entry, never to a self-
@@ -265,18 +265,28 @@ def set_cached_reliable_nodes(db: Database, nodes: list[ReliableNode]) -> None:
 
 
 def reliable_url_key(url: str) -> str | None:
-    """Normalized `host:port` key for a roster URL, or `None` if it does
-    not parse."""
+    """Normalized dial-target key for a roster URL, or `None` if invalid.
+
+    The path is identity-bearing: one authority may host multiple Link nodes.
+    Default ports and an omitted root slash are normalized so spelling alone
+    does not split observations for the same endpoint.
+    """
     try:
         parts = urlsplit(url)
         hostname, port = parts.hostname, parts.port
     except ValueError:
         return None
-    if not hostname:
+    scheme = parts.scheme.lower()
+    if not hostname or scheme not in {"http", "https"}:
         return None
     if port is None:
-        port = 443 if parts.scheme == "https" else 80
-    return f"{hostname.lower()}:{port}"
+        port = 443 if scheme == "https" else 80
+    normalized_host = hostname.lower()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    path = parts.path or "/"
+    query = f"?{parts.query}" if parts.query else ""
+    return f"{scheme}://{normalized_host}:{port}{path}{query}"
 
 
 def get_observed_reliable_identities(db: Database) -> dict[str, str]:

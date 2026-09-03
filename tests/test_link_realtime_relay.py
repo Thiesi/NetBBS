@@ -281,7 +281,8 @@ def test_reliable_node_fingerprints_binds_roster_entries_to_observed_identities_
         ))
     roster = [ReliableNode(name="Reliable Link", url="http://relink.netbbs.org:7862")]
     assert reliable_node_fingerprints(node.link_node, roster, {}) == []
-    observed = {"relink.netbbs.org:7862": relay.identity.fingerprint}
+    from netbbs.link.reliable_nodes import reliable_url_key
+    observed = {reliable_url_key(roster[0].url): relay.identity.fingerprint}
     assert reliable_node_fingerprints(node.link_node, roster, observed) == [relay.identity.fingerprint]
     assert reliable_node_fingerprints(node.link_node, [ReliableNode(name="x", url="http://other:1")], observed) == []
     # An identity observed once but no longer a known peer is not a relay candidate.
@@ -1480,6 +1481,25 @@ def test_a_decline_of_an_earlier_invitation_does_not_fail_the_fresh_rendezvous()
     asyncio.run(scenario())
 
 
+def test_an_idless_legacy_answer_does_not_settle_a_superseding_rendezvous():
+    async def scenario():
+        relay = _fake_relay()
+        a, b = _RecordingSession("a"), _RecordingSession("b")
+        relay._registry._sessions.update({"a": a, "b": b})
+        try:
+            await relay._handle_request(a, "b", request_id="r1")
+            await relay._handle_request(a, "b", request_id="r2")
+            pending = relay._pending[("a", "b")]
+            await relay._handle_party_reject(b, "a", None)
+            await relay._handle_request(b, "a", request_id="legacy", answering=None)
+            assert relay._pending[("a", "b")] is pending
+            assert pending.target_agreed is False
+        finally:
+            await relay.close()
+
+    asyncio.run(scenario())
+
+
 def test_invited_party_echoes_the_invitation_id_on_agreement_and_decline():
     async def scenario():
         client = _client([])
@@ -1574,8 +1594,77 @@ def test_concurrent_ensure_session_calls_share_one_establishment(tmp_path):
             assert first is second
             assert len(relay.relay._bridges) == 1
             assert a.registry.get(b.identity.fingerprint) is first
+            assert a.direct._establishing == {}
         finally:
             await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_waiting_establishment_rechecks_policy_and_retires_its_lock(tmp_path):
+    async def scenario():
+        node = _Node(tmp_path, "establishment-policy")
+        node.wire_party()
+        peer = "peer"
+        allowed = True
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        result = object()
+
+        async def peer_allowed(_fingerprint):
+            return allowed
+
+        async def establish(_fingerprint):
+            entered.set()
+            await release.wait()
+            return result
+
+        node.direct._peer_allowed = peer_allowed
+        node.direct._establish = establish
+        first = asyncio.create_task(node.direct.ensure_session(peer))
+        await entered.wait()
+        second = asyncio.create_task(node.direct.ensure_session(peer))
+        await asyncio.sleep(0)
+        allowed = False
+        release.set()
+        try:
+            assert await first is result
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await second
+            assert excinfo.value.reason == "policy"
+            assert node.direct._establishing == {}
+        finally:
+            node.lane.close(); node.db.close()
+
+    asyncio.run(scenario())
+
+
+def test_establishment_tries_the_next_reliable_anchor_after_bridge_failure(tmp_path):
+    async def scenario():
+        node = _Node(tmp_path, "relay-candidates")
+        node.wire_party()
+        target = "target"
+        r1, r2 = _RecordingSession("r1"), _RecordingSession("r2")
+        calls = []
+
+        async def relay_sessions(*, exclude=None):
+            excluded = exclude or set()
+            return [relay for relay in (r1, r2) if relay.remote_fingerprint not in excluded][:1]
+
+        class RelayClient:
+            async def request_bridge(self, relay, fingerprint, **kwargs):
+                calls.append(relay.remote_fingerprint)
+                if relay is r1:
+                    raise RelayRendezvousError("target_unreachable")
+                return "bridged"
+
+        node.direct._relay_sessions = relay_sessions
+        node.direct._relay_client = RelayClient()
+        try:
+            assert await node.direct._establish(target) == "bridged"
+            assert calls == ["r1", "r2"]
+        finally:
+            node.lane.close(); node.db.close()
 
     asyncio.run(scenario())
 
