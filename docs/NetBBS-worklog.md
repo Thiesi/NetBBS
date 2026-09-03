@@ -3694,3 +3694,17 @@ both persisted peers and active-only real-time sessions take precedence over
 that namespace. UI rendering resolves current friendly identities at display
 time while retaining fingerprints in protocol and persistence fields; when no
 authenticated profile is available, it falls back to the technical identity.
+
+Identity-change notices remain non-blocking but must be acknowledgeable from
+the SysOp Link-status surface; acknowledgement dismisses the retained notices
+so direct-message and Link-mail warnings do not repeat forever. Link mail shows
+undismissed cryptographic-identity warnings both before sending and when
+browsing received mail. Durable channel rows keep their technical author
+address, while rendering recovers the signed author fingerprint from the saved
+event and resolves its current presentation, so historical scrollback follows
+later benign renames without rewriting persistence.
+
+Pending managed-DNS replacements are cleaned up with unconditional idempotent
+provider deletion during cancellation and abandonment. A null local publication
+marker cannot prove that the provider mutation never happened because the
+service may have crashed between those two operations.

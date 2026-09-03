@@ -139,7 +139,7 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
-from netbbs.link.node_profiles import identity_for_peer
+from netbbs.link.node_profiles import identity_for_fingerprint, identity_for_peer
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -799,6 +799,18 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     string, even one that once came from a verified user, must never
     itself be treated as proof.
     """
+    if message.link_event_json is not None:
+        try:
+            payload = json.loads(message.link_event_json)["envelope"]["payload"]
+            remote_author = payload["author"]
+            fingerprint = remote_author["home_node_fingerprint"]
+            identity = identity_for_fingerprint(db, fingerprint)
+            node_label = (
+                identity.label if identity.friendly_name != "Unknown linked node" else fingerprint
+            )
+            return sanitize_text(f"{remote_author['local_user_id']}@{node_label}")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -1346,7 +1358,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
     it was the only command with two names and added no value beyond
     what `/private` already provides.
     """
-    target_name = args.split(maxsplit=1)[0] if args.split() else ""
+    target_name = args.strip()
     if not target_name:
         await _show_usage(ctx.session, "private")
         return None

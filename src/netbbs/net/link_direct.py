@@ -292,13 +292,18 @@ def build_direct_message_deliverer(
             return (
                 target,
                 live,
-                identity_for_fingerprint(db, message.from_node_fingerprint).label,
+                identity_for_fingerprint(db, message.from_node_fingerprint),
                 latest_identity_observation(db, message.from_node_fingerprint),
             )
 
-        target, live, node_label, identity_notice = await lane.run(_lookup)
+        target, live, node_identity, identity_notice = await lane.run(_lookup)
         if target is None or not presence.is_online(target.username):
             return False
+        node_label = (
+            node_identity.label
+            if node_identity.friendly_name != "Unknown linked node"
+            else message.from_node_fingerprint
+        )
         origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(node_label)}"
         notice = colored(
             f"*** Private message from {origin}: {sanitize_text(message.body)}", fg_color=MUTED_COLOR, bold=True,

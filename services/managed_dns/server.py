@@ -288,7 +288,11 @@ class ManagedDnsServer:
                 latest_contact = registration.last_contact_at or registration.created_at
                 if datetime.fromisoformat(latest_contact) >= abandonment_cutoff:
                     continue
-                if registration.status == "matured" or registration.last_known_address is not None:
+                if (
+                    registration.status == "matured"
+                    or registration.replaces_name is not None
+                    or registration.last_known_address is not None
+                ):
                     if not await self._delete_record(registration.name):
                         continue
                 mark_abandoned(self._db, registration.name, released_at=now.isoformat())
@@ -605,7 +609,7 @@ class ManagedDnsServer:
             ):
                 return web.json_response({"error": "unknown or inactive rename"}, status=401)
             previous_name = replacement.replaces_name
-            if replacement.last_known_address is not None and not await self._delete_record(replacement.name):
+            if not await self._delete_record(replacement.name):
                 return web.json_response(
                     {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
                 )

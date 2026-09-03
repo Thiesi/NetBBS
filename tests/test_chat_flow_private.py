@@ -550,6 +550,34 @@ def test_private_with_a_remote_target_sends_each_line_live(lane, hub, presence, 
     assert "(sent to bob@" in text
 
 
+def test_private_accepts_a_friendly_node_name_containing_spaces(
+    lane, hub, presence, mailbox, alice, channel,
+):
+    own_identity = bootstrap_node_identity("private-own")
+    remote_identity = bootstrap_node_identity("private-remote")
+    link_node = LinkNode(identity=own_identity)
+    remote_node = LinkNode(identity=remote_identity)
+    link_node.handle_hello(remote_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="The Rusty Anchor",
+    ))
+    direct = _FakeDirectChat()
+    context = LinkContext(
+        node_identity=own_identity, link_node=link_node,
+        realtime_bridge=_FakeBridge({remote_identity.fingerprint: {"bob": "bob"}}),
+        direct_chat=direct,
+    )
+
+    asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        ["/private bob@The Rusty Anchor", "hello", "/close", "/quit"],
+        link_context=context,
+    ))
+
+    assert direct.sent[0][0] == remote_identity.fingerprint
+    assert direct.sent[0][1]["body"] == "hello"
+
+
 def test_private_with_a_remote_target_ends_the_mode_when_the_peer_becomes_unreachable(
     lane, hub, presence, mailbox, alice, channel
 ):

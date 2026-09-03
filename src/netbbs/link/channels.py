@@ -36,7 +36,6 @@ from netbbs.link.events import (
     build_channel_message,
 )
 from netbbs.link.node_identity import NodeIdentity
-from netbbs.link.node_profiles import identity_for_fingerprint
 from netbbs.search import index_channel_message
 from netbbs.storage.database import Database
 from netbbs.timeutil import utc_now_iso
@@ -283,14 +282,7 @@ def materialize_carried_channel_message(
 
     payload = message.payload
     author = payload["author"]
-    home_fingerprint = author["home_node_fingerprint"]
-    home_identity = identity_for_fingerprint(db, home_fingerprint)
-    home_label = (
-        home_identity.label
-        if home_identity.friendly_name != "Unknown linked node"
-        else home_fingerprint
-    )
-    author_label = f"{author['local_user_id']}@{home_label}"
+    author_label = f"{author['local_user_id']}@{author['home_node_fingerprint']}"
 
     db.connection.execute(
         """

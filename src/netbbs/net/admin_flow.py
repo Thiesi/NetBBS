@@ -185,8 +185,8 @@ from netbbs.link.diagnostics import (
 from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
-    identity_for_fingerprint, identity_for_peer, list_identity_observations, own_canonical_dns_name,
-    resolve_stored_peer_reference,
+    dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    list_identity_observations, own_canonical_dns_name, resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
@@ -4299,6 +4299,13 @@ async def _link_status_screen(
                     "This may be recovery or replacement, but could indicate impersonation."
                 )
             await session.write_line(colored("  " + sanitize_text(message), fg_color=METADATA_COLOR))
+        if await prompt_yes_no(
+            session, "Acknowledge these identity changes and stop repeating their notices?",
+            default=False,
+        ):
+            for notice in identity_notices:
+                await lane.run(dismiss_identity_observation, notice.id)
+            await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
 
     if config is not None:
         await session.write_line(

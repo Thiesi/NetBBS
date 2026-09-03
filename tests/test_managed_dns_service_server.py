@@ -119,8 +119,10 @@ def test_rename_keeps_old_name_active_until_replacement_matures(db):
 
 
 def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
+    provider = LoggingDnsProvider()
+
     async def scenario():
-        server = await _start_server(db)
+        server = await _start_server(db, dns_provider=provider)
         try:
             original = await _register(server, name="old-name")
             _, replacement = await _rename(server, credential=original["credential"], name="new-name")
@@ -134,6 +136,9 @@ def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
     assert body["previous_name"] == "old-name"
     assert get_registration_by_name(db, "old-name").status == "pending"
     assert get_registration_by_name(db, "new-name") is None
+    # Cleanup is deliberately unconditional/idempotent: the provider may have
+    # published immediately before a crash which lost the local marker.
+    assert provider.deletes == ["new-name.netbbs.org."]
 
 
 def test_pending_rename_blocks_release_of_both_names(db):

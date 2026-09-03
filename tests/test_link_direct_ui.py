@@ -225,7 +225,7 @@ def test_deliverer_queues_for_an_online_recipient_and_drops_otherwise(tmp_path):
     assert asyncio.run(deliver(message)) is True
     queued = mailbox.flush(bob_session)
     assert len(queued) == 1
-    assert "Private message from Alice@Unknown linked node" in queued[0][0]
+    assert f"Private message from Alice@{'f' * 64}" in queued[0][0]
     assert "\x1b[31m" not in queued[0][0].split("Private message from")[1]
     # Opted out: dropped even while online.
     set_accepts_direct_messages(rig.db, bob, False)

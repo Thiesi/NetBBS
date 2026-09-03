@@ -44,7 +44,9 @@ from pathlib import Path
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import LinkMailError, compose_link_message
-from netbbs.link.node_profiles import identity_for_fingerprint, resolve_stored_peer_reference
+from netbbs.link.node_profiles import (
+    identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
+)
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MailboxFullError,
@@ -191,8 +193,12 @@ async def _show_inbox(session: Session, lane: DatabaseLane, user: User) -> None:
         sender_labels = {
             m.id: await _display_sender_label(lane, m) for m in messages
         }
+        identity_warnings = {
+            m.id: await _link_mail_identity_warning(lane, m.sender_label) for m in messages
+        }
         descriptions = {
             m.id: f"from {sender_labels[m.id]} "
+            f"{'[IDENTITY CHANGED] ' if identity_warnings[m.id] else ''}"
             f"({format_for_display(m.created_at, override_format=display_format, override_timezone=display_timezone)})"
             for m in messages
         }
@@ -297,6 +303,9 @@ async def _render_message(
             colored("From: ", fg_color=LABEL_COLOR)
             + colored(sanitize_text(sender_label), fg_color=accent)
         )
+        warning = await _link_mail_identity_warning(lane, message.sender_label)
+        if warning is not None:
+            await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
         message.created_at, override_format=display_format, override_timezone=display_timezone
@@ -326,6 +335,21 @@ async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str
         identity.label if identity.friendly_name != "Unknown linked node" else fingerprint
     )
     return f"{user_id}@{node_label}"
+
+
+async def _link_mail_identity_warning(
+    lane: DatabaseLane, technical_address: str,
+) -> str | None:
+    if "@" not in technical_address:
+        return None
+    _user_id, fingerprint = technical_address.split("@", 1)
+    observation = await lane.run(latest_identity_observation, fingerprint)
+    if observation is None or observation.severity != "security":
+        return None
+    return (
+        "Caution: this familiar node name now has a different cryptographic identity. "
+        "Mail remains available, but verify the change if it was unexpected."
+    )
 
 
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
@@ -564,6 +588,9 @@ async def _compose_mail(
                     )
                 continue
             technical_recipient = f"{remote_user}@{resolved}"
+            warning = await _link_mail_identity_warning(lane, technical_recipient)
+            if warning is not None:
+                await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
             try:
                 await lane.run(
                     compose_link_message, user, technical_recipient, subject, body,
