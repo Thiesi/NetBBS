@@ -359,8 +359,26 @@ class _FakeBridge:
 
 
 class _FakeLinkContext:
-    def __init__(self, realtime_bridge) -> None:
+    def __init__(self, realtime_bridge, *, direct_chat=None, known_fingerprints=()) -> None:
         self.realtime_bridge = realtime_bridge
+        self.direct_chat = direct_chat
+        self.realtime_registry = None
+        # Just enough of `LinkNode` for `resolve_node_fingerprint`.
+        self.link_node = type("_FakeLinkNode", (), {"peers": {fp: None for fp in known_fingerprints}})()
+
+
+class _FakeDirectChat:
+    """Records what Who's online asked it to send; the real network
+    layer is proven in tests/test_link_realtime_relay.py."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    async def ensure_session(self, fingerprint: str):
+        return object()
+
+    async def send_direct_message(self, fingerprint: str, **kw) -> None:
+        self.sent.append((fingerprint, kw))
 
 
 def test_who_screen_includes_users_online_on_a_linked_node(tmp_path):
@@ -390,7 +408,10 @@ def test_who_screen_includes_users_online_on_a_linked_node(tmp_path):
     database.close()
 
 
-def test_who_screen_selecting_a_remote_entry_explains_cross_node_chat_is_not_available_yet(tmp_path):
+def test_who_screen_remote_entry_without_a_lane_explains_live_messaging_is_unavailable_here(tmp_path):
+    """Issue #168: a session with no lane/direct-chat layer (the
+    degrade-gracefully test shape) is told plainly, not offered an action
+    that can't work."""
     database = db(tmp_path)
     alice = create_user(database, "alice", password="hunter2", user_level=10)
 
@@ -408,7 +429,42 @@ def test_who_screen_selecting_a_remote_entry_explains_cross_node_chat_is_not_ava
 
         text = _written_text(session)
         assert "erin is connected to a different linked node" in text
-        assert "direct messaging and chat invites across nodes aren't available yet" in text
+        assert "live messaging isn't available from this session" in text
+
+    asyncio.run(scenario())
+    database.close()
+
+
+def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
+    """Issue #168: with the direct-chat layer present, selecting a remote
+    entry prompts for a message and sends it to user@node live."""
+    database = db(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    fingerprint = "remote-node-fingerprint-abc123"
+
+    async def scenario():
+        node_controls = _node_controls()
+        direct = _FakeDirectChat()
+        link_context = _FakeLinkContext(
+            _FakeBridge({fingerprint: {"erin": "erin"}}), direct_chat=direct, known_fingerprints=(fingerprint,),
+        )
+        # (presence for that node is present, so the honest-delivery guard passes)
+        lane = DatabaseLane(database.path)
+        session = FakeSession(["w", "0", "1", "hello erin", "l", "y"])
+        node_controls.session_registry.enter(session)
+        node_controls.session_registry.mark_authenticated(session, "alice")
+        try:
+            await _run_main_menu(session, database, alice, node_controls, lane=lane, link_context=link_context)
+        finally:
+            node_controls.session_registry.leave(session)
+            lane.close()
+
+        text = _written_text(session)
+        assert "Message to erin@remote-node-" in text
+        assert direct.sent and direct.sent[0][0] == fingerprint
+        assert direct.sent[0][1]["to_user_id"] == "erin"
+        assert direct.sent[0][1]["body"] == "hello erin"
+        assert "(sent to erin@" in text
 
     asyncio.run(scenario())
     database.close()

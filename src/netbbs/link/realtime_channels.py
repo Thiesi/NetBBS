@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Awaitable, Callable
 
 from netbbs.chat.channels import Channel
 from netbbs.chat.hub import ChatHub
@@ -270,6 +271,11 @@ class LiveChannelBridge:
         # session (existing convention), but the snapshot must only go
         # out once per connection, not once per call.
         self._node_presence_sent: set[str] = set()
+        # id(session) -> its one close-watcher task. track_session is
+        # called for every presence frame a peer sends (issue #168), so
+        # the watcher must be created exactly once per session, not once
+        # per call -- a chatty peer must not grow this node's task set.
+        self._watched: dict[int, asyncio.Task] = {}
         # channel_id -> opaque holder ids (issue #159): this node's own
         # *subscriber*-side interest in a linked channel it doesn't
         # originate -- the mirror image of `_subscribers` above, which is
@@ -285,6 +291,24 @@ class LiveChannelBridge:
         # feed: the first to leave would silently cut off live delivery
         # for everyone else still interested.
         self._local_interest: dict[str, set[int]] = {}
+        # Issue #168: frames that are not this bridge's own business --
+        # relay rendezvous (`netbbs.link.realtime_relay`) and live direct
+        # messages (`netbbs.link.realtime_direct`) -- are routed to the
+        # first registered handler that claims them. The bridge stays the
+        # single `on_frame` seam every session is constructed with; the
+        # other components plug in rather than each needing a session
+        # hook of their own.
+        self._frame_handlers: list[tuple[
+            Callable[[LinkRealtimeSession, RealtimeFrame], bool],
+            Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
+        ]] = []
+
+    def register_frame_handler(
+        self,
+        owns: Callable[[LinkRealtimeSession, RealtimeFrame], bool],
+        handle: Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
+    ) -> None:
+        self._frame_handlers.append((owns, handle))
 
     def register_local_interest(self, channel_id: str, holder: int) -> bool:
         """Record that `holder` (a caller's own `id(session)`) wants live
@@ -333,9 +357,12 @@ class LiveChannelBridge:
         session, and `_untrack_on_close`'s own watcher (already spawned
         above) will clean up `_node_presence_sent` once `session.closed`
         actually fires."""
-        watcher = asyncio.get_running_loop().create_task(self._untrack_on_close(session))
-        self._watchers.add(watcher)
-        watcher.add_done_callback(self._watchers.discard)
+        if id(session) not in self._watched:
+            watcher = asyncio.get_running_loop().create_task(self._untrack_on_close(session))
+            self._watched[id(session)] = watcher
+            self._watchers.add(watcher)
+            watcher.add_done_callback(self._watchers.discard)
+            watcher.add_done_callback(lambda _t, key=id(session): self._watched.pop(key, None))
 
         if session.remote_fingerprint in self._node_presence_sent:
             return
@@ -385,8 +412,15 @@ class LiveChannelBridge:
             await self._handle_node_presence_snapshot(session, frame)
         elif frame.type == "node_presence_delta":
             await self._handle_node_presence_delta(session, frame)
-        # "error": nothing actionable locally yet from a peer-reported
-        # rejection of a frame this node sent.
+        else:
+            for owns, handle in self._frame_handlers:
+                if owns(session, frame):
+                    await handle(session, frame)
+                    return
+            # "error": nothing actionable locally yet from a peer-reported
+            # rejection of a frame this node sent. A relay/direct frame
+            # with no handler registered (a node that doesn't run those
+            # components) is ignored the same way -- never a strike.
 
     async def _handle_subscribe(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         channel_id = frame.payload["channel_id"]
@@ -565,6 +599,13 @@ class LiveChannelBridge:
     async def _handle_node_presence_snapshot(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         if not await self._node_realtime_allowed(session.remote_fingerprint):
             return
+        # Issue #168: a session that arrives for a direct message or a
+        # relay anchor never subscribes to a channel, so this is the first
+        # (and only) place the receiving side learns it exists. Tracking
+        # here is what spawns the close-watcher that clears this presence
+        # again, and what sends *our* snapshot back so the peer's own
+        # "is that user online there" check has an answer. Idempotent.
+        await self.track_session(session)
         entries = frame.payload["entries"][:_MAX_PRESENCE_SNAPSHOT_ENTRIES]
         self._remote_node_presence[session.remote_fingerprint] = {
             entry["user_id"]: entry["display_label"] for entry in entries
@@ -573,6 +614,7 @@ class LiveChannelBridge:
     async def _handle_node_presence_delta(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         if not await self._node_realtime_allowed(session.remote_fingerprint):
             return
+        await self.track_session(session)
         online = self._remote_node_presence.setdefault(session.remote_fingerprint, {})
         user_id = frame.payload["user_id"]
         if frame.payload["change"] == "join":

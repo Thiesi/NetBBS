@@ -274,12 +274,29 @@ async def _caller_who_screen(
         return
 
     if isinstance(selected, _RemoteWhoEntry):
-        await session.write_line(
-            colored(
-                f"{selected.username} is connected to a different linked node -- direct messaging and "
-                "chat invites across nodes aren't available yet.",
-                fg_color=MUTED_COLOR,
+        # Issue #168: a one-off live message across nodes, over a direct
+        # or relayed real-time session; chat invites stay local-only.
+        from netbbs.net.link_direct import send_live_direct_message
+
+        if lane is None or link_context is None or link_context.direct_chat is None:
+            await session.write_line(
+                colored(
+                    f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
+                    "messaging isn't available from this session.",
+                    fg_color=MUTED_COLOR,
+                )
             )
+            return
+        await session.write(
+            f"Message to {sanitize_text(selected.username)}@{sanitize_text(selected.node_fingerprint[:12])}…: "
+        )
+        message = (await session.read_line()).strip()
+        if not message:
+            await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
+            return
+        await send_live_direct_message(
+            session, lane, user, f"{selected.username}@{selected.node_fingerprint}", message,
+            link_context=link_context,
         )
         return
 

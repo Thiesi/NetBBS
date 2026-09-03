@@ -735,16 +735,22 @@ async def establish_noise_xx_responder(
     identity: NodeIdentity,
     *,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    first_message: bytes | None = None,
 ) -> tuple[RealtimeIdentityPayload, NoiseTransportCiphers]:
-    """Run the responder side of XX and verify the initiator's Link identity."""
+    """Run the responder side of XX and verify the initiator's Link
+    identity. `first_message` (issue #168) is the initiator's first
+    handshake record when the caller has already read it -- the real-
+    time listener peeks at the first record to tell a bridge-attach
+    preamble from a Noise handshake, and must not consume it twice."""
     handshake = NoiseXXHandshake(
         initiator=False,
         static_private_key=bytes(derive_encryption_private_key(identity.transport_key)),
     )
     own_payload = RealtimeIdentityPayload.for_node(identity).to_json_bytes()
     try:
-        first = await asyncio.wait_for(read_realtime_record(reader), timeout_seconds)
-        handshake.read_message(first)
+        if first_message is None:
+            first_message = await asyncio.wait_for(read_realtime_record(reader), timeout_seconds)
+        handshake.read_message(first_message)
         second, _ = handshake.write_message(own_payload)
         await asyncio.wait_for(write_realtime_record(writer, second), timeout_seconds)
         third = await asyncio.wait_for(read_realtime_record(reader), timeout_seconds)
@@ -759,6 +765,36 @@ async def establish_noise_xx_responder(
     if ciphers is None:
         raise LinkTransportError("Noise XX responder did not produce transport keys")
     return remote, ciphers
+
+
+# Issue #168 (design doc §16 Decision 1, raw-socket proxy): a party
+# attaching to a relayed bridge sends exactly one plaintext record --
+# this magic followed by the attach token the relay handed it in
+# `relay_ready` -- before the ordinary Noise XX handshake begins with
+# its counterpart *through* the relay. The relay never sees anything
+# after this record except opaque ciphertext. A real Noise first message
+# starts with a random 32-byte ephemeral key, so a record starting with
+# this ASCII prefix is unambiguous in practice.
+BRIDGE_ATTACH_MAGIC = b"NETBBS-BRIDGE/1 "
+BRIDGE_ATTACH_TOKEN_BYTES = 32  # hex-encoded 128-bit token
+
+
+def encode_bridge_attach_record(attach_token: str) -> bytes:
+    token = attach_token.encode("ascii")
+    if len(token) != BRIDGE_ATTACH_TOKEN_BYTES or not all(c in b"0123456789abcdef" for c in token):
+        raise LinkTransportError("bridge attach token must be 32 lowercase hex characters")
+    return encode_realtime_record(BRIDGE_ATTACH_MAGIC + token)
+
+
+def decode_bridge_attach_record(record: bytes) -> str | None:
+    """The attach token if `record` is a bridge-attach preamble, else
+    `None` (an ordinary Noise handshake record)."""
+    if not record.startswith(BRIDGE_ATTACH_MAGIC):
+        return None
+    token = record[len(BRIDGE_ATTACH_MAGIC):]
+    if len(token) != BRIDGE_ATTACH_TOKEN_BYTES or not all(c in b"0123456789abcdef" for c in token):
+        raise LinkTransportError("malformed bridge attach record")
+    return token.decode("ascii")
 
 
 REALTIME_DEFAULT_OUTBOUND_QUEUE_SIZE = 64
@@ -1126,6 +1162,7 @@ class LinkRealtimeServer:
         on_frame: Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
         lane: DatabaseLane | None = None,
         enforce_trust_policy: bool = False,
+        bridge_attach: Callable[[str, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[bool]] | None = None,
     ) -> None:
         if enforce_trust_policy and lane is None:
             raise ValueError("enforce_trust_policy requires a lane")
@@ -1136,6 +1173,11 @@ class LinkRealtimeServer:
         self._on_frame = on_frame
         self._lane = lane
         self._enforce_trust_policy = enforce_trust_policy
+        # Issue #168: where a bridge-attach preamble (see
+        # BRIDGE_ATTACH_MAGIC) hands its connection off -- the node's
+        # `RealtimeRelay`, when this node serves live relay. `None` means
+        # an attach record is simply an invalid handshake and is closed.
+        self._bridge_attach = bridge_attach
         self._server: asyncio.base_events.Server | None = None
         self._accepting: set[asyncio.Task] = set()
 
@@ -1189,7 +1231,25 @@ class LinkRealtimeServer:
 
     async def _admit_inbound(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            remote, ciphers = await establish_noise_xx_responder(reader, writer, self._identity)
+            first = await asyncio.wait_for(read_realtime_record(reader), _DEFAULT_TIMEOUT_SECONDS)
+            attach_token = decode_bridge_attach_record(first)
+        except (LinkTransportError, TimeoutError):
+            await _reject_before_session(writer)
+            return
+        if attach_token is not None:
+            # A relayed bridge's raw leg (issue #168), not a session with
+            # this node at all -- the relay takes the socket over and this
+            # listener never sees another byte of it.
+            accepted = False
+            if self._bridge_attach is not None:
+                accepted = await self._bridge_attach(attach_token, reader, writer)
+            if not accepted:
+                await _reject_before_session(writer)
+            return
+        try:
+            remote, ciphers = await establish_noise_xx_responder(
+                reader, writer, self._identity, first_message=first
+            )
         except (LinkTransportError, LinkProtocolError):
             await _reject_before_session(writer)
             return
@@ -1268,6 +1328,74 @@ async def dial_realtime_session(
     return session
 
 
+async def attach_relayed_session(
+    host: str,
+    port: int,
+    identity: NodeIdentity,
+    *,
+    attach_token: str,
+    role: str,
+    expected_fingerprint: str,
+    on_frame: Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
+    registry: LinkRealtimeSessionRegistry,
+    lane: DatabaseLane | None = None,
+    enforce_trust_policy: bool = False,
+) -> LinkRealtimeSession:
+    """Issue #168: the party side of a relayed bridge. Open the attach
+    connection to the relay, send the one plaintext preamble record, then
+    run the ordinary Noise XX handshake *with the counterpart* through the
+    relay's spliced sockets in the role `relay_ready` assigned, and admit
+    the result exactly like `dial_realtime_session` would a direct one.
+
+    `expected_fingerprint` is mandatory here, not optional: the relay is
+    a network intermediary that could pair this node with anyone it likes,
+    so the authenticated fingerprint must equal the one the rendezvous
+    named -- on *both* roles (the responder side verifies too; the worklog
+    records this as the binding gap any relay design must close)."""
+    if enforce_trust_policy and lane is None:
+        raise ValueError("enforce_trust_policy requires a lane")
+    if role not in ("initiator", "responder"):
+        raise LinkTransportError(f"unknown relay role {role!r}")
+    reader, writer = await asyncio.open_connection(host, port)
+    owned_by_session = False
+    try:
+        writer.write(encode_bridge_attach_record(attach_token))
+        await writer.drain()
+        if role == "initiator":
+            remote, ciphers = await establish_noise_xx_initiator(
+                reader, writer, identity, expected_fingerprint=expected_fingerprint
+            )
+        else:
+            remote, ciphers = await establish_noise_xx_responder(reader, writer, identity)
+            if remote.root_fingerprint != expected_fingerprint:
+                raise LinkProtocolError(
+                    f"expected a relayed session with {expected_fingerprint}, "
+                    f"but authenticated as {remote.root_fingerprint}"
+                )
+        fingerprint = remote.root_fingerprint
+        if enforce_trust_policy:
+            assert lane is not None
+            allowed = await lane.run(_decide_realtime_admission, fingerprint)
+            if not allowed:
+                raise LinkTransportError(f"relayed session to {fingerprint} refused by local trust policy")
+        session = LinkRealtimeSession(
+            remote_fingerprint=fingerprint, reader=reader, writer=writer, ciphers=ciphers,
+            is_initiator=(role == "initiator"), on_frame=on_frame,
+        )
+        owned_by_session = True
+    except BaseException:
+        # Includes cancellation (a caller's own rendezvous timeout firing
+        # mid-handshake): until a session owns the socket, close it here.
+        if not owned_by_session:
+            await _reject_before_session(writer)
+        raise
+    session.start()
+    survived = await registry.admit(session)
+    if not survived:
+        raise LinkTransportError(f"relayed session to {fingerprint} lost the duplicate-session tiebreak")
+    return session
+
+
 REALTIME_RECONNECT_MIN_BACKOFF_SECONDS = 1.0
 REALTIME_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
 REALTIME_RECONNECT_STABLE_AFTER_SECONDS = 30.0
@@ -1307,15 +1435,23 @@ class LinkRealtimeConnector:
         max_backoff_seconds: float = REALTIME_RECONNECT_MAX_BACKOFF_SECONDS,
         stable_after_seconds: float = REALTIME_RECONNECT_STABLE_AFTER_SECONDS,
         rng: random.Random | None = None,
+        on_session: Callable[[LinkRealtimeSession], Awaitable[None]] | None = None,
+        addresses: list[tuple[str, int]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
+        # Every advertised address, tried in order across successive
+        # attempts (`host`/`port` alone otherwise): a stale first address
+        # must not pin the reconnect loop to an endpoint that never answers.
+        self._addresses: list[tuple[str, int]] = list(addresses) if addresses else [(host, port)]
+        self._attempt = 0
         self._identity = identity
         self._on_frame = on_frame
         self._registry = registry
         self._lane = lane
         self._enforce_trust_policy = enforce_trust_policy
         self._expected_fingerprint = expected_fingerprint
+        self._on_session = on_session
         self._min_backoff = min_backoff_seconds
         self._max_backoff = max_backoff_seconds
         self._stable_after = stable_after_seconds
@@ -1350,13 +1486,17 @@ class LinkRealtimeConnector:
         while not self._stopping:
             try:
                 connected_at = loop.time()
+                host, port = self._addresses[self._attempt % len(self._addresses)]
+                self._attempt += 1
                 session = await dial_realtime_session(
-                    self._host, self._port, self._identity, on_frame=self._on_frame,
+                    host, port, self._identity, on_frame=self._on_frame,
                     registry=self._registry, lane=self._lane,
                     enforce_trust_policy=self._enforce_trust_policy,
                     expected_fingerprint=self._expected_fingerprint,
                 )
                 self._current_session = session
+                if self._on_session is not None:
+                    await self._on_session(session)
                 await session.closed.wait()
                 self._current_session = None
                 if loop.time() - connected_at >= self._stable_after:

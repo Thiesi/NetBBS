@@ -776,3 +776,40 @@ def test_version_flag_prints_release_and_schema_version_and_exits(capsys):
     output = capsys.readouterr().out
     assert __version__ in output
     assert f"schema version {len(MIGRATIONS)}" in output
+
+
+def test_live_relay_bounds_load_from_toml_and_default_sensibly(tmp_path):
+    """Issue #168 (design doc §16 Decision 2): the five live-relay bounds are
+    ordinary [link] settings with the documented defaults, validated
+    positive like every other Link quota."""
+    from netbbs.net.nodeconfig import ConfigError, LinkConfig, NodeConfig, load_config
+
+    defaults = LinkConfig()
+    assert (defaults.live_relay_max_concurrent_pairs, defaults.live_relay_max_pending_rendezvous) == (8, 32)
+    assert defaults.live_relay_rendezvous_timeout_seconds == 30.0
+    assert defaults.live_relay_idle_timeout_seconds == 120.0
+    assert defaults.live_relay_max_bytes_per_second == 65_536
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        "[ssh]\nenabled = true\n[link]\nenabled = true\nlive_relay_max_concurrent_pairs = 2\n"
+        "live_relay_idle_timeout_seconds = 5\n"
+    )
+    config = load_config(["--config", str(config_file)])
+    assert config.link.live_relay_max_concurrent_pairs == 2
+    assert config.link.live_relay_idle_timeout_seconds == 5.0
+    with pytest.raises(ConfigError, match="live_relay_max_concurrent_pairs"):
+        NodeConfig(link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, live_relay_max_concurrent_pairs=0)).validate()
+
+
+@pytest.mark.parametrize("value", ["inf", "nan"])
+def test_non_finite_relay_timeouts_are_rejected(tmp_path, value):
+    """Codex review (PR #269): TOML accepts inf/nan; neither is a bound."""
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        "[ssh]\nenabled = true\n[link]\nenabled = true\n"
+        f"live_relay_rendezvous_timeout_seconds = {value}\n"
+    )
+    with pytest.raises(ConfigError, match="live_relay_rendezvous_timeout_seconds"):
+        load_config(["--config", str(config_file)])

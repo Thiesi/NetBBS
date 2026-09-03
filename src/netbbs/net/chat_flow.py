@@ -1034,6 +1034,9 @@ class ChatCommandContext:
     session_registry: ActiveSessionRegistry | None = None
     direct_invites: DirectChatInvites | None = None
     realtime_bridge: LiveChannelBridge | None = None
+    # Issue #168: everything `/msg user@node` needs (direct-message layer,
+    # peer table, live sessions) -- `None` off-Link, same as the above.
+    link_context: LinkContext | None = None
 
 
 @dataclass(frozen=True)
@@ -1273,6 +1276,17 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
         await _show_usage(ctx.session, "msg")
         return
     target_name, body = parts
+
+    if "@" in target_name:
+        # Issue #168: `user@node-fingerprint` reaches a user on a linked
+        # node live, over a direct or relayed real-time session. Lazy
+        # import: link_direct imports this module for delivery helpers.
+        from netbbs.net.link_direct import send_live_direct_message
+
+        await send_live_direct_message(
+            ctx.session, ctx.lane, ctx.user, target_name, body, link_context=ctx.link_context,
+        )
+        return
 
     target = await _resolve_target(ctx.session, ctx.lane, target_name)
     if target is None:
@@ -2337,7 +2351,7 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
     "join": ("/join <channel>", "Switch to another chat channel."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
-    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user."),
+    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-fingerprint for a linked node)."),
     "private": ("/private <user>", "Enter a private conversation with an online user."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
@@ -3504,6 +3518,7 @@ async def _chat_loop(
                                 session_registry=session_registry,
                                 direct_invites=direct_invites,
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
+                                link_context=link_context,
                             )
                             action = await _dispatch_command(ctx, line)
                             if isinstance(action, _EnterPrivate):
@@ -3547,6 +3562,7 @@ async def _chat_loop(
                                 session_registry=session_registry,
                                 direct_invites=direct_invites,
                                 realtime_bridge=link_context.realtime_bridge if link_context is not None else None,
+                                link_context=link_context,
                             )
                             if not presence.is_online(private_target.username):
                                 await session.write_line(

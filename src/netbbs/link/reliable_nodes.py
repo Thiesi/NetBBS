@@ -47,6 +47,7 @@ import http.client
 import json
 import logging
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 from urllib.error import URLError
@@ -205,6 +206,12 @@ def _parse_entry(entry: object) -> ReliableNode | None:
         return None
     if not (url.startswith("http://") or url.startswith("https://")):
         return None
+    try:
+        parts = urlsplit(url)
+        if not parts.hostname or parts.port is not None and not 1 <= parts.port <= 65535:
+            return None
+    except ValueError:
+        return None  # non-numeric port, unbalanced IPv6 brackets, ...
     # A control character in a name would reach a SysOp's terminal;
     # sanitize_text guards the display path too, but a roster entry has
     # no business carrying one in the first place.

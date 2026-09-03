@@ -168,14 +168,28 @@ _MAX_SEEN_TRUST_PULL_NONCES = 4096
 # events. Version 1 peers would misinterpret those rows, so mixed versions
 # fail at the version boundary rather than accumulating protocol strikes for
 # payloads both sides believe belong to the same version.
-REALTIME_PROTOCOL_VERSION = 2
+#
+# Version 3 (issue #168) adds the relay rendezvous and direct-message frame
+# types. A version-2 peer does not merely reject an unknown type with a
+# bounded strike: `RealtimeFrame.from_json_bytes` raises before the strike
+# path, so the whole session -- possibly a shared channel subscription or
+# an outgoing-only node's relay anchor -- would drop every time one of the
+# new frames arrived. Bumping the version instead makes a mixed pair fail
+# once, at the authenticated handshake, with the caller-visible "upgrade
+# one of the nodes" message issue #263 established.
+REALTIME_PROTOCOL_VERSION = 3
 _REALTIME_IDENTITY_PAYLOAD_VERSION = 2
 REALTIME_MAX_PLAINTEXT_BYTES = 16 * 1024
 REALTIME_MAX_IDENTITY_PAYLOAD_BYTES = 48 * 1024
+# Issue #168 (design doc §16 Decision 4): the live-relay rendezvous
+# frames and the direct-message frame join the existing family; see the
+# REALTIME_PROTOCOL_VERSION comment below for why that still needed a
+# version bump.
 REALTIME_FRAME_TYPES = frozenset(
     {"subscribe", "unsubscribe", "presence_snapshot", "presence_delta",
      "node_presence_snapshot", "node_presence_delta",
-     "channel_message", "scrollback_snapshot", "ping", "pong", "error", "close"}
+     "channel_message", "scrollback_snapshot", "ping", "pong", "error", "close",
+     "relay_request", "relay_waiting", "relay_ready", "relay_reject", "direct_message"}
 )
 _REALTIME_MAX_MESSAGE_ID_BYTES = 64
 _JSON_SAFE_INTEGER = (1 << 53) - 1
@@ -191,6 +205,20 @@ _REALTIME_MAX_ERROR_DETAIL_BYTES = 500
 _REALTIME_MAX_CLOSE_REASON_BYTES = 200
 _REALTIME_MAX_PRESENCE_ENTRIES = 500
 _REALTIME_PRESENCE_CHANGES = frozenset({"join", "leave"})
+# Issue #168: a direct message is one private line, bounded exactly like
+# a channel message; relay rendezvous frames carry only fingerprints,
+# short reason codes, a bridge/attach token, and a role.
+_REALTIME_MAX_DIRECT_MESSAGE_BODY_BYTES = _REALTIME_MAX_CHANNEL_MESSAGE_BODY_BYTES
+_REALTIME_RELAY_ROLES = frozenset({"initiator", "responder"})
+# Who a relay_reject comes from: the relay answering a request it was
+# asked to serve, or the invited party answering an invitation. The two
+# travel over the same session shape in both directions, so without this
+# discriminator a node that is both a relay and a party could misroute one.
+_REALTIME_RELAY_REJECT_ORIGINS = frozenset({"relay", "party"})
+_REALTIME_RELAY_REJECT_REASONS = frozenset(
+    {"not_serving", "invalid_target", "target_unreachable", "at_capacity", "pending_full",
+     "declined", "timeout", "attach_failed", "policy_refused"}
+)
 
 # Issue #194: a scrollback_snapshot bundles up to this many entries in one
 # frame (unlike channel_message, which is always exactly one message), so
@@ -678,7 +706,85 @@ def _validate_close_payload(payload: dict, *, path: str) -> None:
     _validate_bounded_text(payload["reason"], path=f"{path}.reason", max_bytes=_REALTIME_MAX_CLOSE_REASON_BYTES)
 
 
+def _validate_relay_request_payload(payload: dict, *, path: str) -> None:
+    if set(payload) != {"target_fingerprint", "requester_fingerprint"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint and requester_fingerprint")
+    _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
+    _validate_bounded_id(payload["requester_fingerprint"], path=f"{path}.requester_fingerprint")
+    if payload["target_fingerprint"] == payload["requester_fingerprint"]:
+        raise LinkProtocolError(f"{path} target and requester must differ")
+
+
+def _validate_optional_request_id(payload: dict, *, path: str) -> None:
+    # A relay echoes the requester's own relay_request message_id back on
+    # every answer, so a late answer to an earlier, already timed-out
+    # attempt can never be mistaken for the answer to a fresh one.
+    if "request_id" in payload:
+        _validate_bounded_id(payload["request_id"], path=f"{path}.request_id")
+
+
+def _validate_relay_waiting_payload(payload: dict, *, path: str) -> None:
+    keys = set(payload)
+    if "target_fingerprint" not in keys or not keys <= {"target_fingerprint", "request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint (optionally request_id)")
+    _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
+    _validate_optional_request_id(payload, path=path)
+
+
+def _validate_relay_ready_payload(payload: dict, *, path: str) -> None:
+    expected = {"bridge_id", "peer_fingerprint", "role", "attach_token", "attach_address", "attach_port"}
+    keys = set(payload)
+    if not expected <= keys or not keys <= expected | {"request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly {', '.join(sorted(expected))} (optionally request_id)")
+    _validate_optional_request_id(payload, path=path)
+    _validate_bounded_id(payload["bridge_id"], path=f"{path}.bridge_id")
+    _validate_bounded_id(payload["peer_fingerprint"], path=f"{path}.peer_fingerprint")
+    _validate_bounded_id(payload["attach_token"], path=f"{path}.attach_token")
+    _validate_bounded_id(payload["attach_address"], path=f"{path}.attach_address")
+    if payload["role"] not in _REALTIME_RELAY_ROLES:
+        raise LinkProtocolError(f"{path}.role must be initiator or responder")
+    port = payload["attach_port"]
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise LinkProtocolError(f"{path}.attach_port must be a TCP port")
+
+
+def _validate_relay_reject_payload(payload: dict, *, path: str) -> None:
+    required = {"target_fingerprint", "reason", "origin"}
+    keys = set(payload)
+    if not required <= keys or not keys <= required | {"request_id"}:
+        raise LinkProtocolError(f"{path} must contain exactly target_fingerprint, reason, and origin (optionally request_id)")
+    _validate_optional_request_id(payload, path=path)
+    _validate_bounded_id(payload["target_fingerprint"], path=f"{path}.target_fingerprint")
+    if payload["reason"] not in _REALTIME_RELAY_REJECT_REASONS:
+        raise LinkProtocolError(f"{path}.reason is not a known relay rejection reason")
+    if payload["origin"] not in _REALTIME_RELAY_REJECT_ORIGINS:
+        raise LinkProtocolError(f"{path}.origin must be relay or party")
+
+
+def _validate_direct_message_payload(payload: dict, *, path: str) -> None:
+    expected = {"to_user_id", "from_user_id", "from_display_label", "body", "created_at"}
+    if set(payload) != expected:
+        raise LinkProtocolError(f"{path} must contain exactly {', '.join(sorted(expected))}")
+    _validate_bounded_id(payload["to_user_id"], path=f"{path}.to_user_id")
+    _validate_bounded_id(payload["from_user_id"], path=f"{path}.from_user_id")
+    _validate_bounded_text(
+        payload["from_display_label"], path=f"{path}.from_display_label",
+        max_bytes=_REALTIME_MAX_DISPLAY_LABEL_BYTES,
+    )
+    _validate_bounded_text(payload["body"], path=f"{path}.body", max_bytes=_REALTIME_MAX_DIRECT_MESSAGE_BODY_BYTES)
+    if not payload["body"].strip():
+        raise LinkProtocolError(f"{path}.body must not be blank")
+    if not isinstance(payload["created_at"], str):
+        raise LinkProtocolError(f"{path}.created_at must be a string")
+    _parse_aware_timestamp(payload["created_at"], field_name=f"{path}.created_at")
+
+
 _REALTIME_PAYLOAD_VALIDATORS = {
+    "relay_request": _validate_relay_request_payload,
+    "relay_waiting": _validate_relay_waiting_payload,
+    "relay_ready": _validate_relay_ready_payload,
+    "relay_reject": _validate_relay_reject_payload,
+    "direct_message": _validate_direct_message_payload,
     "subscribe": _validate_channel_id_only_payload,
     "unsubscribe": _validate_channel_id_only_payload,
     "presence_snapshot": _validate_presence_snapshot_payload,
@@ -807,6 +913,76 @@ def build_scrollback_snapshot_frame(
     # accepts it into its writer queue. Per-field UTF-8 bounds alone do
     # not account for JSON escaping overhead (notably quotes/backslashes).
     frame.to_json_bytes()
+    return frame
+
+
+def build_relay_request_frame(
+    *, target_fingerprint: str, requester_fingerprint: str, message_id: str | None = None,
+) -> RealtimeFrame:
+    frame = RealtimeFrame(
+        type="relay_request", message_id=message_id or new_realtime_message_id(),
+        payload={"target_fingerprint": target_fingerprint, "requester_fingerprint": requester_fingerprint},
+    )
+    validate_realtime_frame_payload(frame)
+    return frame
+
+
+def build_relay_waiting_frame(
+    *, target_fingerprint: str, request_id: str | None = None, message_id: str | None = None,
+) -> RealtimeFrame:
+    payload: dict = {"target_fingerprint": target_fingerprint}
+    if request_id is not None:
+        payload["request_id"] = request_id
+    frame = RealtimeFrame(
+        type="relay_waiting", message_id=message_id or new_realtime_message_id(), payload=payload,
+    )
+    validate_realtime_frame_payload(frame)
+    return frame
+
+
+def build_relay_ready_frame(
+    *, bridge_id: str, peer_fingerprint: str, role: str, attach_token: str,
+    attach_address: str, attach_port: int, request_id: str | None = None, message_id: str | None = None,
+) -> RealtimeFrame:
+    payload: dict = {
+        "bridge_id": bridge_id, "peer_fingerprint": peer_fingerprint, "role": role,
+        "attach_token": attach_token, "attach_address": attach_address, "attach_port": attach_port,
+    }
+    if request_id is not None:
+        payload["request_id"] = request_id
+    frame = RealtimeFrame(
+        type="relay_ready", message_id=message_id or new_realtime_message_id(), payload=payload,
+    )
+    validate_realtime_frame_payload(frame)
+    return frame
+
+
+def build_relay_reject_frame(
+    *, target_fingerprint: str, reason: str, origin: str, request_id: str | None = None,
+    message_id: str | None = None,
+) -> RealtimeFrame:
+    payload: dict = {"target_fingerprint": target_fingerprint, "reason": reason, "origin": origin}
+    if request_id is not None:
+        payload["request_id"] = request_id
+    frame = RealtimeFrame(
+        type="relay_reject", message_id=message_id or new_realtime_message_id(), payload=payload,
+    )
+    validate_realtime_frame_payload(frame)
+    return frame
+
+
+def build_direct_message_frame(
+    *, to_user_id: str, from_user_id: str, from_display_label: str, body: str, created_at: str,
+    message_id: str | None = None,
+) -> RealtimeFrame:
+    frame = RealtimeFrame(
+        type="direct_message", message_id=message_id or new_realtime_message_id(),
+        payload={
+            "to_user_id": to_user_id, "from_user_id": from_user_id, "from_display_label": from_display_label,
+            "body": body, "created_at": created_at,
+        },
+    )
+    validate_realtime_frame_payload(frame)
     return frame
 
 

@@ -1718,7 +1718,95 @@ confirmed to fail without the fix -- the pattern any future dial-timeout
 regression test in this codebase should follow, rather than trusting a
 `ClientError`-only mock to stand in for what a real elapsed timeout does.
 
-### Real-time relay does not exist yet, and the async relay model does not transfer to it (issue #168)
+### Live relay is a raw proxy below Noise; the async relay model still does not transfer to it (issue #168)
+
+Shipped: `netbbs.link.realtime_relay` (design doc §8.10.3). Invariants that
+constrain future changes:
+
+- **The relay holds no key material and parses nothing.** A bridge is two
+  TCP legs and two byte pumps; every bound on it is a byte or time bound,
+  never a frame bound. Anything that needs to *see* live traffic at a relay
+  is the rejected hybrid double-hop design (§16 "Issue #168"), not an
+  extension of this one.
+- **The party verifies the authenticated fingerprint against the one
+  `relay_ready` named, on both roles** (`transport.attach_relayed_session`).
+  The responder-side check matters as much as the initiator's: Noise XX
+  authenticates *someone*, and the relay chooses who shows up.
+- **Consent is the standing session.** The relay bridges only two nodes
+  both currently connected to it live; an outgoing-only node makes itself
+  reachable by standing by at reliable nodes (`realtime_direct.
+  run_reliable_anchor_connectors`, only while participation is accepted).
+  A standing anchor session needs the reliable node to be `ESTABLISHED` in
+  local trust -- a fresh node whose roster entries are still
+  `PROBATIONARY` cannot anchor (the connector retries with backoff and
+  logs nothing louder than `INFO`); this is Phase 4's existing gate, not a
+  relay limitation, and is the main reason a brand-new node may see "can't
+  be reached for live chat" for a while.
+- **The invitation is a `relay_request` whose target is the invitee's own
+  fingerprint.** Every receiver classifies a `relay_request` by that field:
+  target == own fingerprint -> invitation (party side); requester == sender
+  -> a request to relay (relay side); anything else is not owned by either
+  and is ignored (never a strike). Adding a distinct invitation frame type
+  would change the classification for every deployed peer -- don't.
+- **The bridge-attach preamble is the only plaintext a real-time listener
+  ever accepts** (`transport.BRIDGE_ATTACH_MAGIC`), read by peeking the
+  first record before the responder handshake; `establish_noise_xx_
+  responder(first_message=...)` exists so that peek is never a double
+  read. A listener without a relay closes an attach connection unread.
+- **Version 3, not "new types without a bump".** `RealtimeFrame.__post_init__`
+  rejects an unknown type *before* `_reader_loop`'s strike-counting block, so
+  an older peer closes the whole session on the first new frame. Any future
+  frame-type addition is a version bump for the same reason; the "extend the
+  frozenset without bumping" pattern the #168 design entry cited was wrong.
+- **A party honours only correlated relay frames** (`RealtimeRelayClient.
+  owns_frame`): `relay_ready`/`relay_reject` from the relay it asked for the
+  target it asked, or from the relay whose invitation it accepted (bounded by
+  the rendezvous timeout), one attach in flight per counterpart. Without this
+  any REALTIME-admitted peer could drive unbounded outbound connections to
+  attacker-chosen addresses; `relay_reject.origin` exists so a node that is
+  both relay and party can classify a reject.
+- **A `relay_ready` attach address is pinned to the relay's own advertised
+  real-time addresses** (`RealtimeRelayClient`'s `allowed_attach_addresses`,
+  wired to `dialable_realtime_addresses_for_peer`). Correlation proves which
+  authenticated relay spoke; the pin proves the address is that relay's --
+  without it a malicious relay could make a node open a connection (and send
+  the plaintext preamble) to any service it names. Every session reuse in
+  `LiveDirectChat.ensure_session` re-runs the `REALTIME` policy check too, so
+  a SysOp block takes effect before the next private message, not at the next
+  reconnect.
+- **Every relay answer echoes the requester's `relay_request` message id**
+  (`request_id` on `relay_waiting`/`relay_ready`/`relay_reject`), and the
+  party honours an answer only for the attempt it is currently waiting on.
+  Without it a late reject to an earlier, timed-out attempt fails the retry
+  (TCP orders each direction, not the cross-direction retry race).
+- **The relay half re-decides `REALTIME` policy for the requester on every
+  request** (`policy_refused`), and **every participating node -- full peers
+  too -- stands by at the reliable nodes**; a full peer sending to an
+  outgoing-only peer needs that relay session as much as the reverse, and
+  `_relay_sessions` dials a reliable node on demand when none is up. A
+  standing connector cycles through *every* advertised address across
+  attempts; a stale first address must not pin it.
+- **`attach_relayed_session` closes its socket on any exit before a session
+  owns it -- cancellation included.** A caller's own rendezvous timeout can
+  fire mid-handshake; the `except BaseException` there is deliberate.
+- **Receiving a node-presence snapshot tracks the session.** Server-side
+  `track_session` used to be reached only via `subscribe`; direct-message and
+  anchor sessions never subscribe, so their presence was stored with no close
+  watcher and never answered. `_handle_node_presence_snapshot/_delta` now
+  track (idempotent).
+- **Both session handlers must carry the same `LinkContext`.** The SSH
+  handler had been constructed without the real-time registry/bridge since
+  issue #148 (an SSH caller silently had no live chat); fixed while adding
+  `relay`/`direct_chat`. A test that asserts live-chat behavior through
+  one transport proves nothing about the other.
+
+Testing: `tests/test_link_realtime_relay.py` runs three real nodes on
+loopback (relay + two parties with no listener of their own) through the
+whole rendezvous, the Noise handshake through the relay, delivery, and
+every bound -- including a forged rendezvous that pairs a party with the
+wrong counterpart, which the fingerprint check refuses.
+
+Historical context, still accurate:
 
 `relay_mailbox.py`/`relay_selection.py` are pure store-and-forward: a relay
 accepts one opaque, already-encrypted envelope it structurally cannot
