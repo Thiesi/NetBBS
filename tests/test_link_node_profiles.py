@@ -4,6 +4,7 @@ import pytest
 
 from netbbs.link.node_identity import bootstrap_node_identity
 from netbbs.link.node_profiles import (
+    MAX_IDENTITY_OBSERVATIONS_PER_PEER,
     identity_for_peer,
     list_identity_observations,
     record_peer_identity_observation,
@@ -83,3 +84,40 @@ def test_same_friendly_name_with_new_fingerprint_is_security_notice(db, tmp_path
     notices = list_identity_observations(db)
     assert notices[0].kind == "cryptographic_identity_changed"
     assert notices[0].severity == "security"
+
+
+def test_existing_peer_adopting_another_peers_name_is_security_notice(db, tmp_path):
+    first = _peer(tmp_path, "alice", "Anchor", "anchor.example.org")
+    bob_identity = bootstrap_node_identity("bob")
+    bob_node = LinkNode(identity=bob_identity)
+    second = bob_node.handle_hello(bob_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Other", canonical_dns_name="other.example.org",
+    ))
+    save_peer(db, first)
+    save_peer(db, second)
+    changed = bob_node.handle_hello(bob_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="Anchor", canonical_dns_name="other.example.org",
+    ))
+    save_peer(db, changed)
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.previous_fingerprint == first.fingerprint
+
+
+def test_identity_observation_history_is_bounded_per_peer(db, tmp_path):
+    identity = bootstrap_node_identity("flapping-peer")
+    node = LinkNode(identity=identity)
+    for index in range(MAX_IDENTITY_OBSERVATIONS_PER_PEER + 5):
+        peer = node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-03T12:{index:02d}:00+00:00",
+            friendly_name=f"Name {index}", canonical_dns_name="same.example.org",
+        ))
+        save_peer(db, peer)
+    count = db.connection.execute(
+        "SELECT COUNT(*) FROM link_node_identity_observations WHERE node_fingerprint = ?",
+        (identity.fingerprint,),
+    ).fetchone()[0]
+    assert count == MAX_IDENTITY_OBSERVATIONS_PER_PEER

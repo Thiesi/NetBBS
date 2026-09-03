@@ -90,11 +90,16 @@ async def run_scheduled_managed_dns_updater(
             ):
                 credential = load_credential(credential_path_for(db.path))
                 if credential is not None:
+                    previous_credential = load_credential(previous_credential_path_for(db.path))
+                    if get_previous_name(db) is not None and previous_credential is not None:
+                        await _send_heartbeat(db, base_url, previous_credential, apply_result=False)
                     await _send_heartbeat(db, base_url, credential)
         await sleep(interval_seconds)
 
 
-async def _send_heartbeat(db: Database, base_url: str, credential: str) -> None:
+async def _send_heartbeat(
+    db: Database, base_url: str, credential: str, *, apply_result: bool = True,
+) -> None:
     try:
         # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY, same as
         # every other outbound call this project makes to project-
@@ -107,6 +112,8 @@ async def _send_heartbeat(db: Database, base_url: str, credential: str) -> None:
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
+        return
+    if not apply_result:
         return
     set_registration_status(db, RegistrationStatus(result.status))
     set_last_contact_at(db, utc_now_iso())

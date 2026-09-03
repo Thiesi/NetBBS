@@ -136,6 +136,88 @@ def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
     assert get_registration_by_name(db, "new-name") is None
 
 
+def test_rename_respects_the_global_active_registration_cap(db):
+    async def scenario():
+        server = await _start_server(db, cumulative_cap=1)
+        try:
+            original = await _register(server, name="old-name")
+            return await _rename(server, credential=original["credential"], name="new-name")
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    assert status == 503
+    assert "capacity" in body["error"]
+    assert get_registration_by_name(db, "new-name") is None
+
+
+def test_lost_rename_response_can_be_retried_and_cancelled_with_old_credential(db):
+    async def scenario():
+        server = await _start_server(db)
+        try:
+            original = await _register(server, name="old-name")
+            _, lost = await _rename(server, credential=original["credential"], name="new-name")
+            retry_status, retried = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            cancel_status, cancelled = await _cancel_rename(
+                server, credential=original["credential"]
+            )
+            return lost, retry_status, retried, cancel_status, cancelled
+        finally:
+            await server.stop()
+
+    lost, retry_status, retried, cancel_status, cancelled = asyncio.run(scenario())
+    assert retry_status == 201
+    assert retried["credential"] != lost["credential"]
+    assert cancel_status == 200
+    assert cancelled["previous_name"] == "old-name"
+    assert get_registration_by_name(db, "new-name") is None
+
+
+class _FailOldNameDeleteProvider(LoggingDnsProvider):
+    def delete_record(self, name: str) -> None:
+        if name == "old-name.netbbs.org.":
+            raise DnsProviderError("old record is temporarily undeletable")
+        super().delete_record(name)
+
+
+def test_cancelling_after_partial_publish_removes_the_replacement_record(db):
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    provider = _FailOldNameDeleteProvider()
+
+    async def scenario():
+        nonlocal now
+        server = await _start_server(
+            db, dns_provider=provider, clock=lambda: now, min_age_seconds=60
+        )
+        try:
+            original = await _register(server, name="old-name")
+            await _heartbeat(server, credential=original["credential"])
+            now += timedelta(seconds=61)
+            await _heartbeat(server, credential=original["credential"])
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            await _heartbeat(server, credential=replacement["credential"])
+            now += timedelta(seconds=61)
+            _, still_pending = await _heartbeat(
+                server, credential=replacement["credential"]
+            )
+            cancel_status, _ = await _cancel_rename(
+                server, credential=replacement["credential"]
+            )
+            return still_pending, cancel_status
+        finally:
+            await server.stop()
+
+    still_pending, cancel_status = asyncio.run(scenario())
+    assert still_pending["status"] == "pending"
+    assert "new-name.netbbs.org." not in provider.records
+    assert cancel_status == 200
+    assert get_registration_by_name(db, "new-name") is None
+
+
 def test_register_creates_a_pending_registration(db):
     async def scenario():
         server = await _start_server(db)

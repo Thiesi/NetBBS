@@ -124,6 +124,34 @@ def test_who_annotates_a_remote_participant_with_its_linked_node(lane, hub, pres
     assert origin_fingerprint[:12] not in text
 
 
+def test_who_sanitizes_a_remote_nodes_signed_friendly_name(
+    lane, hub, presence, alice, channel, node_identity,
+):
+    remote_identity = bootstrap_node_identity("remote")
+    remote_node = LinkNode(identity=remote_identity)
+    peer = remote_node.handle_hello(remote_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Safe\x9b31m\u202eevil", canonical_dns_name="safe.example.org",
+    ))
+    local_node = LinkNode(identity=node_identity)
+    local_node.peers[peer.fingerprint] = peer
+    bridge = _bridge_with_roster(
+        hub, lane, presence, channel_id=channel.channel_id,
+        roster={"remoteuser": "Remote User"}, origin_fingerprint=peer.fingerprint,
+    )
+    link_context = LinkContext(
+        node_identity=node_identity, link_node=local_node, realtime_bridge=bridge,
+    )
+
+    session = asyncio.run(
+        _run(lane, hub, presence, channel, alice, ["/who", "/quit"], link_context=link_context)
+    )
+    text = _written_text(session)
+    assert "Safe31mevil" in text
+    assert "\x9b" not in text
+    assert "\u202e" not in text
+
+
 def test_names_includes_a_remote_participant_unannotated(lane, hub, presence, alice, channel, node_identity):
     """`/names` stays a compact, unannotated list (design doc) -- the
     remote label appears, but without the "(on linked node ...)" detail

@@ -44,6 +44,7 @@ from pathlib import Path
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import LinkMailError, compose_link_message
+from netbbs.link.node_profiles import identity_for_fingerprint, resolve_stored_peer_reference
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MailboxFullError,
@@ -523,9 +524,33 @@ async def _compose_mail(
             continue
 
         if link_context is not None and "@" in recipient_text:
+            remote_user, node_reference = recipient_text.rsplit("@", 1)
+            resolved = await lane.run(resolve_stored_peer_reference, node_reference)
+            if isinstance(resolved, list):
+                if resolved:
+                    labels = ", ".join(
+                        (await lane.run(identity_for_fingerprint, fingerprint)).label
+                        for fingerprint in resolved[:5]
+                    )
+                    await session.write_line(
+                        colored(
+                            f"Could not send: {sanitize_text(node_reference)!r} matches more than one node "
+                            f"({sanitize_text(labels)}); use its DNS name.",
+                            fg_color=ERROR_COLOR,
+                        )
+                    )
+                else:
+                    await session.write_line(
+                        colored(
+                            f"Could not send: no linked node is known as {sanitize_text(node_reference)!r}.",
+                            fg_color=ERROR_COLOR,
+                        )
+                    )
+                continue
+            technical_recipient = f"{remote_user}@{resolved}"
             try:
                 await lane.run(
-                    compose_link_message, user, recipient_text, subject, body,
+                    compose_link_message, user, technical_recipient, subject, body,
                     node_identity=link_context.node_identity,
                 )
             except (LinkMailError, MailError) as exc:

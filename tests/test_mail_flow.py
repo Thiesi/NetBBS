@@ -649,6 +649,8 @@ def _link_context_with_known_peer(db, node_identity, peer_identity):
         addresses=None,
         outgoing_only=True,
         created_at="2026-01-01T00:00:00+00:00",
+        friendly_name="Farpoint",
+        canonical_dns_name="farpoint.example.org",
     )
     save_peer(
         db,
@@ -686,6 +688,27 @@ def test_compose_sends_a_link_message_to_a_remote_address(tmp_path):
     assert row["link_delivery_status"] == "pending"
     lane.close()
     db.close()
+
+
+def test_compose_resolves_a_friendly_or_dns_node_name_before_sending(tmp_path):
+    for node_reference in ("Farpoint", "farpoint.example.org"):
+        db_path = tmp_path / f"{node_reference.replace('.', '-')}.db"
+        db = Database(db_path)
+        alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+        node_identity = bootstrap_node_identity("roanoke")
+        remote_identity = bootstrap_node_identity("farpoint")
+        link_context = _link_context_with_known_peer(db, node_identity, remote_identity)
+        session = FakeSession(
+            keys=["c", "s", "b"], lines=[f"bob@{node_reference}", "Hello", "Named route", ""]
+        )
+        lane = DatabaseLane(db_path)
+        asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+        row = db.connection.execute(
+            "SELECT recipient_remote_address FROM mail_messages"
+        ).fetchone()
+        assert row["recipient_remote_address"] == f"bob@{remote_identity.fingerprint}"
+        lane.close()
+        db.close()
 
 
 def test_compose_prompt_mentions_link_address_option_when_link_context_given(tmp_path):

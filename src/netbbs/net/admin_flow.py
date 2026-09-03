@@ -4248,6 +4248,10 @@ async def _link_status_screen(
             fg_color=METADATA_COLOR,
         )
     )
+    await session.write_line(
+        colored("Technical identity: ", fg_color=LABEL_COLOR)
+        + colored(sanitize_text(link_context.node_identity.fingerprint), fg_color=METADATA_COLOR)
+    )
     identity_notices = await lane.run(list_identity_observations)
     if identity_notices:
         security_count = sum(item.severity == "security" for item in identity_notices)

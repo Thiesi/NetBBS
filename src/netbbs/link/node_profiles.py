@@ -20,6 +20,8 @@ from netbbs.timeutil import utc_now_iso
 
 MAX_NODE_FRIENDLY_NAME_LENGTH = 64
 MAX_CANONICAL_DNS_NAME_LENGTH = 253
+MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
+MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
 
 
 @dataclass(frozen=True)
@@ -170,38 +172,44 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         _identity_from_descriptor_json(peer.fingerprint, existing_row["descriptor_json"])
         if existing_row is not None else None
     )
+    if (
+        previous is not None
+        and previous.friendly_name == current.friendly_name
+        and previous.dns_name == current.dns_name
+    ):
+        return
 
     kind = "first_seen"
     severity = "info"
     previous_fingerprint = None
     previous_name = previous.friendly_name if previous else None
     previous_dns = previous.dns_name if previous else None
-    if previous is not None:
+    collision = None
+    for row in db.connection.execute(
+        "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
+        (peer.fingerprint,),
+    ):
+        known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        same_dns = bool(current.dns_name and known.dns_name == current.dns_name)
+        same_name = (
+            current.friendly_name != "Unnamed linked node"
+            and known.friendly_name.lower() == current.friendly_name.lower()
+        )
+        if same_dns or same_name:
+            collision = known
+            break
+
+    if collision is not None:
+        kind = "cryptographic_identity_changed"
+        severity = "security"
+        previous_fingerprint = collision.fingerprint
+        previous_name = collision.friendly_name
+        previous_dns = collision.dns_name
+    elif previous is not None:
         name_changed = previous.friendly_name != current.friendly_name
         dns_changed = previous.dns_name != current.dns_name
-        if not name_changed and not dns_changed:
-            return
         kind = "dns_name_changed" if dns_changed else "friendly_name_changed"
         severity = "warning" if dns_changed else "info"
-    else:
-        for row in db.connection.execute(
-            "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
-            (peer.fingerprint,),
-        ):
-            known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-            same_dns = bool(current.dns_name and known.dns_name == current.dns_name)
-            same_name = (
-                current.friendly_name != "Unnamed linked node"
-                and known.friendly_name.lower() == current.friendly_name.lower()
-            )
-            if same_dns or same_name:
-                kind = "cryptographic_identity_changed"
-                severity = "security"
-                previous_fingerprint = known.fingerprint
-                previous_name = known.friendly_name
-                previous_dns = known.dns_name
-                break
-
     db.connection.execute(
         """
         INSERT INTO link_node_identity_observations
@@ -213,6 +221,25 @@ def record_peer_identity_observation(db: Database, peer) -> None:
             current.fingerprint, previous_fingerprint, current.friendly_name, previous_name,
             current.dns_name, previous_dns, severity, kind, utc_now_iso(),
         ),
+    )
+    db.connection.execute(
+        """
+        DELETE FROM link_node_identity_observations
+        WHERE node_fingerprint = ? AND id NOT IN (
+            SELECT id FROM link_node_identity_observations
+            WHERE node_fingerprint = ? ORDER BY id DESC LIMIT ?
+        )
+        """,
+        (current.fingerprint, current.fingerprint, MAX_IDENTITY_OBSERVATIONS_PER_PEER),
+    )
+    db.connection.execute(
+        """
+        DELETE FROM link_node_identity_observations WHERE id IN (
+            SELECT id FROM link_node_identity_observations
+            ORDER BY id DESC LIMIT -1 OFFSET ?
+        )
+        """,
+        (MAX_IDENTITY_OBSERVATIONS_TOTAL,),
     )
 
 

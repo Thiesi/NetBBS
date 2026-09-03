@@ -62,6 +62,7 @@ from services.managed_dns.store import (
     delete_pending_replacement,
     get_registration_by_credential_hash,
     get_registration_by_name,
+    get_replacement_for_name,
     hash_credential,
     insert_registration,
     list_stale_active_registrations,
@@ -531,8 +532,24 @@ class ManagedDnsServer:
                 return web.json_response({"error": "a rename is already pending"}, status=409)
             if name == current.name:
                 return web.json_response({"error": "the replacement name is unchanged"}, status=400)
+            existing_replacement = get_replacement_for_name(self._db, current.name)
+            if existing_replacement is not None:
+                if existing_replacement.name != name:
+                    return web.json_response({"error": "a rename is already pending"}, status=409)
+                if existing_replacement.last_known_address is not None and not await self._delete_record(
+                    existing_replacement.name
+                ):
+                    return web.json_response(
+                        {"error": "the existing replacement could not be withdrawn; retry shortly"},
+                        status=503,
+                    )
+                delete_pending_replacement(self._db, existing_replacement.name)
             if get_registration_by_name(self._db, name) is not None:
                 return web.json_response({"error": f"{name!r} is already registered or reserved"}, status=409)
+            if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+                return web.json_response(
+                    {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                )
             if not self._rate_limiter.allow():
                 return web.json_response(
                     {"error": "too many registrations right now -- try again shortly"}, status=429
@@ -572,13 +589,20 @@ class ManagedDnsServer:
                 {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
             )
         async with self._dns_transition_lock:
-            replacement = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            authenticated = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            replacement = authenticated
+            if authenticated is not None and authenticated.replaces_name is None:
+                replacement = get_replacement_for_name(self._db, authenticated.name)
             if (
                 replacement is None or replacement.status not in ("pending", "abandoned")
                 or replacement.replaces_name is None
             ):
                 return web.json_response({"error": "unknown or inactive rename"}, status=401)
             previous_name = replacement.replaces_name
+            if replacement.last_known_address is not None and not await self._delete_record(replacement.name):
+                return web.json_response(
+                    {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
+                )
             if not delete_pending_replacement(self._db, replacement.name):
                 return web.json_response({"error": "rename is no longer pending"}, status=409)
             return web.json_response(

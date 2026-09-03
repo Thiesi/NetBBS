@@ -3655,6 +3655,15 @@ non-blocking security warning and must never inherit trust automatically.
 
 Managed `netbbs.org` renames are make-before-break. Keep the old registration
 and its bearer credential until the new name has matured and its DNS record was
-successfully published; backup/restore must carry both credential files during
-that interval. External DNS remains operator-managed: publish its replacement
-before changing `link.advertised_host`.
+successfully published; heartbeat both registrations and make cancellation
+remove any already-published replacement before deleting its row. Rename
+admission remains subject to the global active-registration cap. The old
+credential can cancel or safely retry a replacement whose one-time credential
+was lost before local persistence. Backup/restore must carry both credential
+files during that interval. External DNS remains operator-managed: publish its
+replacement before changing `link.advertised_host`.
+
+Authenticated node-profile observations are remotely influenced retained
+state. Keep both a per-peer bound and a global bound, and check collisions on
+profile changes as well as first sight; a familiar name adopted by an already-
+known fingerprint is still a cryptographic-identity warning.

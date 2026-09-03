@@ -226,6 +226,16 @@ def get_registration_by_name(db: Database, name: str) -> Registration | None:
     return _row_to_registration(row) if row is not None else None
 
 
+def get_replacement_for_name(db: Database, name: str) -> Registration | None:
+    """The still-manageable pending/abandoned replacement for ``name``."""
+    row = db.connection.execute(
+        "SELECT * FROM registrations WHERE replaces_name = ? "
+        "AND status IN ('pending', 'abandoned') ORDER BY created_at DESC LIMIT 1",
+        (name,),
+    ).fetchone()
+    return _row_to_registration(row) if row is not None else None
+
+
 def get_registration_by_credential_hash(db: Database, credential_hash: str) -> Registration | None:
     row = db.connection.execute(
         "SELECT * FROM registrations WHERE credential_hash = ?", (credential_hash,)

@@ -6248,7 +6248,8 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
 
     text = _written_text(session)
     assert "Node: " in _visible(text)
-    assert link_context.node_identity.fingerprint not in text
+    assert "Technical identity:" in _visible(text)
+    assert link_context.node_identity.fingerprint in text
     assert "Mode: " in text
     assert "[OUTGOING ONLY]" in text
     assert "Configured seeds: 1" in text

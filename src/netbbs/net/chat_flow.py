@@ -2151,7 +2151,9 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
     for label, fingerprint in remote_entries:
         peer = ctx.link_context.link_node.peers.get(fingerprint) if ctx.link_context is not None else None
         node_name = identity_for_peer(peer).label if peer is not None else None
-        node_note = f" (on linked node {node_name})" if node_name else " (on a linked node)"
+        node_note = (
+            f" (on linked node {sanitize_text(node_name)})" if node_name else " (on a linked node)"
+        )
         await ctx.session.write_line(f"{label}{node_note}")
 
 
