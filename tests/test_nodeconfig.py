@@ -799,3 +799,17 @@ def test_live_relay_bounds_load_from_toml_and_default_sensibly(tmp_path):
     assert config.link.live_relay_idle_timeout_seconds == 5.0
     with pytest.raises(ConfigError, match="live_relay_max_concurrent_pairs"):
         NodeConfig(link=LinkConfig(enabled=True, host="127.0.0.1", port=7862, live_relay_max_concurrent_pairs=0)).validate()
+
+
+@pytest.mark.parametrize("value", ["inf", "nan"])
+def test_non_finite_relay_timeouts_are_rejected(tmp_path, value):
+    """Codex review (PR #269): TOML accepts inf/nan; neither is a bound."""
+    from netbbs.net.nodeconfig import ConfigError, load_config
+
+    config_file = tmp_path / "netbbs.toml"
+    config_file.write_text(
+        "[ssh]\nenabled = true\n[link]\nenabled = true\n"
+        f"live_relay_rendezvous_timeout_seconds = {value}\n"
+    )
+    with pytest.raises(ConfigError, match="live_relay_rendezvous_timeout_seconds"):
+        load_config(["--config", str(config_file)])

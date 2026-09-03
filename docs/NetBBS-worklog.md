@@ -1765,6 +1765,15 @@ constrain future changes:
   any REALTIME-admitted peer could drive unbounded outbound connections to
   attacker-chosen addresses; `relay_reject.origin` exists so a node that is
   both relay and party can classify a reject.
+- **A `relay_ready` attach address is pinned to the relay's own advertised
+  real-time addresses** (`RealtimeRelayClient`'s `allowed_attach_addresses`,
+  wired to `dialable_realtime_addresses_for_peer`). Correlation proves which
+  authenticated relay spoke; the pin proves the address is that relay's --
+  without it a malicious relay could make a node open a connection (and send
+  the plaintext preamble) to any service it names. Every session reuse in
+  `LiveDirectChat.ensure_session` re-runs the `REALTIME` policy check too, so
+  a SysOp block takes effect before the next private message, not at the next
+  reconnect.
 - **Receiving a node-presence snapshot tracks the session.** Server-side
   `track_session` used to be reached only via `subscribe`; direct-message and
   anchor sessions never subscribe, so their presence was stored with no close

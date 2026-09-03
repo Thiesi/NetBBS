@@ -759,7 +759,9 @@ def _validate_direct_message_payload(payload: dict, *, path: str) -> None:
     _validate_bounded_text(payload["body"], path=f"{path}.body", max_bytes=_REALTIME_MAX_DIRECT_MESSAGE_BODY_BYTES)
     if not payload["body"].strip():
         raise LinkProtocolError(f"{path}.body must not be blank")
-    _validate_bounded_id(payload["created_at"], path=f"{path}.created_at")
+    if not isinstance(payload["created_at"], str):
+        raise LinkProtocolError(f"{path}.created_at must be a string")
+    _parse_aware_timestamp(payload["created_at"], field_name=f"{path}.created_at")
 
 
 _REALTIME_PAYLOAD_VALIDATORS = {

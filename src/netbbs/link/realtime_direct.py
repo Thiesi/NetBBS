@@ -91,7 +91,7 @@ def reliable_node_fingerprints(node: LinkNode, roster: list[ReliableNode]) -> li
     for fingerprint, peer in node.peers.items():
         addresses = peer.descriptor.payload.get("addresses") or []
         for address in addresses:
-            if address.get("protocol") != "http":
+            if address.get("protocol") not in ("http", "https"):
                 continue
             host_port = (str(address.get("address", "")).lower(), address.get("port"))
             if host_port in wanted and fingerprint not in found:
@@ -108,7 +108,7 @@ def _peer_http_addresses(node: LinkNode, fingerprint: str) -> set[tuple[str, int
         return set()
     return {
         (str(a.get("address", "")).lower(), a.get("port"))
-        for a in (peer.descriptor.payload.get("addresses") or []) if a.get("protocol") == "http"
+        for a in (peer.descriptor.payload.get("addresses") or []) if a.get("protocol") in ("http", "https")
     }
 
 
@@ -149,6 +149,12 @@ class LiveDirectChat:
         node holds with a reliable node. Raises `DirectChatUnreachable`."""
         if fingerprint == self._identity.fingerprint:
             raise DirectChatUnreachable(fingerprint, "self")
+        # A session can outlive a trust change (§8.10.2's "checked again"
+        # principle): a SysOp who blocks or quarantines a node must stop a
+        # private message to it immediately, not at the next reconnect.
+        # The dial/attach paths run this same gate inside the transport.
+        if not await self._peer_allowed(fingerprint):
+            raise DirectChatUnreachable(fingerprint, "policy")
         session = self._registry.get(fingerprint)
         if session is not None:
             return session
@@ -180,6 +186,11 @@ class LiveDirectChat:
                 )
                 continue
         raise DirectChatUnreachable(fingerprint, last_reason)
+
+    async def _peer_allowed(self, fingerprint: str) -> bool:
+        return await self._lane.run(
+            lambda db: decide_node_action(db, fingerprint, LinkPolicyAction.REALTIME).allowed
+        )
 
     async def _relay_sessions(self) -> list[LinkRealtimeSession]:
         """Live sessions with reliable nodes (§16 issue #219 Decision 4:

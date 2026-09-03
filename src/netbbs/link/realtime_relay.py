@@ -478,6 +478,7 @@ class RealtimeRelayClient:
         decide_peer_allowed: Callable[[str], Awaitable[bool]],
         on_session: Callable[[LinkRealtimeSession], Awaitable[None]] | None = None,
         rendezvous_timeout_seconds: float = LIVE_RELAY_DEFAULT_RENDEZVOUS_TIMEOUT_SECONDS,
+        allowed_attach_addresses: Callable[[str], list[tuple[str, int]]] | None = None,
     ) -> None:
         self._own = own_fingerprint
         self._registry = registry
@@ -485,6 +486,13 @@ class RealtimeRelayClient:
         self._decide_peer_allowed = decide_peer_allowed
         self._on_session = on_session
         self._timeout = rendezvous_timeout_seconds
+        # A relay's `relay_ready` names where to attach. Correlation only
+        # proves *which* authenticated peer said so; this pins the address
+        # to that relay's own advertised real-time addresses, so a
+        # malicious relay cannot make this node open a connection (and
+        # send the plaintext preamble) to an arbitrary internal or
+        # external service. `None` (tests only) skips the pin.
+        self._allowed_attach_addresses = allowed_attach_addresses
         # target fingerprint -> (relay fingerprint asked, future resolved
         # with the established session or failed with RelayRendezvousError)
         self._waiting: dict[str, tuple[str, asyncio.Future]] = {}
@@ -532,6 +540,10 @@ class RealtimeRelayClient:
             return
         if error is not None:
             future.set_exception(error)
+            # The settling caller raises its own copy; mark the shared
+            # future's exception retrieved so the last waiter leaving does
+            # not leave asyncio an "exception was never retrieved" report.
+            future.exception()
         else:
             future.set_result(result)
 
@@ -601,10 +613,32 @@ class RealtimeRelayClient:
         peer = payload["peer_fingerprint"]
         if peer in self._attaching:
             return  # one attach per counterpart; a duplicate ready is not a retry
+        relay = self._relay_for(peer)
+        if relay is not None and not self._attach_address_allowed(relay, payload):
+            _logger.warning(
+                "relay %s named an attach address it does not advertise (%s:%s); refusing",
+                relay[:12], payload["attach_address"], payload["attach_port"],
+            )
+            self._accepted.pop(peer, None)
+            self._settle(peer, RelayRendezvousError("attach_failed", "attach address not advertised by the relay"))
+            return
         self._accepted.pop(peer, None)
         task = asyncio.get_running_loop().create_task(self._attach(payload))
         self._attaching[peer] = task
         task.add_done_callback(lambda _t, peer=peer: self._attaching.pop(peer, None))
+
+    def _relay_for(self, peer: str) -> str | None:
+        entry = self._waiting.get(peer)
+        if entry is not None:
+            return entry[0]
+        accepted = self._accepted.get(peer)
+        return accepted[0] if accepted is not None else None
+
+    def _attach_address_allowed(self, relay: str, payload: dict) -> bool:
+        if self._allowed_attach_addresses is None:
+            return True
+        wanted = (str(payload["attach_address"]).lower(), int(payload["attach_port"]))
+        return any((str(host).lower(), int(port)) == wanted for host, port in self._allowed_attach_addresses(relay))
 
     async def _attach(self, payload: dict) -> None:
         peer = payload["peer_fingerprint"]

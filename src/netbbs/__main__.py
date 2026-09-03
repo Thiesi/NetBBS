@@ -846,7 +846,7 @@ async def run(
                 # own.
                 from netbbs.link.realtime_direct import LiveDirectChat
                 from netbbs.link.realtime_relay import RealtimeRelay, RealtimeRelayClient
-                from netbbs.link.transport import attach_relayed_session
+                from netbbs.link.transport import attach_relayed_session, dialable_realtime_addresses_for_peer
                 from netbbs.net.link_direct import build_direct_message_deliverer
 
                 attach_address = None if config.link.outgoing_only else config.link.advertised_host
@@ -883,6 +883,7 @@ async def run(
                     establish_session=_establish_relayed, decide_peer_allowed=_peer_realtime_allowed,
                     on_session=link_realtime_bridge.track_session,
                     rendezvous_timeout_seconds=config.link.live_relay_rendezvous_timeout_seconds,
+                    allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(link_node, fp),
                 )
                 link_direct_chat = LiveDirectChat(
                     node_identity=node_identity, link_node=link_node, lane=background_lane,

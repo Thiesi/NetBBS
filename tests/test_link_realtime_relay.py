@@ -119,9 +119,12 @@ class _Node:
                 registry=self.registry, lane=self.lane, enforce_trust_policy=True,
             )
 
+        from netbbs.link.transport import dialable_realtime_addresses_for_peer
+
         self.relay_client = RealtimeRelayClient(
             own_fingerprint=self.identity.fingerprint, registry=self.registry, establish_session=_establish,
             decide_peer_allowed=_allowed, on_session=self.bridge.track_session, rendezvous_timeout_seconds=3.0,
+            allowed_attach_addresses=lambda fp: dialable_realtime_addresses_for_peer(self.link_node, fp),
         )
 
         async def _deliver(message: IncomingDirectMessage) -> bool:
@@ -740,3 +743,89 @@ def test_anchor_connectors_are_reconciled_when_participation_or_roster_changes(t
         ("start", ("127.0.0.1", 9001)), ("stop", ("127.0.0.1", 9001)),  # final stop: task exit owns them
     ]
     node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()
+
+
+def test_client_refuses_a_ready_whose_attach_address_the_relay_does_not_advertise():
+    """Codex review (PR #269): correlation proves which relay spoke; the
+    pin proves the address is that relay's own -- a malicious relay must
+    not be able to point this node at an arbitrary service."""
+    async def scenario():
+        calls: list = []
+
+        async def _establish(**kw):
+            calls.append(kw)
+            raise RuntimeError("unreachable in this test")
+
+        client = RealtimeRelayClient(
+            own_fingerprint="me", registry=LinkRealtimeSessionRegistry(own_fingerprint="me"),
+            establish_session=_establish, decide_peer_allowed=lambda fp: asyncio.sleep(0, result=True),
+            rendezvous_timeout_seconds=1.0, allowed_attach_addresses=lambda fp: [("127.0.0.1", 7863)],
+        )
+        relay = _RecordingSession("relay")
+        task = asyncio.create_task(client.request_bridge(relay, "peer"))
+        await asyncio.sleep(0)
+        bad = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="peer", role="initiator", attach_token="0" * 32,
+            attach_address="10.0.0.5", attach_port=22,
+        )
+        await client.handle_frame(relay, bad)
+        with pytest.raises(RelayRendezvousError) as excinfo:
+            await task
+        assert excinfo.value.reason == "attach_failed"
+        assert calls == []
+        # The advertised address is accepted (and then fails only at establish).
+        task = asyncio.create_task(client.request_bridge(relay, "peer"))
+        await asyncio.sleep(0)
+        good = build_relay_ready_frame(
+            bridge_id="x", peer_fingerprint="peer", role="initiator", attach_token="0" * 32,
+            attach_address="127.0.0.1", attach_port=7863,
+        )
+        await client.handle_frame(relay, good)
+        with pytest.raises(RelayRendezvousError):
+            await task
+        assert len(calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_ensure_session_rechecks_trust_before_reusing_a_session(tmp_path):
+    async def scenario():
+        relay, a, b = await _three_nodes(tmp_path)
+        try:
+            session = await a.direct.ensure_session(b.identity.fingerprint)
+            assert a.registry.get(b.identity.fingerprint) is session
+            set_trust_override(
+                a.db, TrustSubject.node(b.identity.fingerprint), TrustDimension.RESOURCE_BEHAVIOR,
+                TrustState.BLOCKED, reason="sysop lockout", now_iso="2026-09-03T12:00:00+00:00",
+            )
+            with pytest.raises(DirectChatUnreachable) as excinfo:
+                await a.direct.ensure_session(b.identity.fingerprint)
+            assert excinfo.value.reason == "policy"
+            with pytest.raises(DirectChatUnreachable):
+                await a.direct.send_direct_message(
+                    b.identity.fingerprint, to_user_id="bob", from_user_id="alice", from_display_label="Alice",
+                    body="must not go out", created_at=utc_now_iso(),
+                )
+            assert b.delivered == []
+        finally:
+            await a.teardown(); await b.teardown(); await relay.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_reliable_node_fingerprints_accepts_https_descriptors(tmp_path):
+    node = _Node(tmp_path, "https-matcher")
+    relay = _Node(tmp_path, "https-relay")
+    node.link_node.handle_hello(relay.link_node.build_hello(
+        addresses=[{"protocol": "https", "address": "relink.example", "port": 443}],
+        outgoing_only=False, created_at=utc_now_iso(),
+    ))
+    assert reliable_node_fingerprints(node.link_node, [ReliableNode(name="R", url="https://relink.example")]) == [relay.identity.fingerprint]
+    node.lane.close(); node.db.close(); relay.lane.close(); relay.db.close()
+
+
+def test_direct_message_frame_rejects_a_malformed_timestamp():
+    with pytest.raises(LinkProtocolError):
+        build_direct_message_frame(
+            to_user_id="bob", from_user_id="alice", from_display_label="Alice", body="hi", created_at="x",
+        )
