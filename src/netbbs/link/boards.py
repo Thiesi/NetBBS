@@ -74,6 +74,8 @@ if TYPE_CHECKING:
     # annotation itself is never evaluated at runtime.
     from netbbs.link.realtime_channels import LiveChannelBridge
     from netbbs.link.transport import LinkRealtimeSessionRegistry
+    from netbbs.link.realtime_direct import LiveDirectChat
+    from netbbs.link.realtime_relay import RealtimeRelay
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,11 @@ class LinkContext:
     link_config: LinkConfigSnapshot | None = None
     realtime_registry: LinkRealtimeSessionRegistry | None = None
     realtime_bridge: LiveChannelBridge | None = None
+    # Issue #168: this node's live-relay server half (for the SysOp Link
+    # status screen) and the direct-message layer (for /msg and Who's
+    # online) -- `None` under the same conditions as the two above.
+    relay: RealtimeRelay | None = None
+    direct_chat: LiveDirectChat | None = None
 
 
 class LinkBoardsError(Exception):

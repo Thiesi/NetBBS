@@ -1787,11 +1787,11 @@ never identity authority. Transport-key rotation ends sessions using the old
 key; reconnect performs a fresh handshake against the new verified chain.
 
 The endpoint descriptor advertises real-time TCP addresses separately from
-HTTP addresses. Phase 5 initially supports direct node-to-node sessions only.
-An outgoing-only node may dial a reachable full node. Two nodes which both
-cannot accept inbound connections have no real-time path in this phase;
-asynchronous linked-channel events continue to work. Real-time relay is a
-separate future protocol, not tunneled through the asynchronous relay mailbox.
+HTTP addresses. An outgoing-only node may dial a reachable full node. Two
+nodes which both cannot accept inbound connections meet through a live relay
+(§8.10.3, issue #168) -- a raw-socket proxy below the Noise layer, a separate
+mechanism from the asynchronous relay mailbox, never tunneled through it.
+Asynchronous linked-channel events continue to work regardless.
 
 #### 8.10.1 Session framing and ownership
 
@@ -1813,6 +1813,10 @@ per-session replay window. The first implementation supports:
 - `node_presence_snapshot` and `node_presence_delta` (issue #164, node-wide
   -- see §8.10.2);
 - `channel_message`;
+- `scrollback_snapshot` (issue #194);
+- `relay_request`, `relay_waiting`, `relay_ready`, `relay_reject` (issue
+  #168, §8.10.3 -- the live-relay rendezvous);
+- `direct_message` (issue #168, §8.10.3);
 - `ping`, `pong`, `error`, and `close`.
 
 One node owns at most one live session per remote fingerprint. If simultaneous
@@ -1875,10 +1879,10 @@ A freshly-subscribing peer also receives a bounded, ephemeral
 rendered once and never durably stored on the subscribing side (§16,
 issue #194) — a shrunk window before the existing async catch-up path
 below fills in what a live-only subscribe would otherwise miss, not a
-new durability promise. The first vertical still does not offer
-real-time private chat, multiple background channel subscriptions per
-caller (issue #159, closed — decided against, not a gap), or real-time
-multi-hop relay (issue #168). A disconnect does not queue or replay live
+new durability promise. The first vertical still does not offer multiple
+background channel subscriptions per caller (issue #159, closed — decided
+against, not a gap); live private messages and relayed sessions arrived
+with §8.10.3 (issue #168). A disconnect does not queue or replay live
 frames. Callers see `connecting`, `live`, and `offline/degraded` state
 plus an honest notice that live traffic may have been missed;
 asynchronous signed linked-channel events remain the durable catch-up
@@ -1891,6 +1895,70 @@ node is currently `BLOCKED`/`QUARANTINED`, keyed on the event the message
 carries (`link_content_visible`), never on which node happened to relay it.
 `PROBATIONARY` and local messages are unaffected -- boards and channels now
 share one visibility policy instead of two independently-decided ones.
+
+#### 8.10.3 Relayed sessions and live direct messages (issue #168)
+
+**Live relay.** A relay is any full peer with relay serving enabled
+(`[link] relay_serving_enabled`, the same switch as the asynchronous
+mailbox) that both parties currently hold an ordinary authenticated
+real-time session with; the reliable-nodes roster (§8.3, §16 issue #219
+Decision 4) is how an outgoing-only node knows which relays to stand by
+at -- it keeps a reconnecting session to every reliable node it knows
+while participation is accepted, since by definition nobody can dial it
+first. The relay is a raw-socket proxy below Noise (§16 issue #168
+Decision 1): it never holds key material, sees only ciphertext, and the
+two parties run the unchanged Noise XX mutual handshake with *each other*
+through it.
+
+Rendezvous rides over the parties' existing sessions to the relay:
+`relay_request {target_fingerprint, requester_fingerprint}` from the
+requester; `relay_waiting` back while the target is asked; the same
+`relay_request` shape forwarded to the target as an invitation (its own
+fingerprint as target); the target's agreement (a `relay_request` naming
+the requester) or `relay_reject {reason: declined}`; then `relay_ready
+{bridge_id, peer_fingerprint, role, attach_token, attach_address,
+attach_port}` to both. Each party opens a fresh TCP connection to the
+attach address, sends one plaintext `NETBBS-BRIDGE/1 <token>` record, and
+runs Noise XX in its assigned role (requester initiates). Both roles
+verify the authenticated fingerprint against the one `relay_ready` named
+before admitting the session -- the relay is an intermediary and could
+pair anyone with anyone; this check is what stops that. The relay makes
+no trust decision about the pair; each party applies its own `REALTIME`
+policy to the other before agreeing and again after the handshake, as
+for any direct session. Relaying carries no Phase-4 implication.
+
+Bounds (Decision 2), all operator-adjustable under `[link]`, each breach
+an explicit reject/close: `live_relay_max_concurrent_pairs` (8),
+`live_relay_max_pending_rendezvous` (32) with
+`live_relay_rendezvous_timeout_seconds` (30, reported back as
+`relay_reject {timeout}`), `live_relay_max_bytes_per_second` per
+direction per bridge (64 KiB -- a byte-rate bound, since the relay never
+parses frames), and `live_relay_idle_timeout_seconds` (120, a dumb
+"no bytes either way" timer the endpoints' own ping/pong keeps from
+firing). One leg closing tears down the other. Reject reasons are a
+closed set: `not_serving`, `invalid_target`, `target_unreachable`,
+`at_capacity`, `pending_full`, `declined`, `timeout`, `attach_failed`.
+
+**Live direct messages.** `direct_message {to_user_id, from_user_id,
+from_display_label, body, created_at}` is one private line between a
+user on the sending node and a user on the receiving node, over whichever
+session exists or can be established: the registry's existing session,
+a direct dial of the peer's advertised real-time address, or a relayed
+session -- in that order. It is ephemeral and node-attested like a
+channel message (§8.10.2): never stored, never a canonical event. The
+receiving node re-checks the sending node's `REALTIME` policy at delivery,
+then delivers exactly as a local `/msg` does (live chat sessions via the
+hub, every other session via the mailbox); an unknown, opted-out, or
+offline recipient is dropped silently -- the sender already checked the
+peer's node-wide presence, which the peer pushes the moment the session
+is tracked, and a remote user list is not a caller's to probe.
+
+Caller-facing (Decision 3): `/msg user@node-fingerprint <text>` in chat
+and `[M]essage` on a remote entry in Who's online. When no path exists,
+whatever the reason, the caller sees one reason-free refusal -- "can't be
+reached for live chat right now" -- pointing at Link mail; nothing fails
+silently. `/private`, `/dm` invites, and multi-hop (relay-of-relay) stay
+local/direct only in this vertical.
 
 ---
 
@@ -5234,11 +5302,21 @@ critical path:
   pair cap reached) — explicit, matching Decision 3's fail-clearly
   requirement, never a silent drop.
 
-This closes every acceptance criterion issue #168 named. Implementation
-(the four decisions above, plus the resource-limit values themselves,
-still unpicked here — this locks in their *shape*, not their exact
-numbers) is separate, future, tracked work, not part of this design
-pass.
+This closes every acceptance criterion issue #168 named.
+
+**Implemented** (§8.10.3 is the normative description): `netbbs.link.
+realtime_relay` (relay server half and party half), `netbbs.link.
+realtime_direct` (session establishment order, direct messages, the
+reliable-node anchor connectors), `netbbs.net.link_direct` (the `/msg
+user@node` flow and the receiving-side deliverer), five `[link]
+live_relay_*` bounds with the defaults §8.10.3 lists, and a `relay_ready`
+payload that names the relay's attach address so a party never has to
+remember which address it reached the relay at. Two implementation
+choices beyond the four decisions: the invitation reuses the
+`relay_request` shape with the invitee's own fingerprint as target
+(no fifth frame type), and a bridge is only ever offered between two
+nodes both currently connected to the relay -- consent is the standing
+session, so the asynchronous `relaying_for` model is not consulted.
 
 ### Issue #201 — managed netbbs.org subdomain + dynamic DNS — closed
 

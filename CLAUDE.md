@@ -165,9 +165,12 @@ ephemeral catch-up snapshot of the origin's own recent scrollback alongside
 the existing presence snapshot. Not yet built: multiple simultaneous channel
 memberships with background/unread delivery (investigated and deliberately
 deferred — no observable benefit over the existing durable unread-count
-model), and Link-wide live private chat and real-time multi-hop relay (issue
-#168, a real distributed-systems/crypto design fork, not sized for casual
-pickup).
+model). Live relay for two mutually-unreachable nodes and Link-wide live
+direct messages (`/msg user@node-fingerprint`, issue #168) shipped with the
+reliable-nodes onboarding (issue #219): a raw-socket proxy below Noise at any
+full peer with relay serving on, anchored at the reliable nodes. Still not
+built: cross-node `/private`/`/dm`, and relay-of-relay (multi-hop) live
+sessions.
 
 Phase 7's first vertical (issue #172, closed — supersedes #63/#167, both
 closed) shipped in v5.4.0: a native door-game execution model (subprocess

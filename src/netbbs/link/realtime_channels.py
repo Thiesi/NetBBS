@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Awaitable, Callable
 
 from netbbs.chat.channels import Channel
 from netbbs.chat.hub import ChatHub
@@ -285,6 +286,24 @@ class LiveChannelBridge:
         # feed: the first to leave would silently cut off live delivery
         # for everyone else still interested.
         self._local_interest: dict[str, set[int]] = {}
+        # Issue #168: frames that are not this bridge's own business --
+        # relay rendezvous (`netbbs.link.realtime_relay`) and live direct
+        # messages (`netbbs.link.realtime_direct`) -- are routed to the
+        # first registered handler that claims them. The bridge stays the
+        # single `on_frame` seam every session is constructed with; the
+        # other components plug in rather than each needing a session
+        # hook of their own.
+        self._frame_handlers: list[tuple[
+            Callable[[LinkRealtimeSession, RealtimeFrame], bool],
+            Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
+        ]] = []
+
+    def register_frame_handler(
+        self,
+        owns: Callable[[LinkRealtimeSession, RealtimeFrame], bool],
+        handle: Callable[[LinkRealtimeSession, RealtimeFrame], Awaitable[None]],
+    ) -> None:
+        self._frame_handlers.append((owns, handle))
 
     def register_local_interest(self, channel_id: str, holder: int) -> bool:
         """Record that `holder` (a caller's own `id(session)`) wants live
@@ -385,8 +404,15 @@ class LiveChannelBridge:
             await self._handle_node_presence_snapshot(session, frame)
         elif frame.type == "node_presence_delta":
             await self._handle_node_presence_delta(session, frame)
-        # "error": nothing actionable locally yet from a peer-reported
-        # rejection of a frame this node sent.
+        else:
+            for owns, handle in self._frame_handlers:
+                if owns(session, frame):
+                    await handle(session, frame)
+                    return
+            # "error": nothing actionable locally yet from a peer-reported
+            # rejection of a frame this node sent. A relay/direct frame
+            # with no handler registered (a node that doesn't run those
+            # components) is ignored the same way -- never a strike.
 
     async def _handle_subscribe(self, session: LinkRealtimeSession, frame: RealtimeFrame) -> None:
         channel_id = frame.payload["channel_id"]

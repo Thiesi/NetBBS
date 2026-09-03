@@ -227,6 +227,17 @@ class LinkConfig:
     request_rate_max_tracked_sources: int = 10_000
     diagnostic_log_max_age_days: int = 30
     diagnostic_log_max_rows: int = 5_000
+    # Design doc §16 issue #168 Decision 2: bounds for *serving* live
+    # relay (only a full peer with relay_serving_enabled ever does).
+    # A bridge is two live TCP legs for a whole conversation; the byte-
+    # rate bound replaces the per-frame one (a relay never parses
+    # frames); the idle timer is protocol-agnostic; pending rendezvous
+    # are capped in count and time.
+    live_relay_max_concurrent_pairs: int = 8
+    live_relay_max_pending_rendezvous: int = 32
+    live_relay_rendezvous_timeout_seconds: float = 30.0
+    live_relay_idle_timeout_seconds: float = 120.0
+    live_relay_max_bytes_per_second: int = 65_536
 
 
 def effective_realtime_port(link_config: LinkConfig) -> int:
@@ -449,6 +460,11 @@ class NodeConfig:
             "request_rate_max_tracked_sources": self.link.request_rate_max_tracked_sources,
             "diagnostic_log_max_age_days": self.link.diagnostic_log_max_age_days,
             "diagnostic_log_max_rows": self.link.diagnostic_log_max_rows,
+            "live_relay_max_concurrent_pairs": self.link.live_relay_max_concurrent_pairs,
+            "live_relay_max_pending_rendezvous": self.link.live_relay_max_pending_rendezvous,
+            "live_relay_rendezvous_timeout_seconds": self.link.live_relay_rendezvous_timeout_seconds,
+            "live_relay_idle_timeout_seconds": self.link.live_relay_idle_timeout_seconds,
+            "live_relay_max_bytes_per_second": self.link.live_relay_max_bytes_per_second,
         }
         for name, value in _require_positive_link.items():
             if value <= 0:
@@ -717,6 +733,21 @@ def _link_from_toml(data: dict, current: LinkConfig) -> LinkConfig:
             table.get("diagnostic_log_max_age_days", current.diagnostic_log_max_age_days)
         ),
         diagnostic_log_max_rows=int(table.get("diagnostic_log_max_rows", current.diagnostic_log_max_rows)),
+        live_relay_max_concurrent_pairs=int(
+            table.get("live_relay_max_concurrent_pairs", current.live_relay_max_concurrent_pairs)
+        ),
+        live_relay_max_pending_rendezvous=int(
+            table.get("live_relay_max_pending_rendezvous", current.live_relay_max_pending_rendezvous)
+        ),
+        live_relay_rendezvous_timeout_seconds=float(
+            table.get("live_relay_rendezvous_timeout_seconds", current.live_relay_rendezvous_timeout_seconds)
+        ),
+        live_relay_idle_timeout_seconds=float(
+            table.get("live_relay_idle_timeout_seconds", current.live_relay_idle_timeout_seconds)
+        ),
+        live_relay_max_bytes_per_second=int(
+            table.get("live_relay_max_bytes_per_second", current.live_relay_max_bytes_per_second)
+        ),
     )
 
 
@@ -888,6 +919,11 @@ def _apply_cli_overrides(config: NodeConfig, args: argparse.Namespace) -> NodeCo
                     if args.link_diagnostic_log_max_rows is None
                     else args.link_diagnostic_log_max_rows
                 ),
+                live_relay_max_concurrent_pairs=link.live_relay_max_concurrent_pairs,
+                live_relay_max_pending_rendezvous=link.live_relay_max_pending_rendezvous,
+                live_relay_rendezvous_timeout_seconds=link.live_relay_rendezvous_timeout_seconds,
+                live_relay_idle_timeout_seconds=link.live_relay_idle_timeout_seconds,
+                live_relay_max_bytes_per_second=link.live_relay_max_bytes_per_second,
             ),
         )
     return config

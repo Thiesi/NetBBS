@@ -29,6 +29,8 @@ from netbbs.files.storage import purge_incoming_staging
 from netbbs.session_history import reconcile_interrupted_sessions
 from netbbs.link.boards import LinkConfigSnapshot, LinkContext
 from netbbs.link.diagnostics import LINK_LOGGER_NAME, LinkDiagnosticLogHandler
+from netbbs.link.enforcement import LinkPolicyAction, decide_node_action
+from netbbs.link.onboarding import participation_accepted
 from netbbs.link.node_identity import NodeIdentityError, load_or_bootstrap_node_identity
 from netbbs.link.protocol import HelloMessage, LinkNode
 from netbbs.link.onboarding import resolve_link_enabled, set_configured_link_enabled
@@ -183,6 +185,7 @@ async def _start_servers(
     link_lane: DatabaseLane,
     link_realtime_registry=None,
     link_realtime_bridge=None,
+    link_realtime_relay=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -368,9 +371,16 @@ async def _start_servers(
                     on_frame=link_realtime_bridge.on_frame,
                     lane=link_lane,
                     enforce_trust_policy=True,
+                    # Issue #168: bridge-attach preambles go to the relay.
+                    bridge_attach=link_realtime_relay.attach if link_realtime_relay is not None else None,
                 ),
             )
             _logger.info("NetBBS Link real-time listening on %s:%d", config.link.host, realtime_port)
+            if link_realtime_relay is not None and link_realtime_relay.serving:
+                _logger.info(
+                    "NetBBS Link live relay serving (up to %d concurrent bridged pairs)",
+                    link_realtime_relay.max_concurrent_pairs,
+                )
 
     if not any_interactive_started:
         # A non-interactive listener (Link) may have started successfully
@@ -638,6 +648,7 @@ async def run(
                 LinkContext(
                     node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot,
                     realtime_registry=link_realtime_registry, realtime_bridge=link_realtime_bridge,
+                    relay=link_realtime_relay, direct_chat=link_direct_chat,
                 ) if link_node is not None else None
             ),
             direct_invites=direct_invites,
@@ -658,7 +669,9 @@ async def run(
             lane=foreground_lane,
             link_context=(
                 LinkContext(
-                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot
+                    node_identity=node_identity, link_node=link_node, link_config=link_config_snapshot,
+                    realtime_registry=link_realtime_registry, realtime_bridge=link_realtime_bridge,
+                    relay=link_realtime_relay, direct_chat=link_direct_chat,
                 ) if link_node is not None else None
             ),
             direct_invites=direct_invites,
@@ -682,6 +695,11 @@ async def run(
     # a defined name rather than NameError inside that `finally`.
     link_realtime_registry = None
     link_realtime_bridge = None
+    link_realtime_relay = None
+    link_realtime_relay_client = None
+    link_direct_chat = None
+    reliable_anchor_task: asyncio.Task | None = None
+    reliable_anchor_connectors: list = []
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
         # `netbbs.backup restore` can reliably refuse against an idle-
@@ -805,6 +823,9 @@ async def run(
         # without aiohttp still runs Link's asynchronous half fine.
         link_realtime_registry = None
         link_realtime_bridge = None
+        link_realtime_relay = None
+        link_realtime_relay_client = None
+        link_direct_chat = None
         if link_node is not None:
             try:
                 from netbbs.link.realtime_channels import LiveChannelBridge
@@ -816,6 +837,68 @@ async def run(
                 link_realtime_bridge = LiveChannelBridge(
                     hub=hub, lane=background_lane, presence=presence, registry=link_realtime_registry
                 )
+                # Issue #168 (design doc §8.10.3): the live-relay server half
+                # (serves only as a full peer with relay serving on -- an
+                # outgoing-only node has no address to attach to), the party
+                # half that asks relays for bridges and answers invitations,
+                # and the direct-message layer that rides on either a direct
+                # or a relayed session. All three plug into the bridge's
+                # single on_frame seam rather than owning sessions of their
+                # own.
+                from netbbs.link.realtime_direct import LiveDirectChat
+                from netbbs.link.realtime_relay import RealtimeRelay, RealtimeRelayClient
+                from netbbs.link.transport import attach_relayed_session
+                from netbbs.net.link_direct import build_direct_message_deliverer
+
+                attach_address = None if config.link.outgoing_only else config.link.advertised_host
+                attach_port = None if config.link.outgoing_only else (
+                    config.link.realtime_advertised_port
+                    if config.link.realtime_advertised_port is not None else effective_realtime_port(config.link)
+                )
+                link_realtime_relay = RealtimeRelay(
+                    own_fingerprint=node_identity.fingerprint, registry=link_realtime_registry,
+                    serving_enabled=config.link.relay_serving_enabled,
+                    attach_address=attach_address, attach_port=attach_port,
+                    max_concurrent_pairs=config.link.live_relay_max_concurrent_pairs,
+                    max_pending=config.link.live_relay_max_pending_rendezvous,
+                    rendezvous_timeout_seconds=config.link.live_relay_rendezvous_timeout_seconds,
+                    idle_timeout_seconds=config.link.live_relay_idle_timeout_seconds,
+                    max_bytes_per_second=config.link.live_relay_max_bytes_per_second,
+                )
+
+                async def _peer_realtime_allowed(fingerprint: str) -> bool:
+                    return await background_lane.run(
+                        lambda db: decide_node_action(db, fingerprint, LinkPolicyAction.REALTIME).allowed
+                    )
+
+                async def _establish_relayed(**kw):
+                    return await attach_relayed_session(
+                        kw["host"], kw["port"], node_identity, attach_token=kw["attach_token"],
+                        role=kw["role"], expected_fingerprint=kw["expected_fingerprint"],
+                        on_frame=link_realtime_bridge.on_frame, registry=link_realtime_registry,
+                        lane=background_lane, enforce_trust_policy=True,
+                    )
+
+                link_realtime_relay_client = RealtimeRelayClient(
+                    own_fingerprint=node_identity.fingerprint, registry=link_realtime_registry,
+                    establish_session=_establish_relayed, decide_peer_allowed=_peer_realtime_allowed,
+                    on_session=link_realtime_bridge.track_session,
+                    rendezvous_timeout_seconds=config.link.live_relay_rendezvous_timeout_seconds,
+                )
+                link_direct_chat = LiveDirectChat(
+                    node_identity=node_identity, link_node=link_node, lane=background_lane,
+                    registry=link_realtime_registry, on_frame=link_realtime_bridge.on_frame,
+                    track_session=link_realtime_bridge.track_session, relay_client=link_realtime_relay_client,
+                    deliver=build_direct_message_deliverer(
+                        lane=background_lane, hub=hub, mailbox=mailbox, session_registry=session_registry,
+                        presence=presence,
+                    ),
+                )
+                link_realtime_bridge.register_frame_handler(link_realtime_relay.owns_frame, link_realtime_relay.handle_frame)
+                link_realtime_bridge.register_frame_handler(
+                    link_realtime_relay_client.owns_frame, link_realtime_relay_client.handle_frame
+                )
+                link_realtime_bridge.register_frame_handler(link_direct_chat.owns_frame, link_direct_chat.handle_frame)
 
         # Design doc §13.11, issue #60: attached once, here, only when
         # Link is actually enabled -- a disabled node has no netbbs.link
@@ -862,7 +945,7 @@ async def run(
             )
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
-            link_realtime_registry, link_realtime_bridge,
+            link_realtime_registry, link_realtime_bridge, link_realtime_relay,
         )
 
         # Design doc: the piece that makes this node
@@ -953,6 +1036,33 @@ async def run(
                         )
 
                 reliable_nodes_refresh_task.add_done_callback(_log_reliable_nodes_refresh_failure)
+
+                # Issue #168 (design doc §8.10.3): an outgoing-only node
+                # stands by at every reliable node it knows, so it can be
+                # reached for a live-relay rendezvous -- nobody can dial
+                # it, so the standing session has to exist first. Only
+                # while participation is accepted; a full peer is
+                # dialable and needs no anchor.
+                if config.link.outgoing_only and link_realtime_bridge is not None and link_realtime_registry is not None:
+                    from netbbs.link.realtime_direct import run_reliable_anchor_connectors
+                    from netbbs.link.transport import LinkRealtimeConnector
+
+                    def _start_anchor_connector(**kw):
+                        connector = LinkRealtimeConnector(
+                            host=kw["host"], port=kw["port"], identity=kw["identity"], on_frame=kw["on_frame"],
+                            registry=kw["registry"], lane=kw["lane"], enforce_trust_policy=kw["enforce_trust_policy"],
+                            expected_fingerprint=kw["expected_fingerprint"], on_session=kw["track_session"],
+                        )
+                        connector.start()
+                        reliable_anchor_connectors.append(connector)
+                        return connector
+
+                    reliable_anchor_task = asyncio.create_task(run_reliable_anchor_connectors(
+                        node_identity=node_identity, link_node=link_node, lane=background_lane,
+                        registry=link_realtime_registry, on_frame=link_realtime_bridge.on_frame,
+                        track_session=link_realtime_bridge.track_session,
+                        participation_accepted=participation_accepted, start_connector=_start_anchor_connector,
+                    ))
 
         # Design doc -- node management, Thiesi's own request: every
         # configured listener/background task above has already started
@@ -1061,6 +1171,13 @@ async def run(
         # bridge`'s own per-session watcher tasks (issue #148's "own
         # async tasks" rule).
         if link_realtime_registry is not None:
+            await _drain_immediately(reliable_anchor_task)
+            for connector in reliable_anchor_connectors:
+                await connector.stop()
+            if link_realtime_relay_client is not None:
+                await link_realtime_relay_client.close()
+            if link_realtime_relay is not None:
+                await link_realtime_relay.close()
             await link_realtime_registry.close_all(reason="node_shutdown")
         if link_realtime_bridge is not None:
             await link_realtime_bridge.close()

@@ -46,6 +46,11 @@ from netbbs.link.protocol import (
     RealtimeReplayWindow,
     build_channel_message_frame,
     build_close_frame,
+    build_direct_message_frame,
+    build_relay_ready_frame,
+    build_relay_reject_frame,
+    build_relay_request_frame,
+    build_relay_waiting_frame,
     build_error_frame,
     build_ping_frame,
     build_pong_frame,
@@ -182,6 +187,18 @@ def test_build_frame_helpers_produce_payloads_that_pass_their_own_validator():
         build_pong_frame(),
         build_error_frame("bad_thing", "detail"),
         build_close_frame("shutting down"),
+        # Issue #168
+        build_relay_request_frame(target_fingerprint="b", requester_fingerprint="a"),
+        build_relay_waiting_frame(target_fingerprint="b"),
+        build_relay_ready_frame(
+            bridge_id="bridge", peer_fingerprint="b", role="initiator", attach_token="0" * 32,
+            attach_address="203.0.113.5", attach_port=8862,
+        ),
+        build_relay_reject_frame(target_fingerprint="b", reason="declined"),
+        build_direct_message_frame(
+            to_user_id="bob", from_user_id="alice", from_display_label="Alice", body="hi",
+            created_at="2026-01-01T00:00:00+00:00",
+        ),
     ]
 
     assert {frame.type for frame in frames} == REALTIME_FRAME_TYPES

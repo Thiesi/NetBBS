@@ -4207,6 +4207,17 @@ async def _link_status_screen(
         carried = await lane.run(carried_board_count, link_context.node_identity.fingerprint)
         await session.write_line(f"Carried boards: {carried}/{config.max_carried_boards}")
     await session.write_line(f"Known events: {len(node.known_event_ids)}")
+    relay = link_context.relay
+    if relay is not None:
+        if relay.serving:
+            await session.write_line(
+                f"Live relay: serving ({relay.active_pairs}/{relay.max_concurrent_pairs} bridged pairs, "
+                f"{relay.pending_rendezvous} pending)"
+            )
+        else:
+            await session.write_line("Live relay: not serving (outgoing-only node, or relay serving off)")
+    live_sessions = link_context.realtime_registry.all_sessions() if link_context.realtime_registry is not None else []
+    await session.write_line(f"Live sessions: {len(live_sessions)}")
     await session.write_line(f"Post-edit chains: {len(node.post_edits)}")
     await session.write_line(f"Candidate (unverified) peers: {len(node.candidate_descriptors)}")
     await session.write_line(f"Relays serving this node: {len(node.relays_serving_me)}")
