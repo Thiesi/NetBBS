@@ -24,6 +24,7 @@ from aiohttp import ClientSession
 from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
+    save_credential,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -93,19 +94,28 @@ async def run_scheduled_managed_dns_updater(
                     previous_credential = load_credential(previous_credential_path_for(db.path))
                     previous_result = None
                     if previous_credential is not None:
-                        previous_result = await _send_heartbeat(base_url, previous_credential)
-                    result = await _send_heartbeat(base_url, credential)
+                        previous_result, _ = await _send_heartbeat(base_url, previous_credential)
+                    result, primary_inactive = await _send_heartbeat(base_url, credential)
                     if result is not None:
                         _apply_heartbeat_result(
                             db, result, previous_result=previous_result,
                             has_previous_credential=previous_credential is not None,
+                        )
+                    elif primary_inactive and previous_result is not None and previous_credential is not None:
+                        save_credential(credential_path_for(db.path), previous_credential)
+                        delete_credential(previous_credential_path_for(db.path))
+                        set_previous_name(db, None)
+                        set_previous_status(db, None)
+                        _apply_heartbeat_result(
+                            db, previous_result, previous_result=None,
+                            has_previous_credential=False,
                         )
         await sleep(interval_seconds)
 
 
 async def _send_heartbeat(
     base_url: str, credential: str,
-) -> HeartbeatResult | None:
+) -> tuple[HeartbeatResult | None, bool]:
     try:
         # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY, same as
         # every other outbound call this project makes to project-
@@ -118,8 +128,8 @@ async def _send_heartbeat(
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
-        return None
-    return result
+        return None, "HTTP 401" in str(exc)
+    return result, False
 
 
 def _apply_heartbeat_result(

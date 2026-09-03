@@ -1292,6 +1292,22 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     matching every other chat command — no parallel main-menu entry point.
     """
     parts = args.split(maxsplit=1)
+    if "@" in args and ctx.link_context is not None:
+        # Friendly node names may contain spaces. Walk possible boundaries
+        # longest-first and use the first complete, uniquely resolvable node
+        # reference; local usernames themselves cannot contain whitespace.
+        from netbbs.net.link_direct import parse_remote_address, resolve_node_fingerprint
+
+        words = args.split()
+        for boundary in range(len(words) - 1, 0, -1):
+            candidate = " ".join(words[:boundary])
+            parsed = parse_remote_address(candidate)
+            if parsed is None:
+                continue
+            resolved = resolve_node_fingerprint(ctx.link_context, parsed[1])
+            if not isinstance(resolved, list):
+                parts = [candidate, " ".join(words[boundary:])]
+                break
     if len(parts) < 2:
         await _show_usage(ctx.session, "msg")
         return

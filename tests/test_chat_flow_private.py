@@ -21,6 +21,9 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
+from netbbs.link.boards import LinkContext
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
@@ -88,12 +91,16 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
+async def _run(
+    lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None,
+    link_context=None,
+):
     session = FakeSession(lines)
     history = InputHistory()
     await asyncio.wait_for(
         chat_flow._chat_loop(
-            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user,
+            session_registry=session_registry, link_context=link_context,
         ),
         timeout=2,
     )
@@ -134,6 +141,32 @@ def test_msg_to_unknown_user_shows_friendly_message(lane, hub, presence, mailbox
 def test_msg_with_no_text_shows_usage(lane, hub, presence, mailbox, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/msg bob", "/quit"]))
     assert "Usage: /msg" in _written(session)
+
+
+def test_msg_resolves_a_friendly_node_name_containing_spaces(
+    lane, hub, presence, mailbox, alice, channel, monkeypatch,
+):
+    own_identity = bootstrap_node_identity("own")
+    remote_identity = bootstrap_node_identity("remote")
+    link_node = LinkNode(identity=own_identity)
+    remote_node = LinkNode(identity=remote_identity)
+    link_node.handle_hello(remote_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="The Rusty Anchor",
+    ))
+    context = LinkContext(node_identity=own_identity, link_node=link_node)
+    sent = []
+
+    async def fake_send(session, lane_arg, user, address, body, *, link_context):
+        sent.append((address, body))
+
+    monkeypatch.setattr("netbbs.net.link_direct.send_live_direct_message", fake_send)
+    asyncio.run(_run(
+        lane, hub, presence, mailbox, channel, alice,
+        ["/msg bob@The Rusty Anchor hello there", "/quit"], link_context=context,
+    ))
+
+    assert sent == [("bob@The Rusty Anchor", "hello there")]
 
 
 # -- /msg: delivery -----------------------------------------------------------

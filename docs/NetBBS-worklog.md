@@ -3678,3 +3678,19 @@ configuration transaction: a crash can occur after credential replacement but
 before the new and previous names are committed. While the service has a
 pending replacement, `/release` rejects both registrations; the explicit
 cancel-rename operation is the only safe way to unwind that pair.
+
+Managed-DNS recovery is bidirectional: if cancellation succeeds remotely but
+the node crashes before restoring the old credential locally, a successful old
+credential heartbeat plus a definitive inactive-primary response promotes the
+old credential and clears the transition. Retrying an already-reserved rename
+rotates only that replacement's credential and is exempt from new-registration
+admission; it must never delete the reservation before a throttle decision.
+Abandonment withdraws any row with a recorded published address, including a
+partially published replacement which intentionally remains pending.
+
+Every presentation claim shares one collision namespace: a DNS claim can
+collide with a friendly-name claim and vice versa. Exact fingerprints across
+both persisted peers and active-only real-time sessions take precedence over
+that namespace. UI rendering resolves current friendly identities at display
+time while retaining fingerprints in protocol and persistence fields; when no
+authenticated profile is available, it falls back to the technical identity.

@@ -188,8 +188,11 @@ async def _show_inbox(session: Session, lane: DatabaseLane, user: User) -> None:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         # Pre-fetched once, outside pick_item's synchronous callbacks --
         # see this module's own docstring for why.
+        sender_labels = {
+            m.id: await _display_sender_label(lane, m) for m in messages
+        }
         descriptions = {
-            m.id: f"from {m.sender_label} "
+            m.id: f"from {sender_labels[m.id]} "
             f"({format_for_display(m.created_at, override_format=display_format, override_timezone=display_timezone)})"
             for m in messages
         }
@@ -289,9 +292,10 @@ async def _render_message(
             + colored(sanitize_text(to_label), fg_color=accent)
         )
     else:
+        sender_label = await _display_sender_label(lane, message)
         await session.write_line(
             colored("From: ", fg_color=LABEL_COLOR)
-            + colored(sanitize_text(message.sender_label), fg_color=accent)
+            + colored(sanitize_text(sender_label), fg_color=accent)
         )
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
@@ -310,6 +314,18 @@ async def _render_message(
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
     await session.write_line(colored(body, fg_color=VALUE_COLOR))
     await session.write_line(divider)
+
+
+async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
+    """Resolve a Link sender's technical home node only at render time."""
+    if "@" not in message.sender_label:
+        return message.sender_label
+    user_id, fingerprint = message.sender_label.split("@", 1)
+    identity = await lane.run(identity_for_fingerprint, fingerprint)
+    node_label = (
+        identity.label if identity.friendly_name != "Unknown linked node" else fingerprint
+    )
+    return f"{user_id}@{node_label}"
 
 
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:

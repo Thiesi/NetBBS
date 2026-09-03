@@ -85,6 +85,19 @@ def parse_remote_address(text: str) -> tuple[str, str] | None:
 
 def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str | list[str]:
     """Resolve a DNS name, unique friendly name, or legacy fingerprint prefix."""
+    needle = node_prefix.strip().lower()
+    exact = {
+        fingerprint for fingerprint in link_context.link_node.peers
+        if fingerprint.lower() == needle
+    }
+    if link_context.realtime_registry is not None:
+        exact.update(
+            active.remote_fingerprint
+            for active in link_context.realtime_registry.all_sessions()
+            if active.remote_fingerprint.lower() == needle
+        )
+    if len(exact) == 1:
+        return next(iter(exact))
     peer_result = resolve_peer_reference(link_context.link_node.peers.values(), node_prefix)
     if not isinstance(peer_result, list):
         return peer_result.fingerprint

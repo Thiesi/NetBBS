@@ -104,7 +104,7 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
     previous_name = get_previous_name(db)
     if previous_name and status is RegistrationStatus.PENDING:
         return f"{previous_name}.netbbs.org"
-    if managed_name and status in (RegistrationStatus.PENDING, RegistrationStatus.MATURED):
+    if managed_name and status is RegistrationStatus.MATURED:
         return f"{managed_name}.netbbs.org"
     return normalize_dns_name(advertised_host)
 
@@ -195,17 +195,20 @@ def record_peer_identity_observation(db: Database, peer) -> None:
     previous_name = previous.friendly_name if previous else None
     previous_dns = previous.dns_name if previous else None
     collision = None
+    current_claims = {
+        value.lower() for value in (current.friendly_name, current.dns_name)
+        if value and value != "Unnamed linked node"
+    }
     for row in db.connection.execute(
         "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
         (peer.fingerprint,),
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
-        same_dns = bool(current.dns_name and known.dns_name == current.dns_name)
-        same_name = (
-            current.friendly_name != "Unnamed linked node"
-            and known.friendly_name.lower() == current.friendly_name.lower()
-        )
-        if same_dns or same_name:
+        known_claims = {
+            value.lower() for value in (known.friendly_name, known.dns_name)
+            if value and value != "Unnamed linked node"
+        }
+        if current_claims & known_claims:
             collision = known
             break
 
@@ -223,22 +226,23 @@ def record_peer_identity_observation(db: Database, peer) -> None:
             """,
             (peer.fingerprint,),
         ):
-            historical_names = {
-                value.lower() for value in (row["friendly_name"], row["previous_friendly_name"])
-                if value and value != "Unnamed linked node"
+            historical_claims = {
+                value.lower() for value in (
+                    row["friendly_name"], row["previous_friendly_name"],
+                    row["canonical_dns_name"], row["previous_dns_name"],
+                ) if value and value != "Unnamed linked node"
             }
-            historical_dns = {
-                value for value in (row["canonical_dns_name"], row["previous_dns_name"])
-                if value
-            }
-            if (
-                current.friendly_name.lower() in historical_names
-                or bool(current.dns_name and current.dns_name in historical_dns)
-            ):
+            matched_claims = current_claims & historical_claims
+            if matched_claims:
+                matched_claim = next(iter(matched_claims))
                 collision = NodeDisplayIdentity(
                     row["node_fingerprint"],
-                    row["friendly_name"] or row["previous_friendly_name"] or "Unknown linked node",
-                    row["canonical_dns_name"] or row["previous_dns_name"],
+                    current.friendly_name
+                    if current.friendly_name.lower() == matched_claim
+                    else row["friendly_name"] or row["previous_friendly_name"] or "Unknown linked node",
+                    current.dns_name
+                    if current.dns_name and current.dns_name.lower() == matched_claim
+                    else row["canonical_dns_name"] or row["previous_dns_name"],
                 )
                 break
 

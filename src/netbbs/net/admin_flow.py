@@ -4280,8 +4280,22 @@ async def _link_status_screen(
                     f"{notice.canonical_dns_name or 'no DNS name'}; its verified identity is unchanged."
                 )
             else:
+                current_claims = {
+                    value.lower(): value for value in (
+                        notice.friendly_name, notice.canonical_dns_name,
+                    ) if value
+                }
+                previous_claims = {
+                    value.lower() for value in (
+                        notice.previous_friendly_name, notice.previous_dns_name,
+                    ) if value
+                }
+                shared_claim = next(
+                    (value for key, value in current_claims.items() if key in previous_claims),
+                    "a familiar node name",
+                )
                 message = (
-                    f"The cryptographic identity at {notice.canonical_dns_name or 'a known DNS name'} changed. "
+                    f"The cryptographic identity presented as {shared_claim} changed. "
                     "This may be recovery or replacement, but could indicate impersonation."
                 )
             await session.write_line(colored("  " + sanitize_text(message), fg_color=METADATA_COLOR))
@@ -10177,7 +10191,7 @@ async def _transfer_board_origin_screen(
     if selected is None:
         return
     target = selected.fingerprint
-    target_label = identity_for_peer(selected).label
+    target_label = sanitize_text(identity_for_peer(selected).label)
     if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target_label}?", default=False):
         await session.write_line("Cancelled.")
         return
@@ -10262,7 +10276,9 @@ async def _accept_board_origin_transfer_screen(
         colored("\r\nAccept message board origin", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
     old_peer = link_context.link_node.peers.get(old_origin)
-    old_label = identity_for_peer(old_peer).label if old_peer is not None else "an unknown linked node"
+    old_label = sanitize_text(
+        identity_for_peer(old_peer).label if old_peer is not None else "an unknown linked node"
+    )
     if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_label}?", default=False):
         await session.write_line("Cancelled.")
         return
@@ -10369,7 +10385,7 @@ async def _draw_board_detail(
                 "this node" if is_origin else
                 identity_for_peer(origin_peer).label if origin_peer is not None else "unknown linked node"
             )
-            await session.write_line(f"Origin: {origin_label}{orphan_note}")
+            await session.write_line(f"Origin: {sanitize_text(origin_label)}{orphan_note}")
 
             offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
             if offer is not None:
@@ -10378,7 +10394,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: an incoming origin-transfer offer from "
-                            f"{identity_for_peer(link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint'))).label if link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint')) is not None else 'an unknown linked node'}",
+                            f"{sanitize_text(identity_for_peer(link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint'))).label) if link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint')) is not None else 'an unknown linked node'}",
                             fg_color=MUTED_COLOR,
                         )
                     )
@@ -10386,7 +10402,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: your own outstanding transfer offer to "
-                            f"{identity_for_peer(link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint'))).label if link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint')) is not None else 'an unknown linked node'}",
+                            f"{sanitize_text(identity_for_peer(link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint'))).label) if link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint')) is not None else 'an unknown linked node'}",
                             fg_color=MUTED_COLOR,
                         )
                     )

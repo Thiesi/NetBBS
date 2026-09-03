@@ -11,9 +11,9 @@ import asyncio
 
 import aiohttp
 
-from netbbs.managed_dns.client import register, rename
+from netbbs.managed_dns.client import cancel_rename, register, rename
 from netbbs.managed_dns.credential import (
-    credential_path_for, previous_credential_path_for, save_credential,
+    credential_path_for, load_credential, previous_credential_path_for, save_credential,
 )
 from netbbs.managed_dns.state import (
     OptIn,
@@ -181,6 +181,48 @@ def test_updater_repairs_a_rename_interrupted_before_local_state_commit(tmp_path
     assert get_registered_name(db) == "new-name"
     assert get_previous_name(db) == "old-name"
     assert get_registration_status(db) is RegistrationStatus.PENDING
+    db.close()
+
+
+def test_updater_repairs_a_cancel_interrupted_before_local_state_commit(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, base_url)
+            async with aiohttp.ClientSession() as session:
+                original = await register(
+                    session, base_url, name="old-name", node_fingerprint="fp-1", dynamic=False,
+                )
+                replacement = await rename(
+                    session, base_url, name="new-name", credential=original.credential,
+                )
+                await cancel_rename(session, base_url, credential=replacement.credential)
+
+            # Cancellation reached the service, but the node crashed before
+            # restoring its primary credential and local configuration.
+            set_registered_name(db, replacement.name)
+            set_previous_name(db, original.name)
+            set_registration_status(db, RegistrationStatus.PENDING)
+            save_credential(credential_path_for(db.path), replacement.credential)
+            save_credential(previous_credential_path_for(db.path), original.credential)
+
+            sleep_calls = _fake_sleep_recorder()
+            await _run_one_pass(db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]))
+            return db, original.credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, original_credential = asyncio.run(scenario())
+    assert get_registered_name(db) == "old-name"
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == original_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
     db.close()
 
 

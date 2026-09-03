@@ -243,6 +243,15 @@ def get_registration_by_credential_hash(db: Database, credential_hash: str) -> R
     return _row_to_registration(row) if row is not None else None
 
 
+def replace_registration_credential(db: Database, name: str, credential_hash: str) -> None:
+    """Atomically rotate a pending replacement's recoverable bearer secret."""
+    db.connection.execute(
+        "UPDATE registrations SET credential_hash = ? WHERE name = ? AND status = 'pending'",
+        (credential_hash, name),
+    )
+    db.connection.commit()
+
+
 def count_registrations_for_node(db: Database, node_fingerprint: str, *, statuses: tuple[str, ...]) -> int:
     """How many of `node_fingerprint`'s own registrations are currently
     in one of `statuses` -- Decision 3's one-name-per-node cap counts

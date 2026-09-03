@@ -46,6 +46,7 @@ from netbbs.link.enforcement import (
 )
 from netbbs.link.events import ChannelMessage as LinkChannelMessage
 from netbbs.link.node_identity import NodeIdentity
+from netbbs.link.node_profiles import identity_for_fingerprint
 from netbbs.link.protocol import (
     LinkNode,
     LinkProtocolError,
@@ -180,10 +181,16 @@ def _accept_scrollback_snapshot(
             subject = TrustSubject.user(entry["author_node_fingerprint"], entry["author_user_id"])
             if not content_visible_for_subject(db, subject):
                 continue
-        author_label = (
-            f"{entry['author_user_id']}@{entry['author_node_fingerprint']}"
-            if authored else entry["author_label"]
-        )
+        if authored:
+            home_identity = identity_for_fingerprint(db, entry["author_node_fingerprint"])
+            home_label = (
+                home_identity.label
+                if home_identity.friendly_name != "Unknown linked node"
+                else entry["author_node_fingerprint"]
+            )
+            author_label = f"{entry['author_user_id']}@{home_label}"
+        else:
+            author_label = entry["author_label"]
         messages.append(LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=entry["kind"],
             author_label=author_label, author_fingerprint=None,
@@ -532,9 +539,15 @@ class LiveChannelBridge:
             _decide_channel_subscribe_authorization, channel_id=frame.payload["channel_id"],
             peer_fingerprint=session.remote_fingerprint,
         )
+        node_identity = await self._lane.run(identity_for_fingerprint, session.remote_fingerprint)
+        node_label = (
+            node_identity.label
+            if node_identity.friendly_name != "Unknown linked node"
+            else session.remote_fingerprint
+        )
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind="message",
-            author_label=f"{frame.payload['user_id']}@{session.remote_fingerprint}",
+            author_label=f"{frame.payload['user_id']}@{node_label}",
             author_fingerprint=None, body=frame.payload["body"], created_at=frame.payload["created_at"],
         )
         await self._hub.broadcast(channel.name, message)
@@ -545,9 +558,15 @@ class LiveChannelBridge:
             peer_fingerprint=session.remote_fingerprint,
         )
         kind = "join" if frame.payload["change"] == "join" else "leave"
+        node_identity = await self._lane.run(identity_for_fingerprint, session.remote_fingerprint)
+        node_label = (
+            node_identity.label
+            if node_identity.friendly_name != "Unknown linked node"
+            else session.remote_fingerprint
+        )
         message = LocalChannelMessage(
             id=-1, channel_id=channel.id, kind=kind,
-            author_label=f"{frame.payload['user_id']}@{session.remote_fingerprint}",
+            author_label=f"{frame.payload['user_id']}@{node_label}",
             author_fingerprint=None, body=None, created_at=utc_now_iso(),
         )
         await self._hub.broadcast(channel.name, message)

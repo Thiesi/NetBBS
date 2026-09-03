@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
@@ -108,6 +109,24 @@ def test_resolve_node_fingerprint_by_unique_prefix_case_insensitively(tmp_path):
     fp = rig.peer_identity.fingerprint
     assert resolve_node_fingerprint(rig.context(), fp[:10].upper()) == fp
     assert resolve_node_fingerprint(rig.context(), "zzzz-not-a-peer") == []
+    rig.close()
+
+
+def test_exact_active_session_fingerprint_cannot_be_shadowed_by_a_peer_name(tmp_path):
+    rig = _Rig(tmp_path)
+    active_identity = bootstrap_node_identity("active-only")
+    claiming_identity = bootstrap_node_identity("claiming-peer")
+    claiming_node = LinkNode(identity=claiming_identity)
+    rig.link_node.handle_hello(claiming_node.build_hello(
+        addresses=None, outgoing_only=True, created_at=utc_now_iso(),
+        friendly_name=active_identity.fingerprint,
+    ))
+    rig.registry._sessions[active_identity.fingerprint] = SimpleNamespace(
+        remote_fingerprint=active_identity.fingerprint
+    )
+
+    assert resolve_node_fingerprint(rig.context(), active_identity.fingerprint) == active_identity.fingerprint
+    rig.registry._sessions.clear()
     rig.close()
 
 

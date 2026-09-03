@@ -10,6 +10,10 @@ from netbbs.link.node_profiles import (
     record_peer_identity_observation,
     resolve_peer_reference,
     resolve_stored_peer_reference,
+    own_canonical_dns_name,
+)
+from netbbs.managed_dns.state import (
+    RegistrationStatus, set_registered_name, set_registration_status,
 )
 from netbbs.link.protocol import LinkNode
 from netbbs.link.store import save_peer
@@ -105,6 +109,24 @@ def test_same_friendly_name_with_new_fingerprint_is_security_notice(db, tmp_path
     assert notices[0].severity == "security"
 
 
+def test_dns_claim_colliding_with_another_peers_friendly_name_is_security_notice(db, tmp_path):
+    first = _peer(tmp_path, "alice", "anchor.example.org", "alice.example.org")
+    second = _peer(tmp_path, "mallory", "Other", "anchor.example.org")
+    save_peer(db, first)
+    save_peer(db, second)
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.previous_fingerprint == first.fingerprint
+
+
+def test_pending_initial_managed_name_is_not_advertised_before_publication(db):
+    set_registered_name(db, "reserved-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "currently-live.example.org"
+
+
 def test_existing_peer_adopting_another_peers_name_is_security_notice(db, tmp_path):
     first = _peer(tmp_path, "alice", "Anchor", "anchor.example.org")
     bob_identity = bootstrap_node_identity("bob")
@@ -146,6 +168,7 @@ def test_new_peer_adopting_a_retained_previous_name_is_security_notice(db, tmp_p
     assert notice.kind == "cryptographic_identity_changed"
     assert notice.severity == "security"
     assert notice.previous_fingerprint == alice_identity.fingerprint
+    assert notice.previous_friendly_name == "Old Anchor"
 
 
 def test_identity_observation_history_is_bounded_per_peer(db, tmp_path):

@@ -71,6 +71,7 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
+    replace_registration_credential,
     save_rate_limit_state,
     set_contact_window,
     set_last_contact_at,
@@ -287,7 +288,7 @@ class ManagedDnsServer:
                 latest_contact = registration.last_contact_at or registration.created_at
                 if datetime.fromisoformat(latest_contact) >= abandonment_cutoff:
                     continue
-                if registration.status == "matured":
+                if registration.status == "matured" or registration.last_known_address is not None:
                     if not await self._delete_record(registration.name):
                         continue
                 mark_abandoned(self._db, registration.name, released_at=now.isoformat())
@@ -536,14 +537,19 @@ class ManagedDnsServer:
             if existing_replacement is not None:
                 if existing_replacement.name != name:
                     return web.json_response({"error": "a rename is already pending"}, status=409)
-                if existing_replacement.last_known_address is not None and not await self._delete_record(
-                    existing_replacement.name
-                ):
-                    return web.json_response(
-                        {"error": "the existing replacement could not be withdrawn; retry shortly"},
-                        status=503,
-                    )
-                delete_pending_replacement(self._db, existing_replacement.name)
+                secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
+                replace_registration_credential(
+                    self._db, existing_replacement.name, hash_credential(secret)
+                )
+                return web.json_response(
+                    {
+                        "name": existing_replacement.name, "previous_name": current.name,
+                        "previous_status": current.status, "credential": secret,
+                        "status": existing_replacement.status,
+                        "created_at": existing_replacement.created_at,
+                    },
+                    status=201,
+                )
             if get_registration_by_name(self._db, name) is not None:
                 return web.json_response({"error": f"{name!r} is already registered or reserved"}, status=409)
             if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:

@@ -175,7 +175,11 @@ def test_rename_respects_the_global_active_registration_cap(db):
 
 def test_lost_rename_response_can_be_retried_and_cancelled_with_old_credential(db):
     async def scenario():
-        server = await _start_server(db)
+        # Registration plus the first rename exhaust both tokens. Recovery of
+        # the already-held reservation must not need a third admission token.
+        server = await _start_server(
+            db, rate_limit_capacity=2, rate_limit_refill_per_minute=0,
+        )
         try:
             original = await _register(server, name="old-name")
             _, lost = await _rename(server, credential=original["credential"], name="new-name")
@@ -238,6 +242,42 @@ def test_cancelling_after_partial_publish_removes_the_replacement_record(db):
     assert "new-name.netbbs.org." not in provider.records
     assert cancel_status == 200
     assert get_registration_by_name(db, "new-name") is None
+
+
+def test_sweep_withdraws_a_partially_published_stale_replacement(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+    provider = _FailOldNameDeleteProvider()
+
+    async def scenario():
+        server = await _start_server(
+            db, clock=clock, min_age_seconds=0, dns_provider=provider,
+            abandonment_seconds=7 * 24 * 60 * 60,
+        )
+        try:
+            original = await _register(server, name="old-name", dynamic=True)
+            await _heartbeat(server, credential=original["credential"])
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            status, body = await _heartbeat(
+                server, credential=replacement["credential"]
+            )
+            assert status == 200
+            assert body["status"] == "pending"
+            assert body["last_known_address"] is not None
+        finally:
+            await server.stop()
+
+        clock.now += timedelta(days=8)
+        sweeper = ManagedDnsServer(
+            "127.0.0.1", 0, db, clock=clock, dns_provider=provider,
+            abandonment_seconds=7 * 24 * 60 * 60,
+        )
+        await sweeper._sweep_once()
+
+    asyncio.run(scenario())
+    assert get_registration_by_name(db, "new-name").status == "abandoned"
+    assert "new-name.netbbs.org." in provider.deletes
 
 
 def test_register_creates_a_pending_registration(db):
