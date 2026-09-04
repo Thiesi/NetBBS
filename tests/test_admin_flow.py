@@ -7649,3 +7649,30 @@ def test_standalone_rename_says_what_happens_to_callers_inside(db, lane, sysop):
     text = _written_text(session)
     assert "Updated 'Lobby2'" in text
     assert "they keep the old name until they leave and rejoin" in text
+
+
+def test_rename_refusal_sanitizes_a_hostile_channel_name(db, lane, sysop):
+    """Review of #278: a carried Link channel's name comes from a remote
+    signed genesis and may carry terminal controls; the refusal styles
+    the name, so it must be sanitized first."""
+    from netbbs.chat.channels import create_channel
+    from netbbs.chat.hub import ChatHub, ParticipantId
+
+    channel = create_channel(db, "Lobby", creator=sysop)
+    hostile = "Lob[31mby"
+    db.connection.execute("UPDATE channels SET name = ? WHERE id = ?", (hostile, channel.id))
+    db.connection.commit()
+    hub = ChatHub()
+    hub.join(hostile, ParticipantId("alice", 1))
+    controls = NodeControls(
+        session_registry=ActiveSessionRegistry(), maintenance=MaintenanceMode(),
+        shutdown_event=asyncio.Event(), graceful_delay_seconds=60.0, chat_hub=hub,
+    )
+    session = FakeSession(["m", "n", "l", "0", "1", "e", "n", "Lobby2", "s", "n", hostile, "s", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+    refusal = next(line for line in session.written if "cannot be renamed" in line)
+    # The escape byte is gone (the styling wrapper adds its own, well-formed
+    # sequences around the text, never inside the name); the visible
+    # remainder of the hostile name is harmless.
+    assert "[31m" not in refusal
+    assert "cannot be renamed while 1 caller(s) are in it" in refusal

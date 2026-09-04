@@ -12524,8 +12524,10 @@ async def _channel_screen(
         if existing is not None and draft["name"] != existing.name and chat_hub is not None:
             occupants = chat_hub.participant_count(existing.name)
             if occupants:
+                # A carried Link channel's name comes from a remote signed
+                # genesis: sanitize before it is styled into the refusal.
                 raise ChannelError(
-                    f"{existing.name!r} cannot be renamed while {occupants} caller(s) are in it: "
+                    f"{sanitize_text(existing.name)!r} cannot be renamed while {occupants} caller(s) are in it: "
                     "live chat membership follows the channel name, so they would be cut off from "
                     "everyone who joins afterwards. Wait until the channel is empty."
                 )
