@@ -2507,11 +2507,25 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
             return
 
         draft: dict = {"domain_id": "", "display_name": "", "weight": 1.0}
+        existing_domains = {d.domain_id: d for d in domains}
+        id_field = text_field("domain_id", required=True)
+
+        async def _id_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            # Entering the ID of an existing domain seeds its name and
+            # weight, so updating one field cannot silently reset the
+            # others to the create defaults (Codex review on #290).
+            before = draft["domain_id"]
+            await id_field(session, lane, draft)
+            existing = existing_domains.get(draft["domain_id"])
+            if draft["domain_id"] != before and existing is not None:
+                draft["display_name"] = existing.display_name
+                draft["weight"] = existing.weight
+
         fields = [
             FieldSpec(
                 key="domain_id", hotkey="i", menu_text=menu_key("I", "D", prefix="Domain "), label="Domain ID",
                 render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
-                prompt=text_field("domain_id", required=True),
+                prompt=_id_then_seed,
                 brief="Stable identifier for the domain",
                 help="The identifier trusted reporters are assigned to. Reusing an existing ID updates it.",
             ),
@@ -2642,7 +2656,7 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             selected = await pick_item(
                 session, anchors,
                 name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: _stable_id_for(a.fingerprint),
-                description_of=lambda a: a.reason,
+                description_of=lambda a: f"{a.fingerprint} -- {a.reason}",
                 title="Remove which trust anchor?", empty_message="No trust anchors are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2651,7 +2665,10 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             if selected is None:
                 continue
             if not await prompt_yes_no(
-                session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trust anchor?", default=False
+                session,
+                f"Remove {sanitize_text(labels[selected.fingerprint])} "
+                f"[{sanitize_text(selected.fingerprint)}] as a trust anchor?",
+                default=False,
             ):
                 continue
             try:
@@ -2669,12 +2686,16 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
         )
 
         async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
-            # Updating an existing anchor starts from its stored reason
-            # rather than a blank (Codex review on #290).
+            # A *changed* node replaces the dependent field from that
+            # node's stored record (or resets it for a node without one)
+            # -- never reseeds on a picker backed out of, and never mixes
+            # one node's fields with another's (Codex review on #290).
+            before = draft["node"]
             await node_field(session, lane, draft)
+            if draft["node"] == before:
+                return
             existing = existing_anchors.get(draft["node"])
-            if existing is not None and not draft["reason"]:
-                draft["reason"] = existing.reason
+            draft["reason"] = existing.reason if existing is not None else ""
 
         fields = [
             FieldSpec(
@@ -2747,7 +2768,7 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             selected = await pick_item(
                 session, reporters,
                 name_of=lambda r: labels[r.fingerprint], stable_id_of=lambda r: _stable_id_for(r.fingerprint),
-                description_of=lambda r: f"domain {r.domain_id}",
+                description_of=lambda r: f"{r.fingerprint} -- domain {r.domain_id}",
                 title="Remove which trusted reporter?", empty_message="No trusted reporters are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2756,7 +2777,10 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             if selected is None:
                 continue
             if not await prompt_yes_no(
-                session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trusted reporter?", default=False
+                session,
+                f"Remove {sanitize_text(labels[selected.fingerprint])} "
+                f"[{sanitize_text(selected.fingerprint)}] as a trusted reporter?",
+                default=False,
             ):
                 continue
             try:
@@ -2777,16 +2801,26 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
         )
 
         async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
-            # Updating an existing reporter starts from its stored
-            # configuration, so an untouched field keeps its value
-            # instead of being silently reset (Codex review on #290).
+            # A *changed* node replaces every dependent field from that
+            # node's stored record (or resets them for a node without
+            # one) -- never reseeds on a picker backed out of, and never
+            # mixes one reporter's fields with another's (Codex review
+            # on #290).
+            before = draft["node"]
             await node_field(session, lane, draft)
+            if draft["node"] == before:
+                return
             existing = existing_reporters.get(draft["node"])
             if existing is not None:
-                draft["domain_id"] = draft["domain_id"] or existing.domain_id
-                draft["scopes"] = draft["scopes"] or ", ".join(f"{d.value}:{c}" for d, c in existing.scopes)
+                draft["domain_id"] = existing.domain_id
+                draft["scopes"] = ", ".join(f"{d.value}:{c}" for d, c in existing.scopes)
                 draft["can_vouch_nodes"] = existing.can_vouch_nodes
                 draft["can_vouch_users"] = existing.can_vouch_users
+            else:
+                draft["domain_id"] = ""
+                draft["scopes"] = ""
+                draft["can_vouch_nodes"] = False
+                draft["can_vouch_users"] = False
 
         fields = [
             FieldSpec(
@@ -2884,7 +2918,7 @@ async def _attestation_authorities_screen(
             selected = await pick_item(
                 session, authorities,
                 name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: _stable_id_for(a.fingerprint),
-                description_of=lambda a: ",".join(a.attributes),
+                description_of=lambda a: f"{a.fingerprint} -- {','.join(a.attributes)}",
                 title="Remove which attestation authority?", empty_message="No attestation authorities are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -2894,7 +2928,8 @@ async def _attestation_authorities_screen(
                 continue
             if not await prompt_yes_no(
                 session,
-                f"Remove {sanitize_text(labels[selected.fingerprint])} as an attestation authority?",
+                f"Remove {sanitize_text(labels[selected.fingerprint])} "
+                f"[{sanitize_text(selected.fingerprint)}] as an attestation authority?",
                 default=False,
             ):
                 continue
@@ -2917,14 +2952,21 @@ async def _attestation_authorities_screen(
         )
 
         async def _node_then_seed(session: Session, lane: DatabaseLane, draft: dict) -> None:
-            # Updating an existing authority starts from its stored scope
-            # and reason -- an untouched Attributes field must not widen
-            # an age-only authority to age,name (Codex review on #290).
+            # A *changed* node replaces the dependent fields from that
+            # node's stored record (an untouched Attributes field must
+            # not widen an age-only authority to age,name) or resets
+            # them for a node without one (Codex review on #290).
+            before = draft["node"]
             await node_field(session, lane, draft)
+            if draft["node"] == before:
+                return
             existing = existing_authorities.get(draft["node"])
             if existing is not None:
                 draft["attributes"] = ",".join(existing.attributes)
-                draft["reason"] = draft["reason"] or existing.reason
+                draft["reason"] = existing.reason
+            else:
+                draft["attributes"] = "age,name"
+                draft["reason"] = ""
 
         fields = [
             FieldSpec(
@@ -3126,7 +3168,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
                 stable_id_of=lambda item: _stable_id_for(
                     f"{item.reporter_fingerprint}|{item.dimension.value}|{item.category}"
                 ),
-                description_of=lambda item: item.reason,
+                description_of=lambda item: f"{item.reporter_fingerprint} -- {item.reason}",
                 title="Remove which safety deviation?", empty_message="No safety deviations are configured.",
                 redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
                 accent_color=await lane.run(effective_accent_color_256),
@@ -3137,7 +3179,7 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             if not await prompt_yes_no(
                 session,
                 f"Remove the sole-authority deviation for {sanitize_text(labels[selected.reporter_fingerprint])} "
-                f"on {selected.dimension.value}:{selected.category}?",
+                f"[{sanitize_text(selected.reporter_fingerprint)}] on {selected.dimension.value}:{selected.category}?",
                 default=False,
             ):
                 continue

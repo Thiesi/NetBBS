@@ -837,6 +837,31 @@ def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
     assert "Attributes: age" in _visible(_written_text(session))
 
 
+def test_trust_domain_update_keeps_the_stored_weight(db, lane, sysop):
+    """Codex review on #290: re-entering an existing domain's ID seeds
+    name and weight from it, so renaming alone cannot reset the weight."""
+    from netbbs.link.trust import configure_trust_domain
+
+    configure_trust_domain(db, "friends", display_name="Friends", weight=0.25, actor_user_id=sysop.id)
+    session = FakeSession(["s", "p", "d", "a", "i", "friends", "n", "Close friends", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    domains = list_trust_domains(db)
+    assert [(d.domain_id, d.display_name, d.weight) for d in domains] == [("friends", "Close friends", 0.25)]
+
+
+def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, sysop):
+    from netbbs.link.trust import configure_trust_anchor, list_trust_anchors
+
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_trust_anchor(db, fingerprint, reason="runs the seed", actor_user_id=sysop.id)
+    # [R]emove -> the only anchor -> confirm.
+    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert text.count(fingerprint) >= 2  # in the picker row and in the confirmation
+    assert list_trust_anchors(db) == []
+
+
 # -- create user ----------------------------------------------------------
 
 
