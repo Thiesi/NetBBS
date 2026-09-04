@@ -6519,7 +6519,7 @@ def test_managed_dns_status_register_hotkey_registers_end_to_end(db, lane, sysop
             # own asyncio.run) -- the server above needs to keep running
             # in *this* coroutine's own event loop while the admin
             # screen dials it.
-            session = FakeSession(["d", "r", "myboard", "n", "n", " ", "b", "b"])
+            session = FakeSession(["d", "r", "n", "myboard", "d", "r", " ", "b", "b"])
             await admin_menu(session, lane, sysop)
         finally:
             await server.stop()
@@ -6543,7 +6543,7 @@ def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
             set_node_fingerprint(db, "fp-1")
             # Register first (outside the admin screen, to set up state),
             # then exercise the screen's own [L] Release hotkey.
-            await admin_menu(FakeSession(["d", "r", "myboard", "n", "n", " ", "b", "b"]), lane, sysop)
+            await admin_menu(FakeSession(["d", "r", "n", "myboard", "d", "r", " ", "b", "b"]), lane, sysop)
             await admin_menu(FakeSession(["d", "l", "y", "b", "b"]), lane, sysop)
         finally:
             await server.stop()
@@ -6551,6 +6551,22 @@ def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
 
     asyncio.run(scenario())
     assert get_registration_status(db) is RegistrationStatus.RELEASED
+
+
+def test_managed_dns_status_register_back_returns_straight_to_the_status(db, lane, sysop):
+    """Codex review on #292: [B]ack out of the registration editor wrote
+    no outcome, so the status screen must not hold a 'Press any key'
+    pause for it."""
+    from netbbs.managed_dns.state import get_registered_name, set_node_fingerprint, set_service_url
+
+    set_service_url(db, "http://127.0.0.1:1")
+    set_node_fingerprint(db, "fp-1")
+    session = FakeSession(["d", "r", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Managed DNS registration" in text
+    assert text.count("Press any key to continue...") == 0
+    assert get_registered_name(db) is None
 
 
 # -- outbox: work-item inspection/replay/cancel (design doc §13.7) ----------

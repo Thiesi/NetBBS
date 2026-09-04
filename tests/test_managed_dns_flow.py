@@ -267,6 +267,60 @@ def test_register_via_prompt_blank_name_defaults_to_the_previous_registration(tm
     db.close()
 
 
+def test_register_via_prompt_reclaim_keeps_the_previous_dynamic_setting(tmp_path):
+    """Codex review on #292: a reclaim prefilled with the previous name
+    must also start from the previous dynamic-IP choice, not silently
+    turn address tracking back on."""
+    from netbbs.managed_dns.state import get_dynamic
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db, cooldown_seconds=3600)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["n", "myboard", "d", "r"]), lane)  # dynamic off
+            assert get_dynamic(db) is False
+            await release_registration(FakeSession(["y"]), lane)
+            await register_via_prompt(FakeSession(["r"]), lane)  # plain reclaim
+            lane.close()
+            return db
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db = asyncio.run(scenario())
+    assert get_registered_name(db) == "myboard"
+    assert get_dynamic(db) is False
+    db.close()
+
+
+def test_register_via_prompt_service_rejection_keeps_the_draft(tmp_path):
+    """Codex review on #292: the request runs inside the register step,
+    so a rejection returns to the draft (here: an unreachable service,
+    then [B]ack) instead of discarding it."""
+    async def scenario():
+        db = Database(tmp_path / "node.db")
+        set_service_url(db, "http://127.0.0.1:1")  # nothing listens here
+        set_node_fingerprint(db, "fp-1")
+        lane = DatabaseLane(db.path)
+        session = FakeSession(["n", "myboard", "r", "b", "y"])
+        wrote = await register_via_prompt(session, lane)
+        lane.close()
+        return db, session, wrote
+
+    db, session, wrote = asyncio.run(scenario())
+    text = "".join(session.written)
+    assert "Could not save: Registration failed" in text
+    assert "myboard.netbbs.org" in text  # the draft was still on screen after the failure
+    assert wrote is False
+    assert get_registered_name(db) is None
+    db.close()
+
+
 def test_register_via_prompt_reclaims_a_matured_registration(tmp_path):
     """The other half of the was_reclaim distinction: a registration
     that *had* matured before release reclaims straight back to
