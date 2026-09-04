@@ -1768,35 +1768,42 @@ def test_node_menu_shows_maintenance_and_drain_options(db, lane, sysop):
     assert "rain" in text
 
 
-def test_maintenance_mode_screen_turns_it_on(db, lane, sysop):
+def test_maintenance_mode_toggle_turns_it_on(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is True
     assert "Maintenance mode is now ON." in _written_text(session)
 
 
-def test_maintenance_mode_screen_turns_it_back_off(db, lane, sysop):
+def test_maintenance_mode_toggle_turns_it_back_off(db, lane, sysop):
     node_controls = _node_controls()
     node_controls.maintenance.enable_lockdown()
-    session = FakeSession(["n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is False
     assert "Maintenance mode is now off." in _written_text(session)
 
 
-def test_maintenance_mode_screen_declined_confirmation_does_nothing(db, lane, sysop):
+
+def test_maintenance_mode_is_a_toggle_on_the_node_menu(db, lane, sysop):
+    # Issue #282: [M] used to open a two-line status screen whose only
+    # exit was "Turn maintenance mode ON?". It now toggles in place.
     node_controls = _node_controls()
-    session = FakeSession(["n", "m", "n", "b", "b", "b"])
+    session = FakeSession(["n", "m", "m", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
+    text = _written_text(session)
+    assert "Turn maintenance mode" not in text
+    assert "Maintenance mode is now ON." in text
+    assert "Maintenance mode is now off." in text
     assert node_controls.maintenance.is_lockdown_active() is False
 
 
-def test_maintenance_mode_screen_does_not_touch_shutdown_lockout(db, lane, sysop):
+def test_maintenance_mode_toggle_does_not_touch_shutdown_lockout(db, lane, sysop):
     """Design doc §13.8: [M]aintenance mode's lockdown flag is entirely
     separate from shutdown's own `is_active()` lockout."""
     node_controls = _node_controls()
-    session = FakeSession(["n", "m", "y", "b", "b", "b"])
+    session = FakeSession(["n", "m", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert node_controls.maintenance.is_lockdown_active() is True
     assert node_controls.maintenance.is_active() is False
@@ -1934,8 +1941,8 @@ def test_drain_screen_offers_to_cancel_an_already_scheduled_drain(db, lane, syso
         first_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
 
-        # "d" -> already-scheduled notice -> "y" (cancel it) -> back x3
-        admin_session = FakeSession(["n", "d", "y", "b", "b", "b"])
+        # "d" -> already-scheduled notice -> "c" ([C]ancel it) -> back x3
+        admin_session = FakeSession(["n", "d", "c", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1959,10 +1966,10 @@ def test_drain_screen_declining_the_cancel_offer_replaces_the_existing_schedule(
         first_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message="old message")
 
-        # "d" -> already-scheduled notice -> "n" (don't cancel, continue)
+        # "d" -> already-scheduled notice -> "r" ([R]eplace it)
         # -> the draft field screen for a new one: "d"/"0" sets Delay,
         # "s"/"y" saves and confirms.
-        admin_session = FakeSession(["n", "d", "n", "d", "0", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "d", "r", "d", "0", "s", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -2013,7 +2020,7 @@ def test_shutdown_screen_offers_to_cancel_an_already_scheduled_shutdown(db, lane
         first_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.shutdown_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
 
-        admin_session = FakeSession(["n", "s", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "s", "c", "b", "b", "b"])
         node_controls.session_registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -2049,8 +2056,8 @@ def test_shutdown_screen_refuses_to_cancel_a_signal_triggered_shutdown(db, lane,
             first_task, deadline=loop.time() + 60.0, message=None, source="sigterm", cancellable=False
         )
 
-        # No "y" in this script at all -- the "Cancel it?" prompt must
-        # never be reached, so there is nothing here to answer.
+        # No "c" in this script at all -- the [C]ancel/[R]eplace/[B]ack
+        # prelude must never be reached, so there is nothing to choose.
         admin_session = FakeSession(["n", "s", "b", "b", "b"])
         node_controls.session_registry.enter(admin_session)
         try:
@@ -2062,7 +2069,7 @@ def test_shutdown_screen_refuses_to_cancel_a_signal_triggered_shutdown(db, lane,
         assert "triggered externally" in text
         assert "SIGTERM" in text
         assert "cannot be cancelled or replaced" in text
-        assert "Cancel it?" not in text
+        assert "ancel it" not in _visible(text)
         assert "Scheduled shutdown cancelled." not in text
         # Nothing was touched: still scheduled, task still alive, maintenance untouched.
         assert node_controls.shutdown_scheduler.is_scheduled() is True
@@ -2144,7 +2151,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
-        admin_session = FakeSession(["n", "l", "0", "", "y", "b", "b", "b"])
+        admin_session = FakeSession(["n", "l", "d", "0", "s", "y", "b", "b", "b"])
         admin_task = asyncio.create_task(
             _run_admin_session_as_its_own_task(admin_session, lane, sysop, node_controls, registry)
         )
@@ -2160,7 +2167,7 @@ def test_lock_and_drain_screen_engages_lockdown_and_schedules_drain(db, lane, sy
 
 def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "l", "-5", "b", "b", "b"])
+    session = FakeSession(["n", "l", "d", "-5", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "cannot be negative" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -2168,7 +2175,7 @@ def test_lock_and_drain_screen_rejects_a_negative_delay(db, lane, sysop):
 
 def test_lock_and_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "l", "soon", "b", "b", "b"])
+    session = FakeSession(["n", "l", "d", "soon", "b", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "Not a number" in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -2176,7 +2183,7 @@ def test_lock_and_drain_screen_rejects_a_non_numeric_delay(db, lane, sysop):
 
 def test_lock_and_drain_screen_declined_final_confirmation_leaves_lockdown_off(db, lane, sysop):
     node_controls = _node_controls()
-    session = FakeSession(["n", "l", "0", "", "n", "b", "b", "b"])
+    session = FakeSession(["n", "l", "s", "n", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
     assert "Cancelled." in _written_text(session)
     assert node_controls.maintenance.is_lockdown_active() is False
@@ -2184,7 +2191,7 @@ def test_lock_and_drain_screen_declined_final_confirmation_leaves_lockdown_off(d
 
 def test_lock_and_drain_screen_offers_to_cancel_a_bare_already_scheduled_drain(db, lane, sysop):
     """Engaging while a plain [D]rain (no lockdown) is already scheduled
-    reuses [D]rain's own "already scheduled -- cancel it?" sub-flow
+    reuses [D]rain's own "already scheduled -- [C]ancel/[R]eplace/[B]ack" prelude
     verbatim, for consistency."""
     async def scenario():
         node_controls = _node_controls()
@@ -2192,7 +2199,7 @@ def test_lock_and_drain_screen_offers_to_cancel_a_bare_already_scheduled_drain(d
         drain_task = asyncio.create_task(asyncio.Event().wait())
         node_controls.drain_scheduler.schedule(drain_task, deadline=loop.time() + 60.0, message=None)
 
-        session = FakeSession(["n", "l", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "c", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2215,7 +2222,7 @@ def test_lock_and_drain_screen_cancels_lockdown_and_drain_while_still_counting(d
             drain_task, deadline=loop.time() + 60.0, message=None, source="lock_and_drain"
         )
 
-        session = FakeSession(["n", "l", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "c", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2236,7 +2243,7 @@ def test_lock_and_drain_screen_cancel_after_drain_already_finished(db, lane, sys
     drain's own liveness, is what keeps this "active"."""
     node_controls = _node_controls()
     node_controls.maintenance.enable_lockdown(source="lock_and_drain")
-    session = FakeSession(["n", "l", "y", "b", "b", "b"])
+    session = FakeSession(["n", "l", "c", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, node_controls=node_controls))
 
     text = _written_text(session)
@@ -2255,7 +2262,7 @@ def test_lock_and_drain_screen_declining_cancel_leaves_it_active(db, lane, sysop
             drain_task, deadline=loop.time() + 60.0, message=None, source="lock_and_drain"
         )
 
-        session = FakeSession(["n", "l", "n", "b", "b", "b"])
+        session = FakeSession(["n", "l", "b", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2280,7 +2287,7 @@ def test_lock_and_drain_screen_still_starts_a_drain_when_maintenance_was_enabled
         node_controls = _node_controls()
         node_controls.maintenance.enable_lockdown()  # plain [M], default source="maintenance"
 
-        session = FakeSession(["n", "l", "0", "", "y", "b", "b", "b"])
+        session = FakeSession(["n", "l", "d", "0", "s", "y", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -2317,8 +2324,8 @@ def test_lock_and_drain_screen_never_disables_maintenance_that_predates_it(db, l
 
         # Revisiting the screen: not "Lock & drain is active" (it never
         # owned the lock), but the ordinary "a drain is already
-        # scheduled -- cancel it?" sub-flow, answered yes.
-        session = FakeSession(["n", "l", "y", "b", "b", "b"])
+        # scheduled" prelude, answered [C]ancel.
+        session = FakeSession(["n", "l", "c", "b", "b", "b"])
         await admin_menu(session, lane, sysop, node_controls=node_controls)
 
         text = _written_text(session)
@@ -3271,7 +3278,7 @@ def test_gc_screen_reclaims_an_orphaned_blob(db, lane, sysop):
     backdated = time.time() - 7200  # past the default 1-hour safety age
     os.utime(blob_path, (backdated, backdated))
 
-    inputs = ["m", "f", "g", "y", "b", "b", "b"]
+    inputs = ["m", "f", "g", "r", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3296,7 +3303,7 @@ def test_gc_screen_declining_confirmation_does_not_delete(db, lane, sysop):
     backdated = time.time() - 7200
     os.utime(blob_path, (backdated, backdated))
 
-    inputs = ["m", "f", "g", "n", "b", "b", "b"]
+    inputs = ["m", "f", "g", "b", "b", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 
@@ -3304,7 +3311,7 @@ def test_gc_screen_declining_confirmation_does_not_delete(db, lane, sysop):
 
 
 def test_gc_screen_with_nothing_to_reclaim_skips_the_confirmation_prompt(db, lane, sysop):
-    inputs = ["m", "f", "g", "b", "b", "b"]  # no "y"/"n" needed
+    inputs = ["m", "f", "g", "b", "b", "b"]  # no [R]eclaim/[B]ack step is offered
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Would reclaim 0 orphaned blob" in _written_text(session)
@@ -5732,7 +5739,7 @@ def _fake_release(tag: str):
 
 
 def test_update_screen_shows_no_prior_check(db, lane, sysop):
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "No check has been run on this node yet." in _written_text(session)
 
@@ -5740,7 +5747,7 @@ def test_update_screen_shows_no_prior_check(db, lane, sysop):
 def test_update_screen_declining_check_leaves_state_unchanged(db, lane, sysop):
     from netbbs.selfupdate import get_last_check_summary
 
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_last_check_summary(db) == (None, None)
 
@@ -5755,7 +5762,7 @@ def test_update_screen_reports_up_to_date(db, lane, sysop, monkeypatch):
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["s", "u", "y", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "c", "x", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -5774,7 +5781,7 @@ def test_update_screen_reports_newer_release_without_auto_applying(db, lane, sys
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["s", "u", "y", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "c", "x", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _visible(_written_text(session))
@@ -5799,7 +5806,7 @@ def test_update_screen_handles_check_failure_gracefully(db, lane, sysop, monkeyp
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["s", "u", "y", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "c", "x", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Could not check for updates: could not reach the release API: timed out" in _written_text(session)
     checked_at, outcome = get_last_check_summary(db)
@@ -5811,18 +5818,40 @@ def test_update_screen_toggles_auto_check(db, lane, sysop):
     from netbbs.selfupdate import get_auto_update_check_enabled
 
     assert get_auto_update_check_enabled(db) is True
-    session = FakeSession(["s", "u", "n", "n", "y", "b", "b"])
+    session = FakeSession(["s", "u", "a", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_auto_update_check_enabled(db) is False
     assert "off" in _written_text(session)
 
 
-def test_update_screen_declining_toggle_leaves_auto_check_unchanged(db, lane, sysop):
+
+def test_update_screen_auto_check_toggle_is_one_keystroke_each_way(db, lane, sysop):
     from netbbs.selfupdate import get_auto_update_check_enabled
 
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "a", "a", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_auto_update_check_enabled(db) is True
+    text = _written_text(session)
+    assert "Daily automatic check is now off." in text
+    assert "Daily automatic check is now ON." in text
+
+
+def test_update_screen_back_asks_nothing_and_changes_nothing(db, lane, sysop):
+    # Issue #282: this screen used to chain three yes/no questions after
+    # its status block, with no other way out. [B]ack is now silent.
+    from netbbs.selfupdate import get_auto_update_check_enabled, get_github_pat, get_last_check_summary
+
+    session = FakeSession(["s", "u", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Check for a new release now?" not in text
+    assert "Turn daily automatic check" not in text
+    assert "[C]heck now" in text
+    assert "[T]oken" in text
+    assert "[A]uto-check off" in text
+    assert get_auto_update_check_enabled(db) is True
+    assert get_github_pat(db) is None
+    assert get_last_check_summary(db) == (None, None)
 
 
 def test_update_screen_shows_recent_check_history(db, lane, sysop):
@@ -5833,7 +5862,7 @@ def test_update_screen_shows_recent_check_history(db, lane, sysop):
     record_check_outcome(db, "up to date (v2.1.0)")
     record_check_outcome(db, "check failed: connection timed out")
 
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
@@ -5847,7 +5876,7 @@ def test_update_screen_hides_history_section_with_only_one_check(db, lane, sysop
 
     record_check_outcome(db, "up to date (v2.1.0)")
 
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert "Recent checks:" not in _written_text(session)
@@ -5857,7 +5886,7 @@ def test_update_screen_hides_history_section_with_only_one_check(db, lane, sysop
 
 
 def test_update_screen_shows_token_not_set_by_default(db, lane, sysop):
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "not set" in _visible(_written_text(session))
 
@@ -5865,8 +5894,8 @@ def test_update_screen_shows_token_not_set_by_default(db, lane, sysop):
 def test_update_screen_sets_a_token(db, lane, sysop):
     from netbbs.selfupdate import get_github_pat
 
-    # check-now: n, set-token: y, <token text>, daily-toggle: n
-    session = FakeSession(["s", "u", "n", "y", "ghp_testtoken1234", "n", "b", "b"])
+    # [T]oken, <token text>, then back out of the update screen, Settings, and the console.
+    session = FakeSession(["s", "u", "t", "ghp_testtoken1234", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert get_github_pat(db) == "ghp_testtoken1234"
@@ -5881,7 +5910,7 @@ def test_update_screen_replaces_and_shows_masked_token_on_redraw(db, lane, sysop
     from netbbs.selfupdate import set_github_pat
 
     set_github_pat(db, "ghp_oldtoken0000")
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "…0000" in _visible(_written_text(session))
 
@@ -5890,20 +5919,22 @@ def test_update_screen_clears_a_token_on_blank_input(db, lane, sysop):
     from netbbs.selfupdate import get_github_pat, set_github_pat
 
     set_github_pat(db, "ghp_oldtoken0000")
-    # check-now: n, replace/clear: y, blank -> clears, daily-toggle: n
-    session = FakeSession(["s", "u", "n", "y", "", "n", "b", "b"])
+    # [T]oken, blank -> clears the existing token.
+    session = FakeSession(["s", "u", "t", "", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert get_github_pat(db) is None
     assert "GitHub token cleared." in _written_text(session)
 
 
-def test_update_screen_declining_token_prompt_leaves_it_unchanged(db, lane, sysop):
+
+def test_update_screen_blank_token_with_none_set_cancels(db, lane, sysop):
     from netbbs.selfupdate import get_github_pat
 
-    session = FakeSession(["s", "u", "n", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "t", "", "b", "b", "b"])
     _run(session, lane, sysop)
     assert get_github_pat(db) is None
+    assert "Cancelled -- no change." in _written_text(session)
 
 
 def test_update_screen_manual_check_forwards_the_stored_token(db, lane, sysop, monkeypatch):
@@ -5919,7 +5950,7 @@ def test_update_screen_manual_check_forwards_the_stored_token(db, lane, sysop, m
 
     monkeypatch.setattr(admin_flow, "check_latest_release", fake_check)
 
-    session = FakeSession(["s", "u", "y", "n", "n", "b", "b"])
+    session = FakeSession(["s", "u", "c", "x", "b", "b", "b"])
     _run(session, lane, sysop)
 
     assert seen_tokens == ["ghp_testtoken1234"]
@@ -6061,7 +6092,7 @@ def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
     create_backup(db_path=db.path, identity_dir=identity_dir, destination=db.path.parent / "backup1")
 
     link_context = _link_context()
-    session = FakeSession(["s", "l", "b", "b"])
+    session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
     assert "Backup: " in text
@@ -6604,7 +6635,7 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     link_context.link_node.boards["board-1"] = object()
     link_context.link_node.known_event_ids.add("event-1")
 
-    session = FakeSession(["s", "l", "b", "b"])
+    session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
@@ -6622,7 +6653,7 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
 def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
     from netbbs.config import set_node_display_name
 
-    session = FakeSession(["s", "l", "b", "b"])
+    session = FakeSession(["s", "l", "b", "b", "b"])
     assert session.node_display_name == "NetBBS"
     set_node_display_name(db, "Renamed While Connected")
 
@@ -6654,7 +6685,7 @@ def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sy
         save_peer(db, changed)
     link_context.link_node.peers[changed.fingerprint] = changed
 
-    session = FakeSession(["s", "l", "y", "b", "b", "b"])
+    session = FakeSession(["s", "l", "a", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     assert "Identity changes acknowledged." in _written_text(session)
@@ -6690,7 +6721,7 @@ def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
         save_peer(db, current)
     link_context.link_node.peers[current.fingerprint] = current
 
-    session = FakeSession(["s", "l", "n", "b", "b", "b"])
+    session = FakeSession(["s", "l", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
@@ -6906,7 +6937,7 @@ def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
     )
     link_context.link_node.peers[peer.fingerprint] = peer
 
-    session = FakeSession(["s", "l", "0", "1", "b", "b"])
+    session = FakeSession(["s", "l", "p", "0", "1", "x", "b", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
@@ -6915,6 +6946,95 @@ def test_link_status_screen_lists_and_shows_peer_detail(db, lane, sysop):
     assert "Last contact: never" in text
     assert "Addresses:" in text
     assert "203.0.113.5" in text
+
+
+def test_link_status_screen_draws_the_whole_panel_before_offering_to_acknowledge(db, lane, sysop):
+    """Issue #282: the acknowledge question used to sit mid-render, so
+    on a node with a security notice the mode/peer half of the panel
+    was only drawn after answering it. [B]ack must leave the notices
+    exactly as they were."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.node_profiles import list_identity_observations
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    link_context = _link_context()
+    peer_identity = bootstrap_node_identity("renamed-peer")
+    peer_node = LinkNode(identity=peer_identity)
+    first = peer_node.handle_hello(peer_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Old Name",
+    ))
+    save_peer(db, first)
+    changed = peer_node.handle_hello(peer_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="New Name",
+    ))
+    save_peer(db, changed)
+    link_context.link_node.peers[changed.fingerprint] = changed
+    before = len(list_identity_observations(db))
+    assert before >= 1
+
+    session = FakeSession(["s", "l", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _visible(_written_text(session))
+    assert "Acknowledge these identity changes" not in text
+    assert "[A]cknowledge identity changes" in text
+    assert "[P]eers" in text
+    # The rest of the panel was drawn without answering anything first.
+    assert text.index("Identity changes observed") < text.index("Known events:")
+    assert len(list_identity_observations(db)) == before
+
+
+def test_drain_prelude_back_leaves_the_schedule_untouched(db, lane, sysop):
+    """Issue #282: checking the countdown on an already-scheduled drain
+    used to require answering "Cancel it?" and then landed in the
+    scheduling editor anyway. [B]ack now leaves it exactly as it was."""
+    async def scenario():
+        node_controls = _node_controls()
+        loop = asyncio.get_running_loop()
+        first_task = asyncio.create_task(asyncio.Event().wait())
+        node_controls.drain_scheduler.schedule(first_task, deadline=loop.time() + 60.0, message=None)
+
+        admin_session = FakeSession(["n", "d", "b", "b", "b", "b"])
+        await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+
+        text = _visible(_written_text(admin_session))
+        assert "already scheduled" in text
+        assert "Cancel it?" not in text
+        assert "[C]ancel it" in text and "[R]eplace it" in text
+        assert "Schedule drain" not in text  # the editor was never entered
+        assert node_controls.drain_scheduler.is_scheduled() is True
+        assert not first_task.cancelled()
+
+        first_task.cancel()
+        await asyncio.gather(first_task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_gc_screen_back_leaves_reclaimable_blobs_alone(db, lane, sysop):
+    import os
+    import time
+
+    from netbbs.files.areas import create_file_area
+    from netbbs.files.entries import delete_file, upload_file
+    from netbbs.files.storage import storage_path_for
+
+    area = create_file_area(db, "Docs", creator=sysop)
+    entry = upload_file(db, area, sysop, "file.txt", b"hello")
+    blob_path = storage_path_for(db, entry.sha256)
+    delete_file(db, entry, deleted_by=sysop)
+    backdated = time.time() - 7200
+    os.utime(blob_path, (backdated, backdated))
+
+    session = FakeSession(["m", "f", "g", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Reclaim this space now?" not in text
+    assert "[R]eclaim now" in text
+    assert blob_path.exists()
 
 
 # -- redraw-in-place (dogfood feature request, issue #160's rollout follow-up) --

@@ -458,6 +458,22 @@ through call chains that don't otherwise need it, and without re-deriving a
 richer panel nested screens have no room to show. A screen that already has
 its own full panel does not also show the condensed line.
 
+### 3.5 Interaction model for screens (issue #282)
+
+Every screen reached by a hotkey shows its content first and can be left with
+`[B]ack` (or a "Press any key" pause) without answering a question or
+changing any stored value. Actions are hotkeys on an action bar, a field on a
+draft editor, or a picker entry; a yes/no prompt is only ever the last
+keystroke immediately before an irreversible, destructive, or network-touching
+action, and it sits behind a hotkey the caller chose rather than on the entry
+or exit path. A toggle is a hotkey that toggles (or a live editor field), not
+a "Turn X on?" question that doubles as the exit. A "blank keeps the current
+value" prompt writes nothing else, including a sibling visibility flag.
+Anything gathering more than two values goes through the draft field editor or
+a picker and persists nothing before `[S]ave`. The deliberate exceptions are
+once-only first-run decisions (Link participation, node name, managed DNS,
+the Unicode-style probe) and type-the-name confirmations before deletes.
+
 ---
 
 ## 4. Accounts, authentication, identity, and addressing

@@ -3769,45 +3769,15 @@ async def _registration_settings_screen(session: Session, lane: DatabaseLane, ac
 # -- self-update (design doc §17) --
 
 
-async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    """
-    Check-for-updates and the daily-automatic-check off switch (§17's
-    "off switch: ... disables the daily automatic background check").
-
-    Deliberately **check-only** in this screen: it reports whether a
-    newer release exists and records the outcome (`netbbs.selfupdate.
-    record_check_outcome`), but does not download/apply/restart. The
-    graceful-drain-then-restart apply flow (§17) needs to coordinate
-    with the live node process's own shutdown/re-exec sequence, which
-    isn't wired up yet -- a deliberate scope cut for this
-    implementation pass, not an oversight, so this screen doesn't
-    promise automation that isn't safely built and tested yet.
-
-    A failed check (network/API error) records `"check failed: ..."`
-    too, not just the two success outcomes -- a real gap traced from a
-    SysOp's own console report of a transient TLS error: before this,
-    `record_check_outcome` was only ever called on success, so a run of
-    consecutive failing days (scheduled or manual) left this screen's
-    own "Last check: ..." line silently showing a stale success from
-    however long ago, with nothing in the product itself distinguishing
-    "quiet because it's fine" from "quiet because it's been failing" --
-    the console's own warning line was the only place that ever showed,
-    which nobody reliably watches.
-
-    The optional GitHub token (`netbbs.selfupdate.get_github_pat`/
-    `set_github_pat`) is the real fix for a node whose release checks
-    keep hitting GitHub's unauthenticated 60/hour-per-source-IP limit
-    (an ordinary dev-loop restart pattern, or a genuine crash-restart
-    loop): authenticated requests get 5000/hour instead. Read masked
-    (last 4 characters only, `masked_github_pat`) and never re-displayed
-    in full once set -- entered via `read_line(echo=False)`, the same
-    masked-input primitive password prompts use, and stored in a plain,
-    owner-only file next to the database (`github_pat_path`), never in
-    the plaintext `node_config` table -- see that function's own
-    docstring for why. The prompt copy names the exact minimal scope
-    needed ("Public Repositories, read-only") since this screen has no
-    way to enforce what scope a pasted token actually carries.
-    """
+async def _draw_update_status(
+    session: Session, lane: DatabaseLane, actor: User
+) -> tuple[bool, str | None, bool]:
+    """Renders the self-update status panel (running version, daily
+    automatic-check switch, GitHub token, last check plus recent
+    history) and the action bar under it. Returns what the dispatch
+    loop in `_update_settings_screen` needs to label and act on its
+    hotkeys without re-reading: the daily-check switch, the masked
+    token, and the caller's unicode-style preference."""
     from netbbs import __version__ as current_version
 
     def _load(db: Database) -> tuple[bool, str | None, str | None, str | None]:
@@ -3879,85 +3849,184 @@ async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: U
     else:
         await session.write_line(colored("No check has been run on this node yet.", fg_color=MUTED_COLOR))
 
-    if await prompt_yes_no(session, "\r\nCheck for a new release now?", default=False):
-        known_etag, known_release = await lane.run(load_release_cache)
-        token = await lane.run(get_github_pat)
-        try:
-            release, new_etag = await check_latest_release(
-                known_etag=known_etag, known_release=known_release, token=token
-            )
-        except UpdateError as exc:
-            await lane.run(record_check_outcome, f"check failed: {exc}")
-            await session.write_line(colored(f"Could not check for updates: {exc}", fg_color=ERROR_COLOR))
-        else:
-            await lane.run(save_release_cache, new_etag, release)
-            if is_newer(current_version, release.tag_name):
-                await lane.run(record_check_outcome, f"newer release available: {release.tag_name}")
-                await session.write_line(
-                    status_badge("UPDATE AVAILABLE", tone="warning", unicode_style=unicode_style)
-                    + " "
-                    + colored(
-                        f"{release.tag_name} (published {release.published_at}).",
-                        fg_color=WARNING_COLOR,
-                    )
-                )
-                await session.write_line(
-                    colored(
-                        "Automatic download/apply is not yet available from this "
-                        "screen -- update manually for now.",
-                        fg_color=MUTED_COLOR,
-                    )
-                )
-            else:
-                await lane.run(record_check_outcome, f"up to date ({current_version})")
-                await session.write_line(
-                    status_badge("UP TO DATE", tone="success", unicode_style=unicode_style)
-                    + " "
-                    + colored(current_version, fg_color=SUCCESS_COLOR)
-                )
 
-    token_prompt = (
-        "\r\nReplace or clear the stored GitHub token?" if masked_token is not None
-        else "\r\nSet a GitHub token to raise the update-check rate limit (60/hour -> 5000/hour)?"
-    )
-    if await prompt_yes_no(session, token_prompt, default=False):
-        await session.write_line(
-            colored(
-                "Paste a fine-grained personal access token scoped to "
-                "'Public Repositories (read-only)' -- no broader access is needed. "
-                + ("Blank clears the existing token." if masked_token is not None else "Blank cancels."),
-                fg_color=MUTED_COLOR,
-            )
+    await session.write_line(
+        "\r\n"
+        + action_bar(
+            [
+                menu_key("C", "heck now"),
+                menu_key("T", "oken"),
+                menu_key("A", "uto-check off" if auto_enabled else "uto-check on"),
+                menu_key("B", "ack"),
+            ],
+            width=session.terminal_width,
         )
-        await session.write(colored("Token: ", fg_color=LABEL_COLOR, bold=True))
-        token_input = (await session.read_line(echo=False)).strip()
-        if token_input:
-            def _apply_token(db: Database) -> None:
-                set_github_pat(db, token_input)
-                record_action(db, actor=actor, action="set_github_pat", detail=f"token ending {token_input[-4:]}")
+    )
+    await session.write("Choice: ")
+    return auto_enabled, masked_token, unicode_style
 
-            await lane.run(_apply_token)
-            await session.write_line("GitHub token saved.")
-        elif masked_token is not None:
-            def _clear_token(db: Database) -> None:
-                clear_github_pat(db)
-                record_action(db, actor=actor, action="clear_github_pat")
 
-            await lane.run(_clear_token)
-            await session.write_line("GitHub token cleared.")
+async def _run_release_check(session: Session, lane: DatabaseLane, *, unicode_style: bool) -> None:
+    """One manual release check: reports whether a newer release exists
+    and records the outcome (`netbbs.selfupdate.record_check_outcome`),
+    but does not download/apply/restart -- see `_update_settings_screen`."""
+    from netbbs import __version__ as current_version
+
+    known_etag, known_release = await lane.run(load_release_cache)
+    token = await lane.run(get_github_pat)
+    try:
+        release, new_etag = await check_latest_release(
+            known_etag=known_etag, known_release=known_release, token=token
+        )
+    except UpdateError as exc:
+        await lane.run(record_check_outcome, f"check failed: {exc}")
+        await session.write_line(colored(f"Could not check for updates: {exc}", fg_color=ERROR_COLOR))
+    else:
+        await lane.run(save_release_cache, new_etag, release)
+        if is_newer(current_version, release.tag_name):
+            await lane.run(record_check_outcome, f"newer release available: {release.tag_name}")
+            await session.write_line(
+                status_badge("UPDATE AVAILABLE", tone="warning", unicode_style=unicode_style)
+                + " "
+                + colored(
+                    f"{release.tag_name} (published {release.published_at}).",
+                    fg_color=WARNING_COLOR,
+                )
+            )
+            await session.write_line(
+                colored(
+                    "Automatic download/apply is not yet available from this "
+                    "screen -- update manually for now.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
         else:
-            await session.write_line(colored("Cancelled -- no change.", fg_color=MUTED_COLOR))
+            await lane.run(record_check_outcome, f"up to date ({current_version})")
+            await session.write_line(
+                status_badge("UP TO DATE", tone="success", unicode_style=unicode_style)
+                + " "
+                + colored(current_version, fg_color=SUCCESS_COLOR)
+            )
 
-    new_state = "off" if auto_enabled else "ON"
-    if not await prompt_yes_no(session, f"\r\nTurn daily automatic check {new_state}?", default=False):
-        return
 
-    def _apply(db: Database) -> None:
-        set_auto_update_check_enabled(db, not auto_enabled)
-        record_action(db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}")
 
-    await lane.run(_apply)
-    await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
+async def _github_token_prompt(
+    session: Session, lane: DatabaseLane, actor: User, *, masked_token: str | None
+) -> None:
+    """Set, replace, or clear the stored GitHub token -- one masked
+    `read_line`; blank clears an existing token and cancels otherwise."""
+    await session.write_line(
+        colored(
+            "Paste a fine-grained personal access token scoped to "
+            "'Public Repositories (read-only)' -- no broader access is needed. "
+            + ("Blank clears the existing token." if masked_token is not None else "Blank cancels."),
+            fg_color=MUTED_COLOR,
+        )
+    )
+    await session.write(colored("Token: ", fg_color=LABEL_COLOR, bold=True))
+    token_input = (await session.read_line(echo=False)).strip()
+    if token_input:
+        def _apply_token(db: Database) -> None:
+            set_github_pat(db, token_input)
+            record_action(db, actor=actor, action="set_github_pat", detail=f"token ending {token_input[-4:]}")
+
+        await lane.run(_apply_token)
+        await session.write_line("GitHub token saved.")
+    elif masked_token is not None:
+        def _clear_token(db: Database) -> None:
+            clear_github_pat(db)
+            record_action(db, actor=actor, action="clear_github_pat")
+
+        await lane.run(_clear_token)
+        await session.write_line("GitHub token cleared.")
+    else:
+        await session.write_line(colored("Cancelled -- no change.", fg_color=MUTED_COLOR))
+
+
+
+async def _update_settings_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Check-for-updates, the GitHub token, and the daily-automatic-check
+    off switch (§17's "off switch: ... disables the daily automatic
+    background check"), as a status panel with one hotkey per action.
+
+    Issue #282: this used to print the same status block and then walk
+    a fixed chain of three yes/no questions (check now? replace the
+    token? turn the daily check on/off?) with no other way out -- a
+    SysOp who pressed `[U]pdate` only to read "Last check: ..." had to
+    decline all three, and one mis-keyed `y` on the last one flipped a
+    persistent node setting. Now `[C]heck now`, `[T]oken`, and
+    `[A]uto-check on/off` are each an explicit choice, `[B]ack` is one
+    silent keystroke, and the panel redraws after every action so the
+    result is visible in the same place it was read from -- the same
+    status + action-bar shape `_managed_dns_status_screen` uses.
+
+    Deliberately **check-only**: it reports whether a newer release
+    exists and records the outcome (`netbbs.selfupdate.
+    record_check_outcome`), but does not download/apply/restart. The
+    graceful-drain-then-restart apply flow (§17) needs to coordinate
+    with the live node process's own shutdown/re-exec sequence, which
+    isn't wired up yet -- a deliberate scope cut for this
+    implementation pass, not an oversight, so this screen doesn't
+    promise automation that isn't safely built and tested yet.
+
+    A failed check (network/API error) records `"check failed: ..."`
+    too, not just the two success outcomes -- a real gap traced from a
+    SysOp's own console report of a transient TLS error: before this,
+    `record_check_outcome` was only ever called on success, so a run of
+    consecutive failing days (scheduled or manual) left this screen's
+    own "Last check: ..." line silently showing a stale success from
+    however long ago, with nothing in the product itself distinguishing
+    "quiet because it's fine" from "quiet because it's been failing" --
+    the console's own warning line was the only place that ever showed,
+    which nobody reliably watches.
+
+    The optional GitHub token (`netbbs.selfupdate.get_github_pat`/
+    `set_github_pat`) is the real fix for a node whose release checks
+    keep hitting GitHub's unauthenticated 60/hour-per-source-IP limit
+    (an ordinary dev-loop restart pattern, or a genuine crash-restart
+    loop): authenticated requests get 5000/hour instead. Read masked
+    (last 4 characters only, `masked_github_pat`) and never re-displayed
+    in full once set -- entered via `read_line(echo=False)`, the same
+    masked-input primitive password prompts use, and stored in a plain,
+    owner-only file next to the database (`github_pat_path`), never in
+    the plaintext `node_config` table -- see that function's own
+    docstring for why. The prompt copy names the exact minimal scope
+    needed ("Public Repositories, read-only") since this screen has no
+    way to enforce what scope a pasted token actually carries.
+    """
+    auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "c":
+            await session.write_line("")
+            await _run_release_check(session, lane, unicode_style=unicode_style)
+            # The check's own verdict line (UPDATE AVAILABLE / UP TO DATE /
+            # the error) is richer than the recorded one-line outcome the
+            # redrawn panel shows -- keep it on screen until dismissed.
+            await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_any_key()
+            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+        elif choice == "t":
+            await session.write_line("")
+            await _github_token_prompt(session, lane, actor, masked_token=masked_token)
+            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+        elif choice == "a":
+            await session.write_line("")
+
+            def _apply(db: Database) -> None:
+                set_auto_update_check_enabled(db, not auto_enabled)
+                record_action(db, actor=actor, action="set_auto_update_check", detail=f"enabled={not auto_enabled}")
+
+            await lane.run(_apply)
+            await session.write_line(f"Daily automatic check is now {'ON' if not auto_enabled else 'off'}.")
+            auto_enabled, masked_token, unicode_style = await _draw_update_status(session, lane, actor)
+        else:
+            await session.write(reject_unhandled_key(choice))
 
 
 # -- backup status (design doc §13.4, issue #60's first operational slice) --
@@ -4642,26 +4711,15 @@ async def _mrc_status_screen(session: Session, lane: DatabaseLane, actor: User, 
 # -- Link status (issue #60, narrow scope) -----------------------------------
 
 
-async def _link_status_screen(
+async def _draw_link_status(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
-) -> None:
-    """
-    Read-only SysOp visibility into this node's live NetBBS Link state
-    (issue #60, deliberately narrow: just visibility into what already
-    exists -- peers, relay activity, board/event counters -- not the
-    backup/quota/retry-queue/dead-letter machinery #60 also calls for,
-    which stays a future design task). Nothing here mutates anything,
-    so unlike every other screen in this submenu there's no
-    `record_action` call; `actor` is accepted only so this screen's
-    signature matches its `_system_menu` siblings.
-
-    `link_context.link_node`'s in-memory fields are read directly, no
-    lane dispatch -- the same "in-memory, no I/O" shape `_who_screen`
-    already uses for `node_controls.session_registry`. Reliability
-    scores, per-peer last-contact, cached seed count, and mailbox sizes
-    are separate, read-only lane-dispatched queries, since none of that
-    is held in memory.
-    """
+) -> tuple[list, bool]:
+    """Renders the whole Link status panel -- identity, any observed
+    identity changes, mode/capacity, counters, relay mailbox, and the
+    verified-peer count -- followed by its action bar. Returns the
+    identity notices shown (so `[A]cknowledge` dismisses exactly those)
+    and whether any verified peers exist (so `[P]eers` is only offered
+    when there is something to open)."""
     node = link_context.link_node
     config = link_context.link_config
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
@@ -4737,14 +4795,6 @@ async def _link_status_screen(
                     "This may be recovery or replacement, but could indicate impersonation."
                 )
             await session.write_line(colored("  " + sanitize_text(message), fg_color=METADATA_COLOR))
-        if await prompt_yes_no(
-            session, "Acknowledge these identity changes and stop repeating their notices?",
-            default=False,
-        ):
-            for notice in identity_notices[:5]:
-                await lane.run(dismiss_identity_observation, notice.id)
-            await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
-
     if config is not None:
         await session.write_line(
             colored("Mode: ", fg_color=LABEL_COLOR)
@@ -4810,13 +4860,30 @@ async def _link_status_screen(
     if not node.peers:
         no_peers_message = "No verified peers." if config is None else f"No verified peers. (max {config.max_peers})"
         await session.write_line(colored(f"\r\n{no_peers_message}", fg_color=MUTED_COLOR))
-        return
+    else:
+        peers_line = (
+            f"Verified peers: {len(node.peers)}" if config is None else f"Verified peers: {len(node.peers)}/{config.max_peers}"
+        )
+        await session.write_line(f"\r\n{peers_line}")
 
-    peers_line = (
-        f"Verified peers: {len(node.peers)}" if config is None else f"Verified peers: {len(node.peers)}/{config.max_peers}"
-    )
-    await session.write_line(f"\r\n{peers_line}")
+    actions = []
+    if node.peers:
+        actions.append(menu_key("P", "eers"))
+    if identity_notices:
+        actions.append(menu_key("A", "cknowledge identity changes"))
+    actions.append(menu_key("B", "ack"))
+    await session.write_line("\r\n" + action_bar(actions, width=session.terminal_width))
+    await session.write("Choice: ")
+    return identity_notices, bool(node.peers)
 
+
+async def _link_peer_detail(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
+) -> bool:
+    """Picker over the verified peers, then one peer's detail lines.
+    Returns whether a peer was actually opened, so the caller knows
+    whether there is anything on screen worth pausing over."""
+    node = link_context.link_node
     def _load(db: Database) -> tuple[dict[str, float], dict[str, str]]:
         return (
             {fingerprint: reliability_score(db, fingerprint) for fingerprint in node.peers},
@@ -4849,7 +4916,7 @@ async def _link_status_screen(
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is None:
-        return
+        return False
 
     selected_identity = identity_for_peer(selected)
     await session.write_line(f"Node: {sanitize_text(selected_identity.label)}")
@@ -4884,6 +4951,59 @@ async def _link_status_screen(
     await session.write_line(
         f"This node relays for it: {'yes' if selected.fingerprint in node.relays_serving_me else 'no'}"
     )
+    return True
+
+
+async def _link_status_screen(
+    session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext
+) -> None:
+    """
+    Read-only SysOp visibility into this node's live NetBBS Link state
+    (issue #60, deliberately narrow: just visibility into what already
+    exists -- peers, relay activity, board/event counters -- not the
+    backup/quota/retry-queue/dead-letter machinery #60 also calls for,
+    which stays a future design task). The only thing that writes
+    anything here is `[A]cknowledge identity changes`, which dismisses
+    the notices currently shown; `actor` is otherwise accepted only so
+    this screen's signature matches its `_system_menu` siblings.
+
+    Issue #282: acknowledging identity changes used to be a yes/no
+    prompt asked *mid-render*, before the mode/capacity/peer half of
+    the status was even drawn -- so on precisely the node that had a
+    security notice to read, the SysOp had to answer a mutating
+    question before seeing the rest. Now the whole panel is drawn
+    first and acknowledging is an explicit hotkey on the action bar,
+    alongside `[P]eers` for the per-peer detail that used to be an
+    unconditional picker at the end of the screen.
+
+    `link_context.link_node`'s in-memory fields are read directly, no
+    lane dispatch -- the same "in-memory, no I/O" shape `_who_screen`
+    already uses for `node_controls.session_registry`. Reliability
+    scores, per-peer last-contact, cached seed count, and mailbox sizes
+    are separate, read-only lane-dispatched queries, since none of that
+    is held in memory.
+    """
+    identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
+    while True:
+        choice = (await session.read_key()).lower()
+
+        if choice == "b":
+            await session.write_line("")
+            return
+        elif choice == "p" and has_peers:
+            await session.write_line("")
+            if await _link_peer_detail(session, lane, actor, link_context=link_context):
+                await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+                await session.read_any_key()
+            identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
+        elif choice == "a" and identity_notices:
+            await session.write_line("")
+            for notice in identity_notices[:5]:
+                await lane.run(dismiss_identity_observation, notice.id)
+            await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
+            identity_notices, has_peers = await _draw_link_status(session, lane, actor, link_context=link_context)
+        else:
+            await session.write(reject_unhandled_key(choice))
 
 
 # -- outbox: work-item inspection/replay/cancel (design doc §13.7, ----------
@@ -5366,7 +5486,7 @@ async def _node_menu(session: Session, lane: DatabaseLane, actor: User, node_con
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "m":
             await session.write_line("")
-            await _maintenance_mode_screen(session, lane, actor, node_controls)
+            await _toggle_maintenance_mode(session, lane, actor, node_controls)
             await _draw_node_menu(session, node_controls, description_level, redraw_in_place, unicode_style, collapsed, header_color)
         elif choice == "d":
             await session.write_line("")
@@ -5415,7 +5535,7 @@ async def _draw_node_menu(
         _menu_row(
             [
                 MenuEntry(label=menu_key("W", "ho"), brief="See who's currently connected"),
-                MenuEntry(label=menu_key("M", "aintenance mode"), brief="Block new non-SysOp logins"),
+                MenuEntry(label=menu_key("M", "aintenance mode"), brief="Toggle: block non-SysOp logins"),
                 MenuEntry(label=menu_key("D", "rain"), brief="Disconnect non-SysOps soon"),
                 MenuEntry(label=menu_key("L", "ock & drain"), brief="Maintenance mode, then drain"),
                 MenuEntry(label=menu_key("S", "hutdown"), brief="Schedule a node shutdown"),
@@ -5598,6 +5718,35 @@ def _shutdown_field_specs() -> list[FieldSpec]:
     ]
 
 
+async def _scheduled_action_prelude(
+    session: Session, status_text: str, *, cancel_label: str = "ancel it", replace_label: str | None = "eplace it"
+) -> str | None:
+    """Issue #282: the "already scheduled -- Cancel it?" step at the top
+    of `[S]hutdown`/`[D]rain`/`[L]ock & drain` used to be a yes/no that
+    a SysOp checking the remaining countdown had to answer before being
+    dropped into the scheduling editor anyway. Now the status line is
+    followed by an action bar: returns `"c"` (cancel the scheduled
+    action), `"r"` (keep going and schedule a replacement -- omitted
+    when `replace_label` is `None`), or `None` for `[B]ack`, which
+    leaves everything exactly as it was."""
+    await _write_wrapped_subtitle(session, status_text, color=ALERT_COLOR, bold=True)
+    options = [menu_key("C", cancel_label)]
+    if replace_label is not None:
+        options.append(menu_key("R", replace_label))
+    options.append(menu_key("B", "ack"))
+    await session.write_line(action_bar(options, width=session.terminal_width))
+    await session.write("Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return None
+        if choice == "c" or (choice == "r" and replace_label is not None):
+            await session.write_line("")
+            return choice
+        await session.write(reject_unhandled_key(choice))
+
+
 async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     """
     Design doc -- node management, Thiesi's own request: now behaves
@@ -5646,13 +5795,14 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
                 color=ALERT_COLOR, bold=True,
             )
             return
-        await _write_wrapped_subtitle(
+        choice = await _scheduled_action_prelude(
             session,
             f"\r\nA shutdown is already scheduled -- going down in "
             f"{format_remaining_seconds(remaining)}.",
-            color=ALERT_COLOR, bold=True,
         )
-        if await prompt_yes_no(session, "Cancel it?", default=False):
+        if choice is None:
+            return
+        if choice == "c":
             node_controls.shutdown_scheduler.cancel()
             node_controls.maintenance.deactivate()
             await lane.run(record_action, actor=actor, action="cancel_shutdown")
@@ -5660,7 +5810,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
             await session.write_line("Scheduled shutdown cancelled.")
             return
         await session.write_line(
-            colored("Continuing -- scheduling a new shutdown will replace it.", fg_color=MUTED_COLOR)
+            colored("Scheduling a new shutdown will replace it.", fg_color=MUTED_COLOR)
         )
 
     await _write_wrapped_subtitle(
@@ -5732,7 +5882,7 @@ async def _shutdown_screen(session: Session, lane: DatabaseLane, actor: User, no
 # -- maintenance mode and drain (design doc §13.8) --------------------------
 
 
-async def _maintenance_mode_screen(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
+async def _toggle_maintenance_mode(session: Session, lane: DatabaseLane, actor: User, node_controls: NodeControls) -> None:
     """
     Toggles `node_controls.maintenance`'s lockdown flag -- while active,
     a non-SysOp account can no longer log in (`netbbs.net.login_flow.
@@ -5745,27 +5895,31 @@ async def _maintenance_mode_screen(session: Session, lane: DatabaseLane, actor: 
     -- `[D]rain` is the separate, explicit action for that (design doc
     §13.8's own two-step workflow), not an implied side effect of
     toggling this on.
+
+    Issue #282: this was a two-line status screen whose only exit was
+    the question "Turn maintenance mode ON/off?". The Node menu already
+    shows the current state on its own status line, so `[M]` now simply
+    toggles it -- one keystroke either way, instantly visible on the
+    redrawn menu and instantly reversible with the same key.
     """
     currently_on = node_controls.maintenance.is_lockdown_active()
-    await session.write_line(
-        colored("\r\nMaintenance mode:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    await session.write_line(
-        f"Currently: {'ON' if currently_on else 'off'} -- new non-SysOp logins are "
-        f"{'blocked' if currently_on else 'allowed'}. Already-connected sessions are unaffected either way."
-    )
-
-    new_state = "off" if currently_on else "ON"
-    if not await prompt_yes_no(session, f"\r\nTurn maintenance mode {new_state}?", default=False):
-        return
-
     if currently_on:
         node_controls.maintenance.disable_lockdown()
     else:
         node_controls.maintenance.enable_lockdown()
     await lane.run(record_action, actor=actor, action="set_maintenance_mode", detail=f"enabled={not currently_on}")
     _logger.info("maintenance mode set to %s by %s", "ON" if not currently_on else "off", actor.username)
-    await session.write_line(f"Maintenance mode is now {'ON' if not currently_on else 'off'}.")
+    if currently_on:
+        await _write_wrapped_subtitle(
+            session, "Maintenance mode is now off. New non-SysOp logins are allowed again.", color=SUCCESS_COLOR,
+        )
+    else:
+        await _write_wrapped_subtitle(
+            session,
+            "Maintenance mode is now ON. New non-SysOp logins are blocked; already-connected "
+            "sessions are unaffected -- use [D]rain to disconnect them.",
+            color=WARNING_COLOR,
+        )
 
 
 def _drain_field_specs() -> list[FieldSpec]:
@@ -5818,20 +5972,21 @@ async def _drain_screen(session: Session, lane: DatabaseLane, actor: User, node_
     """
     if node_controls.drain_scheduler.is_scheduled():
         remaining = node_controls.drain_scheduler.remaining_seconds()
-        await _write_wrapped_subtitle(
+        choice = await _scheduled_action_prelude(
             session,
             f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
             f"{format_remaining_seconds(remaining)}.",
-            color=ALERT_COLOR, bold=True,
         )
-        if await prompt_yes_no(session, "Cancel it?", default=False):
+        if choice is None:
+            return
+        if choice == "c":
             node_controls.drain_scheduler.cancel()
             await lane.run(record_action, actor=actor, action="cancel_drain")
             _logger.info("scheduled drain cancelled by %s", actor.username)
             await session.write_line("Scheduled drain cancelled.")
             return
         await session.write_line(
-            colored("Continuing -- scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
+            colored("Scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
         )
 
     await _write_wrapped_subtitle(
@@ -5911,6 +6066,16 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
     lockdown is still up, this screen's status line won't mention that
     unrelated drain -- composing arbitrary interleavings of every
     independent command was never this issue's own scope.
+
+    Issue #282: this screen kept the fixed linear delay -> message ->
+    confirm chain its siblings `_shutdown_screen`/`_drain_screen` had
+    already been converted away from (a non-numeric delay aborted the
+    whole screen), and both of its "already active/scheduled" preludes
+    were yes/no questions a SysOp checking the countdown had to answer.
+    Now the preludes are `_scheduled_action_prelude` action bars and
+    the gather is `_drain_field_specs()` on `edit_resource_draft`,
+    with the final confirm kept inside `save` for the same reason
+    `_drain_screen` keeps its own.
     """
     lockdown_owned = (
         node_controls.maintenance.is_lockdown_active()
@@ -5927,10 +6092,13 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
             status = f"non-SysOps will be disconnected in {format_remaining_seconds(remaining)}"
         else:
             status = "the drain has already finished (or none was scheduled) -- new non-SysOp logins are still blocked"
-        await session.write_line(
-            colored(f"\r\nLock & drain is active -- {status}.", fg_color=ALERT_COLOR, bold=True)
+        choice = await _scheduled_action_prelude(
+            session,
+            f"\r\nLock & drain is active -- {status}.",
+            cancel_label="ancel (unlock, stop any running drain)",
+            replace_label=None,
         )
-        if await prompt_yes_no(session, "Unlock and cancel the drain (if still running)?", default=False):
+        if choice == "c":
             if drain_owned:
                 node_controls.drain_scheduler.cancel()
             node_controls.maintenance.disable_lockdown()
@@ -5956,82 +6124,88 @@ async def _lock_and_drain_screen(session: Session, lane: DatabaseLane, actor: Us
 
     if node_controls.drain_scheduler.is_scheduled():
         remaining = node_controls.drain_scheduler.remaining_seconds()
-        await session.write_line(
-            colored(
-                f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
-                f"{format_remaining_seconds(remaining)}.",
-                fg_color=ALERT_COLOR, bold=True,
-            )
+        choice = await _scheduled_action_prelude(
+            session,
+            f"\r\nA drain is already scheduled -- non-SysOps will be disconnected in "
+            f"{format_remaining_seconds(remaining)}.",
         )
-        if await prompt_yes_no(session, "Cancel it?", default=False):
+        if choice is None:
+            return
+        if choice == "c":
             node_controls.drain_scheduler.cancel()
             await lane.run(record_action, actor=actor, action="cancel_drain")
             _logger.info("scheduled drain cancelled by %s", actor.username)
             await session.write_line("Scheduled drain cancelled.")
             return
         await session.write_line(
-            colored("Continuing -- scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
+            colored("Scheduling a new drain will replace it.", fg_color=MUTED_COLOR)
         )
 
-    await session.write_line(
-        colored(
-            "\r\nThis immediately locks out new non-SysOp logins, then warns every "
-            "connected non-SysOp session, waits, and disconnects them. SysOp sessions "
-            "(including this one) are never warned or disconnected. Maintenance mode "
-            "stays on afterward until you run this again to unlock.",
-            fg_color=MUTED_COLOR,
-        )
+    await _write_wrapped_subtitle(
+        session,
+        "\r\nThis immediately locks out new non-SysOp logins, then warns every "
+        "connected non-SysOp session, waits, and disconnects them. SysOp sessions "
+        "(including this one) are never warned or disconnected. Maintenance mode "
+        "stays on afterward until you run this again to unlock.",
     )
-    await write_prompt(session, "Delay in seconds before disconnecting [60]: ")
-    delay_raw = (await session.read_line()).strip()
-    try:
-        delay_seconds = float(delay_raw) if delay_raw else 60.0
-    except ValueError:
-        await session.write_line("Not a number -- cancelled.")
-        return
-    if delay_seconds < 0:
-        await session.write_line("Delay cannot be negative -- cancelled.")
-        return
 
-    await write_prompt(session, "Custom broadcast message (leave blank for the default): ")
-    message_raw = (await session.read_line()).strip()
-    message = message_raw or None
+    draft: dict = {"delay_seconds": 60.0, "message": None}
 
-    if not await prompt_yes_no(
-        session, f"\r\nConfirm lock & drain (lock now, disconnect non-SysOps after {int(delay_seconds)}s)?", default=False
-    ):
-        await session.write_line("Cancelled.")
-        return
+    async def save(draft: dict) -> bool | None:
+        delay_seconds = draft["delay_seconds"]
+        message = draft["message"]
+        if not await prompt_yes_no(
+            session,
+            f"Confirm lock & drain (lock now, disconnect non-SysOps after {int(delay_seconds)}s)?",
+            default=False,
+        ):
+            await session.write_line("Cancelled.")
+            return None
 
-    await lane.run(
-        record_action, actor=actor, action="trigger_lock_and_drain",
-        detail=(
-            f"delay_seconds={delay_seconds}, message={message!r}, "
-            f"lockdown_pre_existing={lockdown_already_independent}"
-        ),
-    )
-    _logger.info("lock & drain triggered by %s (delay_seconds=%s)", actor.username, delay_seconds)
-    if not lockdown_already_independent:
-        node_controls.maintenance.enable_lockdown(source="lock_and_drain")
-    task = asyncio.create_task(
-        run_drain_sequence(
-            session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
+        await lane.run(
+            record_action, actor=actor, action="trigger_lock_and_drain",
+            detail=(
+                f"delay_seconds={delay_seconds}, message={message!r}, "
+                f"lockdown_pre_existing={lockdown_already_independent}"
+            ),
         )
-    )
-    loop = asyncio.get_running_loop()
-    node_controls.drain_scheduler.schedule(
-        task, deadline=loop.time() + delay_seconds, message=message, source="lock_and_drain"
-    )
-    if lockdown_already_independent:
-        await session.write_line(
-            f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s. "
-            "The existing maintenance lock (enabled independently) was left as-is."
+        _logger.info("lock & drain triggered by %s (delay_seconds=%s)", actor.username, delay_seconds)
+        if not lockdown_already_independent:
+            node_controls.maintenance.enable_lockdown(source="lock_and_drain")
+        task = asyncio.create_task(
+            run_drain_sequence(
+                session_registry=node_controls.session_registry, delay_seconds=delay_seconds, message=message,
+            )
         )
-    else:
-        await session.write_line(
-            f"Locked -- new non-SysOp logins are blocked, and non-SysOp sessions will be "
-            f"disconnected in {int(delay_seconds)}s."
+        loop = asyncio.get_running_loop()
+        node_controls.drain_scheduler.schedule(
+            task, deadline=loop.time() + delay_seconds, message=message, source="lock_and_drain"
         )
+        if lockdown_already_independent:
+            await session.write_line(
+                f"Drain started -- non-SysOp sessions will be disconnected in {int(delay_seconds)}s. "
+                "The existing maintenance lock (enabled independently) was left as-is."
+            )
+        else:
+            await session.write_line(
+                f"Locked -- new non-SysOp logins are blocked, and non-SysOp sessions will be "
+                f"disconnected in {int(delay_seconds)}s."
+            )
+        return True
+
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title="Lock & drain",
+        fields=_drain_field_specs(), draft=draft, save=save,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 # -- banners & mastheads umbrella (issue #178) -----------------------------
@@ -11136,20 +11310,32 @@ async def _draw_area_menu(
 async def _gc_screen(session: Session, lane: DatabaseLane) -> None:
     """
     Reference-aware blob garbage collection (GitHub issue #35): always
-    shows a dry-run report first, then asks separately before actually
-    reclaiming anything -- the same "preview, then explicit confirm"
-    shape delete confirmations elsewhere in this menu use, appropriate
-    here too since this is a one-way filesystem operation the database
-    itself can't undo.
+    shows a dry-run report first, then offers the actual reclaim as an
+    explicit hotkey -- the "preview, then explicit confirm" shape is
+    kept because this is a one-way filesystem operation the database
+    itself can't undo. Issue #282: the confirm used to be a yes/no that
+    gated leaving the screen; `[B]ack` now leaves without a question,
+    and a report with nothing to reclaim never offers anything.
     """
     preview = await lane.run(reclaim_orphaned_blobs, dry_run=True)
     await _write_gc_report(session, preview)
     if preview.reclaimable_blobs == 0:
         return
-    if not await prompt_yes_no(session, "Reclaim this space now?", default=False):
-        return
-    result = await lane.run(reclaim_orphaned_blobs, dry_run=False)
-    await _write_gc_report(session, result)
+    await session.write_line(
+        action_bar([menu_key("R", "eclaim now"), menu_key("B", "ack")], width=session.terminal_width)
+    )
+    await session.write("Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return
+        if choice == "r":
+            await session.write_line("")
+            result = await lane.run(reclaim_orphaned_blobs, dry_run=False)
+            await _write_gc_report(session, result)
+            return
+        await session.write(reject_unhandled_key(choice))
 
 
 def _format_bytes(size_bytes: int) -> str:
