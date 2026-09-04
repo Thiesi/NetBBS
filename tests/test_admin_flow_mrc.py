@@ -146,7 +146,7 @@ async def _open_channel_detail(session, lane, sysop, lobby, *, mrc_bridge=None):
 
 
 def test_channel_detail_maps_pauses_and_unmaps_a_room(db, lane, sysop, lobby):
-    session = FakeSession(["m", "#General", "p", "p", "m", "-", "b"])
+    session = FakeSession(["m", "#General", "p", "p", "u", "b"])
     asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
     text = _visible(_written_text(session))
     assert "MRC room: none (not bridged)" in text
@@ -319,7 +319,7 @@ def test_standalone_mapping_changes_say_they_are_not_instant(db, lane, sysop, lo
     """Review of #275: without a bridge in reach (the standalone admin
     CLI), a pause or unmap only changes the database; the screen must
     not claim the live bridge stopped relaying."""
-    session = FakeSession(["m", "#General", "p", "m", "-", "b"])
+    session = FakeSession(["m", "#General", "p", "u", "b"])
     asyncio.run(_open_channel_detail(session, lane, sysop, lobby))
     text = _visible(_written_text(session))
     assert text.count("A running node applies this within a minute") == 3

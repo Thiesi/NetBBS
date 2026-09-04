@@ -981,6 +981,23 @@ was itself an unresolved Tab — every other keystroke (including ones that
 change nothing, like Left then Right) must clear that flag before its own
 handling runs.
 
+### `edit_resource_draft` save contract: raise to retry, return to leave
+
+`edit_resource_draft` returns whatever the caller's `save(draft)` returns,
+`None` included -- so a `save` that prints a validation message and
+`return`s closes the editor and discards the draft, which is what the
+shutdown/drain screens want for a declined final confirmation but not
+what a "fill in X first" rejection wants. The only retry path is an
+exception of the caller's `error_type`: the editor prints
+`Could not save: <message>` and redraws with the draft intact. Every
+issue #282 editor therefore raises its `error_type` (`ValueError`,
+`ModeratorGrantError`, the category error, ...) for missing fields and
+for a declined in-save safety confirmation whose draft should survive,
+and reserves `return None` for "leave the screen, nothing saved". A
+scripted test only proves the difference if it keeps typing after the
+rejected save (the next key would otherwise be swallowed by the parent
+menu either way).
+
 ### `edit_resource_draft` section-based pagination
 
 A sectioned screen (`FieldSpec.section` set) whose full field list, at
