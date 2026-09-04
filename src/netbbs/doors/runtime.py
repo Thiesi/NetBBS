@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 import time
@@ -124,6 +125,26 @@ def _write_door_info(db: Database, workdir: Path, session: Session, player: User
     path = workdir / "door_info.json"
     path.write_text(json.dumps(info), encoding="utf-8")
     return path
+
+
+def _door_environment(info_path: Path) -> dict[str, str]:
+    """Build the door's deliberately minimal execution environment.
+
+    A platform's home-directory locator is execution context rather than a
+    door capability: the child already runs as the same OS user and can reach
+    that user's files.  Supplying it explicitly keeps ``Path.home()`` stable
+    when the rest of the parent environment is intentionally not inherited.
+    In particular, Windows has no password-database fallback when
+    ``USERPROFILE`` is absent, so a persistent door would otherwise resolve a
+    tempfile fallback relative to its disposable working directory.
+    """
+    env = {"NETBBS_DOOR_INFO": str(info_path)}
+    try:
+        home = str(Path.home())
+    except RuntimeError:
+        return env
+    env["USERPROFILE" if os.name == "nt" else "HOME"] = home
+    return env
 
 
 async def _pump_input(session: Session, proc: asyncio.subprocess.Process) -> None:
@@ -209,7 +230,7 @@ async def run_door(
     start = time.monotonic()
     try:
         info_path = await lane.run(_write_door_info, workdir, session, player)
-        env = {"NETBBS_DOOR_INFO": str(info_path)}
+        env = _door_environment(info_path)
 
         try:
             proc = await asyncio.create_subprocess_exec(

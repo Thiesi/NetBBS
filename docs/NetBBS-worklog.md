@@ -3484,15 +3484,18 @@ NetBSD/Linux node enforces; only the async wall-time watchdog (pure
 the `resource.setrlimit` ceilings themselves needs to happen on an
 actual POSIX target, not this Windows dev box.
 
-`netbbs.doors.runtime.run_door` builds the child's environment as a
-literal `{"NETBBS_DOOR_INFO": str(info_path)}` and passes it straight to
-`asyncio.create_subprocess_exec`'s `env=` -- which *replaces* the child's
-environment outright rather than merging with NetBBS's own. A door gets
-exactly that one variable, nothing inherited from the parent process and
-no way for a SysOp to hand it custom configuration through the door
-registry (`Door` has no env/config field at all, only
-`executable_path`/`args`). Any door wanting an operator-tunable setting
-either needs a config file at a fixed path relative to its own script, a
+`netbbs.doors.runtime.run_door` builds a deliberately minimal child
+environment and passes it straight to `asyncio.create_subprocess_exec`'s
+`env=` -- which *replaces* the child's environment outright rather than
+merging with NetBBS's own. A door gets `NETBBS_DOOR_INFO` plus the
+platform's home-directory locator (`HOME` or `USERPROFILE`), resolved by
+the parent so persistent doors do not mistake their disposable scratch
+working directory for durable storage. No other parent variables are
+inherited, and there is no way for a SysOp to hand a door custom
+configuration through the door registry (`Door` has no env/config field
+at all, only `executable_path`/`args`). Any door wanting an
+operator-tunable setting either needs a config file at a fixed path
+relative to its own script, a
 CLI flag folded into `args`, or a wrapper launcher script that sets env
 vars before exec'ing the real interpreter -- not a registry-level env
 override, because that mechanism doesn't exist in v1.

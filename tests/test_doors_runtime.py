@@ -8,13 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import importlib.util
 import json
 import os
 import sys
 import textwrap
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -283,83 +281,22 @@ def test_the_real_demo_door_plays_a_full_round_through_run_door(db, lane, player
 # no longer affects where it saves.
 #
 # What that default *does* still depend on is a real user's home
-# directory, and `run_door` replaces a door's environment outright (only
-# NETBBS_DOOR_INFO survives) -- there's no way to hand it
-# VOIDRUNNER_SAVE_DIR through the real launch path, so this test cleans
-# up whatever the door's own `_default_save_dir()` actually resolves to
-# afterward, computed identically to how the door itself computes it
-# (correct regardless of which platform-specific fallback branch fires).
+# directory. `run_door` replaces a door's environment outright but
+# explicitly supplies the platform home locator alongside NETBBS_DOOR_INFO,
+# keeping persistent state outside the disposable scratch directory.
 
 _VOIDRUNNER_PATH = _BUNDLED_DOORS_DIR / "voidrunner.py"
 
 
-def _load_voidrunner_default_save_dir() -> Path:
-    """Computed the same way the real door subprocess would actually see
-    it, not the test process's own normal environment -- `run_door`
-    replaces a door's entire environment (only `NETBBS_DOOR_INFO`
-    survives), which changes what `Path.home()` itself resolves to (see
-    that module's own Windows-specific fallback). `tempfile.tempdir` is
-    reset too, alongside `os.environ` -- `tempfile.gettempdir()` caches
-    its result at module level after the first call, so without this a
-    test process that already called it once (pytest itself routinely
-    does) would keep returning that *earlier*, unstripped-environment
-    answer, not what a genuinely fresh process (the real child) computes
-    once `TEMP`/`TMP` aren't present -- silently checked, verified to
-    diverge on this project's own Windows dev environment (`c:\\tmp`
-    fresh vs. the normal per-user temp directory cached)."""
-    spec = importlib.util.spec_from_file_location("voidrunner_under_test", _VOIDRUNNER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module  # dataclasses needs this registered before exec_module
-    spec.loader.exec_module(module)
-    import tempfile
-
-    with mock.patch.dict(os.environ, {"NETBBS_DOOR_INFO": "unused"}, clear=True):
-        with mock.patch.object(tempfile, "tempdir", None):
-            return module._default_save_dir()
-
-
-def _remove_hall_of_fame_entry(save_dir: Path, user_id: int) -> None:
-    """The door also writes a *shared* `leaderboard.json` in this same
-    default save directory (see `update_hall_of_fame`) -- unlike
-    `save_path`, this file may genuinely hold other pilots' real dogfood
-    history if anyone has ever played Voidrunner for real on this same
-    machine using its own default (non-overridden) save location, so
-    cleanup here must only ever strip out this test's own entry, never
-    delete or truncate the whole file."""
-    path = save_dir / "leaderboard.json"
-    if not path.exists():
-        return
-    try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(entries, list):
-        return
-    remaining = [e for e in entries if e.get("user_id") != user_id]
-    if remaining:
-        path.write_text(json.dumps(remaining), encoding="utf-8")
-    else:
-        path.unlink(missing_ok=True)
-
-
-def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(db, lane, player):
+def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
+    db, lane, player, tmp_path, monkeypatch,
+):
+    door_home = tmp_path / "door-home"
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(door_home))
     door = create_door(db, "Voidrunner", sys.executable, args=(str(_VOIDRUNNER_PATH),), creator=player)
     session = FakeSession()
-    save_dir = _load_voidrunner_default_save_dir()
+    save_dir = door_home / ".netbbs" / "voidrunner_saves"
     save_path = save_dir / f"{player.id}.json"
-    # Belt-and-suspenders: a prior interrupted run of this same test
-    # (skipping its own `finally` cleanup below -- a hard process kill,
-    # not an ordinary assertion failure, which `finally` already
-    # survives) could leave a stale save behind at this same shared
-    # path, `player.id` being deterministically 1 for a fresh throwaway
-    # DB's first created user -- which desyncs this scripted keystroke
-    # sequence entirely (a *resumed* career skips the callsign/confirm-
-    # launch prompts a *new* one expects first). Caught for real: a
-    # leftover file from an earlier ad hoc manual repro of this exact
-    # scenario made this test fail intermittently.
-    save_path.unlink(missing_ok=True)
-    _remove_hall_of_fame_entry(save_dir, player.id)
 
     async def scenario():
         task = asyncio.create_task(_run(session, lane, door, player))
@@ -369,17 +306,13 @@ def test_the_real_space_trading_door_plays_a_full_opening_loop_through_run_door(
         session.type_in("\rYMAB3\rQS Q")
         return await task
 
-    try:
-        result = asyncio.run(scenario())
+    result = asyncio.run(scenario())
 
-        assert result.reason == "exited"
-        assert result.exit_code == 0
-        output = bytes(session.written).decode()
-        assert "V O I D R U N N E R" in output  # the title screen's letter-spaced wordmark
-        assert "keeper" in output  # the real caller handle, from the drop-file
-        assert "Bought 3x Food" in output
-        assert "Docking clamps engaged" in output
-        assert save_path.exists()  # the door manages its own save, unmediated by NetBBS
-    finally:
-        save_path.unlink(missing_ok=True)
-        _remove_hall_of_fame_entry(save_dir, player.id)
+    assert result.reason == "exited"
+    assert result.exit_code == 0
+    output = bytes(session.written).decode()
+    assert "V O I D R U N N E R" in output  # the title screen's letter-spaced wordmark
+    assert "keeper" in output  # the real caller handle, from the drop-file
+    assert "Bought 3x Food" in output
+    assert "Docking clamps engaged" in output
+    assert save_path.exists()  # the door manages its own save, unmediated by NetBBS
