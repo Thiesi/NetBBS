@@ -2,9 +2,11 @@
 Integration tests for the post-draft save/resume feature (dogfood
 feature request, issue #149): `/exit`/`/quit` (line editor) and "Keep
 draft & exit" (fullscreen editor) leave the in-progress post body on
-disk instead of discarding it, and `_show_board` proactively offers to
-[E]dit/[D]elete/[I]gnore a saved draft the next time the caller enters
-that same board -- before the ordinary post list/navigation flow.
+disk instead of discarding it, and `_show_board` surfaces a saved draft
+the next time the caller enters that same board as a notice plus a
+`[D]raft` menu entry (resume / discard / leave it) -- issue #282 replaced
+the earlier modal [E]dit/[D]elete/[I]gnore question that fired before
+the ordinary post list/navigation flow.
 
 Same `FakeSession` shape as tests/test_login_flow_fullscreen_editor.py
 (a single ordered input queue serves read_key/read_line/
@@ -258,6 +260,34 @@ def test_leaving_a_saved_draft_alone_offers_it_again_next_time(db, alice):
     reentry_session = FakeSession(["b", ""])
     asyncio.run(board_flow._show_board(reentry_session, db, board, alice))
     assert "saved post draft" in _written_text(reentry_session)
+
+
+def test_post_with_a_saved_draft_goes_through_resume_or_discard(db, alice):
+    """Codex review on #287: there is one autosave slot per caller and
+    board, so [P]ost while a draft exists must not compose straight into
+    it (the editor's own recovery prompt, or fullscreen autosave, would
+    consume the draft without an explicit choice)."""
+    board = create_board(db, "general", creator=alice)
+    exit_session = FakeSession(["p", "Subject", "saved body", "/exit", "b"])
+    asyncio.run(board_flow._show_board(exit_session, db, board, alice))
+
+    # [P]ost -> the draft menu -> [B]ack keeps the draft, nothing composed.
+    back_session = FakeSession(["p", "b", "b", ""])
+    asyncio.run(board_flow._show_board(back_session, db, board, alice))
+    text = _written_text(back_session)
+    assert "Resume it?" not in text
+    assert "Enter message text" not in text
+    assert board_flow._post_draft_path(db, kind="new", board=board, user=alice).exists()
+
+    # [P]ost -> [D]iscard deletes it and opens a fresh editor.
+    fresh_session = FakeSession(["p", "d", "New subject", "fresh body", "/done", "p", "b"])
+    asyncio.run(board_flow._show_board(fresh_session, db, board, alice))
+    text = _written_text(fresh_session)
+    assert "Draft deleted" in text and "Posted" in text
+    assert "Resume it?" not in text
+    post = list_posts_page(db, board, alice).posts[0]
+    assert post.subject == "New subject" and post.body == "fresh body"
+    assert not board_flow._post_draft_path(db, kind="new", board=board, user=alice).exists()
 
 
 def test_no_prompt_offered_when_no_draft_is_saved(db, alice):

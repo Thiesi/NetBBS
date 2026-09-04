@@ -272,154 +272,164 @@ async def _caller_who_screen(
         ]
         return local + _remote_who_entries(db, link_context)
 
-    selected = await pick_item(
-        session, await _load_entries(),
-        name_of=_who_entry_name,
-        stable_id_of=lambda e: e.session_id if isinstance(e, SessionSummary) else e.stable_id,
-        description_of=lambda e: _who_entry_description(db, e),
-        title="Who's online",
-        empty_message="No one else is online right now.",
-        # Issue #102: this is exactly the "list that goes stale while
-        # you're looking at it" case Ctrl-R exists for -- who's
-        # connected changes independently of anything this screen does.
-        refresh=_load_entries,
-        description_level=menu_description_level(db, user),
-        redraw_in_place=redraw_in_place_enabled(db, user),
-        unicode_style=unicode_style_enabled(db, user),
-        collapsed=breadcrumb_collapsed_enabled(db, user),
-        accent_color=effective_accent_color(session, db),
-        header_color=effective_header_color(session, db),
-    )
-    if selected is None:
-        return
+    async def _act_on(selected: _WhoEntry) -> None:
+        if isinstance(selected, _RemoteWhoEntry):
+            # Issue #168: a one-off live message across nodes, over a direct
+            # or relayed real-time session; chat invites stay local-only.
+            from netbbs.net.link_direct import send_live_direct_message
 
-    if isinstance(selected, _RemoteWhoEntry):
-        # Issue #168: a one-off live message across nodes, over a direct
-        # or relayed real-time session; chat invites stay local-only.
-        from netbbs.net.link_direct import send_live_direct_message
-
-        if lane is None or link_context is None or link_context.direct_chat is None:
+            if lane is None or link_context is None or link_context.direct_chat is None:
+                await session.write_line(
+                    colored(
+                        f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
+                        "messaging isn't available from this session.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+                return
+            node_label = _remote_who_node_label(db, selected)
+            # Issue #282: selecting a remote caller used to drop straight
+            # into the message prompt, so someone who picked the name only
+            # to see where they were connected had to Enter past a blank
+            # line to get out. Same [M]essage/[B]ack shape as a local entry
+            # (minus the chat invite, which stays local-only).
             await session.write_line(
-                colored(
-                    f"{sanitize_text(selected.username)} is connected to a different linked node -- live "
-                    "messaging isn't available from this session.",
-                    fg_color=MUTED_COLOR,
+                "\r\n" + screen_title(
+                    f"{sanitize_text(selected.username)}@{sanitize_text(node_label)}",
+                    breadcrumb=(session.node_display_name, "Who's online"),
+                    subtitle="Connected to a different linked node -- a live one-off message is available.",
+                    width=session.terminal_width,
+                    clear=redraw_in_place_enabled(db, user),
+                    unicode_style=unicode_style_enabled(db, user),
+                    collapsed=breadcrumb_collapsed_enabled(db, user),
+                    header_color=effective_header_color(session, db),
+                    node_name_gradient=session.node_name_gradient,
                 )
             )
+            await session.write_line(
+                menu_row(
+                    [
+                        MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message"),
+                        MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"),
+                    ],
+                    width=session.terminal_width, height=session.terminal_height,
+                    description_level=menu_description_level(db, user),
+                )
+            )
+            await write_prompt(session, "Choice: ")
+            while True:
+                action = (await session.read_key()).lower()
+                if action in ("m", "b"):
+                    await session.write_line("")
+                    break
+                await session.write(reject_unhandled_key(action))
+            if action == "b":
+                return
+            await write_prompt(
+                session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
+            )
+            message = (await session.read_line()).strip()
+            if not message:
+                await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
+                return
+            await send_live_direct_message(
+                session, lane, user, f"{selected.username}@{selected.node_fingerprint}", message,
+                link_context=link_context,
+            )
             return
-        node_label = _remote_who_node_label(db, selected)
-        # Issue #282: selecting a remote caller used to drop straight
-        # into the message prompt, so someone who picked the name only
-        # to see where they were connected had to Enter past a blank
-        # line to get out. Same [M]essage/[B]ack shape as a local entry
-        # (minus the chat invite, which stays local-only).
+
+        assert selected.username is not None  # filtered above
+        try:
+            target = get_user_by_username(db, selected.username)
+        except AuthError:
+            await session.write_line(colored("That account no longer exists.", fg_color=ERROR_COLOR))
+            return
+
+        if not accepts_direct_messages(db, target):
+            await session.write_line(
+                colored(f"{target.username} has opted out of receiving direct messages.", fg_color=MUTED_COLOR)
+            )
+            return
+
+        offer_invite = direct_invites is not None and lane is not None
         await session.write_line(
             "\r\n" + screen_title(
-                f"{sanitize_text(selected.username)}@{sanitize_text(node_label)}",
+                target.username,
                 breadcrumb=(session.node_display_name, "Who's online"),
-                subtitle="Connected to a different linked node -- a live one-off message is available.",
+                subtitle="Choose how you would like to connect.",
                 width=session.terminal_width,
                 clear=redraw_in_place_enabled(db, user),
                 unicode_style=unicode_style_enabled(db, user),
                 collapsed=breadcrumb_collapsed_enabled(db, user),
                 header_color=effective_header_color(session, db),
-                node_name_gradient=session.node_name_gradient,
-            )
+            node_name_gradient=session.node_name_gradient)
         )
+        options = [MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off message")]
+        if offer_invite:
+            options.append(MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat"))
+        options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
         await session.write_line(
             menu_row(
-                [
-                    MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off live message"),
-                    MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"),
-                ],
-                width=session.terminal_width, height=session.terminal_height,
+                options, width=session.terminal_width, height=session.terminal_height,
                 description_level=menu_description_level(db, user),
             )
         )
-        await session.write("Choice: ")
-        action = (await session.read_key()).lower()
-        await session.write_line("")
+        await write_prompt(session, "Choice: ")
+        while True:
+            action = (await session.read_key()).lower()
+            if action == "b" or action == "m" or (offer_invite and action == "i"):
+                await session.write_line("")
+                break
+            await session.write(reject_unhandled_key(action))
+
         if action == "b":
             return
-        if action != "m":
-            await session.write(reject_unhandled_key(action))
+        if action == "i":
+            assert direct_invites is not None and lane is not None  # offer_invite's own condition
+            await run_direct_chat_invite_flow(
+                session, lane, hub, presence, direct_invites, node_controls.session_registry, user, target,
+            )
             return
-        await write_prompt(
-            session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
-        )
+
+        await write_prompt(session, f"Message to {selected.username}: ")
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
             return
-        await send_live_direct_message(
-            session, lane, user, f"{selected.username}@{selected.node_fingerprint}", message,
-            link_context=link_context,
+
+        delivered = await node_controls.session_registry.notify_one(
+            selected.session,
+            colored(f"\r\n*** Message from {user.username}: {sanitize_text(message)} ***", fg_color=ALERT_COLOR, bold=True),
         )
-        return
+        if delivered:
+            await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
+        else:
+            await session.write_line(colored(f"{selected.username} is no longer online.", fg_color=ERROR_COLOR))
 
-    assert selected.username is not None  # filtered above
-    try:
-        target = get_user_by_username(db, selected.username)
-    except AuthError:
-        await session.write_line(colored("That account no longer exists.", fg_color=ERROR_COLOR))
-        return
-
-    if not accepts_direct_messages(db, target):
-        await session.write_line(
-            colored(f"{target.username} has opted out of receiving direct messages.", fg_color=MUTED_COLOR)
-        )
-        return
-
-    offer_invite = direct_invites is not None and lane is not None
-    await session.write_line(
-        "\r\n" + screen_title(
-            target.username,
-            breadcrumb=(session.node_display_name, "Who's online"),
-            subtitle="Choose how you would like to connect.",
-            width=session.terminal_width,
-            clear=redraw_in_place_enabled(db, user),
+    # Issue #282 (Codex review): every path back from a selected entry --
+    # [B]ack, a sent message, a refused target -- lands on the list
+    # again, as the menu entry's own "Return to Who's online" says, so
+    # a caller can look at (or message) more than one person per visit.
+    # [B]ack on the list itself is the way out.
+    while True:
+        selected = await pick_item(
+            session, await _load_entries(),
+            name_of=_who_entry_name,
+            stable_id_of=lambda e: e.session_id if isinstance(e, SessionSummary) else e.stable_id,
+            description_of=lambda e: _who_entry_description(db, e),
+            title="Who's online",
+            empty_message="No one else is online right now.",
+            # Issue #102: this is exactly the "list that goes stale while
+            # you're looking at it" case Ctrl-R exists for -- who's
+            # connected changes independently of anything this screen does.
+            refresh=_load_entries,
+            description_level=menu_description_level(db, user),
+            redraw_in_place=redraw_in_place_enabled(db, user),
             unicode_style=unicode_style_enabled(db, user),
             collapsed=breadcrumb_collapsed_enabled(db, user),
+            accent_color=effective_accent_color(session, db),
             header_color=effective_header_color(session, db),
-        node_name_gradient=session.node_name_gradient)
-    )
-    options = [MenuEntry(label=menu_key("M", "essage"), brief="Send a one-off message")]
-    if offer_invite:
-        options.append(MenuEntry(label=menu_key("I", "nvite to chat"), brief="Invite them to a direct chat"))
-    options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to Who's online"))
-    await session.write_line(
-        menu_row(
-            options, width=session.terminal_width, height=session.terminal_height,
-            description_level=menu_description_level(db, user),
         )
-    )
-    await session.write("Choice: ")
-    action = (await session.read_key()).lower()
-    await session.write_line("")
-
-    if action == "b":
-        return
-    if offer_invite and action == "i":
-        assert direct_invites is not None and lane is not None  # offer_invite's own condition
-        await run_direct_chat_invite_flow(
-            session, lane, hub, presence, direct_invites, node_controls.session_registry, user, target,
-        )
-        return
-    if action != "m":
-        await session.write(reject_unhandled_key(action))
-        return
-
-    await write_prompt(session, f"Message to {selected.username}: ")
-    message = (await session.read_line()).strip()
-    if not message:
-        await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
-        return
-
-    delivered = await node_controls.session_registry.notify_one(
-        selected.session,
-        colored(f"\r\n*** Message from {user.username}: {sanitize_text(message)} ***", fg_color=ALERT_COLOR, bold=True),
-    )
-    if delivered:
-        await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
-    else:
-        await session.write_line(colored(f"{selected.username} is no longer online.", fg_color=ERROR_COLOR))
+        if selected is None:
+            return
+        await _act_on(selected)

@@ -347,10 +347,12 @@ discarding from saving: `/cancel` (line editor) or discarding (fullscreen
 editor) always deletes any in-progress draft; `/exit`/`/quit` (line editor)
 or "Keep draft & exit" (fullscreen editor) instead save it to the same
 per-caller autosave target the fullscreen editor already used for crash
-recovery, and return without committing. Board entry proactively offers to
-edit, delete, or ignore a saved new-post draft for that board before the
-ordinary post list/navigation flow; re-opening a specific post for edit
-offers to resume its own saved draft the same way the pre-existing
+recovery, and return without committing. A board with a saved new-post draft
+for the caller shows a notice and a `[D]raft` entry on its own menu (resume,
+discard, or leave it) instead of interrupting entry with a question; `[P]ost`
+while such a draft exists goes through the same resume/discard choice, since
+there is one autosave slot per caller and board. Re-opening a specific post
+for edit offers to resume its own saved draft the same way the pre-existing
 crash-recovery prompt already did. Mail composition and other callers that
 never opt into a draft target keep exactly the old discard-only behavior --
 `/exit`/`/quit` are not recognized there at all.

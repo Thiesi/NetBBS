@@ -1157,7 +1157,7 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                 width=session.terminal_width,
             )
         )
-        await session.write("Choice: ")
+        await write_prompt(session, "Choice: ")
 
     await _draw()
     while True:
