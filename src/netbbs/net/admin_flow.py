@@ -7617,8 +7617,8 @@ async def _draw_mastheads_menu(
         "\r\n" + _menu_row(
             [
                 MenuEntry(label=menu_key("M", "ain menu"), brief="Custom art above the main menu"),
-                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above every board-list view"),
-                MenuEntry(label=menu_key("F", "ile areas"), brief="Above every file-area-list view"),
+                MenuEntry(label=menu_key("o", "ards", prefix="Message b"), brief="Above all message-board-list views"),
+                MenuEntry(label=menu_key("F", "ile areas"), brief="Above all file-area-list views"),
                 MenuEntry(label=menu_key("C", "hat channels"), brief="Above the channel picker"),
                 MenuEntry(label=menu_key("B", "ack"), brief="Return to Mastheads & banners"),
             ],
