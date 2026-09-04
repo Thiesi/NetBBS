@@ -324,7 +324,7 @@ def test_operations_console_wraps_actions_on_a_narrow_terminal(db, lane, sysop):
 
 def test_sysop_menu_reaches_trust_domain_configuration(db, lane, sysop):
     session = FakeSession(
-        ["s", "p", "d", "a", "friends", "Known independent operators", "0.75", "b", "b", "b"]
+        ["s", "p", "d", "a", "i", "friends", "n", "Known independent operators", "w", "0.75", "s", "b", "b", "b", "b"]
     )
     _run(session, lane, sysop)
 
@@ -343,7 +343,7 @@ def test_trust_domains_screen_writes_a_newline_before_the_next_prompt(db, lane, 
     true of all five trust-config screens; this is the one the capture
     actually showed."""
     session = FakeSession(
-        ["s", "p", "d", "a", "friends", "Known independent operators", "0.75", "b", "b", "b"]
+        ["s", "p", "d", "a", "i", "friends", "n", "Known independent operators", "w", "0.75", "s", "b", "b", "b", "b"]
     )
     _run(session, lane, sysop)
 
@@ -352,7 +352,8 @@ def test_trust_domains_screen_writes_a_newline_before_the_next_prompt(db, lane, 
     # between ANSI color codes (menu_key(), issue #160's wrap fix for
     # this prompt), so the literal bracket-to-letter span is no longer
     # contiguous; the un-colored tail after it still is.
-    assert "]ack: \r\nDomain ID: " in text
+    assert "]ack: \r\n" in text
+    assert "Domain ID" in _visible(text)
 
 
 def test_trust_domains_screen_rejects_an_unrecognized_key_and_reprompts_instead_of_exiting(
@@ -384,13 +385,11 @@ def test_trust_domains_screen_gives_a_friendly_message_for_a_non_numeric_weight(
     float: ''") straight to the SysOp, instead of a message matching
     the rest of the admin UI's numeric-input convention (_read_int's
     "Not a number -- cancelled.")."""
-    session = FakeSession(
-        ["s", "p", "d", "a", "friends", "Known independent operators", "", "b", "b", "b"]
-    )
+    session = FakeSession(["s", "p", "d", "a", "w", "abc", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
-    assert "Not a number -- cancelled." in text
+    assert "Not a number." in text
     assert "could not convert string to float" not in text
     assert list_trust_domains(db) == []
 
@@ -433,7 +432,7 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",  # choose the only subject
-            "o", "r", "b", "resource abuse reviewed",
+            "o", "d", "r", "t", "b", "r", "resource abuse reviewed", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -470,7 +469,8 @@ def test_warned_node_requires_technical_identity_confirmation_for_trust_override
     register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
     session = FakeSession([
         "s", "p", "s", "0", "1",
-        "o", "r", "b", "reviewed but identity changed", "n",
+        "o", "d", "r", "t", "b", "r", "reviewed but identity changed", "s", "n",
+        "b", "y",  # leave the editor, confirming the discard of the unsaved draft
         "b", "b", "b", "b",
     ])
 
@@ -522,7 +522,9 @@ def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
         return False
 
     monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
-    session = FakeSession(["r", "b", "identity changed again"])
+    # [D]imension -> resource, S[t]ate -> blocked, [R]eason, [S]ave; the
+    # declined re-confirmation leaves the draft, so [B]ack + "y" discards.
+    session = FakeSession(["d", "r", "t", "b", "r", "identity changed again", "s", "b", "y"])
 
     asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
 
@@ -580,9 +582,14 @@ def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop
     session = FakeSession(
         [
             "s", "p",
-            "d", "a", "emergency", "Emergency operator", "1.0",
-            "r", "a", reporter, "emergency", "identity_integrity:signed_equivocation", "n", "n",
-            "e", "a", reporter, "i", "signed_equivocation", "because", "n",
+            # Trust domains: [A]dd -> editor -> save -> back to the listing -> [B]ack.
+            "d", "a", "i", "emergency", "n", "Emergency operator", "w", "1.0", "s", "b",
+            # Trusted reporters: [N]ode -> "(type it)" entry -> the fingerprint, then domain/scopes, save.
+            "r", "a", "n", "0", "1", reporter, "d", "emergency", "c", "identity_integrity:signed_equivocation", "s", "b",
+            # Safety deviations: node, [D]imension -> [I]dentity, category, justification, save -> DANGER: n,
+            # then leave the editor discarding the draft.
+            "e", "a", "n", "0", "1", reporter, "d", "i", "c", "signed_equivocation", "j", "because", "s", "n",
+            "b", "y", "b",
             "b", "b", "b",
         ]
     )
@@ -597,8 +604,8 @@ def test_sysop_menu_reaches_separate_attestation_authority_configuration(
     identity_node = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
-            "s", "p", "i", "a", identity_node, "age,name",
-            "verified identity contractor", "b", "b", "b",
+            "s", "p", "i", "a", "n", "0", "1", identity_node,
+            "r", "verified identity contractor", "s", "b", "b", "b", "b",
         ]
     )
     _run(session, lane, sysop)
@@ -650,7 +657,7 @@ def test_trust_configuration_requires_confirmation_for_a_reused_familiar_name(
         created_at="2026-09-04T08:02:00+00:00",
     )
     session = FakeSession(
-        ["s", "p", "i", "a", "Familiar Node", "n", "b", "b", "b"]
+        ["s", "p", "i", "a", "n", "0", "1", "Familiar Node", "n", "b", "b", "b", "b", "b"]
     )
 
     _run(session, lane, sysop)
@@ -688,7 +695,7 @@ def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     session = FakeSession(
         [
             "s", "p", "s", "0", "1",
-            "i", "n", "r", "local document review",
+            "i", "o", "a", "r", "local document review", "s",
             "b", "b", "b", "b",
         ]
     )
@@ -697,6 +704,162 @@ def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     assert state.accepted is False
     assert state.reason_code == "sysop_reject"
     assert "Remote attestation override applied and audited." in _written_text(session)
+
+
+def test_trust_anchor_editor_picks_a_stored_peer_and_remove_uses_a_picker(db, lane, sysop):
+    """Issue #282: the node is a picker over stored peers (typed input
+    still available as the first entry), and removal picks from the
+    anchors that exist instead of re-typing a reference."""
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.link.trust import list_trust_anchors
+
+    peer = LinkNode(identity=bootstrap_node_identity("anchor-peer"))
+    save_peer(db, peer.handle_hello(peer.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-04T09:00:00+00:00",
+        friendly_name="Anchor Peer",
+    )))
+
+    # [A]dd -> [N]ode -> the stored peer is entry 02 (01 is "type it") -> [R]eason -> [S]ave.
+    session = FakeSession(["s", "p", "a", "a", "n", "0", "2", "r", "runs the seed", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    anchors = list_trust_anchors(db)
+    assert [a.fingerprint for a in anchors] == [peer.identity.fingerprint]
+    text = _visible(_written_text(session))
+    assert "Anchor Peer" in text and "Trust anchor changed and audited." in text
+
+    # [R]emove -> picker (the only anchor) -> confirm.
+    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    assert list_trust_anchors(db) == []
+    assert "Trust anchor removed and audited." in _written_text(session)
+
+
+def test_trust_editors_back_leaves_policy_untouched(db, lane, sysop):
+    from netbbs.link.trust import list_sole_authorities, list_trust_anchors, list_trust_domains, list_trusted_reporters
+
+    session = FakeSession([
+        "s", "p",
+        "d", "a", "i", "half-typed", "b", "y", "b",  # domain editor, then discard
+        "a", "a", "b", "b",  # anchor editor untouched -> silent back
+        "r", "a", "b", "b",
+        "e", "a", "b", "b",
+        "b", "b", "b",
+    ])
+    _run(session, lane, sysop)
+    assert list_trust_domains(db) == []
+    assert list_trust_anchors(db) == []
+    assert list_trusted_reporters(db) == []
+    assert list_sole_authorities(db) == []
+    assert "saved and audited" not in _written_text(session)
+
+
+def test_trust_override_rejected_save_keeps_the_draft(db, lane, sysop):
+    """A [S]ave with fields missing is reported through the editor's
+    retry path, so what was already entered survives (issue #282)."""
+    subject = TrustSubject.node("remote-node")
+    register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")
+    session = FakeSession([
+        "s", "p", "s", "0", "1",
+        "o", "r", "resource abuse reviewed", "s",  # reason only -> rejected
+        "d", "r", "t", "b", "s",                    # add dimension + state, save
+        "b", "b", "b", "b",
+    ])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "Could not save: choose a [D]imension and a S[t]ate first" in text
+    assert "Trust override applied and audited." in text
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert state.state == TrustState.BLOCKED
+    assert state.explanation["override_reason"] == "resource abuse reviewed"
+
+
+def test_trust_anchor_picker_selection_still_warns_about_a_reused_familiar_name(db, lane, sysop):
+    """Codex review on #290: picking a stored peer from the node picker
+    must go through the same changed-identity confirmation a typed
+    name does, and declining it keeps the draft without a node."""
+    from netbbs.link.events import build_endpoint_descriptor
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+    from netbbs.link.store import save_peer
+    from netbbs.link.trust import list_trust_anchors
+
+    original = bootstrap_node_identity("original-familiar-node")
+    replacement = bootstrap_node_identity("replacement-familiar-node")
+
+    def save_profile(identity, *, friendly_name, created_at):
+        save_peer(
+            db,
+            PeerRecord(
+                fingerprint=identity.fingerprint,
+                root_public_key=bytes(identity.root.verify_key),
+                transitions=identity.transitions,
+                descriptor=build_endpoint_descriptor(
+                    signing_identity=identity.signing_key,
+                    subject_fingerprint=identity.fingerprint,
+                    addresses=None,
+                    outgoing_only=True,
+                    created_at=created_at,
+                    friendly_name=friendly_name,
+                ),
+            ),
+        )
+
+    save_profile(original, friendly_name="Familiar Node", created_at="2026-09-04T08:00:00+00:00")
+    save_profile(original, friendly_name="Renamed Original", created_at="2026-09-04T08:01:00+00:00")
+    save_profile(replacement, friendly_name="Familiar Node", created_at="2026-09-04T08:02:00+00:00")
+
+    # [A]dd -> [N]ode -> pick the replacement (most recently contacted, entry 02) -> warning -> "n".
+    session = FakeSession(["s", "p", "a", "a", "n", "0", "2", "n", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert "No trust policy change made." in text
+    assert "Node: (not chosen)" in _visible(text)
+    assert list_trust_anchors(db) == []
+
+
+def test_attestation_authority_update_keeps_its_existing_scope(db, lane, sysop):
+    """Codex review on #290: choosing a node that is already an authority
+    seeds the draft from its record, so changing only the reason cannot
+    silently widen an age-only scope to age,name."""
+    identity_node = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_attestation_authority(
+        db, identity_node, attributes=["age"], reason="age only", now_iso="2026-09-04T12:00:00.000000Z",
+    )
+    # [A]dd/update -> [N]ode -> "(type it)" -> the fingerprint -> [R]eason -> [S]ave.
+    session = FakeSession(["s", "p", "i", "a", "n", "0", "1", identity_node, "r", "re-reviewed", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    authority = list_attestation_authorities(db)[0]
+    assert authority.attributes == ("age",)
+    assert authority.reason == "re-reviewed"
+    assert "Attributes: age" in _visible(_written_text(session))
+
+
+def test_trust_domain_update_keeps_the_stored_weight(db, lane, sysop):
+    """Codex review on #290: re-entering an existing domain's ID seeds
+    name and weight from it, so renaming alone cannot reset the weight."""
+    from netbbs.link.trust import configure_trust_domain
+
+    configure_trust_domain(db, "friends", display_name="Friends", weight=0.25, actor_user_id=sysop.id)
+    session = FakeSession(["s", "p", "d", "a", "i", "friends", "n", "Close friends", "s", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    domains = list_trust_domains(db)
+    assert [(d.domain_id, d.display_name, d.weight) for d in domains] == [("friends", "Close friends", 0.25)]
+
+
+def test_trust_anchor_removal_picker_shows_the_technical_identity(db, lane, sysop):
+    from netbbs.link.trust import configure_trust_anchor, list_trust_anchors
+
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
+    configure_trust_anchor(db, fingerprint, reason="runs the seed", actor_user_id=sysop.id)
+    # [R]emove -> the only anchor -> confirm.
+    session = FakeSession(["s", "p", "a", "r", "0", "1", "y", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert text.count(fingerprint) >= 2  # in the picker row and in the confirmation
+    assert list_trust_anchors(db) == []
 
 
 # -- create user ----------------------------------------------------------
