@@ -113,6 +113,7 @@ from netbbs.chat.categories import get_category_by_id as get_channel_category_by
 from netbbs.chat.categories import list_subcategories as list_channel_subcategories
 from netbbs.chat.categories import list_top_level_categories as list_top_level_channel_categories
 from netbbs.chat.channels import Channel, ChannelError, create_channel, delete_channel, list_channels, update_channel
+from netbbs.chat.hub import ChatHub
 from netbbs.communities import (
     Community,
     CommunityError,
@@ -707,6 +708,7 @@ async def admin_menu(
             await _content_menu(
                 session, lane, user, link_context=link_context,
                 mrc_bridge=node_controls.mrc_bridge if node_controls is not None else None,
+                chat_hub=node_controls.chat_hub if node_controls is not None else None,
             )
             dashboard_state = await _draw_admin_menu(
                 session, lane, user, node_controls=node_controls, link_context=link_context
@@ -9098,6 +9100,7 @@ async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) 
 async def _content_menu(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
     mrc_bridge: MrcBridge | None = None,
+    chat_hub: ChatHub | None = None,
 ) -> None:
     def _load_stats(db: Database) -> dict[str, Any]:
         all_boards = list_boards(db)
@@ -9151,7 +9154,7 @@ async def _content_menu(
             await _draw_content_menu(session, stats=stats)
         elif choice == "n":
             await session.write_line("")
-            await _channel_menu(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge)
+            await _channel_menu(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
             stats = await lane.run(_load_stats)
             await _draw_content_menu(session, stats=stats)
         elif choice == "c":
@@ -12296,6 +12299,7 @@ async def _delete_door_screen(session: Session, lane: DatabaseLane, actor: User,
 async def _channel_menu(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
     mrc_bridge: MrcBridge | None = None,
+    chat_hub: ChatHub | None = None,
 ) -> None:
     description_level = await lane.run(menu_description_level, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
@@ -12317,7 +12321,7 @@ async def _channel_menu(
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         elif choice == "l":
             await session.write_line("")
-            await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge)
+            await _list_channels_screen(session, lane, actor, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
             status_line = await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width)
             await _draw_channel_menu(session, description_level, redraw_in_place, unicode_style, collapsed, header_color, status_line=status_line)
         else:
@@ -12476,10 +12480,19 @@ def _channel_field_specs(
 
 
 async def _channel_screen(
-    session: Session, lane: DatabaseLane, actor: User, *, existing: Channel | None = None
+    session: Session, lane: DatabaseLane, actor: User, *, existing: Channel | None = None,
+    chat_hub: ChatHub | None = None,
 ) -> Channel | None:
     """Unified create/edit screen -- see `_board_screen`'s own
-    docstring for the general shape and reasoning, identical here."""
+    docstring for the general shape and reasoning, identical here.
+
+    `chat_hub` (issue #277): live membership in `ChatHub` is keyed by
+    channel *name*, and every session already inside holds the old name
+    for its sends, receives and leave. Renaming an occupied channel
+    would therefore cut those callers off from everyone who joins
+    afterwards, so with the running node in reach the rename is refused
+    until the channel is empty; the standalone admin CLI, which cannot
+    see occupancy, says what a rename does to anyone inside instead."""
     if existing is not None:
         draft = {
             "name": existing.name, "description": existing.description, "min_level": existing.min_level,
@@ -12508,6 +12521,14 @@ async def _channel_screen(
     async def save(draft: dict) -> Channel:
         if not draft["name"]:
             raise ChannelError("name cannot be blank")
+        if existing is not None and draft["name"] != existing.name and chat_hub is not None:
+            occupants = chat_hub.participant_count(existing.name)
+            if occupants:
+                raise ChannelError(
+                    f"{existing.name!r} cannot be renamed while {occupants} caller(s) are in it: "
+                    "live chat membership follows the channel name, so they would be cut off from "
+                    "everyone who joins afterwards. Wait until the channel is empty."
+                )
         if existing is None:
             return await lane.run(
                 create_channel,
@@ -12547,12 +12568,21 @@ async def _channel_screen(
     if channel is not None:
         verb = "Updated" if existing is not None else "Created chat channel"
         await session.write_line(f"{verb} {channel.name!r}.")
+        if existing is not None and channel.name != existing.name and chat_hub is None:
+            await session.write_line(
+                colored(
+                    "If the node is running with callers in this channel, they keep the old name "
+                    "until they leave and rejoin.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
     return channel
 
 
 async def _list_channels_screen(
     session: Session, lane: DatabaseLane, actor: User, *, link_context: LinkContext | None = None,
     mrc_bridge: MrcBridge | None = None,
+    chat_hub: ChatHub | None = None,
 ) -> None:
     channels = await lane.run(list_channels)
     selected = await pick_item(
@@ -12569,7 +12599,7 @@ async def _list_channels_screen(
         header_color=await lane.run(effective_header_color_256),
     )
     if selected is not None:
-        await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge)
+        await _channel_detail_screen(session, lane, actor, selected, link_context=link_context, mrc_bridge=mrc_bridge, chat_hub=chat_hub)
 
 
 def _channel_description(channel: Channel) -> str:
@@ -12584,6 +12614,7 @@ def _channel_description(channel: Channel) -> str:
 async def _channel_detail_screen(
     session: Session, lane: DatabaseLane, actor: User, channel: Channel, *, link_context: LinkContext | None = None,
     mrc_bridge: MrcBridge | None = None,
+    chat_hub: ChatHub | None = None,
 ) -> None:
     linked = await lane.run(is_channel_linked, channel) if link_context is not None else False
     mrc_mapping = await lane.run(get_mrc_mapping, channel)
@@ -12608,7 +12639,7 @@ async def _channel_detail_screen(
             return
         elif choice == "e":
             await session.write_line("")
-            updated = await _channel_screen(session, lane, actor, existing=channel)
+            updated = await _channel_screen(session, lane, actor, existing=channel, chat_hub=chat_hub)
             if updated is not None:
                 channel = updated
                 if mrc_bridge is not None and mrc_mapping is not None:

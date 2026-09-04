@@ -326,6 +326,13 @@ class NodeControls:
     # bottom of the `netbbs.net` import graph) never imports the chat
     # stack; the real type is annotated at every consumer.
     mrc_bridge: Any = None
+    # Issue #277: the node's one in-process `netbbs.chat.hub.ChatHub` --
+    # live channel membership only a running node has, `None` from the
+    # standalone `python -m netbbs.admin` CLI, exactly like
+    # `session_registry`. Typed `Any` so this module (the bottom of the
+    # `netbbs.net` import graph) never imports the chat stack; the real
+    # type is annotated at every consumer.
+    chat_hub: Any = None
 
 
 async def run_shutdown_sequence(
