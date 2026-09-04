@@ -1304,6 +1304,7 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     online-only private message. Scoped as a chat-context command only,
     matching every other chat command — no parallel main-menu entry point.
     """
+    args = args.lstrip()
     if args.startswith('"'):
         closing_quote = args.find('"', 1)
         parts = (
@@ -1373,7 +1374,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         if resolved is None:
             return None
         peer = ctx.link_context.link_node.peers.get(resolved)
-        node_label = identity_for_peer(peer).label if peer is not None else "linked node"
+        node_label = identity_for_peer(peer).label if peer is not None else resolved
         remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved, node_label=node_label)
         close_hint = menu_key("/close", "")
         await ctx.session.write_line(

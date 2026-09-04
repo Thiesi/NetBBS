@@ -62,6 +62,19 @@ def test_resolver_prefers_dns_and_refuses_ambiguous_friendly_names(tmp_path):
     assert resolve_peer_reference([alice, bob], alice.fingerprint[:12]) is alice
 
 
+def test_resolver_refuses_a_reference_shared_across_dns_and_friendly_name(db, tmp_path):
+    friendly = _peer(tmp_path, "friendly", "shared.example.org", "friendly.example.org")
+    dns = _peer(tmp_path, "dns", "DNS owner", "shared.example.org")
+    save_peer(db, friendly)
+    save_peer(db, dns)
+
+    assert resolve_peer_reference([friendly, dns], "shared.example.org") == [friendly, dns]
+    assert resolve_stored_peer_reference(db, "shared.example.org") == [
+        friendly.fingerprint,
+        dns.fingerprint,
+    ]
+
+
 def test_resolver_preserves_terminal_periods_in_friendly_names(db, tmp_path):
     dotted = _peer(tmp_path, "dotted", "The Anchor.", "dotted.example.org")
     plain = _peer(tmp_path, "plain", "The Anchor", "plain.example.org")
@@ -190,6 +203,16 @@ def test_pending_rename_advertises_the_previous_name_only_once_it_was_published(
     assert own_canonical_dns_name(db, "currently-live.example.org") == "old-name.netbbs.org"
 
 
+def test_abandoned_replacement_keeps_advertising_a_published_previous_name(db):
+    set_registered_name(db, "replacement")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+
+    assert own_canonical_dns_name(db, "currently-live.example.org") == "old-name.netbbs.org"
+
+
 def test_pending_rename_does_not_advertise_an_unpublished_previous_name(db):
     set_registered_name(db, "replacement")
     set_registration_status(db, RegistrationStatus.PENDING)
@@ -233,15 +256,22 @@ def test_latest_observation_prefers_undismissed_security_over_newer_benign_chang
         addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
         friendly_name="Anchor", canonical_dns_name="other.example.org",
     )))
-    save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
-        addresses=None, outgoing_only=True, created_at="2026-09-03T14:00:00+00:00",
-        friendly_name="Recovered", canonical_dns_name="other.example.org",
-    )))
+    for index in range(MAX_IDENTITY_OBSERVATIONS_PER_PEER + 5):
+        save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-04T12:{index:02d}:00+00:00",
+            friendly_name=f"Recovered {index}", canonical_dns_name="other.example.org",
+        )))
 
     latest = latest_identity_observation(db, impostor_identity.fingerprint)
     assert latest is not None
     assert latest.kind == "cryptographic_identity_changed"
     assert latest.severity == "security"
+    count = db.connection.execute(
+        "SELECT COUNT(*) FROM link_node_identity_observations WHERE node_fingerprint = ?",
+        (impostor_identity.fingerprint,),
+    ).fetchone()[0]
+    assert count == MAX_IDENTITY_OBSERVATIONS_PER_PEER
 
 
 @pytest.mark.parametrize(
@@ -254,6 +284,27 @@ def test_peer_adopting_the_local_nodes_claim_is_security_notice(
     set_node_display_name(db, "Local Anchor")
     set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
     remember_own_identity_claims(db, canonical_dns_name="local.example.org")
+
+    save_peer(db, _peer(tmp_path, "impostor", friendly_name, dns_name))
+
+    notice = list_identity_observations(db)[0]
+    assert notice.kind == "cryptographic_identity_changed"
+    assert notice.severity == "security"
+    assert notice.previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
+
+
+@pytest.mark.parametrize(
+    ("friendly_name", "dns_name"),
+    [("Old Local", "other.example.org"), ("Other", "old-local.example.org")],
+)
+def test_peer_adopting_a_retained_previous_local_claim_is_security_notice(
+    db, tmp_path, friendly_name, dns_name,
+):
+    set_node_display_name(db, "Old Local")
+    set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
+    remember_own_identity_claims(db, canonical_dns_name="old-local.example.org")
+    set_node_display_name(db, "New Local")
+    remember_own_identity_claims(db, canonical_dns_name="new-local.example.org")
 
     save_peer(db, _peer(tmp_path, "impostor", friendly_name, dns_name))
 
@@ -302,6 +353,35 @@ def test_identity_observation_history_is_bounded_per_peer(db, tmp_path):
         (identity.fingerprint,),
     ).fetchone()[0]
     assert count == MAX_IDENTITY_OBSERVATIONS_PER_PEER
+
+
+def test_global_observation_bound_preserves_an_undismissed_security_warning(
+    db, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("netbbs.link.node_profiles.MAX_IDENTITY_OBSERVATIONS_TOTAL", 3)
+    anchor = _peer(tmp_path, "global-anchor", "Anchor", "anchor.example.org")
+    impostor_identity = bootstrap_node_identity("global-impostor")
+    impostor_node = LinkNode(identity=impostor_identity)
+    save_peer(db, anchor)
+    save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Other", canonical_dns_name="other.example.org",
+    )))
+    save_peer(db, impostor_node.handle_hello(impostor_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T13:00:00+00:00",
+        friendly_name="Anchor", canonical_dns_name="other.example.org",
+    )))
+    for index in range(4):
+        save_peer(db, _peer(
+            tmp_path, f"global-peer-{index}", f"Peer {index}", f"peer-{index}.example.org",
+        ))
+
+    latest = latest_identity_observation(db, impostor_identity.fingerprint)
+    assert latest is not None
+    assert latest.severity == "security"
+    assert db.connection.execute(
+        "SELECT COUNT(*) FROM link_node_identity_observations"
+    ).fetchone()[0] == 3
 
 
 NFC_NAME = "Caf\u00e9 Anchor"

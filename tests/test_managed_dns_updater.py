@@ -189,6 +189,20 @@ def test_updater_clears_previous_publication_after_authoritative_inactive_respon
     db.close()
 
 
+def test_heartbeat_error_text_cannot_masquerade_as_an_inactive_credential(monkeypatch):
+    from netbbs.managed_dns.client import ManagedDnsError
+    from netbbs.managed_dns.updater import _send_heartbeat
+
+    async def rejected_heartbeat(*_args, **_kwargs):
+        raise ManagedDnsError("upstream body mentioned HTTP 401", status_code=503)
+
+    monkeypatch.setattr("netbbs.managed_dns.updater.heartbeat", rejected_heartbeat)
+
+    result, inactive = asyncio.run(_send_heartbeat("https://dns.example", "secret"))
+    assert result is None
+    assert inactive is False
+
+
 def test_updater_marks_an_authoritatively_inactive_primary_unpublished(tmp_path):
     async def scenario():
         backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")

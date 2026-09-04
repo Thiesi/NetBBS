@@ -514,7 +514,10 @@ an administratively configured fingerprint) is shown by that fingerprint rather
 than a shared placeholder. A full fingerprint is available as **Technical
 identity** in the relevant SysOp detail view and remains accepted as an
 advanced/backward-compatible input. Friendly-name resolution must be unique;
-an ambiguous name is refused with a request to use the DNS name. Friendly
+an ambiguous presentation name is refused with a request to use an unambiguous
+DNS name or the technical identity. DNS and friendly claims share that one
+namespace, so a reference matching one node's DNS claim and another node's
+friendly claim is ambiguous rather than silently preferring either. Friendly
 names are compared in one Unicode normalization form (NFC), so canonically
 equivalent spellings are one name, never two claims. UI delimiters, invisible
 control/format characters, and the `Unnamed linked node` fallback label are
@@ -530,7 +533,11 @@ from continuing. Presentation names never transfer trust or reputation between
 fingerprints.
 An undismissed cryptographic-identity warning continues to be shown at
 interaction boundaries even if a newer benign profile change is observed;
-only SysOp acknowledgement dismisses it.
+only SysOp acknowledgement dismisses it. Bounded observation pruning therefore
+retains undismissed security warnings ahead of newer benign observations. The
+local node likewise retains a bounded history of its previous friendly and DNS
+claims so another fingerprint cannot adopt a just-renamed local identity without
+raising the same warning.
 
 ### 4.5 Identity tiers
 

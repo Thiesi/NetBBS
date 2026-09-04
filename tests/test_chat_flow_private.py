@@ -163,7 +163,7 @@ def test_msg_resolves_a_friendly_node_name_containing_spaces(
     monkeypatch.setattr("netbbs.net.link_direct.send_live_direct_message", fake_send)
     asyncio.run(_run(
         lane, hub, presence, mailbox, channel, alice,
-        ['/msg "bob@The Rusty Anchor" hello there', "/quit"], link_context=context,
+        ['/msg    "bob@The Rusty Anchor" hello there', "/quit"], link_context=context,
     ))
 
     assert sent == [("bob@The Rusty Anchor", "hello there")]
@@ -543,7 +543,7 @@ def test_private_with_a_remote_target_sends_each_line_live(lane, hub, presence, 
         link_context=_FakeLinkContext(fingerprint, direct),
     ))
     text = _written(session)
-    assert "Entering private conversation with bob@linked node" in text
+    assert f"Entering private conversation with bob@{fingerprint}" in text
     assert [kw["body"] for _fp, kw in direct.sent] == ["hello over there", "second line"]
     assert all(fp == fingerprint for fp, _kw in direct.sent)
     assert direct.sent[0][1]["to_user_id"] == "bob"

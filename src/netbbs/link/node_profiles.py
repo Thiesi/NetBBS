@@ -27,7 +27,10 @@ MAX_CANONICAL_DNS_NAME_LENGTH = 253
 MAX_IDENTITY_OBSERVATIONS_PER_PEER = 20
 MAX_IDENTITY_OBSERVATIONS_TOTAL = 5000
 _NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
+_MAX_OWN_IDENTITY_CLAIM_HISTORY = 40
+_OWN_FRIENDLY_NAME_CONFIG_KEY = "link_own_friendly_name_claim"
 _OWN_CANONICAL_DNS_CONFIG_KEY = "link_own_canonical_dns_claim"
+_OWN_IDENTITY_HISTORY_CONFIG_KEY = "link_own_identity_claim_history"
 UNKNOWN_NODE_NAME = "Unknown linked node"
 UNNAMED_NODE_NAME = "Unnamed linked node"
 
@@ -153,7 +156,7 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
     status = get_registration_status(db)
     previous_name = get_previous_name(db)
     if (
-        previous_name and status is RegistrationStatus.PENDING
+        previous_name and status in (RegistrationStatus.PENDING, RegistrationStatus.ABANDONED)
         and get_previous_status(db) is RegistrationStatus.MATURED and get_previous_published(db)
     ):
         return f"{previous_name}.netbbs.org"
@@ -163,7 +166,28 @@ def own_canonical_dns_name(db: Database, advertised_host: str | None) -> str | N
 
 
 def remember_own_identity_claims(db: Database, *, canonical_dns_name: str | None) -> None:
-    """Persist the local DNS presentation used for collision detection."""
+    """Persist current and recently replaced local presentation claims."""
+    friendly_name = get_node_display_name(db)
+    previous = (
+        get_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY),
+        get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY),
+    )
+    current = (friendly_name, canonical_dns_name)
+    try:
+        history = json.loads(get_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY) or "[]")
+    except (TypeError, ValueError):
+        history = []
+    if not isinstance(history, list):
+        history = []
+    if any(previous) and previous != current:
+        for value in previous:
+            if value and value not in history:
+                history.append(value)
+    history = [
+        value for value in history if isinstance(value, str)
+    ][-_MAX_OWN_IDENTITY_CLAIM_HISTORY:]
+    set_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY, json.dumps(history))
+    set_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY, friendly_name)
     set_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY, canonical_dns_name or "")
 
 
@@ -177,12 +201,13 @@ def resolve_peer_reference(peers, reference: str):
     exact_fingerprint = [peer for peer in values if peer.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    exact_dns = [peer for peer in values if identity_for_peer(peer).dns_name == dns_needle]
-    if exact_dns:
-        return exact_dns[0] if len(exact_dns) == 1 else exact_dns
-    exact_name = [peer for peer in values if name_key(identity_for_peer(peer).friendly_name) == name_needle]
-    if exact_name:
-        return exact_name[0] if len(exact_name) == 1 else exact_name
+    presentation_matches = [
+        peer for peer in values
+        if identity_for_peer(peer).dns_name == dns_needle
+        or name_key(identity_for_peer(peer).friendly_name) == name_needle
+    ]
+    if presentation_matches:
+        return presentation_matches[0] if len(presentation_matches) == 1 else presentation_matches
     fingerprints = [peer for peer in values if peer.fingerprint.lower().startswith(name_needle)]
     return fingerprints[0] if len(fingerprints) == 1 else fingerprints
 
@@ -236,12 +261,12 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
     exact_fingerprint = [item.fingerprint for item in identities if item.fingerprint.lower() == name_needle]
     if exact_fingerprint:
         return exact_fingerprint[0]
-    dns_matches = [item.fingerprint for item in identities if item.dns_name == dns_needle]
-    if dns_matches:
-        return dns_matches[0] if len(dns_matches) == 1 else dns_matches
-    name_matches = [item.fingerprint for item in identities if name_key(item.friendly_name) == name_needle]
-    if name_matches:
-        return name_matches[0] if len(name_matches) == 1 else name_matches
+    presentation_matches = [
+        item.fingerprint for item in identities
+        if item.dns_name == dns_needle or name_key(item.friendly_name) == name_needle
+    ]
+    if presentation_matches:
+        return presentation_matches[0] if len(presentation_matches) == 1 else presentation_matches
     fingerprint_matches = [
         item.fingerprint for item in identities
         if item.fingerprint.lower().startswith(name_needle)
@@ -276,10 +301,17 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         name_key(value) for value in (current.friendly_name, current.dns_name)
         if value and value != UNNAMED_NODE_NAME
     }
+    try:
+        local_history = json.loads(get_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY) or "[]")
+    except (TypeError, ValueError):
+        local_history = []
+    if not isinstance(local_history, list):
+        local_history = []
     local_claims = {
         name_key(value)
-        for value in (get_node_display_name(db), get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY))
-        if value
+        for value in (
+            get_node_display_name(db), get_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY), *local_history,
+        ) if isinstance(value, str) and value
     }
     if current_claims & local_claims:
         collision = NodeDisplayIdentity(
@@ -361,7 +393,11 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         DELETE FROM link_node_identity_observations
         WHERE node_fingerprint = ? AND id NOT IN (
             SELECT id FROM link_node_identity_observations
-            WHERE node_fingerprint = ? ORDER BY id DESC LIMIT ?
+            WHERE node_fingerprint = ?
+            ORDER BY CASE
+                WHEN severity = 'security' AND dismissed_at IS NULL THEN 0
+                WHEN dismissed_at IS NULL THEN 1 ELSE 2 END,
+                id DESC LIMIT ?
         )
         """,
         (current.fingerprint, current.fingerprint, MAX_IDENTITY_OBSERVATIONS_PER_PEER),
@@ -370,7 +406,10 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         """
         DELETE FROM link_node_identity_observations WHERE id IN (
             SELECT id FROM link_node_identity_observations
-            ORDER BY id DESC LIMIT -1 OFFSET ?
+            ORDER BY CASE
+                WHEN severity = 'security' AND dismissed_at IS NULL THEN 0
+                WHEN dismissed_at IS NULL THEN 1 ELSE 2 END,
+                id DESC LIMIT -1 OFFSET ?
         )
         """,
         (MAX_IDENTITY_OBSERVATIONS_TOTAL,),

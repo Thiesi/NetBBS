@@ -145,7 +145,7 @@ async def _send_heartbeat(
             result = await heartbeat(session, base_url, credential=credential)
     except ManagedDnsError as exc:
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
-        return None, "HTTP 401" in str(exc)
+        return None, exc.status_code == 401
     return result, False
 
 

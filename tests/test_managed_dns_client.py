@@ -155,10 +155,11 @@ def test_heartbeat_raises_managed_dns_error_on_an_unknown_credential(db):
         await server.start()
         try:
             async with aiohttp.ClientSession() as session:
-                with pytest.raises(ManagedDnsError):
+                with pytest.raises(ManagedDnsError) as caught:
                     await heartbeat(
                         session, f"http://127.0.0.1:{server.port}", credential="not-a-real-credential",
                     )
+                assert caught.value.status_code == 401
         finally:
             await server.stop()
 

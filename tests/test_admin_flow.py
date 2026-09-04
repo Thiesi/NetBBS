@@ -6096,6 +6096,39 @@ def test_managed_dns_pending_rename_offers_cancel_change_without_hotkey_collisio
     assert "Re[l]ease" not in text
 
 
+def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.managed_dns.state import (
+        OptIn,
+        RegistrationStatus,
+        set_opt_in,
+        set_previous_name,
+        set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "newboard")
+    set_previous_name(db, "oldboard")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+
+    cancelled = []
+
+    async def fake_cancel(_session, _lane):
+        cancelled.append(True)
+
+    monkeypatch.setattr("netbbs.net.admin_flow.cancel_registration_rename", fake_cancel)
+    session = FakeSession(["d", "c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "The new name is inactive" in text
+    assert "[C]ancel change" in text
+    assert "Change [n]ame" not in text
+    assert "Re[l]ease" not in text
+    assert cancelled == [True]
+
+
 def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(db, lane, sysop):
     from netbbs.managed_dns.state import OptIn, RegistrationStatus, set_opt_in, set_registered_name, set_registration_status
 

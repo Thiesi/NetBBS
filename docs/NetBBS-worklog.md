@@ -3762,3 +3762,18 @@ corresponding cached publication claim even when no alternate credential is
 live. Keep both bearer secrets during a pending rename, including after either
 row is abandoned, because the replacement credential can still cancel the
 transition and the previous secret is required to use the revived old row.
+Classify that response from the client's structured HTTP status, never by
+searching provider-controlled error text.
+
+Managed-DNS cancellation revalidates cooldown and capacity synchronously after
+awaiting provider deletion: fresh registrations do not take the transition lock
+and can consume the last slot while the provider call runs. A previous abandoned
+name is not revivable once its cooldown has elapsed, even if the periodic sweep
+has not deleted its row yet. Rename completion clears the old row's publication
+marker before deleting its provider record so a crash in between forces the old
+credential's next heartbeat to republish rather than trusting stale state.
+
+Bounded identity-observation pruning gives undismissed security warnings first
+claim on both per-peer and global retention budgets. Retain a bounded history of
+the local node's replaced friendly and DNS claims too, and resolve friendly and
+DNS matches as one ambiguity set rather than giving either claim kind precedence.

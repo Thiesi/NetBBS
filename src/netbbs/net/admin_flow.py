@@ -4003,7 +4003,15 @@ async def _draw_managed_dns_status(
                 colored("Current name: ", fg_color=LABEL_COLOR)
                 + colored(f"{previous_name}.netbbs.org", fg_color=METADATA_COLOR)
             )
-            await session.write_line(colored("The new name is reserved and maturing.", fg_color=MUTED_COLOR))
+            if status is ManagedDnsRegistrationStatus.ABANDONED:
+                await session.write_line(
+                    colored(
+                        "The new name is inactive. Cancel the change to restore the current name.",
+                        fg_color=WARNING_COLOR,
+                    )
+                )
+            else:
+                await session.write_line(colored("The new name is reserved and maturing.", fg_color=MUTED_COLOR))
         if last_contact_at is not None:
             display_format, display_timezone = await lane.run(resolve_display_preferences)
             when = format_for_display(
@@ -4012,12 +4020,12 @@ async def _draw_managed_dns_status(
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
 
     actions = [menu_key("R", "egister")]
-    if status in _MANAGED_DNS_ACTIVE_STATUSES:
+    if previous_name is not None:
+        actions.append(menu_key("C", "ancel change"))
+    elif status in _MANAGED_DNS_ACTIVE_STATUSES:
         if previous_name is None:
             actions.append(menu_key("l", "ease", prefix="Re"))
             actions.append(menu_key("N", "ame", prefix="Change "))
-        else:
-            actions.append(menu_key("C", "ancel change"))
     actions.append(menu_key("B", "ack"))
     await session.write_line("\r\n" + "    ".join(actions))
     return status
@@ -4059,8 +4067,7 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             await rename_registration(session, lane)
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
-            choice == "c" and status in _MANAGED_DNS_ACTIVE_STATUSES
-            and await lane.run(get_managed_dns_previous_name) is not None
+            choice == "c" and await lane.run(get_managed_dns_previous_name) is not None
         ):
             await session.write_line("")
             await cancel_registration_rename(session, lane)

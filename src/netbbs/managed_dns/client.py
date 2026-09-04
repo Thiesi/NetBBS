@@ -32,6 +32,10 @@ class ManagedDnsError(Exception):
     still there" posture design doc §16 already established for the
     conceptually similar live-subscribe path (issue #148/#194)."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 @dataclass(frozen=True)
 class RegisterResult:
@@ -70,7 +74,10 @@ async def register(
         ) as response:
             if response.status != 201:
                 text = await response.text()
-                raise ManagedDnsError(f"registration of {name!r} failed: HTTP {response.status}: {text}")
+                raise ManagedDnsError(
+                    f"registration of {name!r} failed: HTTP {response.status}: {text}",
+                    status_code=response.status,
+                )
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -117,7 +124,9 @@ async def heartbeat(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(f"heartbeat failed: HTTP {response.status}: {text}")
+                raise ManagedDnsError(
+                    f"heartbeat failed: HTTP {response.status}: {text}", status_code=response.status,
+                )
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -159,7 +168,10 @@ async def rename(
         ) as response:
             if response.status != 201:
                 text = await response.text()
-                raise ManagedDnsError(f"rename to {name!r} failed: HTTP {response.status}: {text}")
+                raise ManagedDnsError(
+                    f"rename to {name!r} failed: HTTP {response.status}: {text}",
+                    status_code=response.status,
+                )
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -194,7 +206,9 @@ async def cancel_rename(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(f"cancel rename failed: HTTP {response.status}: {text}")
+                raise ManagedDnsError(
+                    f"cancel rename failed: HTTP {response.status}: {text}", status_code=response.status,
+                )
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
@@ -232,7 +246,9 @@ async def release(
         ) as response:
             if response.status != 200:
                 text = await response.text()
-                raise ManagedDnsError(f"release failed: HTTP {response.status}: {text}")
+                raise ManagedDnsError(
+                    f"release failed: HTTP {response.status}: {text}", status_code=response.status,
+                )
             body = await response.json(loads=strict_json_loads)
     except (ClientError, TimeoutError, ValueError) as exc:
         raise ManagedDnsError(f"could not reach {url}: {exc}") from exc
