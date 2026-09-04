@@ -51,7 +51,7 @@ from netbbs.config import RegistrationMode, get_registration_mode
 from netbbs.net import char_input
 from netbbs.net.new_account_banner_after import load_new_account_banner_after
 from netbbs.net.new_account_banner_before import load_new_account_banner_before
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
 from netbbs.net.throttle import LoginThrottle
 from netbbs.net.welcome_banner import load_welcome_banner
 from netbbs.rendering import strip_ansi
@@ -677,39 +677,37 @@ class SSHServer:
         Stop listening and make sure every admitted connection is gone.
 
         `SSHAcceptor.close()` only stops accepting; connections it already
-        admitted stay open, and on Python 3.12+ `wait_closed()` blocks
-        until every one of them has actually dropped (the same CPython
-        behavior change `docs/NetBBS-worklog.md` records for
-        `LinkRealtimeServer.stop`). Ending a caller's session only exits
-        its *channel* (`SSHSession.close`); the connection underneath
-        stays up until the client disconnects -- which a client whose
-        network silently vanished never does, so an unbounded wait here
-        sat for the kernel's whole TCP retransmission timeout (the
-        real ~9-minute Ctrl+C hang reported on ReLink). Wait briefly for
-        connections to close on their own, then abort whatever is left:
-        `abort()` drops the transport immediately without the
-        disconnect handshake a dead peer could never complete.
+        admitted stay open. Ending a caller's session only exits its
+        *channel* (`SSHSession.close`); the connection underneath stays
+        up until the client disconnects -- which a client whose network
+        silently vanished never does. Judging the deadline on
+        `wait_closed()` is wrong on every supported interpreter: on
+        Python 3.12+ it blocks until every admitted connection has
+        dropped (the real ~9-minute Ctrl+C hang reported on ReLink), on
+        3.11 it returns at once and would leave those connections open.
+        So the deadline is judged on the connections this listener
+        tracks itself (see `wait_until_drained`): wait briefly for them
+        to close on their own, then `abort()` whatever is left -- that
+        drops the transport immediately, without the disconnect
+        handshake a dead peer could never complete -- and only then
+        release the listener.
         """
         if self._acceptor is None:
             return
         self._acceptor.close()
-        try:
-            await asyncio.wait_for(self._acceptor.wait_closed(), timeout=self._stop_timeout_seconds)
-            return
-        except asyncio.TimeoutError:
-            pass
-        lingering = list(self._connections)
-        _logger.warning(
-            "%d SSH connection(s) did not close within %.1fs of shutdown; aborting them",
-            len(lingering),
-            self._stop_timeout_seconds,
-        )
-        for conn in lingering:
-            conn.abort()
+        if not await wait_until_drained(lambda: not self._connections, self._stop_timeout_seconds):
+            lingering = list(self._connections)
+            _logger.warning(
+                "%d SSH connection(s) did not close within %.1fs of shutdown; aborting them",
+                len(lingering),
+                self._stop_timeout_seconds,
+            )
+            for conn in lingering:
+                conn.abort()
         # `abort()` fires connection_lost on the next loop iteration, which
-        # detaches each transport from the listener; this second wait is
-        # bounded only as a defensive ceiling, not because anything is
-        # expected to still be attached after the aborts above.
+        # detaches each transport from the listener; bounded only as a
+        # defensive ceiling, not because anything is expected to still be
+        # attached after the aborts above.
         try:
             await asyncio.wait_for(self._acceptor.wait_closed(), timeout=self._stop_timeout_seconds)
         except asyncio.TimeoutError:

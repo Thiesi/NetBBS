@@ -3409,8 +3409,13 @@ not a normal-path wait for every connection it ever accepted to finish.
 `TelnetServer.stop()` and `SSHServer.stop()` lacked it and produced a real
 ~9-minute Ctrl+C hang on ReLink (design doc §13.11, item 5): they now track
 every admitted connection themselves (the session registry never sees a
-connection still in auth or option negotiation), bound `wait_closed()` by
-`background_task_drain_seconds`, then `abort()` the rest. Two invariants
+connection still in auth or option negotiation) and judge the
+`background_task_drain_seconds` deadline on *that set*, then `abort()` the
+rest, with `wait_closed()` only as a bounded final release of the listening
+socket. `wait_closed()` itself is the wrong drain signal on every supported
+interpreter, in opposite directions: 3.12+ blocks on admitted connections,
+3.11 returns immediately with them still attached -- a "wait, and abort on
+timeout" shape silently never aborts anything on 3.11 (Codex review, PR #283). Two invariants
 behind that fix: exiting an SSH *process/channel* (`SSHSession.close`) does
 not close the SSH *connection* -- only the client or `conn.abort()` does; and
 asyncssh sends no transport keepalives by default, so a peer that vanished
