@@ -26,6 +26,8 @@ from netbbs.chat.scrollback import get_scrollback
 from netbbs.directory import set_bio, set_bio_visible
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
+from netbbs.rendering.ansi import strip_ansi
+from netbbs.rendering.width import display_width
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from tests.test_chat_flow_moderation import FakeSession
@@ -287,9 +289,11 @@ def test_finger_reflows_a_bio_the_same_way_the_directory_and_profile_screens_do(
     # a wrapped multi-line bio is still a single entry here, with the
     # wrap points embedded as literal "\n"s.
     bio_entry = next(entry for entry in session.written if "word0" in entry)
-    wrapped_lines = bio_entry.rstrip("\r\n").split("\n")
+    wrapped_lines = bio_entry.splitlines()
     assert len(wrapped_lines) > 1, "the long bio was not wrapped onto multiple lines at all"
-    assert not any(len(line) > 80 for line in wrapped_lines), "a wrapped bio line exceeded terminal width"
+    assert not any(
+        display_width(strip_ansi(line)) > 80 for line in wrapped_lines
+    ), "a wrapped bio line exceeded terminal width"
     # Every word survived, in order, just split across more lines --
     # confirms this is real wrapping, not truncation.
     assert " ".join(wrapped_lines) == long_bio

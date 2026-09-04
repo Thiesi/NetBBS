@@ -116,6 +116,22 @@ The standing principle is:
 - **Sanitize before styling.** Sanitize untrusted segments before adding ANSI;
   never sanitize a completed trusted ANSI string. Compose nested colored
   segments independently because SGR reset does not restore an outer color.
+- **Wrap every terminal-facing text.** Ordinary lines go through
+  `Session.write_line`; interactive prompts go through `write_prompt`. Both
+  wrap by display columns at the negotiated terminal width, remove whitespace
+  at wrap boundaries, and retain all text instead of relying on terminal
+  soft-wrap or clipping. Screen-specific renderers should wrap sanitized plain
+  text with `wrap_to_width` before styling where practical, and must not use
+  `break_long_words=False` for terminal output. Trusted, deliberately
+  preformatted ANSI art should use `write_preformatted_line` to retain authored
+  rows that fit; even it must wrap an over-width row rather than overflow.
+  Width measurement must normalize tabs and account for cursor-positioning
+  controls, not treat every ANSI escape as zero-width. Absolute positions reset
+  column accounting, save/restore and bare carriage returns update it, and
+  numeric cursor spans are capped without per-column expansion.
+  CLI prose uses `print_wrapped`; errors must measure stderr when stderr receives them.
+  Self-contained bundled doors enforce the same boundary in their local
+  `out_line`/`out_prompt` helpers.
 - **Fail clearly.** Administrative lockout, identity ambiguity, incompatible
   databases, protocol rejection, and resource exhaustion should not degrade
   silently.

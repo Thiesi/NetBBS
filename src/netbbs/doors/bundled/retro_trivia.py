@@ -29,6 +29,7 @@ import os
 import random
 import re
 import sys
+import unicodedata
 
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
@@ -36,6 +37,7 @@ BOLD = f"{ESC}[1m"
 DIM = f"{ESC}[2m"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\([AB0-2]|\x1b[78HDM]")
+_OUTPUT_WIDTH = 80
 
 
 def _strip_ansi(text: str) -> str:
@@ -147,7 +149,130 @@ def out(text: str = "") -> None:
 
 
 def out_line(text: str = "") -> None:
-    out(text + "\r\n")
+    out(_wrap_output(text, _OUTPUT_WIDTH) + "\r\n")
+
+
+def out_prompt(text: str) -> None:
+    """Write a prompt without relying on the terminal's soft wrapping."""
+    out(_wrap_output(text, max(1, _OUTPUT_WIDTH - 1)))
+
+
+def _wrap_output(text: str, width: int) -> str:
+    """ANSI-aware, display-column-bounded wrapping for this standalone door."""
+    text = text.replace("\t", " ")
+    atoms: list[tuple[str, str, int]] = []
+    pending_escape = ""
+    position = 0
+    for match in ANSI_ESCAPE_RE.finditer(text):
+        for ch in text[position : match.start()]:
+            atoms.append((pending_escape + ch, ch, _char_width(ch)))
+            pending_escape = ""
+        pending_escape += match.group(0)
+        position = match.end()
+    for ch in text[position:]:
+        atoms.append((pending_escape + ch, ch, _char_width(ch)))
+        pending_escape = ""
+    if not atoms:
+        return pending_escape
+
+    if (
+        width >= 2
+        and atoms[0][1] in ("│", "║")
+        and atoms[-1][1] == atoms[0][1]
+        and sum(atom_width for _, _, atom_width in atoms) > width
+    ):
+        left = atoms[0][0]
+        right = atoms[-1][0] + pending_escape
+        content = "".join(raw for raw, _, _ in atoms[1:-1]).rstrip()
+        rows = _wrap_output(content, width - 2).split("\r\n")
+        rendered: list[str] = []
+        active_style = ""
+        for row in rows:
+            continued = active_style + row if active_style else row
+            active_style = _active_sgr_after(row, active_style)
+            rendered.append(
+                f"{left}{continued}{' ' * max(0, width - 2 - _visible_width(continued))}{right}"
+            )
+        return "\r\n".join(rendered)
+
+    lines: list[str] = []
+    start = 0
+    while start < len(atoms):
+        used = 0
+        overflow = len(atoms)
+        for index in range(start, len(atoms)):
+            if used + atoms[index][2] > width:
+                overflow = index
+                break
+            used += atoms[index][2]
+        if overflow == len(atoms):
+            lines.append("".join(raw for raw, _, _ in atoms[start:]) + pending_escape)
+            pending_escape = ""
+            break
+
+        whitespace = overflow if atoms[overflow][1].isspace() else None
+        if whitespace is None:
+            whitespace = next(
+                (
+                    index
+                    for index in range(overflow - 1, start - 1, -1)
+                    if atoms[index][1].isspace()
+                ),
+                None,
+            )
+        whitespace_start = whitespace
+        if whitespace is not None:
+            while whitespace_start > start and atoms[whitespace_start - 1][1].isspace():
+                whitespace_start -= 1
+            if whitespace_start == start:
+                whitespace = None
+        if whitespace is None:
+            end = max(start + 1, overflow)
+            lines.append("".join(raw for raw, _, _ in atoms[start:end]))
+            start = end
+            continue
+
+        whitespace_end = whitespace
+        while whitespace_end < len(atoms) and atoms[whitespace_end][1].isspace():
+            whitespace_end += 1
+        boundary_escapes = "".join(
+            raw[: -len(ch)] if ch else raw
+            for raw, ch, _ in atoms[whitespace_start:whitespace_end]
+        )
+        lines.append(
+            "".join(raw for raw, _, _ in atoms[start:whitespace_start])
+            + boundary_escapes
+        )
+        start = whitespace_end
+
+    if pending_escape:
+        lines[-1] += pending_escape
+    return "\r\n".join(lines)
+
+
+def _char_width(ch: str) -> int:
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch).startswith("C"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _visible_width(text: str) -> int:
+    return sum(_char_width(ch) for ch in ANSI_ESCAPE_RE.sub("", text))
+
+
+def _active_sgr_after(text: str, active: str) -> str:
+    for match in ANSI_ESCAPE_RE.finditer(text):
+        sequence = match.group(0)
+        if not (sequence.startswith(f"{ESC}[") and sequence.endswith("m")):
+            continue
+        params = sequence[2:-1].split(";") if sequence[2:-1] else ["0"]
+        if "0" in params:
+            active = ""
+        if any(param and param != "0" for param in params):
+            active += sequence
+    return active
 
 
 def read_key() -> str:
@@ -254,7 +379,7 @@ def ask_question(p: Palette, number: int, total: int, question: str, choices: li
 
     out_line(_box_line(f"{p.border}│{RESET}", "", f"{p.border}│{RESET}", w))
     out_line(f"{p.border}╰{'─' * (w - 2)}╯{RESET}")
-    out(f"  {p.accent}⚡{RESET} {p.muted}Your answer [{p.gold}A{p.muted}/{p.gold}B{p.muted}/{p.gold}C{p.muted}/{p.gold}D{p.muted}]: {RESET}")
+    out_prompt(f"  {p.accent}⚡{RESET} {p.muted}Your answer [{p.gold}A{p.muted}/{p.gold}B{p.muted}/{p.gold}C{p.muted}/{p.gold}D{p.muted}]: {RESET}")
 
     while True:
         key = read_key().upper()
@@ -334,12 +459,17 @@ def draw_final_score(p: Palette, score: int, total: int, info: dict | None = Non
 
 
 def main() -> int:
+    global _OUTPUT_WIDTH
+
     sys.stdout.reconfigure(encoding="utf-8")
     info = _load_door_info()
     palette = Palette(truecolor=info.get("color_depth") == "truecolor")
 
-    term_w = info.get("terminal_width", 80)
-    w = 78 if term_w >= 80 else max(40, term_w)
+    try:
+        _OUTPUT_WIDTH = max(1, int(info.get("terminal_width", 80)))
+    except (TypeError, ValueError):
+        _OUTPUT_WIDTH = 80
+    w = min(78, _OUTPUT_WIDTH)
 
     draw_title(palette, info, width=w)
 

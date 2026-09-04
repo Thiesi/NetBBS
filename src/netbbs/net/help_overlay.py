@@ -87,17 +87,13 @@ async def show_help(
     # convention: same header_color, same bold, as the top/bottom rule.
     side_border = colored("│", fg_color=header_color, bold=True)
     for line in lines:
-        # break_long_words=False: a filesystem path (`_banner_help_screen`'s
-        # whole point is showing one intact and copy-pasteable) is exactly
-        # the unbreakable-token case -- wrap_to_width's own hard-break
-        # fallback for an over-width "word" is correct for unspaced CJK
-        # prose, but would instead corrupt a path into two unusable
-        # fragments (dogfood report, caught by a test path just long
-        # enough to trigger it). Overflowing the closing border on that
-        # one line is the accepted trade-off.
+        # The wrapper's hard-break fallback is used only when an indivisible
+        # token (typically a path) is wider than the content area.  That keeps
+        # the closing border visible and makes every physical row bounded;
+        # ordinary prose still wraps only at whitespace boundaries.
         wrapped_lines = (
             [line] if visible_width(line) <= inner_width
-            else wrap_to_width(line, inner_width, break_long_words=False)
+            else wrap_to_width(line, inner_width)
         )
         for wrapped in wrapped_lines:
             pad = " " * max(0, inner_width - visible_width(wrapped))

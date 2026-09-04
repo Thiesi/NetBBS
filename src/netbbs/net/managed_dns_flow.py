@@ -46,7 +46,7 @@ from netbbs.managed_dns.state import (
     set_pending_rename_state,
 )
 from netbbs.net.confirm import prompt_yes_no
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import MUTED_COLOR, colored, sanitize_text, wrap_to_width
 from netbbs.storage.execution import DatabaseLane
 
@@ -86,7 +86,7 @@ async def offer_managed_dns_opt_in(session: Session, lane: DatabaseLane) -> None
         # same bug netbbs.net.admin_flow._write_wrapped_subtitle's own
         # docstring documents fixing for screen subtitles).
         await session.write_line("")
-        for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width, break_long_words=False):
+        for wrapped in wrap_to_width(_OPT_IN_BLURB, session.terminal_width):
             await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
         await session.write_line("")
         # Defaults to accept (design doc §16, issue #219 Decision 7: both
@@ -149,11 +149,15 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
 
     previous_name = await lane.run(get_registered_name)
     if previous_name is not None:
-        await session.write(
+        await write_prompt(
+            session,
             f"Desired subdomain name (letters, digits, hyphens; Enter for {previous_name!r}): "
         )
     else:
-        await session.write("Desired subdomain name (letters, digits, hyphens; leave blank to skip for now): ")
+        await write_prompt(
+            session,
+            "Desired subdomain name (letters, digits, hyphens; leave blank to skip for now): ",
+        )
     raw_name = (await session.read_line()).strip()
     if not raw_name:
         if previous_name is None:
@@ -182,7 +186,7 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
             "(Noting that -- the managed record still tracks this node's address, "
             "but a bare web address won't be part of the promise; telling callers "
             "how to actually reach any web interface stays your own responsibility.)",
-            session.terminal_width, break_long_words=False,
+            session.terminal_width,
         ):
             await session.write_line(colored(wrapped, fg_color=MUTED_COLOR))
 
@@ -320,7 +324,7 @@ async def rename_registration(session: Session, lane: DatabaseLane) -> None:
     if previous_name is not None:
         await session.write_line(colored("A managed-DNS name change is already pending.", fg_color=MUTED_COLOR))
         return
-    await session.write(f"New subdomain name for {sanitize_text(old_name)}.netbbs.org: ")
+    await write_prompt(session, f"New subdomain name for {sanitize_text(old_name)}.netbbs.org: ")
     new_name = (await session.read_line()).strip()
     if not new_name:
         return

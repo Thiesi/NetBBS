@@ -228,11 +228,27 @@ stream, browser code, or another transport-specific primitive.
 Use hybrid terminal rendering:
 
 - ordinary screens use ANSI/VT100 text with reflow;
+- every terminal-facing prose line and interactive prompt is wrapped to the
+  session's negotiated display-column width before the terminal can soft-wrap
+  or clip it; wrap boundaries never leave a trailing or leading blank, and
+  screen-specific truncation is reserved for deliberately single-line chrome;
 - cursor-addressed screen-buffer rendering is reserved for interfaces which
   benefit from it, such as fullscreen editors and pinned chat rows;
 - the minimum supported terminal is 40x24;
 - screens must degrade clearly rather than corrupting output when a terminal is
   too small or lacks a capability.
+
+Trusted SysOp-authored ANSI art preserves each authored row when it fits because
+unconditionally reflowing it would corrupt its layout. It is not exempt from the
+width bound: an over-width row still wraps so no content disappears beyond the
+right edge. Cursor positioning is preserved while a bounded cursor model tracks
+absolute, relative, save/restore, and bare-carriage-return column changes;
+numeric parameters are clamped without per-column expansion, and tabs are
+normalized before measuring. Ordinary product copy, including text surrounding
+an art preview, uses normal prose wrapping. Prompts reserve two columns for a
+possible East Asian Wide/Fullwidth first input character. CLI errors measure the
+stderr terminal they are written to, rather than assuming stdout has the same
+width.
 
 Untrusted user text is sanitized before styling. Trusted ANSI is added only
 after sanitization. Nested colored fragments are composed independently because

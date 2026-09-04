@@ -53,7 +53,7 @@ from netbbs.net.picker import pick_item
 from netbbs.net.profile_flow import _edit_profile, _last_sessions_screen, _verify_identity_menu
 from netbbs.net.redraw_preference import redraw_in_place_enabled
 from netbbs.net.scan_and_find import _find_screen, _new_scan_screen
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_preformatted_line, write_prompt
 from netbbs.net.shutdown import NodeControls, format_remaining_seconds
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -282,13 +282,14 @@ async def _draw_main_menu(
     )
     if masthead:
         prefix = clear_screen() if redraw else ""
-        await session.write_line(f"{prefix}{masthead}\r\n{title}\r\n{options}\r\n")
+        await write_preformatted_line(session, f"{prefix}{masthead}")
+        await session.write_line(f"{title}\r\n{options}\r\n")
     else:
         # Masthead disabled (the default): identical bytes to before
         # issue #161, unconditionally -- no existing node's output
         # changes just because this module now exists.
         await session.write_line(f"\r\n{title}\r\n{options}\r\n")
-    await session.write(_main_menu_prompt(db, user, node_controls))
+    await write_prompt(session, _main_menu_prompt(db, user, node_controls))
 
 
 def _main_menu_prompt(db: Database, user: User, node_controls: NodeControls | None) -> str:

@@ -23,12 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from netbbs.auth.users import get_user_by_username  # noqa: E402
 from netbbs.boards import create_board, create_post  # noqa: E402
 from netbbs.boards.categories import CategoryError, get_category_by_name  # noqa: E402
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
 def main() -> None:
     if len(sys.argv) < 3:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -45,7 +46,7 @@ def main() -> None:
     # not how real board creation should work once admin tooling exists.
     row = db.connection.execute("SELECT username FROM users LIMIT 1").fetchone()
     if row is None:
-        print("No users exist yet — run scripts/create_test_user.py first.")
+        print_wrapped("No users exist yet — run scripts/create_test_user.py first.")
         sys.exit(1)
     creator = get_user_by_username(db, row["username"])
 
@@ -54,7 +55,7 @@ def main() -> None:
         try:
             category_id = get_category_by_name(db, category_name).id
         except CategoryError as exc:
-            print(f"Error: {exc}")
+            print_wrapped(f"Error: {exc}")
             sys.exit(1)
 
     board = create_board(
@@ -66,7 +67,10 @@ def main() -> None:
         creator=creator,
     )
     pinned_note = " (pinned)" if board.pinned else ""
-    print(f"Created board {board.name!r} (board_id {board.board_id[:16]}...){pinned_note} in {db_path}")
+    print_wrapped(
+        f"Created board {board.name!r} (board_id {board.board_id[:16]}...)"
+        f"{pinned_note} in {db_path}"
+    )
 
     post = create_post(
         db,
@@ -75,7 +79,7 @@ def main() -> None:
         subject="Welcome",
         body="This is the first post on this board.",
     )
-    print(f"Seeded with post {post.post_id[:16]}... by {post.author_label}")
+    print_wrapped(f"Seeded with post {post.post_id[:16]}... by {post.author_label}")
 
 
 if __name__ == "__main__":

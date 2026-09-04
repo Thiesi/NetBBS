@@ -26,7 +26,7 @@ from netbbs.net.menu_description_preference import menu_description_level
 from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.picker import pick_item
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.net.session_registry import SessionSummary
 from netbbs.net.shutdown import NodeControls
 from netbbs.net.unicode_style_preference import unicode_style_enabled
@@ -308,7 +308,9 @@ async def _caller_who_screen(
             )
             return
         node_label = _remote_who_node_label(db, selected)
-        await session.write(f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: ")
+        await write_prompt(
+            session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
+        )
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
@@ -371,7 +373,7 @@ async def _caller_who_screen(
         await session.write(reject_unhandled_key(action))
         return
 
-    await session.write(f"Message to {selected.username}: ")
+    await write_prompt(session, f"Message to {selected.username}: ")
     message = (await session.read_line()).strip()
     if not message:
         await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))

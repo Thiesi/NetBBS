@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
 
-from netbbs.rendering.ansi import colored
-from netbbs.rendering.reflow import colored_truncate, reflow
+from netbbs.rendering.ansi import colored, strip_ansi
+from netbbs.rendering.reflow import (
+    colored_truncate,
+    print_wrapped,
+    reflow,
+    terminal_wrapped,
+    wrap_terminal_text,
+)
+from netbbs.rendering.width import display_width
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -90,6 +98,117 @@ def test_reflow_wraps_cjk_text_at_display_column_boundaries_not_character_count(
     for line in lines:
         assert display_width(line) <= 8
     assert "".join(lines) == text
+
+
+# -- terminal-output safety net ----------------------------------------
+
+
+def test_wrap_terminal_text_wraps_at_words_without_edge_spaces():
+    result = wrap_terminal_text("alpha beta gamma delta", width=11)
+    assert result.split("\r\n") == ["alpha beta", "gamma delta"]
+    assert all(not line.startswith(" ") and not line.endswith(" ") for line in result.split("\r\n"))
+
+
+def test_wrap_terminal_text_keeps_styled_text_and_escape_sequences_intact():
+    original = colored("alpha beta gamma", fg_color=51, bold=True)
+    result = wrap_terminal_text(original, width=10)
+    visible_lines = strip_ansi(result).split("\r\n")
+    assert visible_lines == ["alpha beta", "gamma"]
+    assert all(display_width(line) <= 10 for line in visible_lines)
+    assert result.count("\x1b[38;5;51m") == 1
+    assert result.count("\x1b[0m") == 1
+
+
+def test_wrap_terminal_text_never_hides_an_indivisible_token():
+    result = wrap_terminal_text("0123456789abcdef", width=5)
+    lines = result.split("\r\n")
+    assert "".join(lines) == "0123456789abcdef"
+    assert all(display_width(line) <= 5 for line in lines)
+
+
+def test_wrap_terminal_text_normalizes_tabs_before_measuring():
+    result = wrap_terminal_text("1234\t56789", width=10)
+    assert "\t" not in result
+    assert result == "1234 56789"
+    assert all(display_width(line) <= 10 for line in result.split("\r\n"))
+
+
+def test_wrap_terminal_text_does_not_emit_an_empty_row_before_indented_token():
+    result = wrap_terminal_text("  0123456789", width=5)
+    assert result.split("\r\n") == ["  012", "34567", "89"]
+
+
+def test_wrap_terminal_text_tracks_horizontal_cursor_movement():
+    result = wrap_terminal_text("\x1b[35Cabcdefghij", width=40)
+    assert result == "\x1b[35Cabcde\r\nfghij"
+
+
+def test_wrap_terminal_text_keeps_absolute_row_but_bounds_its_column():
+    result = wrap_terminal_text("\x1b[2;35Habcdefghij", width=40)
+    assert result == "\x1b[2;35Habcdef\r\nghij"
+
+
+def test_absolute_row_position_resets_column_accounting():
+    result = wrap_terminal_text("abc\x1b[2;10Hx", width=10)
+    assert result == "abc\x1b[2;10Hx"
+
+
+def test_cursor_accounting_caps_huge_numeric_parameters_without_expansion():
+    result = wrap_terminal_text("\x1b[999999999Cx", width=40)
+    assert result == "\x1b[999999999Cx"
+
+
+def test_bare_carriage_return_resets_column_without_adding_a_row():
+    assert wrap_terminal_text("abc\rX", width=40) == "abc\rX"
+
+
+def test_absolute_column_control_preserves_already_rendered_cells():
+    assert wrap_terminal_text("abc\x1b[10Gx", width=10) == "abc\x1b[10Gx"
+
+
+def test_saved_cursor_column_participates_in_wrapping():
+    original = "\x1b[39G\x1b7\x1b[1Gabc\x1b8xyz"
+    assert wrap_terminal_text(original, width=40) == original[:-1] + "\r\nz"
+
+
+def test_wrap_terminal_text_preserves_existing_blank_lines():
+    assert wrap_terminal_text("first\r\n\r\nsecond", width=80) == "first\r\n\r\nsecond"
+
+
+def test_wrap_terminal_text_rejects_non_positive_width():
+    with pytest.raises(ValueError):
+        wrap_terminal_text("hello", 0)
+
+
+def test_print_wrapped_bounds_cli_prose_without_edge_spaces(capsys):
+    print_wrapped("alpha beta gamma delta", width=11)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == ["alpha beta", "gamma delta"]
+    assert all(len(line) <= 11 and line == line.strip() for line in lines)
+
+
+def test_terminal_wrapped_uses_lf_for_exception_messages():
+    assert terminal_wrapped("alpha beta gamma", width=10) == "alpha beta\ngamma"
+
+
+def test_terminal_wrapped_measures_the_destination_stream(monkeypatch):
+    class _Stderr:
+        def fileno(self) -> int:
+            return 2
+
+    monkeypatch.delenv("COLUMNS", raising=False)
+    measured: list[int] = []
+
+    def terminal_size(fd: int) -> os.terminal_size:
+        measured.append(fd)
+        return os.terminal_size((12, 24))
+
+    monkeypatch.setattr(os, "get_terminal_size", terminal_size)
+    result = terminal_wrapped("alpha beta gamma delta", stream=_Stderr())
+
+    assert measured == [2]
+    assert result.splitlines() == ["alpha beta", "gamma delta"]
 
 
 # -- colored_truncate ---------------------------------------------------

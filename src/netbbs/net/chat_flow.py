@@ -195,6 +195,7 @@ from netbbs.rendering import (
     visible_width,
     wrap_to_width,
 )
+from netbbs.rendering.reflow import wrap_terminal_text
 from netbbs.sort_preferences import get_effective_sort_mode, set_sort_preference
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
@@ -3185,7 +3186,13 @@ async def _print_and_redraw_input(
     if height < _PINNED_UI_MIN_HEIGHT:
         return
     scroll_bottom = height - _PINNED_ROWS
-    await session.write(set_scroll_region(1, scroll_bottom) + move_cursor(scroll_bottom, 1) + text + "\r\n")
+    wrapped = wrap_terminal_text(text, session.terminal_width)
+    await session.write(
+        set_scroll_region(1, scroll_bottom)
+        + move_cursor(scroll_bottom, 1)
+        + wrapped
+        + "\r\n"
+    )
     await _repaint_input_row(
         session, live_buffer, height, accent_color=accent_color, unicode_style=unicode_style
     )

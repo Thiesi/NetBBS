@@ -34,7 +34,7 @@ from pathlib import Path
 from netbbs.net.char_input import EditorKey, EditorKeyKind
 from netbbs.net.draft_storage import delete_draft, offer_draft_recovery, save_draft
 from netbbs.net.help_overlay import show_help
-from netbbs.net.session import Session, SessionClosedError
+from netbbs.net.session import Session, SessionClosedError, write_prompt
 from netbbs.rendering import (
     MUTED_COLOR,
     ScreenBuffer,
@@ -420,7 +420,9 @@ async def _confirm_quit(session: Session) -> str:
     leaves the in-progress draft on disk and exits without submitting
     it, instead of forcing a choice between finishing now or losing the
     work."""
-    await session.write("\r\nUnsaved changes. [S]ave, [K]eep draft & exit, [D]iscard, or [C]ancel? ")
+    await write_prompt(
+        session, "\r\nUnsaved changes. [S]ave, [K]eep draft & exit, [D]iscard, or [C]ancel? "
+    )
     answer = (await session.read_key()).lower()
     if answer == "s":
         return "save"

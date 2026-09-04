@@ -20,12 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
 def main() -> None:
     if len(sys.argv) < 4:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -35,7 +36,7 @@ def main() -> None:
     description = sys.argv[5] if len(sys.argv) > 5 else None
 
     if kind not in ("board", "channel"):
-        print(f"kind must be 'board' or 'channel', got {kind!r}")
+        print_wrapped(f"kind must be 'board' or 'channel', got {kind!r}")
         sys.exit(1)
 
     if kind == "board":
@@ -50,18 +51,18 @@ def main() -> None:
         try:
             parent = get_category_by_name(db, parent_name)
         except CategoryError as exc:
-            print(f"Error: {exc}")
+            print_wrapped(f"Error: {exc}")
             sys.exit(1)
         parent_id = parent.id
 
     try:
         category = create_category(db, name, description=description, parent_category_id=parent_id)
     except CategoryError as exc:
-        print(f"Error: {exc}")
+        print_wrapped(f"Error: {exc}")
         sys.exit(1)
 
     level = "top-level" if category.is_top_level else f"sub-category of {parent_name!r}"
-    print(f"Created {kind} category {category.name!r} ({level}) in {db_path}")
+    print_wrapped(f"Created {kind} category {category.name!r} ({level}) in {db_path}")
 
 
 if __name__ == "__main__":

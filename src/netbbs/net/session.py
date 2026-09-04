@@ -14,6 +14,8 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from netbbs.rendering.reflow import wrap_terminal_text
+
 if TYPE_CHECKING:
     # Deferred/type-checking-only: netbbs.net.char_input itself imports
     # SessionClosedError from this module, so a real top-level import
@@ -173,7 +175,7 @@ class Session(ABC):
         terminal clients, so there's no reason for subclasses to
         override this.
         """
-        await self.write(text + "\r\n")
+        await self.write(wrap_terminal_text(text, self.terminal_width) + "\r\n")
 
     @abstractmethod
     async def read_line(
@@ -347,3 +349,32 @@ class Session(ABC):
         happen to appear in a ZDLE-escaped frame or raw file content,
         which `write` would otherwise corrupt.
         """
+
+
+async def write_prompt(session: Session, text: str) -> None:
+    """Write a width-safe interactive prompt without a trailing newline.
+
+    Two columns are reserved for the first input character, covering the
+    maximum width of one supported East Asian Wide/Fullwidth character, so a
+    prompt never makes that first keystroke disappear into an implicit
+    soft-wrap.  Callers should use this instead of raw ``Session.write``
+    whenever the output is human-readable prompt text; ``write`` remains the
+    low-level primitive for cursor controls, incremental echo, screen-buffer
+    diffs, bells, and raw door-style output.
+    """
+    width = max(1, getattr(session, "terminal_width", 80) - 2)
+    await session.write(wrap_terminal_text(text, width))
+
+
+async def write_preformatted_line(session: Session, text: str) -> None:
+    """Write trusted terminal art while preserving authored line breaks.
+
+    SysOp-authored ANSI banners and mastheads keep their original rows whenever
+    those rows fit.  Cursor positioning is preserved but modeled so it
+    participates in width measurement.  An over-width row still wraps as the
+    bounded fallback, so trusted art cannot hide content beyond a narrow
+    terminal's right edge.  Ordinary human-readable text must use ``write_line``
+    or ``write_prompt``.
+    """
+    width = max(1, getattr(session, "terminal_width", 80))
+    await session.write(wrap_terminal_text(text, width) + "\r\n")

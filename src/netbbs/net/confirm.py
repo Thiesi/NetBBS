@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from netbbs.net.char_input import EditorKeyKind
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import LABEL_COLOR, MENU_KEY_COLOR, colored
 
 
@@ -98,7 +98,7 @@ async def prompt_yes_no(session: Session, prompt: str, *, default: bool) -> bool
     they can never silently choose the default.
     """
     hint = f"{_highlighted('Y')}/n" if default else f"y/{_highlighted('N')}"
-    await session.write(f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
+    await write_prompt(session, f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
     answer = await read_confirmation_choice(session)
     return default if answer is None else answer
 
@@ -114,6 +114,6 @@ async def prompt_yes_no_or_keep(session: Session, prompt: str, *, current: bool)
     keypress; Enter keeps the current value.
     """
     hint = _highlighted("y" if current else "N")
-    await session.write(f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
+    await write_prompt(session, f"{prompt} {_BRACKET_OPEN}{hint}{_BRACKET_CLOSE}: ")
     answer = await read_confirmation_choice(session)
     return current if answer is None else answer

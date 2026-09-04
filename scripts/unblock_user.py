@@ -15,12 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from netbbs.auth.users import get_user_by_username  # noqa: E402
 from netbbs.moderation import unblock_user  # noqa: E402
+from netbbs.rendering.reflow import print_wrapped  # noqa: E402
 from netbbs.storage.database import Database  # noqa: E402
 
 
 def main() -> None:
     if len(sys.argv) != 3:
-        print(__doc__)
+        print_wrapped(__doc__ or "")
         sys.exit(1)
 
     db_path = Path(sys.argv[1])
@@ -29,7 +30,7 @@ def main() -> None:
     db = Database(db_path)
     target = get_user_by_username(db, username)
     unblock_user(db, target)
-    print(f"Unblocked {username!r} in {db_path}")
+    print_wrapped(f"Unblocked {username!r} in {db_path}")
 
 
 if __name__ == "__main__":

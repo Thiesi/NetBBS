@@ -66,7 +66,7 @@ from netbbs.net.node_theme import effective_accent_color, effective_header_color
 from netbbs.net.picker import pick_item
 from netbbs.net.prose_editor import edit_prose
 from netbbs.net.redraw_preference import redraw_in_place_enabled
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.net.sort_ui import SORT_MODE_LABELS, prompt_sort_change
 from netbbs.net.unicode_style_preference import unicode_style_enabled
 from netbbs.permissions import meets_level
@@ -540,7 +540,7 @@ async def _show_board(
                 await session.write_line(colored("Post cancelled.", fg_color=MUTED_COLOR))
                 return
             if action is ReviewAction.EDIT_SUBJECT:
-                await session.write(f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
+                await write_prompt(session, f"Subject [{sanitize_text(subject)}] (Enter to keep): ")
                 subject = (await session.read_line()).strip() or subject
                 continue
             if action is ReviewAction.EDIT_BODY:
@@ -592,7 +592,7 @@ async def _show_board(
                 fg_color=MUTED_COLOR,
             )
         )
-        await session.write("[E]dit it, [D]elete it, or [I]gnore for now? ")
+        await write_prompt(session, "[E]dit it, [D]elete it, or [I]gnore for now? ")
         choice = (await session.read_key()).lower()
         if choice == "d":
             delete_draft(draft_path)
@@ -752,7 +752,7 @@ async def _edit_existing_post(
     edit stays purely local, not propagated (see `queue_board_post_
     moderator_edit_if_linked`'s own docstring for why).
     """
-    await session.write(f"Edit which post number [1-{len(page.posts)}]? ")
+    await write_prompt(session, f"Edit which post number [1-{len(page.posts)}]? ")
     choice = (await session.read_key()).strip()
     if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
         await session.write_line(colored("\r\nNot a valid post number.", fg_color=MUTED_COLOR))
@@ -764,7 +764,7 @@ async def _edit_existing_post(
         await session.write_line(colored("You can't edit that post.", fg_color=MUTED_COLOR))
         return
 
-    await session.write(f"Subject [{post.subject}] (Enter to keep): ")
+    await write_prompt(session, f"Subject [{post.subject}] (Enter to keep): ")
     subject = (await session.read_line()).strip() or post.subject
 
     edit_draft_path = _post_draft_path(
@@ -827,7 +827,7 @@ async def _tombstone_existing_post(
     `queue_board_post_moderator_edit_if_linked` (see that function's own
     docstring).
     """
-    await session.write(f"Tombstone which post number [1-{len(page.posts)}]? ")
+    await write_prompt(session, f"Tombstone which post number [1-{len(page.posts)}]? ")
     choice = (await session.read_key()).strip()
     if not choice.isdigit() or not (1 <= int(choice) <= len(page.posts)):
         await session.write_line(colored("\r\nNot a valid post number.", fg_color=MUTED_COLOR))

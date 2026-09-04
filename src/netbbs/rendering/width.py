@@ -102,12 +102,10 @@ def wrap_to_width(text: str, width: int, *, break_long_words: bool = True) -> li
     `break_long_words=False` (same name/meaning as stdlib `textwrap`'s
     own parameter) turns that fallback off: an over-width word is
     instead emitted whole, on its own line, overflowing `width` rather
-    than being split. Use this for content where a mid-token break
-    corrupts meaning rather than just looking untidy -- a filesystem
-    path is the concrete case (dogfood report: a long absolute path,
-    embedded in an otherwise-wrappable sentence or standing alone,
-    doesn't survive being cut in half the way CJK text does; overflow
-    is the lesser problem)."""
+    than being split. It is retained for non-terminal formatting where
+    preserving an indivisible token matters more than the requested width;
+    terminal-facing output must leave this at its bounded default because
+    off-screen text is invisible to the caller."""
     if width < 1:
         raise ValueError(f"width must be >= 1, got {width}")
 

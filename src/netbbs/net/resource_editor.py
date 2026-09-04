@@ -32,7 +32,7 @@ from typing import Any, Awaitable, Callable
 from netbbs.net.char_input import CANCEL_KEY, HELP_KEY, EditorKey, EditorKeyKind, reject_unhandled_key
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.help_overlay import show_help
-from netbbs.net.session import Session
+from netbbs.net.session import Session, write_prompt
 from netbbs.rendering import (
     ACCENT_COLOR,
     HEADER_COLOR,
@@ -826,7 +826,7 @@ def text_field(key: str, *, required: bool = False) -> FieldPrompt:
     async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft.get(key) or ""
         shown = current if current else "(blank)" if required else "(none)"
-        await session.write(f"[{shown}] (blank = keep): ")
+        await write_prompt(session, f"[{shown}] (blank = keep): ")
         raw = (await session.read_line()).strip()
         if raw:
             draft[key] = raw
