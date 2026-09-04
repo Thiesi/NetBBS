@@ -156,6 +156,44 @@ def test_remote_command_lists_a_catalogued_but_not_yet_fetched_file(db, lane, al
     assert "Cancelled" in output
 
 
+def test_remote_fetch_warns_before_confirming_a_changed_origin_identity(
+    db, lane, alice, node_identity, remote_node_identity,
+):
+    from netbbs.link.store import save_peer
+
+    area, remote_file = _carried_area_with_one_remote_file(
+        db, node_identity, remote_node_identity
+    )
+    familiar_node = LinkNode(identity=bootstrap_node_identity("familiar-file-origin"))
+    changed_node = LinkNode(identity=remote_node_identity)
+
+    def admitted(node):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-09-04T09:30:00+00:00",
+            friendly_name="Familiar File Origin",
+            canonical_dns_name="familiar-files.example.org",
+        ))
+
+    save_peer(db, admitted(familiar_node))
+    changed_peer = admitted(changed_node)
+    save_peer(db, changed_peer)
+    link_context = _link_context_for(node_identity)
+    link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
+    session = FakeSession(["/remote", "0", "1", "n"])
+
+    asyncio.run(
+        file_flow._show_area(session, lane, area, alice, link_context=link_context)
+    )
+
+    output = _written(session)
+    assert "IDENTITY CHANGED" in output
+    assert "different cryptographic identity" in output
+    assert remote_file.origin_fingerprint in output
+    assert "Cancelled" in output
+
+
 def test_remote_command_reports_an_already_fetched_entry_without_offering_to_fetch(
     db, lane, alice, node_identity, remote_node_identity
 ):

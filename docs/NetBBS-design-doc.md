@@ -568,9 +568,14 @@ labels, so the same non-blocking identity warnings remain available even before
 the corresponding durable event has arrived.
 
 High-impact consent screens retain the same non-blocking model but disclose
-security context before confirmation. In particular, accepting a board-origin
-transfer from a node with an undismissed cryptographic-identity warning shows
-the offering node's full technical identity before the default-no prompt.
+security context before confirmation. Offering or accepting a board-origin
+transfer involving a node with an undismissed cryptographic-identity warning
+shows that node's full technical identity before the default-no prompt. If an
+incoming offer's authenticated origin profile is unavailable, the confirmation
+falls back to the signed origin fingerprint rather than an anonymous placeholder.
+Likewise, a remote-file catalogue marks warned origins with their full technical
+identity and repeats that caution before the fetch confirmation, before any bytes
+are transferred.
 
 ### 4.5 Identity tiers
 

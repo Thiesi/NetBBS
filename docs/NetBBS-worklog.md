@@ -3895,5 +3895,22 @@ consent boundary and discloses the warned origin fingerprint before confirmation
 When cooldown reissue leaves another fingerprint's pending replacement pointing
 at the newly owned previous name, ignoring the stale row in memory is
 insufficient: detach its `replaces_name` in SQLite before inserting the new
-owner's replacement, or the partial unique index still denies an unrelated
+owner’s replacement, or the partial unique index still denies an unrelated
 rename. Detachment changes neither the stale row's owner nor its credential.
+
+Origin-transfer identity disclosure is symmetric: both offering and accepting
+consult the undismissed observation for the signed fingerprint before their
+default-no confirmation. An incoming offer with no live peer profile falls back
+to its signed `old_origin_fingerprint`, never a generic unknown-node label.
+Remote-file catalogues similarly preload warned origin fingerprints through one
+database-lane call, put the technical identity in the catalogue row, and repeat
+the caution immediately before fetch consent.
+
+An authoritative replacement-credential 401 plus a successful previous-name
+heartbeat does not by itself prove that the server removed the replacement's
+`replaces_name` relationship. The updater first attempts `/cancel-rename` with
+the working previous credential. Promote and journal the reverse credential swap
+only after cancellation succeeds or a 401 proves the relationship is already
+absent; on transient or policy failure, atomically retain the transition and both
+credentials while recording the replacement as abandoned and the previous
+heartbeat's authoritative state.

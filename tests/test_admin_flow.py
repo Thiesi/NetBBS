@@ -2842,6 +2842,49 @@ def test_transfer_board_origin_disambiguates_duplicate_peer_labels(db, lane, sys
     assert "Offer sent" not in text
 
 
+def test_transfer_board_origin_warns_before_offering_to_a_changed_identity(
+    db, lane, sysop,
+):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net.admin_flow import _transfer_board_origin_screen
+
+    familiar_node = LinkNode(identity=bootstrap_node_identity("familiar-target"))
+    changed_node = LinkNode(identity=bootstrap_node_identity("changed-target"))
+
+    def admitted(node):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-09-04T09:30:00+00:00",
+            friendly_name="Familiar Target",
+            canonical_dns_name="familiar-target.example.org",
+        ))
+
+    save_peer(db, admitted(familiar_node))
+    changed_peer = admitted(changed_node)
+    save_peer(db, changed_peer)
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
+
+    session = FakeSession(["0", "1", "n"])
+    asyncio.run(
+        _transfer_board_origin_screen(session, lane, board, link_context)
+    )
+
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert changed_peer.fingerprint in text
+    assert "Cancelled." in text
+    assert board.board_id not in link_context.link_node.pending_origin_transfers
+
+
 def test_close_board_flow(db, lane, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.link.boards import is_board_closed, link_board
@@ -2944,6 +2987,7 @@ def test_accept_board_origin_transfer_flow(db, lane, sysop):
 
     text = _written_text(session)
     assert "Accepted" in text
+    assert remote_identity.fingerprint in text
     assert board.board_id not in link_context.link_node.pending_origin_transfers
     assert link_context.link_node.board_origin[board.board_id] == link_context.node_identity.fingerprint
 

@@ -384,7 +384,13 @@ def test_updater_retries_the_previous_name_after_replacement_abandonment_and_a_t
             return HeartbeatResult("old-name", "matured", "127.0.0.1"), False
         return None, True
 
+    async def rename_already_absent(_base_url, _credential):
+        return None, True
+
     monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    monkeypatch.setattr(
+        "netbbs.managed_dns.updater._cancel_remote_rename", rename_already_absent,
+    )
     sleep_calls: list[float] = []
     parked = asyncio.Event()
 
@@ -418,6 +424,103 @@ def test_updater_retries_the_previous_name_after_replacement_abandonment_and_a_t
     db.close()
 
 
+def test_updater_preserves_a_remote_rename_when_automatic_cancellation_fails(
+    tmp_path, monkeypatch,
+):
+    from netbbs.managed_dns.client import HeartbeatResult
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "inactive-new-secret")
+    save_credential(previous_credential_path_for(db.path), "working-old-secret")
+
+    async def fake_send_heartbeat(_base_url, credential):
+        if credential == "working-old-secret":
+            return HeartbeatResult("old-name", "matured", "127.0.0.1"), False
+        return None, True
+
+    async def cancellation_failed(_base_url, _credential):
+        return None, False
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    monkeypatch.setattr(
+        "netbbs.managed_dns.updater._cancel_remote_rename", cancellation_failed,
+    )
+
+    sleep_calls = _fake_sleep_recorder()
+    asyncio.run(_run_one_pass(
+        db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]),
+    ))
+
+    assert get_registered_name(db) == "new-name"
+    assert get_registration_status(db) is RegistrationStatus.ABANDONED
+    assert not get_published(db)
+    assert get_previous_name(db) == "old-name"
+    assert get_previous_status(db) is RegistrationStatus.MATURED
+    assert get_previous_published(db)
+    assert load_credential(credential_path_for(db.path)) == "inactive-new-secret"
+    assert load_credential(previous_credential_path_for(db.path)) == "working-old-secret"
+    db.close()
+
+
+def test_updater_cancels_an_abandoned_remote_replacement_before_promoting_the_old_name(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            base_url = f"http://127.0.0.1:{server.port}"
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, base_url)
+            async with aiohttp.ClientSession() as session:
+                original = await register(
+                    session, base_url, name="old-name",
+                    node_fingerprint="fp-1", dynamic=False,
+                )
+                replacement = await rename(
+                    session, base_url, name="new-name",
+                    credential=original.credential,
+                )
+            mark_abandoned(
+                backend_db, replacement.name,
+                released_at="2026-09-04T09:30:00+00:00",
+            )
+
+            set_registered_name(db, replacement.name)
+            set_registration_status(db, RegistrationStatus.PENDING)
+            set_previous_name(db, original.name)
+            set_previous_status(db, RegistrationStatus.PENDING)
+            save_credential(credential_path_for(db.path), replacement.credential)
+            save_credential(previous_credential_path_for(db.path), original.credential)
+
+            sleep_calls = _fake_sleep_recorder()
+            await _run_one_pass(
+                db, sleep_calls=sleep_calls, condition=lambda: bool(sleep_calls[1]),
+            )
+            return db, backend_db, original.credential
+        finally:
+            await server.stop()
+
+    db, backend_db, original_credential = asyncio.run(scenario())
+    old = get_registration_by_name(backend_db, "old-name")
+    assert get_registration_by_name(backend_db, "new-name") is None
+    assert old is not None and old.status == "pending"
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.PENDING
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == original_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+    backend_db.close()
+
+
 def test_updater_commits_promoted_state_before_journaling_credential_swap(tmp_path, monkeypatch):
     from netbbs.managed_dns.client import HeartbeatResult
 
@@ -436,10 +539,16 @@ def test_updater_commits_promoted_state_before_journaling_credential_swap(tmp_pa
             return HeartbeatResult("old-name", "matured", "127.0.0.1"), False
         return None, True
 
+    async def rename_already_absent(_base_url, _credential):
+        return None, True
+
     def crash_before_journal(*_args, **_kwargs):
         raise RuntimeError("simulated crash before credential journal")
 
     monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_send_heartbeat)
+    monkeypatch.setattr(
+        "netbbs.managed_dns.updater._cancel_remote_rename", rename_already_absent,
+    )
     monkeypatch.setattr(
         "netbbs.managed_dns.updater.stage_credential_cancellation", crash_before_journal,
     )

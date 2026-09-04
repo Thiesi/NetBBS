@@ -21,7 +21,9 @@ from collections.abc import Awaitable, Callable
 import asyncio
 from aiohttp import ClientSession
 
-from netbbs.managed_dns.client import HeartbeatResult, ManagedDnsError, heartbeat
+from netbbs.managed_dns.client import (
+    CancelRenameResult, HeartbeatResult, ManagedDnsError, cancel_rename, heartbeat,
+)
 from netbbs.managed_dns.credential import (
     credential_path_for, delete_credential, load_credential, previous_credential_path_for,
     managed_dns_transition_lock, recover_credential_transition, stage_credential_cancellation,
@@ -124,17 +126,32 @@ async def _run_managed_dns_update_pass(db: Database) -> None:
             previous_inactive=previous_inactive,
         )
     elif primary_inactive and previous_result is not None and previous_credential is not None:
-        _apply_heartbeat_result(
-            db, previous_result, previous_result=None,
-            has_previous_credential=False,
+        cancellation, rename_absent = await _cancel_remote_rename(
+            base_url, previous_credential
         )
-        # Commit the recovered service truth while both files
-        # still exist, then journal the reverse swap. A crash
-        # at any point leaves either the fallback credential or
-        # a replayable journal, never an active DB identity with
-        # its only working secret already deleted.
-        stage_credential_cancellation(db.path, previous_credential)
-        recover_credential_transition(db.path)
+        if cancellation is not None:
+            _apply_cancelled_rename_result(db, cancellation)
+        elif rename_absent:
+            # A 401 from cancellation means the relationship is already gone
+            # (for example, cancellation completed before a node crash), so
+            # the working previous heartbeat can safely repair local state.
+            _apply_heartbeat_result(
+                db, previous_result, previous_result=None,
+                has_previous_credential=False,
+            )
+        else:
+            # The service may still retain the abandoned replacement. Keep the
+            # transition visible and both credentials recoverable so a later
+            # pass or the SysOp can retry cancellation.
+            _preserve_outstanding_rename(
+                db, name=name, previous_result=previous_result,
+            )
+        if cancellation is not None or rename_absent:
+            # Commit the recovered service truth while both files still exist,
+            # then journal the reverse swap. A crash at any point leaves either
+            # the fallback credential or a replayable journal.
+            stage_credential_cancellation(db.path, previous_credential)
+            recover_credential_transition(db.path)
     elif previous_result is not None and previous_credential is not None:
         # The previous name can mature or be republished even when the
         # replacement heartbeat times out. Preserve the unknown primary state,
@@ -192,6 +209,56 @@ async def _send_heartbeat(
         _logger.warning("Managed-DNS heartbeat failed: %s", exc)
         return None, exc.status_code == 401
     return result, False
+
+
+async def _cancel_remote_rename(
+    base_url: str, previous_credential: str,
+) -> tuple[CancelRenameResult | None, bool]:
+    """Cancel a retained remote rename; report whether it was already absent."""
+    try:
+        async with ClientSession(trust_env=False) as session:
+            result = await cancel_rename(
+                session, base_url, credential=previous_credential,
+            )
+    except ManagedDnsError as exc:
+        _logger.warning("Managed-DNS automatic rename cancellation failed: %s", exc)
+        return None, exc.status_code == 401
+    return result, False
+
+
+def _apply_cancelled_rename_result(
+    db: Database, result: CancelRenameResult,
+) -> None:
+    """Apply the service's authoritative state after automatic cancellation."""
+    set_heartbeat_reconciliation_state(
+        db,
+        name=result.previous_name,
+        status=RegistrationStatus(result.previous_status),
+        published=result.previous_last_known_address is not None,
+        last_contact_at=utc_now_iso(),
+        previous_name=None,
+        previous_status=None,
+        previous_published=False,
+    )
+
+
+def _preserve_outstanding_rename(
+    db: Database, *, name: str, previous_result: HeartbeatResult,
+) -> None:
+    """Record both heartbeat truths without hiding an uncancelled rename."""
+    previous_name = get_previous_name(db)
+    if previous_name is None or previous_result.name != previous_name:
+        return
+    set_heartbeat_reconciliation_state(
+        db,
+        name=name,
+        status=RegistrationStatus.ABANDONED,
+        published=False,
+        last_contact_at=utc_now_iso(),
+        previous_name=previous_name,
+        previous_status=RegistrationStatus(previous_result.status),
+        previous_published=previous_result.last_known_address is not None,
+    )
 
 
 def _apply_inactive_heartbeat_results(

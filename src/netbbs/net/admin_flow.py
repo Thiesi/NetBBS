@@ -10211,6 +10211,26 @@ def _linked_boards_excluding(db: Database, exclude_board_id: int) -> list[Board]
     ]
 
 
+async def _warn_about_changed_node_identity(
+    session: Session,
+    lane: DatabaseLane,
+    fingerprint: str,
+    *,
+    role: str,
+) -> None:
+    identity_notice = await lane.run(latest_identity_observation, fingerprint)
+    if identity_notice is None or identity_notice.severity != "security":
+        return
+    await session.write_line(
+        colored(
+            "Caution: this familiar node name now has a different cryptographic identity. "
+            f"{role} technical identity is {sanitize_text(fingerprint)}.",
+            fg_color=MUTED_COLOR,
+            bold=True,
+        )
+    )
+
+
 async def _transfer_board_origin_screen(
     session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
 ) -> None:
@@ -10265,6 +10285,9 @@ async def _transfer_board_origin_screen(
         return
     target = selected.fingerprint
     target_label = sanitize_text(_candidate_label(selected))
+    await _warn_about_changed_node_identity(
+        session, lane, target, role="The proposed new origin's",
+    )
     if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target_label}?", default=False):
         await session.write_line("Cancelled.")
         return
@@ -10350,19 +10373,14 @@ async def _accept_board_origin_transfer_screen(
     )
     old_peer = link_context.link_node.peers.get(old_origin)
     old_label = sanitize_text(
-        identity_for_peer(old_peer).label if old_peer is not None else "an unknown linked node"
+        identity_for_peer(old_peer).label
+        if old_peer is not None
+        else old_origin if isinstance(old_origin, str) else "an unknown linked node"
     )
     if isinstance(old_origin, str):
-        identity_notice = await lane.run(latest_identity_observation, old_origin)
-        if identity_notice is not None and identity_notice.severity == "security":
-            await session.write_line(
-                colored(
-                    "Caution: this familiar node name now has a different cryptographic identity. "
-                    f"The offering node's technical identity is {sanitize_text(old_origin)}.",
-                    fg_color=MUTED_COLOR,
-                    bold=True,
-                )
-            )
+        await _warn_about_changed_node_identity(
+            session, lane, old_origin, role="The offering node's",
+        )
     if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_label}?", default=False):
         await session.write_line("Cancelled.")
         return

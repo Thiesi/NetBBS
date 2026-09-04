@@ -77,7 +77,9 @@ from netbbs.files.categories import (
 )
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
-from netbbs.link.node_profiles import identity_for_peer, present_link_author_label
+from netbbs.link.node_profiles import (
+    identity_for_peer, latest_identity_observation, present_link_author_label,
+)
 from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
@@ -822,9 +824,26 @@ async def _browse_remote_files(
         await session.write_line(f"\r\n{state}")
         return
 
+    def warned_origins(db: Database) -> set[str]:
+        return {
+            remote_file.origin_fingerprint
+            for remote_file in remote_files
+            if (
+                (notice := latest_identity_observation(db, remote_file.origin_fingerprint))
+                is not None and notice.severity == "security"
+            )
+        }
+
+    identity_warnings = await lane.run(warned_origins)
+
     def render_description(remote_file: RemoteFile) -> str:
         status = "[LOCAL] already fetched" if remote_file.fetched_file_id is not None else "[REMOTE] not yet fetched"
         origin = _remote_file_origin_label(link_context, remote_file)
+        if remote_file.origin_fingerprint in identity_warnings:
+            return (
+                f"[IDENTITY CHANGED: {remote_file.origin_fingerprint}] "
+                f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
+            )
         return f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
 
     selected = await pick_item(
@@ -858,6 +877,16 @@ async def _browse_remote_files(
     await session.write_line(
         f"\r\n{sanitize_text(selected.filename)!r} ({_format_size(selected.size_bytes)}), not yet fetched."
     )
+    if selected.origin_fingerprint in identity_warnings:
+        await session.write_line(
+            colored(
+                "Caution: this familiar origin name now has a different cryptographic identity. "
+                f"The file origin's technical identity is "
+                f"{sanitize_text(selected.origin_fingerprint)}.",
+                fg_color=MUTED_COLOR,
+                bold=True,
+            )
+        )
     if not await prompt_yes_no(session, "Fetch it from its origin now?", default=False):
         await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
         return
