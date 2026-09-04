@@ -2169,82 +2169,247 @@ async def _pick_trust_dimension(session: Session) -> TrustDimension | None:
     }.get(choice)
 
 
+def _float_field(
+    key: str, *, label: str, minimum: float | None = None, maximum: float | None = None
+) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """A numeric editor field with the module's "blank = keep" convention
+    and a friendly rejection instead of a leaked float() exception (a
+    dogfood report against the old trust-domain wizard)."""
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        await write_prompt(session, f"{label} [{draft.get(key)}] (blank = keep): ")
+        raw = (await session.read_line()).strip()
+        if not raw:
+            return
+        try:
+            value = float(raw)
+        except ValueError:
+            await session.write_line(colored("Not a number.", fg_color=MUTED_COLOR))
+            return
+        if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+            await session.write_line(colored(f"Must be between {minimum} and {maximum}.", fg_color=MUTED_COLOR))
+            return
+        draft[key] = value
+
+    return prompt
+
+
+def _node_reference_field(
+    key: str, *, redraw_in_place: bool, unicode_style: bool, collapsed: bool
+) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """A linked-node field for the trust editors (issue #282): a picker
+    over the peers this node has stored (their friendly labels, most
+    recently contacted first) with a leading "type it" entry for a
+    name, DNS name, or technical identity that isn't listed -- typed
+    input still goes through `_resolve_admin_node_reference`, so the
+    familiar-name-with-a-new-key warning and its confirmation are
+    unchanged. Stores the fingerprint in `draft[key]` and the display
+    label in `draft[key + "_label"]`; backing out keeps both."""
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        def _known(db: Database) -> list[tuple[str, str | None]]:
+            contact = load_peer_last_contact(db)
+            ordered = sorted(contact, key=lambda fp: contact[fp], reverse=True)
+            return [(identity_for_fingerprint(db, fp).label, fp) for fp in ordered]
+
+        choices: list[tuple[str, str | None]] = [("(type a name, DNS name, or technical identity)", None)]
+        choices += await lane.run(_known)
+        selected = await pick_item(
+            session, choices,
+            name_of=lambda item: item[0],
+            stable_id_of=lambda item: 0 if item[1] is None else (hash(item[1]) & 0x7FFFFFFF),
+            description_of=lambda item: item[1],
+            title="Which node?",
+            empty_message="No linked nodes are stored yet.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=await lane.run(effective_accent_color_256),
+            header_color=await lane.run(effective_header_color_256),
+        )
+        if selected is None:
+            return
+        if selected[1] is not None:
+            draft[key] = selected[1]
+            draft[key + "_label"] = selected[0]
+            return
+        await write_prompt(session, "Node name, DNS name, or technical identity (blank = keep): ")
+        raw = (await session.read_line()).strip()
+        if not raw:
+            return
+        fingerprint = await _resolve_admin_node_reference(session, lane, raw)
+        if fingerprint is None:
+            return
+        draft[key] = fingerprint
+        draft[key + "_label"] = (await lane.run(identity_for_fingerprint, fingerprint)).label
+
+    return prompt
+
+
+def _node_render(key: str) -> Callable[[dict], str]:
+    return lambda d: sanitize_text(d.get(key + "_label") or d.get(key) or "(not chosen)")
+
+
+async def _trust_editor(
+    session: Session, lane: DatabaseLane, actor: User, *, title: str, fields: list[FieldSpec],
+    draft: dict, save, error_type: type[Exception] = ValueError,
+) -> object | None:
+    """The one `edit_resource_draft` call shape every trust editor
+    shares -- preferences resolved here so the seven screens don't each
+    repeat the same six lookups."""
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    return await edit_resource_draft(
+        session, lane,
+        title=title, fields=fields, draft=draft, save=save, error_type=error_type,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+
+
+async def _trust_list_choice(session: Session, options: list[str]) -> str:
+    """The listing screens' own action bar (kept in its established
+    `write_prompt(action_bar(...) + ": ")` form): returns the chosen
+    lowercase key, re-prompting on anything not offered."""
+    keys = {"b"} | {o for o in options}
+    labels = {"a": menu_key("A", "dd/update"), "r": menu_key("R", "emove"), "b": menu_key("B", "ack")}
+    while True:
+        await write_prompt(
+            session,
+            f"{action_bar([labels[k] for k in ('a', 'r', 'b') if k in keys], width=session.terminal_width)}: "
+        )
+        choice = (await session.read_key()).lower()
+        if choice in keys:
+            await session.write_line("")
+            return choice
+        await session.write(reject_unhandled_key(choice))
+
+
 async def _set_trust_override_screen(
     session: Session, lane: DatabaseLane, actor: User, subject: TrustSubject
 ) -> None:
-    dimension = await _pick_trust_dimension(session)
-    if dimension is None:
-        return
-    await session.write_line("State:")
-    await session.write_line(
-        action_bar(
-            [
-                menu_key("P", "robationary"),
-                menu_key("E", "stablished"),
-                menu_key("Q", "uarantined"),
-                menu_key("B", "locked"),
-            ],
-            width=session.terminal_width,
+    """
+    Issue #282: was a fixed five-step chain (dimension, state, reason,
+    then up to two confirmations) with no way back -- an invalid key
+    anywhere cancelled everything. Now a draft editor: `[D]imension`
+    and `S[t]ate` open their own small action bars, `[R]eason` is the
+    mandatory free text, and `[S]ave` runs the two safety
+    confirmations exactly as before (the audited-deviation question for
+    ESTABLISHED, and the changed-identity re-check loop) before
+    applying the override. Declining either leaves the draft intact.
+    """
+    draft: dict = {"dimension": None, "state": None, "reason": ""}
+
+    async def _dimension_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        dimension = await _pick_trust_dimension(session)
+        if dimension is not None:
+            draft["dimension"] = dimension
+
+    async def _state_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        await session.write_line("State:")
+        await session.write_line(
+            action_bar(
+                [
+                    menu_key("P", "robationary"),
+                    menu_key("E", "stablished"),
+                    menu_key("Q", "uarantined"),
+                    menu_key("B", "locked"),
+                ],
+                width=session.terminal_width,
+            )
         )
+        await write_prompt(session, "Choice: ")
+        state = {
+            "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
+            "q": TrustState.QUARANTINED, "b": TrustState.BLOCKED,
+        }.get((await session.read_key()).lower())
+        await session.write_line("")
+        if state is not None:
+            draft["state"] = state
+
+    fields = [
+        FieldSpec(
+            key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
+            render=lambda d: d["dimension"].value if d["dimension"] is not None else "(not chosen)",
+            prompt=_dimension_prompt,
+            brief="Which trust dimension to force",
+            help="Identity integrity, resource behavior, or content conduct -- each is tracked separately.",
+        ),
+        FieldSpec(
+            key="state", hotkey="t", menu_text=menu_key("t", "ate", prefix="S"), label="State",
+            render=lambda d: d["state"].value if d["state"] is not None else "(not chosen)",
+            prompt=_state_prompt,
+            brief="The state to force",
+            help=(
+                "Probationary, established, quarantined, or blocked. Forcing ESTABLISHED bypasses the "
+                "automatic probation requirements and is recorded as an audited safety deviation."
+            ),
+        ),
+        FieldSpec(
+            key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+            render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+            prompt=text_field("reason", required=True),
+            brief="Mandatory audit note",
+            help="Recorded in the trust decision history alongside the override.",
+        ),
+    ]
+
+    async def save(draft: dict) -> bool | None:
+        dimension, state, reason = draft["dimension"], draft["state"], draft["reason"]
+        if dimension is None or state is None:
+            raise ValueError("choose a [D]imension and a S[t]ate first")
+        if not reason:
+            raise ValueError("a reason is required")
+        if state == TrustState.ESTABLISHED:
+            confirmed = await prompt_yes_no(
+                session,
+                "This bypasses automatic probation requirements. Apply this audited safety deviation?",
+                default=False,
+            )
+            if not confirmed:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+        while True:
+            identity_notice = await lane.run(
+                latest_identity_observation, subject.node_fingerprint
+            )
+            if identity_notice is None or identity_notice.severity != "security":
+                break
+            await _warn_about_changed_node_identity(
+                session, lane, subject.node_fingerprint, role="This subject's"
+            )
+            confirmed = await prompt_yes_no(
+                session,
+                "Apply this trust override to technical identity "
+                f"{sanitize_text(subject.node_fingerprint)} despite the identity warning?",
+                default=False,
+            )
+            if not confirmed:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+            refreshed_notice = await lane.run(
+                latest_identity_observation, subject.node_fingerprint
+            )
+            if (
+                refreshed_notice is None
+                or refreshed_notice.severity != "security"
+                or refreshed_notice.id == identity_notice.id
+            ):
+                break
+        try:
+            await lane.run(
+                set_trust_override, subject, dimension, state,
+                reason=reason, actor_user_id=actor.id,
+            )
+        except ValueError as exc:
+            await session.write_line(colored(f"Trust state changed concurrently: {exc}", fg_color=ERROR_COLOR))
+            return None
+        await session.write_line(colored("Trust override applied and audited.", fg_color=SUCCESS_COLOR))
+        return True
+
+    await _trust_editor(
+        session, lane, actor, title="Trust override", fields=fields, draft=draft, save=save,
     )
-    await session.write("Choice: ")
-    state = {
-        "p": TrustState.PROBATIONARY, "e": TrustState.ESTABLISHED,
-        "q": TrustState.QUARANTINED, "b": TrustState.BLOCKED,
-    }.get((await session.read_key()).lower())
-    if state is None:
-        await session.write_line(colored("Unknown trust state; no change made.", fg_color=ERROR_COLOR))
-        return
-    await session.write("Mandatory reason: ")
-    reason = (await session.read_line()).strip()
-    if not reason:
-        await session.write_line(colored("A reason is required; no change made.", fg_color=ERROR_COLOR))
-        return
-    if state == TrustState.ESTABLISHED:
-        confirmed = await prompt_yes_no(
-            session,
-            "This bypasses automatic probation requirements. Apply this audited safety deviation?",
-            default=False,
-        )
-        if not confirmed:
-            await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
-            return
-    while True:
-        identity_notice = await lane.run(
-            latest_identity_observation, subject.node_fingerprint
-        )
-        if identity_notice is None or identity_notice.severity != "security":
-            break
-        await _warn_about_changed_node_identity(
-            session, lane, subject.node_fingerprint, role="This subject's"
-        )
-        confirmed = await prompt_yes_no(
-            session,
-            "Apply this trust override to technical identity "
-            f"{sanitize_text(subject.node_fingerprint)} despite the identity warning?",
-            default=False,
-        )
-        if not confirmed:
-            await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
-            return
-        refreshed_notice = await lane.run(
-            latest_identity_observation, subject.node_fingerprint
-        )
-        if (
-            refreshed_notice is None
-            or refreshed_notice.severity != "security"
-            or refreshed_notice.id == identity_notice.id
-        ):
-            break
-    try:
-        await lane.run(
-            set_trust_override, subject, dimension, state,
-            reason=reason, actor_user_id=actor.id,
-        )
-    except ValueError as exc:
-        await session.write_line(colored(f"Trust state changed concurrently: {exc}", fg_color=ERROR_COLOR))
-        return
-    await session.write_line(colored("Trust override applied and audited.", fg_color=SUCCESS_COLOR))
 
 
 async def _clear_trust_override_screen(
@@ -2298,44 +2463,57 @@ async def _trust_decision_history_screen(
 
 
 async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    domains = await lane.run(list_trust_domains)
-    await session.write_line(
-        colored("\r\nTrust domains:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    for domain in domains:
-        await session.write_line(f"{domain.domain_id}: {domain.display_name} (weight {domain.weight:.2f})")
+    """Listing plus `[A]dd/update` (issue #282: a draft editor -- Domain
+    ID, display name, weight -- instead of three prompts in a row where
+    a bad weight discarded the other two) and `[B]ack`. The listing
+    redraws after a save."""
     while True:
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('A', 'dd/update'), menu_key('B', 'ack')], width=session.terminal_width)}: "
+        domains = await lane.run(list_trust_domains)
+        await session.write_line(
+            colored("\r\nTrust domains:", fg_color=await lane.run(effective_header_color_256), bold=True)
         )
-        choice = (await session.read_key()).lower()
+        for domain in domains:
+            await session.write_line(f"{domain.domain_id}: {domain.display_name} (weight {domain.weight:.2f})")
+        choice = await _trust_list_choice(session, ["a"])
         if choice == "b":
             return
-        if choice == "a":
-            break
-        await session.write(reject_unhandled_key(choice))
-    await session.write_line("")
-    await session.write("Domain ID: ")
-    domain_id = (await session.read_line()).strip()
-    await session.write("Display name: ")
-    display_name = (await session.read_line()).strip()
-    await session.write("Weight (0.0-1.0): ")
-    raw_weight = (await session.read_line()).strip()
-    try:
-        weight = float(raw_weight)
-    except ValueError:
-        await session.write_line(colored("Not a number -- cancelled.", fg_color=MUTED_COLOR))
-        return
-    try:
-        await lane.run(
-            configure_trust_domain, domain_id, display_name=display_name,
-            weight=weight, actor_user_id=actor.id,
-        )
-    except ValueError as exc:
-        await session.write_line(colored(f"Trust domain not changed: {exc}", fg_color=ERROR_COLOR))
-        return
-    await session.write_line(colored("Trust domain saved and audited.", fg_color=SUCCESS_COLOR))
+
+        draft: dict = {"domain_id": "", "display_name": "", "weight": 1.0}
+        fields = [
+            FieldSpec(
+                key="domain_id", hotkey="i", menu_text=menu_key("I", "D", prefix="Domain "), label="Domain ID",
+                render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
+                prompt=text_field("domain_id", required=True),
+                brief="Stable identifier for the domain",
+                help="The identifier trusted reporters are assigned to. Reusing an existing ID updates it.",
+            ),
+            FieldSpec(
+                key="display_name", hotkey="n", menu_text=menu_key("N", "ame"), label="Display name",
+                render=lambda d: sanitize_text(d["display_name"]) if d["display_name"] else "(none)",
+                prompt=text_field("display_name"),
+                brief="Human-readable name",
+                help="Shown in listings and audit history instead of the bare ID.",
+            ),
+            FieldSpec(
+                key="weight", hotkey="w", menu_text=menu_key("W", "eight"), label="Weight",
+                render=lambda d: f"{d['weight']:.2f}",
+                prompt=_float_field("weight", label="Weight (0.0-1.0)", minimum=0.0, maximum=1.0),
+                brief="0.0-1.0 influence on trust signals",
+                help="How much a signal from this domain's reporters counts, from 0.0 (ignored) to 1.0 (full).",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if not draft["domain_id"]:
+                raise ValueError("a Domain ID is required")
+            await lane.run(
+                configure_trust_domain, draft["domain_id"], display_name=draft["display_name"],
+                weight=draft["weight"], actor_user_id=actor.id,
+            )
+            await session.write_line(colored("Trust domain saved and audited.", fg_color=SUCCESS_COLOR))
+            return True
+
+        await _trust_editor(session, lane, actor, title="Trust domain", fields=fields, draft=draft, save=save)
 
 
 async def _resolve_admin_node_reference(
@@ -2399,44 +2577,79 @@ async def _resolve_admin_node_reference(
 
 
 async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    anchors = await lane.run(list_trust_anchors)
-    await session.write_line(
-        colored("\r\nTrust anchors:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    for anchor in anchors:
-        identity = await lane.run(identity_for_fingerprint, anchor.fingerprint)
-        await session.write_line(
-            f"{sanitize_text(identity.label)}: {sanitize_text(anchor.reason)}"
-        )
+    """Listing plus `[A]dd/update` (a draft editor: node, reason),
+    `[R]emove` (a picker over the anchors that actually exist, then one
+    confirm), `[B]ack` -- issue #282."""
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     while True:
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
+        anchors = await lane.run(list_trust_anchors)
+        labels = {a.fingerprint: (await lane.run(identity_for_fingerprint, a.fingerprint)).label for a in anchors}
+        await session.write_line(
+            colored("\r\nTrust anchors:", fg_color=await lane.run(effective_header_color_256), bold=True)
         )
-        choice = (await session.read_key()).lower()
+        for anchor in anchors:
+            await session.write_line(
+                f"{sanitize_text(labels[anchor.fingerprint])}: {sanitize_text(anchor.reason)}"
+            )
+        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
-        if choice in {"a", "r"}:
-            break
-        await session.write(reject_unhandled_key(choice))
-    await session.write_line("")
-    await write_prompt(session, "Node name, DNS name, or technical identity: ")
-    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
-    if fingerprint is None:
-        return
-    try:
-        if choice == "a":
-            await session.write("Mandatory reason: ")
-            reason = (await session.read_line()).strip()
-            await lane.run(
-                configure_trust_anchor, fingerprint, reason=reason, actor_user_id=actor.id,
+        if choice == "r":
+            selected = await pick_item(
+                session, anchors,
+                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: hash(a.fingerprint) & 0x7FFFFFFF,
+                description_of=lambda a: a.reason,
+                title="Remove which trust anchor?", empty_message="No trust anchors are configured.",
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
             )
-        else:
-            await lane.run(remove_trust_anchor, fingerprint, actor_user_id=actor.id)
-    except ValueError as exc:
-        await session.write_line(colored(f"Trust anchor not changed: {exc}", fg_color=ERROR_COLOR))
-        return
-    await session.write_line(colored("Trust anchor changed and audited.", fg_color=SUCCESS_COLOR))
+            if selected is None:
+                continue
+            if not await prompt_yes_no(
+                session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trust anchor?", default=False
+            ):
+                continue
+            try:
+                await lane.run(remove_trust_anchor, selected.fingerprint, actor_user_id=actor.id)
+            except ValueError as exc:
+                await session.write_line(colored(f"Trust anchor not changed: {exc}", fg_color=ERROR_COLOR))
+                continue
+            await session.write_line(colored("Trust anchor removed and audited.", fg_color=SUCCESS_COLOR))
+            continue
+
+        draft: dict = {"node": None, "node_label": None, "reason": ""}
+        fields = [
+            FieldSpec(
+                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                render=_node_render("node"),
+                prompt=_node_reference_field(
+                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                ),
+                brief="Which linked node to anchor",
+                help="A stored peer, or a name/DNS name/technical identity typed in.",
+            ),
+            FieldSpec(
+                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+                prompt=text_field("reason", required=True),
+                brief="Mandatory audit note",
+                help="Why this node's trust signals are anchored. Recorded in the configuration history.",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if draft["node"] is None or not draft["reason"]:
+                raise ValueError("choose a [N]ode and give a [R]eason first")
+            await lane.run(
+                configure_trust_anchor, draft["node"], reason=draft["reason"], actor_user_id=actor.id,
+            )
+            await session.write_line(colored("Trust anchor changed and audited.", fg_color=SUCCESS_COLOR))
+            return True
+
+        await _trust_editor(session, lane, actor, title="Trust anchor", fields=fields, draft=draft, save=save)
 
 
 def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
@@ -2453,119 +2666,222 @@ def _parse_reporter_scopes(value: str) -> list[tuple[TrustDimension, str]]:
 
 
 async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    reporters = await lane.run(list_trusted_reporters)
-    await session.write_line(
-        colored("\r\nTrusted reporters:", fg_color=await lane.run(effective_header_color_256), bold=True)
-    )
-    for reporter in reporters:
-        scopes = ", ".join(f"{d.value}:{c}" for d, c in reporter.scopes) or "no scopes"
-        identity = await lane.run(identity_for_fingerprint, reporter.fingerprint)
-        await session.write_line(
-            f"{sanitize_text(identity.label)} domain={sanitize_text(reporter.domain_id)} "
-            f"scopes={sanitize_text(scopes)} "
-            f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
-        )
+    """Listing plus `[A]dd/update` (a draft editor: node, domain,
+    scopes, the two vouch switches), `[R]emove` (picker + confirm),
+    `[B]ack` -- issue #282."""
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     while True:
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
+        reporters = await lane.run(list_trusted_reporters)
+        labels = {r.fingerprint: (await lane.run(identity_for_fingerprint, r.fingerprint)).label for r in reporters}
+        await session.write_line(
+            colored("\r\nTrusted reporters:", fg_color=await lane.run(effective_header_color_256), bold=True)
         )
-        choice = (await session.read_key()).lower()
+        for reporter in reporters:
+            scopes = ", ".join(f"{d.value}:{c}" for d, c in reporter.scopes) or "no scopes"
+            await session.write_line(
+                f"{sanitize_text(labels[reporter.fingerprint])} domain={sanitize_text(reporter.domain_id)} "
+                f"scopes={sanitize_text(scopes)} "
+                f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
+            )
+        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
-        if choice in {"a", "r"}:
-            break
-        await session.write(reject_unhandled_key(choice))
-    await session.write_line("")
-    await write_prompt(session, "Reporter node name, DNS name, or technical identity: ")
-    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
-    if fingerprint is None:
-        return
-    try:
         if choice == "r":
-            await lane.run(remove_trusted_reporter, fingerprint, actor_user_id=actor.id)
-        else:
-            await session.write("Trust domain ID: ")
-            domain_id = (await session.read_line()).strip()
-            await write_prompt(session, "Scopes (dimension:category, comma separated): ")
-            scopes = _parse_reporter_scopes(await session.read_line())
-            node_vouch = await prompt_yes_no(session, "May this reporter vouch for nodes?", default=False)
-            user_vouch = await prompt_yes_no(session, "May this reporter vouch for users?", default=False)
+            selected = await pick_item(
+                session, reporters,
+                name_of=lambda r: labels[r.fingerprint], stable_id_of=lambda r: hash(r.fingerprint) & 0x7FFFFFFF,
+                description_of=lambda r: f"domain {r.domain_id}",
+                title="Remove which trusted reporter?", empty_message="No trusted reporters are configured.",
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
+            )
+            if selected is None:
+                continue
+            if not await prompt_yes_no(
+                session, f"Remove {sanitize_text(labels[selected.fingerprint])} as a trusted reporter?", default=False
+            ):
+                continue
+            try:
+                await lane.run(remove_trusted_reporter, selected.fingerprint, actor_user_id=actor.id)
+            except ValueError as exc:
+                await session.write_line(colored(f"Trusted reporter not changed: {exc}", fg_color=ERROR_COLOR))
+                continue
+            await session.write_line(colored("Trusted reporter removed and audited.", fg_color=SUCCESS_COLOR))
+            continue
+
+        draft: dict = {
+            "node": None, "node_label": None, "domain_id": "", "scopes": "",
+            "can_vouch_nodes": False, "can_vouch_users": False,
+        }
+        fields = [
+            FieldSpec(
+                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                render=_node_render("node"),
+                prompt=_node_reference_field(
+                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                ),
+                brief="Which linked node reports",
+                help="A stored peer, or a name/DNS name/technical identity typed in.",
+            ),
+            FieldSpec(
+                key="domain_id", hotkey="d", menu_text=menu_key("D", "omain ID"), label="Domain ID",
+                render=lambda d: sanitize_text(d["domain_id"]) if d["domain_id"] else "(required)",
+                prompt=text_field("domain_id", required=True),
+                brief="Trust domain this reporter belongs to",
+                help="Must name a configured trust domain (see Trust [D]omains).",
+            ),
+            FieldSpec(
+                key="scopes", hotkey="c", menu_text=menu_key("c", "opes", prefix="S"), label="Scopes",
+                render=lambda d: sanitize_text(d["scopes"]) if d["scopes"] else "(required)",
+                prompt=text_field("scopes", required=True),
+                brief="dimension:category, comma separated",
+                help=(
+                    "Which evidence this reporter may speak to, as dimension:category pairs separated by "
+                    "commas -- e.g. identity_integrity:signed_equivocation, content_conduct:spam."
+                ),
+            ),
+            FieldSpec(
+                key="can_vouch_nodes", hotkey="v", menu_text=menu_key("V", "ouch for nodes"), label="May vouch for nodes",
+                render=lambda d: "yes" if d["can_vouch_nodes"] else "no",
+                prompt=choice_field("can_vouch_nodes", [False, True]),
+                step=choice_step("can_vouch_nodes", [False, True]),
+                brief="Toggle node vouching",
+                help="Whether a vouch from this reporter counts toward a node leaving probation.",
+            ),
+            FieldSpec(
+                key="can_vouch_users", hotkey="u", menu_text=menu_key("u", "sers", prefix="Vouch for "),
+                label="May vouch for users",
+                render=lambda d: "yes" if d["can_vouch_users"] else "no",
+                prompt=choice_field("can_vouch_users", [False, True]),
+                step=choice_step("can_vouch_users", [False, True]),
+                brief="Toggle user vouching",
+                help="Whether a vouch from this reporter counts toward a remote user leaving probation.",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if draft["node"] is None or not draft["domain_id"] or not draft["scopes"]:
+                raise ValueError("choose a [N]ode and fill in [D]omain ID and S[c]opes first")
+            scopes = _parse_reporter_scopes(draft["scopes"])
             await lane.run(
-                configure_trusted_reporter, fingerprint, domain_id=domain_id, scopes=scopes,
-                can_vouch_nodes=node_vouch, can_vouch_users=user_vouch,
+                configure_trusted_reporter, draft["node"], domain_id=draft["domain_id"], scopes=scopes,
+                can_vouch_nodes=draft["can_vouch_nodes"], can_vouch_users=draft["can_vouch_users"],
                 actor_user_id=actor.id,
             )
-    except ValueError as exc:
-        await session.write_line(colored(f"Trusted reporter not changed: {exc}", fg_color=ERROR_COLOR))
-        return
-    await session.write_line(colored("Trusted reporter changed and audited.", fg_color=SUCCESS_COLOR))
+            await session.write_line(colored("Trusted reporter changed and audited.", fg_color=SUCCESS_COLOR))
+            return True
+
+        await _trust_editor(session, lane, actor, title="Trusted reporter", fields=fields, draft=draft, save=save)
 
 
 async def _attestation_authorities_screen(
     session: Session, lane: DatabaseLane, actor: User
 ) -> None:
-    authorities = await lane.run(list_attestation_authorities)
-    await session.write_line(
-        colored(
-            "\r\nRemote identity-attestation authorities:",
-            fg_color=await lane.run(effective_header_color_256), bold=True,
-        )
-    )
-    for authority in authorities:
-        identity = await lane.run(identity_for_fingerprint, authority.fingerprint)
-        await session.write_line(
-            f"{sanitize_text(identity.label)} "
-            f"scope={sanitize_text(','.join(authority.attributes))} -- "
-            f"{sanitize_text(authority.reason)}"
-        )
-    if not authorities:
-        await session.write_line(
-            colored("None. Remote attestations fail closed.", fg_color=SUCCESS_COLOR)
-        )
+    """Listing plus `[A]dd/update` (a draft editor: node, attributes,
+    reason), `[R]emove` (picker + confirm), `[B]ack` -- issue #282."""
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    attribute_sets = ["age,name", "age", "name"]
     while True:
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
+        authorities = await lane.run(list_attestation_authorities)
+        labels = {a.fingerprint: (await lane.run(identity_for_fingerprint, a.fingerprint)).label for a in authorities}
+        await session.write_line(
+            colored(
+                "\r\nRemote identity-attestation authorities:",
+                fg_color=await lane.run(effective_header_color_256), bold=True,
+            )
         )
-        choice = (await session.read_key()).lower()
+        for authority in authorities:
+            await session.write_line(
+                f"{sanitize_text(labels[authority.fingerprint])} "
+                f"scope={sanitize_text(','.join(authority.attributes))} -- "
+                f"{sanitize_text(authority.reason)}"
+            )
+        if not authorities:
+            await session.write_line(
+                colored("None. Remote attestations fail closed.", fg_color=SUCCESS_COLOR)
+            )
+        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
-        if choice in {"a", "r"}:
-            break
-        await session.write(reject_unhandled_key(choice))
-    await session.write_line("")
-    await write_prompt(session, "Authority node name, DNS name, or technical identity: ")
-    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
-    if fingerprint is None:
-        return
-    try:
         if choice == "r":
-            await lane.run(
-                remove_attestation_authority,
-                fingerprint,
-                actor_user_id=actor.id,
+            selected = await pick_item(
+                session, authorities,
+                name_of=lambda a: labels[a.fingerprint], stable_id_of=lambda a: hash(a.fingerprint) & 0x7FFFFFFF,
+                description_of=lambda a: ",".join(a.attributes),
+                title="Remove which attestation authority?", empty_message="No attestation authorities are configured.",
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
             )
-        else:
-            await write_prompt(session, "Attributes (age,name or both, comma separated): ")
-            attributes = [part.strip() for part in (await session.read_line()).split(",")]
-            await session.write("Mandatory reason: ")
-            reason = (await session.read_line()).strip()
-            await lane.run(
-                configure_attestation_authority,
-                fingerprint,
-                attributes=attributes,
-                reason=reason,
-                actor_user_id=actor.id,
+            if selected is None:
+                continue
+            if not await prompt_yes_no(
+                session,
+                f"Remove {sanitize_text(labels[selected.fingerprint])} as an attestation authority?",
+                default=False,
+            ):
+                continue
+            try:
+                await lane.run(remove_attestation_authority, selected.fingerprint, actor_user_id=actor.id)
+            except ValueError as exc:
+                await session.write_line(
+                    colored(f"Attestation authority not changed: {exc}", fg_color=ERROR_COLOR)
+                )
+                continue
+            await session.write_line(
+                colored("Attestation authority removed and audited.", fg_color=SUCCESS_COLOR)
             )
-    except ValueError as exc:
-        await session.write_line(
-            colored(f"Attestation authority not changed: {exc}", fg_color=ERROR_COLOR)
+            continue
+
+        draft: dict = {"node": None, "node_label": None, "attributes": "age,name", "reason": ""}
+        fields = [
+            FieldSpec(
+                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Node",
+                render=_node_render("node"),
+                prompt=_node_reference_field(
+                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                ),
+                brief="Which linked node may attest",
+                help="A stored peer, or a name/DNS name/technical identity typed in.",
+            ),
+            FieldSpec(
+                key="attributes", hotkey="a", menu_text=menu_key("A", "ttributes"), label="Attributes",
+                render=lambda d: d["attributes"],
+                prompt=choice_field("attributes", attribute_sets),
+                step=choice_step("attributes", attribute_sets),
+                brief="age, name, or both",
+                help="Which verified attributes this authority's signed attestations are accepted for.",
+            ),
+            FieldSpec(
+                key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+                render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+                prompt=text_field("reason", required=True),
+                brief="Mandatory audit note",
+                help="Why this node is trusted to verify identities. Recorded in the configuration history.",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if draft["node"] is None or not draft["reason"]:
+                raise ValueError("choose a [N]ode and give a [R]eason first")
+            await lane.run(
+                configure_attestation_authority, draft["node"],
+                attributes=[part.strip() for part in draft["attributes"].split(",")],
+                reason=draft["reason"], actor_user_id=actor.id,
+            )
+            await session.write_line(
+                colored("Attestation authority changed and audited.", fg_color=SUCCESS_COLOR)
+            )
+            return True
+
+        await _trust_editor(
+            session, lane, actor, title="Attestation authority", fields=fields, draft=draft, save=save,
         )
-        return
-    await session.write_line(
-        colored("Attestation authority changed and audited.", fg_color=SUCCESS_COLOR)
-    )
 
 
 async def _remote_attestation_override_screen(
@@ -2574,15 +2890,25 @@ async def _remote_attestation_override_screen(
     actor: User,
     subject: TrustSubject,
 ) -> None:
-    await session.write_line("Attribute:")
+    """`[O]verride` (issue #282: a draft editor -- attribute, decision,
+    reason, with the accept-side confirmation kept inside Save) or
+    `[C]lear override` (the existing picker), or `[B]ack`."""
+    await session.write_line("Remote attestation:")
     await session.write_line(
         action_bar(
-            [menu_key("A", "ge"), menu_key("N", "ame"), menu_key("C", "lear override"), menu_key("B", "ack")],
+            [menu_key("O", "verride"), menu_key("C", "lear override"), menu_key("B", "ack")],
             width=session.terminal_width,
         )
     )
-    await session.write("Choice: ")
-    choice = (await session.read_key()).lower()
+    await write_prompt(session, "Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice in ("o", "c", "b"):
+            await session.write_line("")
+            break
+        await session.write(reject_unhandled_key(choice))
+    if choice == "b":
+        return
     if choice == "c":
         overrides = await lane.run(list_remote_attestation_overrides, subject)
         selected = await pick_item(
@@ -2616,107 +2942,188 @@ async def _remote_attestation_override_screen(
             colored("Remote attestation override cleared.", fg_color=SUCCESS_COLOR)
         )
         return
-    attribute = {"a": "age", "n": "name"}.get(choice)
-    if attribute is None:
-        return
-    await session.write_line("Decision:")
-    await session.write_line(
-        action_bar(
-            [menu_key("A", "ccept current trusted record"), menu_key("R", "eject")],
-            width=session.terminal_width,
-        )
-    )
-    await session.write("Choice: ")
-    accepted_choice = (await session.read_key()).lower()
-    if accepted_choice not in {"a", "r"}:
-        return
-    accepted = accepted_choice == "a"
-    await session.write("Mandatory reason: ")
-    reason = (await session.read_line()).strip()
-    if accepted:
-        confirmed = await prompt_yes_no(
-            session,
-            "Accept only while a current signed record from a configured authority exists?",
-            default=False,
-        )
-        if not confirmed:
-            await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
-            return
-    try:
-        await lane.run(
-            set_remote_attestation_override,
-            subject,
-            attribute,
-            accepted=accepted,
-            reason=reason,
-            actor_user_id=actor.id,
-        )
-    except ValueError as exc:
+
+    attributes = ["age", "name"]
+    decisions = ["reject", "accept"]
+    draft: dict = {"attribute": "age", "decision": "reject", "reason": ""}
+    fields = [
+        FieldSpec(
+            key="attribute", hotkey="a", menu_text=menu_key("A", "ttribute"), label="Attribute",
+            render=lambda d: d["attribute"],
+            prompt=choice_field("attribute", attributes), step=choice_step("attribute", attributes),
+            brief="age or name",
+            help="Which remote attestation this override applies to.",
+        ),
+        FieldSpec(
+            key="decision", hotkey="d", menu_text=menu_key("D", "ecision"), label="Decision",
+            render=lambda d: "accept current trusted record" if d["decision"] == "accept" else "reject",
+            prompt=choice_field("decision", decisions), step=choice_step("decision", decisions),
+            brief="reject, or accept the current record",
+            help=(
+                "Reject refuses the attestation regardless of its signature. Accept only holds while a "
+                "current signed record from a configured authority exists -- it never revives an expired "
+                "or revoked one."
+            ),
+        ),
+        FieldSpec(
+            key="reason", hotkey="r", menu_text=menu_key("R", "eason"), label="Reason",
+            render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+            prompt=text_field("reason", required=True),
+            brief="Mandatory audit note",
+            help="Recorded with the override in the subject's decision history.",
+        ),
+    ]
+
+    async def save(draft: dict) -> bool | None:
+        if not draft["reason"]:
+            raise ValueError("a reason is required")
+        accepted = draft["decision"] == "accept"
+        if accepted:
+            confirmed = await prompt_yes_no(
+                session,
+                "Accept only while a current signed record from a configured authority exists?",
+                default=False,
+            )
+            if not confirmed:
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
+        try:
+            await lane.run(
+                set_remote_attestation_override,
+                subject,
+                draft["attribute"],
+                accepted=accepted,
+                reason=draft["reason"],
+                actor_user_id=actor.id,
+            )
+        except ValueError as exc:
+            await session.write_line(
+                colored(f"Remote attestation override not changed: {exc}", fg_color=ERROR_COLOR)
+            )
+            return None
         await session.write_line(
-            colored(f"Remote attestation override not changed: {exc}", fg_color=ERROR_COLOR)
+            colored("Remote attestation override applied and audited.", fg_color=SUCCESS_COLOR)
         )
-        return
-    await session.write_line(
-        colored("Remote attestation override applied and audited.", fg_color=SUCCESS_COLOR)
+        return True
+
+    await _trust_editor(
+        session, lane, actor, title="Remote attestation override", fields=fields, draft=draft, save=save,
     )
 
 
 async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    exceptions = await lane.run(list_sole_authorities)
-    await session.write_line(colored("\r\nSole-authority safety deviations:", fg_color=ALERT_COLOR, bold=True))
-    for item in exceptions:
-        reporter = await lane.run(identity_for_fingerprint, item.reporter_fingerprint)
-        await session.write_line(
-            f"{sanitize_text(reporter.label)} {item.dimension.value}:{item.category} -- {item.reason}"
-        )
-    if not exceptions:
-        await session.write_line(colored("None. Two independent domains remain required.", fg_color=SUCCESS_COLOR))
+    """Listing plus `[A]dd/update` (a draft editor: reporter node,
+    dimension, category, justification; the DANGER confirmation stays
+    inside Save), `[R]emove` (picker + confirm), `[B]ack` -- issue #282."""
+    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     while True:
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
-        )
-        choice = (await session.read_key()).lower()
+        exceptions = await lane.run(list_sole_authorities)
+        labels = {
+            item.reporter_fingerprint: (await lane.run(identity_for_fingerprint, item.reporter_fingerprint)).label
+            for item in exceptions
+        }
+        await session.write_line(colored("\r\nSole-authority safety deviations:", fg_color=ALERT_COLOR, bold=True))
+        for item in exceptions:
+            await session.write_line(
+                f"{sanitize_text(labels[item.reporter_fingerprint])} {item.dimension.value}:{item.category} -- {item.reason}"
+            )
+        if not exceptions:
+            await session.write_line(colored("None. Two independent domains remain required.", fg_color=SUCCESS_COLOR))
+        choice = await _trust_list_choice(session, ["a", "r"])
         if choice == "b":
             return
-        if choice in {"a", "r"}:
-            break
-        await session.write(reject_unhandled_key(choice))
-    await session.write_line("")
-    await write_prompt(session, "Reporter node name, DNS name, or technical identity: ")
-    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
-    if fingerprint is None:
-        return
-    dimension = await _pick_trust_dimension(session)
-    if dimension is None:
-        return
-    await session.write("Category: ")
-    category = (await session.read_line()).strip()
-    try:
         if choice == "r":
-            await lane.run(
-                remove_sole_authority, fingerprint, dimension, category,
-                actor_user_id=actor.id,
+            selected = await pick_item(
+                session, exceptions,
+                name_of=lambda item: f"{labels[item.reporter_fingerprint]} {item.dimension.value}:{item.category}",
+                stable_id_of=lambda item: hash((item.reporter_fingerprint, item.dimension.value, item.category)) & 0x7FFFFFFF,
+                description_of=lambda item: item.reason,
+                title="Remove which safety deviation?", empty_message="No safety deviations are configured.",
+                redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                accent_color=await lane.run(effective_accent_color_256),
+                header_color=await lane.run(effective_header_color_256),
             )
-        else:
-            await session.write("Mandatory justification: ")
-            reason = (await session.read_line()).strip()
+            if selected is None:
+                continue
+            if not await prompt_yes_no(
+                session,
+                f"Remove the sole-authority deviation for {sanitize_text(labels[selected.reporter_fingerprint])} "
+                f"on {selected.dimension.value}:{selected.category}?",
+                default=False,
+            ):
+                continue
+            try:
+                await lane.run(
+                    remove_sole_authority, selected.reporter_fingerprint, selected.dimension, selected.category,
+                    actor_user_id=actor.id,
+                )
+            except ValueError as exc:
+                await session.write_line(colored(f"Safety deviation not changed: {exc}", fg_color=ERROR_COLOR))
+                continue
+            await session.write_line(colored("Safety deviation removed and audited.", fg_color=SUCCESS_COLOR))
+            continue
+
+        draft: dict = {"node": None, "node_label": None, "dimension": None, "category": "", "reason": ""}
+
+        async def _dimension_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+            dimension = await _pick_trust_dimension(session)
+            if dimension is not None:
+                draft["dimension"] = dimension
+
+        fields = [
+            FieldSpec(
+                key="node", hotkey="n", menu_text=menu_key("N", "ode"), label="Reporter node",
+                render=_node_render("node"),
+                prompt=_node_reference_field(
+                    "node", redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+                ),
+                brief="The single reporter to trust alone",
+                help="A stored peer, or a name/DNS name/technical identity typed in.",
+            ),
+            FieldSpec(
+                key="dimension", hotkey="d", menu_text=menu_key("D", "imension"), label="Dimension",
+                render=lambda d: d["dimension"].value if d["dimension"] is not None else "(not chosen)",
+                prompt=_dimension_prompt,
+                brief="Which trust dimension",
+                help="Identity integrity, resource behavior, or content conduct.",
+            ),
+            FieldSpec(
+                key="category", hotkey="c", menu_text=menu_key("C", "ategory"), label="Category",
+                render=lambda d: sanitize_text(d["category"]) if d["category"] else "(required)",
+                prompt=text_field("category", required=True),
+                brief="Evidence category within the dimension",
+                help="The evidence category (e.g. signed_equivocation) this single reporter may decide alone.",
+            ),
+            FieldSpec(
+                key="reason", hotkey="j", menu_text=menu_key("J", "ustification"), label="Justification",
+                render=lambda d: sanitize_text(d["reason"]) if d["reason"] else "(required)",
+                prompt=text_field("reason", required=True),
+                brief="Mandatory audit note",
+                help="Why one reporter is enough here. Recorded in the configuration history.",
+            ),
+        ]
+
+        async def save(draft: dict) -> bool | None:
+            if draft["node"] is None or draft["dimension"] is None or not draft["category"] or not draft["reason"]:
+                raise ValueError("fill in [N]ode, [D]imension, [C]ategory, and [J]ustification first")
             confirmed = await prompt_yes_no(
                 session,
                 "DANGER: one reporter will bypass the two-domain rule for this category. Continue?",
                 default=False,
             )
             if not confirmed:
-                await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
-                return
+                raise ValueError("No change made. The draft is kept; [B]ack discards it.")
             await lane.run(
-                configure_sole_authority, fingerprint, dimension, category,
-                reason=reason, actor_user_id=actor.id,
+                configure_sole_authority, draft["node"], draft["dimension"], draft["category"],
+                reason=draft["reason"], actor_user_id=actor.id,
             )
-    except ValueError as exc:
-        await session.write_line(colored(f"Safety deviation not changed: {exc}", fg_color=ERROR_COLOR))
-        return
-    await session.write_line(colored("Safety deviation changed and audited.", fg_color=SUCCESS_COLOR))
+            await session.write_line(colored("Safety deviation changed and audited.", fg_color=SUCCESS_COLOR))
+            return True
+
+        await _trust_editor(
+            session, lane, actor, title="Sole-authority safety deviation", fields=fields, draft=draft, save=save,
+        )
 
 
 async def _trust_config_history_screen(session: Session, lane: DatabaseLane) -> None:
