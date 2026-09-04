@@ -521,3 +521,218 @@ def test_status_snapshot_shape_when_never_started(lane):
     status = bridge.status()
     assert status.state is MrcState.DISABLED and not status.enabled
     assert status.host == "" and status.rooms == {}
+
+
+def test_pre_hello_room_packets_pass_the_same_inbound_bound(db, lane, lobby, alice):
+    """Review of #275: everything a hub sends before HELLO used to skip
+    the inbound size cap and token bucket, so a hub could write
+    unbounded scrollback during every handshake window."""
+    from netbbs.mrc.bridge import INBOUND_BURST
+    from netbbs.mrc.protocol import build_line
+
+    flood = INBOUND_BURST + 20
+
+    class FloodingHub(FakeMrcHub):
+        async def _serve(self, reader, writer):
+            self.connections += 1
+            self._writers.append(writer)
+            try:
+                await reader.readline()
+                for index in range(flood):
+                    writer.write(f"bob~Other~lobby~~~lobby~flood {index}~\n".encode("ascii"))
+                await writer.drain()
+                writer.write(build_line(MrcPacket("SERVER", "", "", "CLIENT", "", "", "HELLO")).encode("ascii"))
+                await writer.drain()
+                while await reader.readline():
+                    pass
+            except (ConnectionError, asyncio.IncompleteReadError):
+                pass
+
+    async def scenario():
+        fake = FloodingHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        # No participant: nobody would drain a delivery queue while the
+        # pre-HELLO flood is being recorded, and the bound under test is
+        # the one ahead of the database write, not delivery.
+        hub = ChatHub()
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            recorded = [m for m in get_scrollback(db, lobby) if m.kind == "message"]
+            # The burst plus at most a few refilled tokens while the
+            # flood was being read -- never the whole flood.
+            assert 0 < len(recorded) <= INBOUND_BURST + 10
+            assert bridge.status().dropped_inbound >= flood - INBOUND_BURST - 10
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_mapping_an_occupied_channel_tells_the_occupants_first(db, lane, lobby, alice):
+    """Review of #275: a caller already inside a channel when the SysOp
+    maps it never saw the join-time disclosure -- they are told before
+    anything they say leaves the node. A reconnect re-announces without
+    repeating the notice."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            set_mrc_room(db, lobby, "lobby")
+            await bridge.refresh_channel_mappings()
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert isinstance(notice, str)
+            assert "now bridged to MRC room #lobby" in notice and "'alice'" in notice
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+
+            await fake.drop_clients()
+            await fake.wait_for_connections(2)
+            await _wait_until(lambda: bridge.state is MrcState.CONNECTED)
+            await fake.wait_for(lambda p: len(fake.packets(body_prefix="NEWROOM:")) >= 2)
+            await asyncio.sleep(0.1)
+            assert queue.empty()
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_remapping_an_occupied_channel_moves_its_callers(db, lane, lobby, alice):
+    """Review of #275: pointing an occupied channel at a different room
+    left the hub roster in the old room while messages went to the new."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        queue = hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            set_mrc_room(db, lobby, "gaming")
+            await bridge.refresh_channel_mappings()
+            moved = await fake.wait_for(lambda p: p.body == "NEWROOM:lobby:gaming")
+            assert moved.from_user == "alice"
+            assert fake.users[("my_board", "alice")] == "gaming"
+            notice = await asyncio.wait_for(queue.get(), timeout=2)
+            assert "MRC room changed from #lobby to #gaming" in notice
+            assert not fake.packets(body_prefix="LOGOFF")
+            assert fake.connections == 1
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_multi_chunk_message_is_all_or_nothing_under_the_per_caller_bucket(db, lane, lobby, alice):
+    """Review of #275: with fewer tokens than chunks, the prefix used to
+    reach MRC while the caller was told nothing was relayed."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+
+            def _msg(body):
+                return ChannelMessage(
+                    id=0, channel_id=lobby.id, kind="message", author_label="alice",
+                    author_fingerprint=None, body=body, created_at="2026-09-04T12:00:00+00:00",
+                )
+
+            assert await bridge.local_message(lobby, _msg("one")) == (True, False)
+            assert await bridge.local_message(lobby, _msg("two")) == (True, False)
+            long_body = " ".join(["word"] * 60)  # three wire chunks, one token left
+            assert await bridge.local_message(lobby, _msg(long_body)) == (False, False)
+            await fake.wait_for(lambda p: p.body == "two")
+            await asyncio.sleep(0.1)
+            assert not [p for p in fake.received if p.body.startswith("word word")]
+            assert bridge.status().dropped_outbound == 1
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_remote_roster_keeps_a_same_named_user_from_another_site(db, lane, lobby, alice):
+    """Review of #275: an MRC identity is nick *and* site -- a remote
+    `alice@Other` is not this node's `alice` and must stay listed."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "USERLIST")
+            await fake.send_line("SERVER~~~alice~~lobby~USERLIST:alice@My_Board,alice@Other,Alice,bob@other~")
+            await _wait_until(lambda: bridge.remote_roster(lobby) == ["alice@Other", "bob@other"])
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_inbound_line_for_a_deleted_channel_drops_the_mapping_not_the_connection(db, lane, lobby, alice, sysop):
+    """Review of #275: a channel deleted underneath a cached mapping
+    (the standalone admin CLI cannot tell the running node) made the
+    next inbound line raise inside the reader and reconnect forever."""
+    from netbbs.chat.channels import delete_channel
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            delete_channel(db, lobby, deleted_by=sysop)
+            await fake.send_line("bob~Other~lobby~~~lobby~still there?~")
+            await _wait_until(lambda: bridge.mapping_for(lobby) is None)
+            await asyncio.sleep(0.2)
+            assert bridge.state is MrcState.CONNECTED
+            assert fake.connections == 1
+            assert bridge.status().dropped_inbound == 1
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_oldversion_on_a_live_session_stops_relaying_immediately(db, lane, lobby, alice):
+    """Review of #275: a version rejection after HELLO on a socket the
+    hub leaves open used to be noted and otherwise ignored."""
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        _enable(db, fake.port)
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = await _connected_bridge(db, lane, hub, fake)
+        try:
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            await fake.send_line("SERVER~~~CLIENT~~~OLDVERSION:9.9.9~")
+            await _wait_until(lambda: bridge.state is MrcState.ERROR)
+            await asyncio.sleep(0.3)
+            assert fake.connections == 1
+            assert "newer MRC client version" in bridge.status().last_error
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())

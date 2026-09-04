@@ -74,6 +74,11 @@ class ChannelMessage:
     link_content_id: str | None = None
     link_event_json: str | None = None
     body_truncated: bool = False
+    # Which outside network a line came from (`"mrc"`), or `None` for a
+    # local or Link-carried row. Issue #275: such a row is never this
+    # node's attested content -- trusted-scrollback snapshots skip it and
+    # Link queueing refuses to sign it.
+    external_source: str | None = None
 
 
 def get_scrollback_limit(db: Database) -> int:
@@ -112,10 +117,14 @@ def record_message(
     author_label: str,
     author_fingerprint: str | None = None,
     body: str | None = None,
+    external_source: str | None = None,
 ) -> ChannelMessage:
     """
     Append an event to `channel`'s scrollback and trim it back down to the
     configured limit.
+
+    `external_source` marks a line that arrived from an outside network
+    (issue #275's MRC bridge records `"mrc"`); see `ChannelMessage`.
 
     `body` is required for `kind="message"` and `kind="daybreak"`
     -- the announcement text itself, since a
@@ -133,10 +142,10 @@ def record_message(
     cursor = db.connection.execute(
         """
         INSERT INTO channel_messages
-            (channel_id, kind, author_label, author_fingerprint, body, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (channel_id, kind, author_label, author_fingerprint, body, created_at, external_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (channel.id, kind, author_label, author_fingerprint, body, created_at),
+        (channel.id, kind, author_label, author_fingerprint, body, created_at, external_source),
     )
     message_id = cursor.lastrowid
     limit = get_scrollback_limit(db)
@@ -162,9 +171,13 @@ def record_message(
     prune_channel_message_search(db, channel.id)
     db.connection.commit()
 
+    # Re-read *this* row by its id, never "the channel's newest row":
+    # a background writer (issue #275's MRC bridge records inbound lines
+    # on the background lane) can insert between the commit above and
+    # this read, and the caller would otherwise sign and propagate
+    # someone else's line as its own.
     row = db.connection.execute(
-        "SELECT * FROM channel_messages WHERE channel_id = ? ORDER BY id DESC LIMIT 1",
-        (channel.id,),
+        "SELECT * FROM channel_messages WHERE id = ?", (message_id,)
     ).fetchone()
     return _row_to_message(row)
 
@@ -217,4 +230,5 @@ def _row_to_message(row: sqlite3.Row) -> ChannelMessage:
         # same semantic state as NULL on a current local-only row.
         link_content_id=row["link_content_id"] if "link_content_id" in columns else None,
         link_event_json=row["link_event_json"] if "link_event_json" in columns else None,
+        external_source=row["external_source"] if "external_source" in columns else None,
     )

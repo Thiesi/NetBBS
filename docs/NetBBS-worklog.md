@@ -3997,3 +3997,27 @@ crash-between-two-writes finding in the interrupted-cancellation path was
 declined: the managed-DNS service is a single-operator service where manual
 repair of one row is the realistic recovery, and the branch already carries
 twice the feature's own size in such safeguards.
+
+MRC bridge review (PR #276, 15 findings, 13 addressed in one pass). Provenance:
+`channel_messages.external_source` (migration 61) marks an MRC line, the
+trusted-scrollback snapshot skips such rows, Link queueing refuses to sign
+them, and `record_message` re-reads the inserted row by id instead of the
+channel's newest row, which under a concurrent bridge write handed a local
+caller someone else's line to sign. Disclosure: mapping or remapping an
+occupied channel tells every occupant before their next line is relayed, and
+a remap moves announced callers with `NEWROOM old:new` instead of leaving the
+hub roster in the old room. Presence chatter is matched against the hub's
+anchored templates, never bare keywords, so "I'm leaving after dinner" stays a
+chat line with its author. The remote roster hides a name only when nick and
+site both match this node. Pipe codes are stripped from every inbound field at
+parse time. A multi-chunk line is relayed all-or-nothing under the per-caller
+bucket. Pre-HELLO packets pass the same size cap and token bucket as later
+traffic, with HELLO itself recognised ahead of the bucket. A live `OLDVERSION`
+closes the connection at once. Deleting a mapped channel refreshes the running
+bridge, and an inbound line for a channel that vanished underneath a cached
+mapping drops the mapping rather than the connection. The diagnostic log
+handler is attached on every run and the Operations menu offers the log on any
+running node, since MRC can be enabled without Link. The case-insensitive
+one-room-one-channel rule is now the index itself (`lower(mrc_room)`). Local
+delivery precedes the MRC relay notice, as `/me` already did. Declined: two
+32-character usernames sharing their first 30 characters colliding on the wire.

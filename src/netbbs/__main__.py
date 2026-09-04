@@ -1036,22 +1036,22 @@ async def run(
                 link_node, config.link, db, _live_relays_provider
             )
 
-        # Design doc §13.11, issue #60: attached once, here, only when
-        # Link is actually enabled -- a disabled node has no netbbs.link
-        # activity to ever log a warning about in the first place.
+        # Design doc §13.11, issue #60: attached once, here, on every run.
+        # It used to be gated on Link being enabled (a Link-disabled node
+        # had nothing to log), but issue #275's MRC bridge writes to the
+        # same bounded log and is switched on live from the SysOp screens,
+        # independently of Link -- an MRC-only node needs its hub warnings
+        # persisted just as much. A handler nothing logs to costs nothing.
         # Removed in the matching finally block below via handler.close()
         # (also closes its own independent sqlite3 connection -- see that
         # class's own docstring for why it doesn't share db.connection).
-        if config.link.enabled:
-            link_diagnostic_log_handler = LinkDiagnosticLogHandler(
-                config.db_path,
-                max_age_days=config.link.diagnostic_log_max_age_days,
-                max_rows=config.link.diagnostic_log_max_rows,
-            )
-            logging.getLogger(LINK_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
-            # Issue #275: the MRC bridge's own warnings land in the same
-            # bounded diagnostic log the SysOp already reads for Link.
-            logging.getLogger(MRC_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
+        link_diagnostic_log_handler = LinkDiagnosticLogHandler(
+            config.db_path,
+            max_age_days=config.link.diagnostic_log_max_age_days,
+            max_rows=config.link.diagnostic_log_max_rows,
+        )
+        logging.getLogger(LINK_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
+        logging.getLogger(MRC_LOGGER_NAME).addHandler(link_diagnostic_log_handler)
 
         # Issue #60's SysOp Link-status screen needs a handful of
         # netbbs.net.nodeconfig.LinkConfig fields for display -- built

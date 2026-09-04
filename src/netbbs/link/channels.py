@@ -358,6 +358,10 @@ def queue_channel_message_if_linked(
     """
     if message.kind != "message":
         return None
+    if message.external_source is not None:
+        # Issue #275: a line recorded from an outside network (MRC) is
+        # never this node's own content to sign.
+        return None
     if not is_channel_linked(db, channel):
         return None
 

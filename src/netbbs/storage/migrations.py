@@ -2575,4 +2575,19 @@ MIGRATIONS = [
         CREATE UNIQUE INDEX idx_channels_mrc_room ON channels(mrc_room) WHERE mrc_room IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Issue #275 review follow-up: channel_messages.external_source names the outside "
+            "network a recorded line came from ('mrc'; NULL = local or Link-carried), so "
+            "trusted-scrollback snapshots and Link queueing can refuse to attest it as this "
+            "node's own content. Also rebuilds idx_channels_mrc_room on lower(mrc_room): MRC "
+            "room names are case-insensitive on the hub, and netbbs.mrc.settings' own "
+            "lower() check before writing is not a constraint against a second writer."
+        ),
+        sql="""
+        ALTER TABLE channel_messages ADD COLUMN external_source TEXT;
+        DROP INDEX idx_channels_mrc_room;
+        CREATE UNIQUE INDEX idx_channels_mrc_room ON channels(lower(mrc_room)) WHERE mrc_room IS NOT NULL;
+        """,
+    ),
 ]

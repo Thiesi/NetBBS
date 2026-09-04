@@ -56,6 +56,7 @@ import asyncio
 import logging
 import platform
 import random
+import sqlite3
 import ssl
 import sys
 import time
@@ -188,8 +189,10 @@ class MrcBridge:
         self._by_room: dict[str, MrcChannelMapping] = {}
         self._by_channel: dict[int, MrcChannelMapping] = {}
         # channel id -> {username: nick} of callers currently announced
-        # to the hub.
+        # to the hub, and channel id -> the room they were announced in
+        # (so a SysOp remapping an occupied channel moves them).
         self._announced: dict[int, dict[str, str]] = {}
+        self._announced_rooms: dict[int, str] = {}
         # room (lower) -> roster from the hub's last USERLIST reply
         self._rosters: dict[str, tuple[str, ...]] = {}
         self._last_userlist_request: dict[str, float] = {}
@@ -247,7 +250,7 @@ class MrcBridge:
         async with self._reload_lock:
             self._apply_mappings(await self._lane.run(self._load_mappings))
             if self._state is MrcState.CONNECTED:
-                await self._reconcile_announced()
+                await self._reconcile_announced(notify=True)
             if self._settings is not None and self._settings.enabled and self._connector_task is None:
                 self._start_connector_if_enabled()
 
@@ -295,6 +298,7 @@ class MrcBridge:
                 pass
         await self._close_connection()
         self._announced.clear()
+        self._announced_rooms.clear()
         self._rosters.clear()
         if self._state is not MrcState.ERROR:
             self._state = MrcState.DISABLED
@@ -360,6 +364,7 @@ class MrcBridge:
             finally:
                 await self._close_connection()
                 self._announced.clear()
+                self._announced_rooms.clear()
                 self._rosters.clear()
             if self._stopping:
                 return
@@ -413,20 +418,26 @@ class MrcBridge:
 
     async def _await_hello(self, reader: asyncio.StreamReader) -> None:
         """The hub answers the handshake with `SERVER~~~CLIENT~~~HELLO~`.
-        Anything else before it (a banner, a version notice) is passed
-        through the ordinary inbound path; `OLDVERSION` there is fatal."""
+        Anything else before it (a banner, a version notice) goes through
+        the same bounded inbound path as post-HELLO traffic -- size cap
+        and token bucket ahead of any database write -- so a hub that
+        floods room packets during every handshake window is throttled
+        exactly like one that floods afterwards; `OLDVERSION` there is
+        fatal."""
         while True:
             line = await reader.readline()
             if not line:
                 raise ConnectionError("hub closed the connection during handshake")
-            packet = parse_line(line.decode("ascii", errors="replace"))
+            packet = self._parse_raw_line(line)
             if packet is None:
                 continue
+            # HELLO is the connection gate itself: recognised before the
+            # bucket, or a flood ahead of it would leave the bridge unable
+            # to ever finish the handshake.
             if packet.is_server and packet.body.strip().upper() == "HELLO":
                 return
-            await self._handle_packet(packet)
-            if self._fatal_error is not None:
-                raise ConnectionError(self._fatal_error)
+            if self._admit_packet():
+                await self._handle_packet(packet)
 
     def _send_site_info(self, settings: MrcSettings) -> None:
         site = settings.site_wire_name
@@ -455,20 +466,31 @@ class MrcBridge:
                 self._dropped_inbound += 1
                 buffer = b""
 
-    async def _handle_raw_line(self, raw: bytes) -> None:
+    def _parse_raw_line(self, raw: bytes) -> MrcPacket | None:
+        """Size cap and parse -- the first half of the inbound gate every
+        line passes, before or after HELLO. `None` means dropped (and
+        counted)."""
         if len(raw) > protocol.MAX_LINE * 2:
             self._dropped_inbound += 1
-            return
+            return None
         packet = parse_line(raw.decode("ascii", errors="replace"))
-        if packet is None:
-            if raw.strip():
-                self._dropped_inbound += 1
-            return
+        if packet is None and raw.strip():
+            self._dropped_inbound += 1
+        return packet
+
+    def _admit_packet(self) -> bool:
+        """The second half: the inbound token bucket ahead of any
+        database write. `False` means dropped (and counted)."""
         if not self._inbound_bucket.has_token():
             self._dropped_inbound += 1
-            return
+            return False
         self._inbound_bucket.consume()
-        await self._handle_packet(packet)
+        return True
+
+    async def _handle_raw_line(self, raw: bytes) -> None:
+        packet = self._parse_raw_line(raw)
+        if packet is not None and self._admit_packet():
+            await self._handle_packet(packet)
 
     async def _writer_loop(self, writer: asyncio.StreamWriter) -> None:
         while True:
@@ -564,16 +586,21 @@ class MrcBridge:
 
     def remote_roster(self, channel: Channel) -> list[str]:
         """MRC users the hub last reported in the channel's room, minus
-        this node's own callers, sorted case-insensitively."""
+        this node's own callers, sorted case-insensitively. An MRC
+        identity is nick *and* site: a remote `alice@OtherBoard` is not
+        this node's `alice` and stays listed."""
         mapping = self._by_channel.get(channel.id)
         if mapping is None:
             return []
         own = {nick.lower() for nick in self._announced.get(channel.id, {}).values()}
+        own_site = self._settings.site_wire_name.lower() if self._settings is not None else ""
         roster = self._rosters.get(mapping.room.lower(), ())
-        return sorted(
-            (name for name in roster if name.split("@", 1)[0].lower() not in own),
-            key=str.lower,
-        )
+
+        def _is_own(entry: str) -> bool:
+            nick, _, site = entry.partition("@")
+            return nick.lower() in own and (not site or site.lower() == own_site)
+
+        return sorted((name for name in roster if not _is_own(name)), key=str.lower)
 
     async def local_join(self, channel: Channel, username: str) -> None:
         """A caller entered `channel`. Announces them to the hub if the
@@ -596,6 +623,7 @@ class MrcBridge:
         nick = nicks.pop(username)
         if not nicks:
             self._announced.pop(channel.id, None)
+            self._announced_rooms.pop(channel.id, None)
         mapping = self._by_channel.get(channel.id)
         settings = self._settings
         if mapping is None or settings is None or self._state is not MrcState.CONNECTED:
@@ -630,10 +658,12 @@ class MrcBridge:
             return False, False
         chunks, truncated = protocol.split_body(body)
         bucket = self._user_bucket(username)
+        # All chunks or none: a prefix of a long line reaching MRC while
+        # the caller is told it was *not* relayed is worse than either.
+        if not bucket.has_tokens(len(chunks)):
+            self._dropped_outbound += 1
+            return False, truncated
         for chunk in chunks:
-            if not bucket.has_token():
-                self._dropped_outbound += 1
-                return False, truncated
             bucket.consume()
             self._enqueue(protocol.chat_message(nick, settings.site_wire_name, mapping.room, chunk))
         return True, truncated
@@ -647,32 +677,80 @@ class MrcBridge:
             return
         nick = protocol.nick_for_username(username)
         nicks[username] = nick
+        self._announced_rooms[mapping.channel.id] = mapping.room
         self._enqueue(protocol.newroom(nick, settings.site_wire_name, "", mapping.room))
         self._request_userlist(mapping, nick)
 
-    async def _reconcile_announced(self) -> None:
+    async def _reconcile_announced(self, *, notify: bool = False) -> None:
         """Make the announced set match "callers currently in an active
         bridged channel" per the `ChatHub`: announce newcomers (a
         mapping added while callers were already inside; every caller
-        after a reconnect), LOGOFF anyone whose channel was unmapped or
-        paused."""
+        after a reconnect), move everyone whose channel now maps to a
+        different room, LOGOFF anyone whose channel was unmapped or
+        paused.
+
+        `notify` (the SysOp-mapping path, not a reconnect): a caller who
+        is already inside a channel when it goes on the network never saw
+        the join-time disclosure, so they are told here, before anything
+        they say leaves the node -- the NEWROOM announcing them is queued
+        in the same turn, ahead of any message they type next."""
         settings = self._settings
         if settings is None or self._state is not MrcState.CONNECTED:
             return
         for channel_id, nicks in list(self._announced.items()):
             mapping = self._by_channel.get(channel_id)
             if mapping is not None and mapping.active:
+                previous_room = self._announced_rooms.get(channel_id, mapping.room)
+                if previous_room.lower() != mapping.room.lower():
+                    for nick in nicks.values():
+                        self._enqueue(protocol.newroom(nick, settings.site_wire_name, previous_room, mapping.room))
+                    self._announced_rooms[channel_id] = mapping.room
+                    self._rosters.pop(previous_room.lower(), None)
+                    self._request_userlist(mapping, next(iter(nicks.values())), force=True)
+                    if notify:
+                        await self._notify_bridged(mapping, list(nicks), moved_from=previous_room)
                 continue
-            room = mapping.room if mapping is not None else ""
+            room = mapping.room if mapping is not None else self._announced_rooms.get(channel_id, "")
             for nick in nicks.values():
                 self._enqueue(protocol.logoff(nick, settings.site_wire_name, room))
             self._announced.pop(channel_id, None)
+            self._announced_rooms.pop(channel_id, None)
         for mapping in self._by_channel.values():
             if not mapping.active:
                 continue
             usernames = {pid.username for pid in self._hub.participant_ids(mapping.channel.name)}
+            already = self._announced.get(mapping.channel.id, {})
+            newcomers = sorted(username for username in usernames if username not in already)
             for username in sorted(usernames):
                 self._announce(mapping, username)
+            if notify and newcomers:
+                await self._notify_bridged(mapping, newcomers)
+
+    async def _notify_bridged(
+        self, mapping: MrcChannelMapping, usernames: list[str], *, moved_from: str | None = None,
+    ) -> None:
+        """The same disclosure `netbbs.net.chat_flow` gives on joining a
+        bridged channel, delivered to callers who were already inside
+        when the SysOp mapped (or remapped) it."""
+        settings = self._settings
+        if settings is None:
+            return
+        for username in usernames:
+            nick = protocol.nick_for_username(username)
+            if moved_from is None:
+                text = (
+                    f"This channel is now bridged to MRC room #{sanitize_text(mapping.room)} on "
+                    f"{sanitize_text(settings.host)} -- your handle {nick!r} is visible to everyone on "
+                    "that network, and what you say here from now on is relayed there."
+                )
+            else:
+                text = (
+                    f"This channel's MRC room changed from #{sanitize_text(moved_from)} to "
+                    f"#{sanitize_text(mapping.room)}; your handle {nick!r} now appears there."
+                )
+            notice = colored(text, fg_color=MUTED_COLOR)
+            for participant in self._hub.participants_for_username(mapping.channel.name, username):
+                await self._hub.send_to(mapping.channel.name, participant, notice)
 
     # --- inbound -----------------------------------------------------------
 
@@ -699,11 +777,31 @@ class MrcBridge:
             self._request_userlist(mapping, self._any_nick(mapping) or "NetBBS")
             return
         author_label = f"{packet.from_user or 'unknown'}@{packet.from_site or 'unknown'} (MRC)"
-        recorded = await self._lane.run(
-            record_message, mapping.channel, kind="message", author_label=author_label,
-            author_fingerprint=None, body=body,
-        )
+        try:
+            recorded = await self._lane.run(
+                record_message, mapping.channel, kind="message", author_label=author_label,
+                author_fingerprint=None, body=body, external_source="mrc",
+            )
+        except sqlite3.DatabaseError as exc:
+            # The channel was deleted (or its row otherwise vanished)
+            # underneath a mapping this bridge still cached -- e.g. from
+            # the standalone admin CLI, which cannot ask the running node
+            # to refresh. Forget the mapping instead of letting one
+            # inbound line kill the connection and every reconnect after.
+            self._dropped_inbound += 1
+            self._forget_mapping(mapping)
+            _logger.warning(
+                "MRC room %r: dropping its mapping to channel %r after a storage error: %s",
+                mapping.room, mapping.channel.name, exc,
+            )
+            return
         await self._hub.broadcast(mapping.channel.name, recorded)
+
+    def _forget_mapping(self, mapping: MrcChannelMapping) -> None:
+        self._by_room.pop(mapping.room.lower(), None)
+        self._by_channel.pop(mapping.channel.id, None)
+        self._announced.pop(mapping.channel.id, None)
+        self._announced_rooms.pop(mapping.channel.id, None)
 
     async def _handle_server_packet(self, packet: MrcPacket) -> None:
         settings = self._settings
@@ -717,9 +815,12 @@ class MrcBridge:
             self._send_site_info(settings)
             return
         if command == "OLDVERSION":
+            # Fatal whenever it arrives -- during the handshake or on a
+            # live session the hub left open: stop relaying now rather
+            # than after the socket happens to close.
             self._fatal_error = f"hub requires a newer MRC client version ({params or 'unspecified'})"
             self._last_error = self._fatal_error
-            return
+            raise ConnectionError(self._fatal_error)
         if command == "NEWUPDATE":
             _logger.info("MRC hub reports a newer client protocol version is available: %s", params)
             return

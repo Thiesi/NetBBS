@@ -73,3 +73,38 @@ def test_run_never_dials_when_mrc_is_disabled(tmp_path):
             await fake.close()
 
     asyncio.run(scenario())
+
+
+def test_mrc_warnings_reach_the_diagnostic_log_without_link(tmp_path):
+    """Review of #275: the diagnostic log handler used to be attached
+    only when Link was enabled, so an MRC-only node persisted none of
+    the bridge's hub warnings."""
+    import sqlite3
+
+    from netbbs.__main__ import run
+
+    async def scenario():
+        config = _config(tmp_path, seed_sysop=False)
+        _seed(config, hub_port=1)  # nothing listens: every dial fails with a real connection error
+        shutdown_event = asyncio.Event()
+        task = asyncio.create_task(run(config, shutdown_event=shutdown_event))
+        row = None
+        try:
+            deadline = asyncio.get_event_loop().time() + 5.0
+            while row is None:
+                assert asyncio.get_event_loop().time() < deadline, "no MRC diagnostic row appeared"
+                conn = sqlite3.connect(str(config.db_path))
+                try:
+                    rows = conn.execute("SELECT level, logger_name, message FROM link_diagnostic_log").fetchall()
+                finally:
+                    conn.close()
+                row = next((r for r in rows if r[1] == "netbbs.mrc"), None)
+                if row is None:
+                    await asyncio.sleep(0.05)
+        finally:
+            shutdown_event.set()
+            await asyncio.wait_for(task, timeout=15)
+        assert row[0] == "WARNING"
+        assert "MRC hub 127.0.0.1:1" in row[2]
+
+    asyncio.run(scenario())

@@ -1221,6 +1221,7 @@ async def _operations_menu(
     # part of this snapshot -- they read `node_controls` directly, in
     # memory, so recomputing them every loop iteration is free.
     state = await lane.run(_load_ops)
+    diagnostics_available = link_context is not None or node_controls is not None
     while True:
         unicode_style = state["unicode_style"]
         collapsed = state["collapsed"]
@@ -1364,10 +1365,19 @@ async def _operations_menu(
             options.extend([
                 MenuEntry(label=menu_key("L", "ink status"), brief="NetBBS Link peer/network health"),
                 MenuEntry(label=menu_key("O", "utbox"), brief="Pending outgoing Link work items"),
-                MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link diagnostic events"),
-                MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
-                MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts"),
             ])
+        # The bounded diagnostic log is written by Link *and* by the MRC
+        # bridge (issue #275), and MRC can be switched on live without
+        # Link -- so on any running node the log is worth reading.
+        if diagnostics_available:
+            options.extend([
+                MenuEntry(label=menu_key("D", "iagnostics"), brief="Recent Link and MRC diagnostic events"),
+                MenuEntry(label=menu_key("F", "ollow log"), brief="Live-tail the diagnostic log"),
+            ])
+        if link_context is not None:
+            options.append(
+                MenuEntry(label=menu_key("R", "epair carried posts"), brief="Fix inconsistent carried posts")
+            )
         options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the SysOp console"))
 
         effective_desc_level, available_menu_height, desc_degraded = _degrade_description_level(
@@ -1406,10 +1416,10 @@ async def _operations_menu(
         elif choice == "o" and link_context is not None:
             await _outbox_screen(session, lane, actor)
             state = await lane.run(_load_ops)
-        elif choice == "d" and link_context is not None:
+        elif choice == "d" and diagnostics_available:
             await _diagnostic_log_screen(session, lane, actor)
             state = await lane.run(_load_ops)
-        elif choice == "f" and link_context is not None:
+        elif choice == "f" and diagnostics_available:
             await _diagnostic_log_tail_screen(session, lane)
             state = await lane.run(_load_ops)
         elif choice == "r" and link_context is not None:
@@ -12593,6 +12603,10 @@ async def _channel_detail_screen(
             await session.write_line("")
             deleted = await _delete_channel_screen(session, lane, actor, channel)
             if deleted:
+                if mrc_bridge is not None and mrc_mapping is not None:
+                    # The running bridge must forget the room now, not on
+                    # the next inbound line for it (issue #275).
+                    await mrc_bridge.refresh_channel_mappings()
                 return
             await _redraw()
         elif choice == "r":

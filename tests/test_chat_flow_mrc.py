@@ -269,6 +269,13 @@ def test_offline_hub_keeps_chat_local_and_says_so(db, lane, hub, presence, chann
             assert "The MRC link is currently offline" in text
             assert "not relayed to MRC: the MRC link is offline" in text
             assert [m.body for m in get_scrollback(db, channel) if m.kind == "message"] == ["still here"]
+            # Review of #275: the message is rendered and delivered locally
+            # *before* the ancillary relay notice is written to the sender,
+            # as the `/me` path already did.
+            written = [strip_ansi(line) for line in session.written]
+            rendered = max(i for i, line in enumerate(written) if "still here" in line and "not relayed" not in line)
+            notice = next(i for i, line in enumerate(written) if "not relayed to MRC" in line)
+            assert rendered < notice
         finally:
             await rig.bridge.close()
     asyncio.run(scenario())

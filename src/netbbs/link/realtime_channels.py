@@ -117,6 +117,12 @@ def _snapshot_entries(db: Database, channel: Channel) -> list[dict]:
         return []
     entries: list[dict] = []
     for message in get_scrollback(db, channel)[-_MAX_SCROLLBACK_SNAPSHOT_ENTRIES:]:
+        if message.external_source is not None:
+            # Issue #275: an MRC line is unauthenticated text from another
+            # network, not this origin's attested content -- exporting it
+            # under the origin's fingerprint would apply the subscriber's
+            # trust policy to the wrong identity.
+            continue
         author_node_fingerprint: str | None = None
         author_user_id: str | None = None
         author_label = message.author_label

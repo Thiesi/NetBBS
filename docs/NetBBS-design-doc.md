@@ -932,7 +932,13 @@ own model: local traffic is recorded and delivered exactly as before and
 then relayed; inbound MRC lines are recorded as external, unverifiable
 authors (`user@site (MRC)`) that never enter trust evaluation; private
 MRC messages are never delivered. The caller is told on joining that
-their handle becomes visible on that network.
+their handle becomes visible on that network, and a caller already inside
+a channel when the SysOp maps or remaps it is told before anything they
+say leaves the node. An inbound MRC line is stored with an explicit
+external-source marker: it is never exported in a trusted-scrollback
+snapshot under the origin's identity and never signed for Link
+propagation, and a locally recorded message is always re-read by its own
+row id so a concurrent bridge write cannot be mistaken for it.
 
 ### 6.4 Personal mail
 

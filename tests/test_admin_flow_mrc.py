@@ -244,3 +244,43 @@ def test_node_status_screen_when_mrc_is_off(db, lane, sysop):
         finally:
             await bridge.close()
     asyncio.run(scenario())
+
+
+def test_deleting_a_mapped_channel_refreshes_the_running_bridge(db, lane, sysop, lobby):
+    """Review of #275: the bridge kept a deleted channel's room mapping
+    until the next inbound line for it failed."""
+    from netbbs.chat.hub import ParticipantId
+
+    async def scenario():
+        fake = FakeMrcHub()
+        await fake.start()
+        save_mrc_settings(db, MrcSettings(enabled=True, host="127.0.0.1", port=fake.port, tls=False, site_name="Board"))
+        set_mrc_room(db, lobby, "lobby")
+        hub = ChatHub()
+        hub.join(lobby.name, ParticipantId("alice", 1))
+        bridge = _bridge(lane, hub)
+        await bridge.start()
+        try:
+            await _wait_state(bridge, MrcState.CONNECTED)
+            await fake.wait_for(lambda p: p.body == "NEWROOM::lobby")
+            session = FakeSession(["d", "lobby"])
+            await _open_channel_detail(session, lane, sysop, lobby, mrc_bridge=bridge)
+            assert "'lobby' deleted." in _visible(_written_text(session))
+            assert bridge.mapping_for(lobby) is None
+            await fake.wait_for(lambda p: p.body == "LOGOFF")
+            assert bridge.state is MrcState.CONNECTED
+        finally:
+            await bridge.close()
+            await fake.close()
+    asyncio.run(scenario())
+
+
+def test_operations_offers_diagnostics_on_a_running_node_without_link(db, lane, sysop):
+    """Review of #275: MRC writes the same bounded diagnostic log as
+    Link and can be switched on without it, so a running node always
+    offers the log."""
+    session = FakeSession(["o", "d", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=_controls()))
+    text = _visible(_written_text(session))
+    assert "[D]iagnostics" in text
+    assert "Nothing logged yet." in text  # the screen actually opened

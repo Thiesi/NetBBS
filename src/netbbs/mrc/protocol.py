@@ -77,6 +77,15 @@ BROADCAST_TARGETS = frozenset({"", NOTME, ALL, CLIENT})
 # such as `|UN`. Synchronet strips `\|\w\w`, ENiGMA `\|[0-9A-Z]{2}`.
 _PIPE_CODE_RE = re.compile(r"\|[0-9A-Za-z]{2}")
 _WHITESPACE_RE = re.compile(r"\s+")
+# The hub's and reference clients' join/part/rename templates, anchored:
+# `*** Joining lobby: nick@site`, `*** Leaving ...`, `- nick has joined`,
+# `- nick@site has left chat.`, `- nick has timed out`, `- nick was
+# renamed to x`. Never an unanchored keyword -- a caller saying "I'm
+# leaving after dinner" is chat, not presence.
+_PRESENCE_RE = re.compile(
+    r"^(?:\*\*\*\s|-\s+\S+\s+(?:has\s+(?:joined|left|timed\s+out)|timed\s+out|was\s+renamed|is\s+now\s+known\s+as)\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -241,7 +250,10 @@ def parse_line(line: str) -> MrcPacket | None:
         return None
     if len(fields) > 7:
         fields = fields[:6] + [" ".join(fields[6:])]
-    cleaned = [sanitize_text(strip_ansi(field)).strip() for field in fields]
+    # Pipe codes are stripped from *every* field here, identity fields
+    # included: a remote `|04bob` is `bob` wherever it is later shown or
+    # compared, the same normalization outbound names already get.
+    cleaned = [strip_pipe_codes(sanitize_text(strip_ansi(field))).strip() for field in fields]
     names = [value[:MAX_NAME] for value in cleaned[:6]]
     return MrcPacket(
         from_user=names[0], from_site=names[1], from_room=names[2],
@@ -269,11 +281,7 @@ def looks_like_presence_chatter(body: str) -> bool:
     """Join/part/timeout chatter the hub and other clients broadcast as
     ordinary text (`*** Joining ...`, `- nick has left chat.`) -- shown
     as an ephemeral notice rather than recorded as a chat message."""
-    lowered = body.lower()
-    return lowered.startswith("***") or any(
-        marker in lowered
-        for marker in ("has joined", "has left", "joining", "leaving", "timeout", "timed out", "renamed")
-    )
+    return _PRESENCE_RE.match(body.strip()) is not None
 
 
 # --- packet builders -------------------------------------------------------

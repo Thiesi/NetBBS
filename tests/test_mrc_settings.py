@@ -109,3 +109,17 @@ def test_channel_mapping_lifecycle(db, sysop):
         set_mrc_paused(db, other, True)
     # The Channel dataclass itself stays MRC-unaware.
     assert not hasattr(get_channel_by_name(db, "lobby"), "mrc_room")
+
+
+def test_room_uniqueness_is_case_insensitive_at_the_constraint(db, sysop):
+    """Review of #275: the helper's lower() check is not a constraint
+    against a second writer -- the index itself must be case-insensitive."""
+    import sqlite3
+
+    lobby = create_channel(db, "lobby", creator=sysop)
+    other = create_channel(db, "other", creator=sysop)
+    set_mrc_room(db, lobby, "Lobby")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.connection.execute("UPDATE channels SET mrc_room = 'lobby' WHERE id = ?", (other.id,))
+    db.connection.rollback()
+    assert get_mrc_mapping(db, other) is None

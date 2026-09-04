@@ -160,3 +160,23 @@ def test_builders_follow_documented_field_conventions():
     assert build_line(protocol.imalive("S", "My Board")) == "CLIENT~S~~SERVER~~~IMALIVE:My Board~\n"
     assert build_line(protocol.info("S", "sys", "Thiesi")) == "CLIENT~S~~SERVER~~~INFOSYS:Thiesi~\n"
     assert build_line(protocol.chat_message("alice", "S", "lobby", "hi")) == "alice~S~lobby~~~lobby~hi~\n"
+
+
+def test_presence_chatter_matches_the_hub_templates_not_loose_keywords():
+    """Review of #275: `leaving`/`joining`/`timeout` as bare substrings
+    reclassified ordinary chat ("I'm leaving after dinner") as presence
+    and dropped its author and retention."""
+    assert looks_like_presence_chatter("*** Leaving lobby: alice@site")
+    assert looks_like_presence_chatter("- alice@Other has joined the room")
+    assert looks_like_presence_chatter("- Bob has timed out")
+    assert looks_like_presence_chatter("- bob was renamed to robert")
+    assert not looks_like_presence_chatter("I'm leaving after dinner")
+    assert not looks_like_presence_chatter("timeout on my end, joining again later")
+    assert not looks_like_presence_chatter("- Anyone leaving for lunch?")
+
+
+def test_parse_line_strips_pipe_codes_from_identity_fields_and_server_bodies():
+    packet = parse_line("|04bob~|12Other~lobby~~~lobby~|07hi~")
+    assert (packet.from_user, packet.from_site, packet.body) == ("bob", "Other", "hi")
+    server = parse_line("SERVER~~~alice~~lobby~USERLIST:|12Carol@third,bob@|04other~")
+    assert parse_userlist(parse_server_command(server.body)[1]) == ["Carol@third", "bob@other"]

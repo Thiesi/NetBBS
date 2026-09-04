@@ -3882,15 +3882,20 @@ async def _chat_loop(
                                 await link_context.realtime_bridge.broadcast_local_message_live(
                                     channel, recorded_message
                                 )
-                        # Issue #275: the MRC sibling of the live-Link push
-                        # above -- a no-op unless this channel is bridged.
-                        if mrc_bridge is not None:
-                            await _relay_to_mrc(session, mrc_bridge, channel, recorded_message)
                         rendered_self = await lane.run(
                             _render_channel_message, channel, user, recorded_message, self_message=True
                         )
                         await session.write_line(rendered_self)
                         await hub.broadcast(channel.name, recorded_message, exclude={participant_id})
+                        # Issue #275: the MRC sibling of the live-Link push
+                        # above -- a no-op unless this channel is bridged.
+                        # After local delivery, as the `/me` path does: the
+                        # relay's own "not relayed" notice is an ancillary
+                        # write to the sender, and a sender whose socket
+                        # drops during it must not take the already-
+                        # recorded message away from every local reader.
+                        if mrc_bridge is not None:
+                            await _relay_to_mrc(session, mrc_bridge, channel, recorded_message)
                         # Design doc: sending a message does not
                         # clear away state -- a user may intentionally remain away
                         # while briefly responding. Reminded, not silently changed.

@@ -1190,3 +1190,26 @@ def test_scrollback_snapshot_is_cleared_on_disconnect_before_pickup(tmp_path):
             await subscriber.teardown()
 
     asyncio.run(scenario())
+
+
+def test_scrollback_snapshot_excludes_external_network_lines(tmp_path):
+    """Review of #275: an MRC line has no Link event and used to be
+    exported as origin-attested content under the origin's fingerprint."""
+    async def scenario():
+        origin = _Node(tmp_path, "origin-external")
+        subscriber = _Node(tmp_path, "subscriber-external")
+        try:
+            origin_channel, _subscriber_channel = _setup_linked_channel(origin, subscriber, name="external")
+            record_message(origin.db, origin_channel, kind="message", author_label="alice", body="ours")
+            record_message(
+                origin.db, origin_channel, kind="message", author_label="bob@Other (MRC)",
+                body="theirs", external_source="mrc",
+            )
+            entries = _snapshot_entries(origin.db, origin_channel)
+            assert [entry["body"] for entry in entries] == ["ours"]
+            assert entries[0]["author_node_fingerprint"] == origin.identity.fingerprint
+        finally:
+            await origin.teardown()
+            await subscriber.teardown()
+
+    asyncio.run(scenario())
