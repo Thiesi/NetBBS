@@ -91,12 +91,13 @@ def test_back_shows_status_and_asks_nothing(db, sysop, alice):
     assert "Attest a birthdate?" not in text
     assert "Attest a real name?" not in text
     assert "[A]ttest age" in text and "Attest [N]ame" in text and "[B]ack" in text
+    assert "Verifying alice" in text
     assert get_attestation(db, alice, "age") is None
     assert get_attestation(db, alice, "name") is None
 
 
 def test_attest_age_records_and_redraws(db, sysop, alice):
-    session = FakeSession(["a", "1990-05-01", "b"])
+    session = FakeSession(["a", "1990-05-01", "x", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, alice))
     text = _visible(session)
     assert "Age attested." in text
@@ -105,7 +106,7 @@ def test_attest_age_records_and_redraws(db, sysop, alice):
 
 
 def test_attest_name_records_and_redraws(db, sysop, alice):
-    session = FakeSession(["n", "Alice Wonderland", "b"])
+    session = FakeSession(["n", "Alice Wonderland", "x", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, alice))
     text = _visible(session)
     assert "Real name attested." in text
@@ -114,7 +115,7 @@ def test_attest_name_records_and_redraws(db, sysop, alice):
 
 
 def test_blank_value_cancels_the_action(db, sysop, alice):
-    session = FakeSession(["a", "", "n", "", "b"])
+    session = FakeSession(["a", "", "x", "n", "", "x", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, alice))
     assert _visible(session).count("Cancelled.") == 2
     assert get_attestation(db, alice, "age") is None
@@ -122,7 +123,7 @@ def test_blank_value_cancels_the_action(db, sysop, alice):
 
 
 def test_invalid_date_is_reported_and_nothing_recorded(db, sysop, alice):
-    session = FakeSession(["a", "not-a-date", "b"])
+    session = FakeSession(["a", "not-a-date", "x", "b"])
     asyncio.run(profile_flow._verify_user(session, db, sysop, alice))
     assert "Could not attest age" in _visible(session)
     assert get_attestation(db, alice, "age") is None

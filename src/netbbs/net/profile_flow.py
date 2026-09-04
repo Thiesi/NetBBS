@@ -1123,10 +1123,21 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
     read from. A blank value at either prompt cancels that action.
     """
     header_color = effective_header_color(session, db)
+    redraw_in_place = redraw_in_place_enabled(db, verifier)
+    unicode_style = unicode_style_enabled(db, verifier)
+    collapsed = breadcrumb_collapsed_enabled(db, verifier)
 
     async def _draw() -> None:
         await session.write_line(
-            colored(f"\r\nVerifying {sanitize_text(subject.username)!r}:", fg_color=header_color, bold=True)
+            "\r\n" + screen_title(
+                f"Verifying {sanitize_text(subject.username)}",
+                breadcrumb=(session.node_display_name, "Verify identity"),
+                width=session.terminal_width,
+                clear=redraw_in_place,
+                unicode_style=unicode_style, collapsed=collapsed,
+                header_color=header_color,
+                node_name_gradient=session.node_name_gradient,
+            )
         )
         self_birthdate = get_birthdate(db, subject)
         self_display_name = get_display_name(db, subject)
@@ -1180,6 +1191,8 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     await session.write_line(colored(f"Could not attest age: {exc}", fg_color=MUTED_COLOR))
                 else:
                     await session.write_line("Age attested.")
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_any_key()
             await _draw()
         elif choice == "n":
             await session.write_line("")
@@ -1194,6 +1207,8 @@ async def _verify_user(session: Session, db: Database, verifier: User, subject: 
                     await session.write_line(colored(f"Could not attest name: {exc}", fg_color=MUTED_COLOR))
                 else:
                     await session.write_line("Real name attested.")
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_any_key()
             await _draw()
         else:
             await session.write(reject_unhandled_key(choice))

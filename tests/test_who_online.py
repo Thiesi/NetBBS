@@ -267,7 +267,7 @@ def test_who_screen_delivers_a_message_to_the_selected_user(tmp_path):
         other_task = asyncio.create_task(_hold_registered(registry, other, "bob"))
         await asyncio.sleep(0)
 
-        session = FakeSession(["w", "0", "1", "m", "Hi there!", "b", "l", "y"])
+        session = FakeSession(["w", "0", "1", "m", "Hi there!", "x", "b", "l", "y"])
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -296,7 +296,7 @@ def test_who_screen_blank_message_cancels_without_sending(tmp_path):
         other_task = asyncio.create_task(_hold_registered(registry, other, "bob"))
         await asyncio.sleep(0)
 
-        session = FakeSession(["w", "0", "1", "m", "", "b", "l", "y"])  # blank message, then back out of the list
+        session = FakeSession(["w", "0", "1", "m", "", "x", "b", "l", "y"])  # blank message -> cancelled, pause, back out
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -333,7 +333,7 @@ def test_who_screen_refuses_to_message_an_opted_out_user(tmp_path):
         # No message text scripted after "01" -- if the screen wrongly
         # prompted for one anyway, read_line would raise and fail the
         # test outright, proving the refusal happens first.
-        session = FakeSession(["w", "0", "1", "b", "l", "y"])
+        session = FakeSession(["w", "0", "1", "x", "b", "l", "y"])
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -461,7 +461,7 @@ def test_who_screen_remote_entry_without_a_lane_explains_live_messaging_is_unava
         node_controls = _node_controls()
         link_context = _FakeLinkContext(_FakeBridge({"remote-node-fingerprint-abc123": {"erin": "erin"}}))
 
-        session = FakeSession(["w", "0", "1", "b", "l", "y"])
+        session = FakeSession(["w", "0", "1", "x", "b", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:
@@ -492,7 +492,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         )
         # (presence for that node is present, so the honest-delivery guard passes)
         lane = DatabaseLane(database.path)
-        session = FakeSession(["w", "0", "1", "m", "hello erin", "b", "l", "y"])
+        session = FakeSession(["w", "0", "1", "m", "hello erin", "x", "b", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:

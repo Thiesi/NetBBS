@@ -272,7 +272,9 @@ async def _caller_who_screen(
         ]
         return local + _remote_who_entries(db, link_context)
 
-    async def _act_on(selected: _WhoEntry) -> None:
+    async def _act_on(selected: _WhoEntry) -> bool:
+        """Returns whether an outcome was written that the caller should
+        get to read before the list is redrawn over it."""
         if isinstance(selected, _RemoteWhoEntry):
             # Issue #168: a one-off live message across nodes, over a direct
             # or relayed real-time session; chat invites stay local-only.
@@ -286,7 +288,7 @@ async def _caller_who_screen(
                         fg_color=MUTED_COLOR,
                     )
                 )
-                return
+                return True
             node_label = _remote_who_node_label(db, selected)
             # Issue #282: selecting a remote caller used to drop straight
             # into the message prompt, so someone who picked the name only
@@ -324,32 +326,32 @@ async def _caller_who_screen(
                     break
                 await session.write(reject_unhandled_key(action))
             if action == "b":
-                return
+                return False
             await write_prompt(
                 session, f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: "
             )
             message = (await session.read_line()).strip()
             if not message:
                 await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
-                return
+                return True
             await send_live_direct_message(
                 session, lane, user, f"{selected.username}@{selected.node_fingerprint}", message,
                 link_context=link_context,
             )
-            return
+            return True
 
         assert selected.username is not None  # filtered above
         try:
             target = get_user_by_username(db, selected.username)
         except AuthError:
             await session.write_line(colored("That account no longer exists.", fg_color=ERROR_COLOR))
-            return
+            return True
 
         if not accepts_direct_messages(db, target):
             await session.write_line(
                 colored(f"{target.username} has opted out of receiving direct messages.", fg_color=MUTED_COLOR)
             )
-            return
+            return True
 
         offer_invite = direct_invites is not None and lane is not None
         await session.write_line(
@@ -383,19 +385,19 @@ async def _caller_who_screen(
             await session.write(reject_unhandled_key(action))
 
         if action == "b":
-            return
+            return False
         if action == "i":
             assert direct_invites is not None and lane is not None  # offer_invite's own condition
             await run_direct_chat_invite_flow(
                 session, lane, hub, presence, direct_invites, node_controls.session_registry, user, target,
             )
-            return
+            return True
 
         await write_prompt(session, f"Message to {selected.username}: ")
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))
-            return
+            return True
 
         delivered = await node_controls.session_registry.notify_one(
             selected.session,
@@ -405,17 +407,25 @@ async def _caller_who_screen(
             await session.write_line(colored("Message sent.", fg_color=SUCCESS_COLOR))
         else:
             await session.write_line(colored(f"{selected.username} is no longer online.", fg_color=ERROR_COLOR))
+        return True
+
+    def _stable_id(entry: _WhoEntry) -> int:
+        return entry.session_id if isinstance(entry, SessionSummary) else entry.stable_id
 
     # Issue #282 (Codex review): every path back from a selected entry --
     # [B]ack, a sent message, a refused target -- lands on the list
     # again, as the menu entry's own "Return to Who's online" says, so
-    # a caller can look at (or message) more than one person per visit.
-    # [B]ack on the list itself is the way out.
+    # a caller can look at (or message) more than one person per visit,
+    # with the cursor back on the entry they came from. An outcome
+    # ("Message sent.", a refusal) is held on a "Press any key" pause
+    # first, since an in-place redraw would otherwise clear it before
+    # it could be read. [B]ack on the list itself is the way out.
+    last_stable_id: int | None = None
     while True:
         selected = await pick_item(
             session, await _load_entries(),
             name_of=_who_entry_name,
-            stable_id_of=lambda e: e.session_id if isinstance(e, SessionSummary) else e.stable_id,
+            stable_id_of=_stable_id,
             description_of=lambda e: _who_entry_description(db, e),
             title="Who's online",
             empty_message="No one else is online right now.",
@@ -429,7 +439,11 @@ async def _caller_who_screen(
             collapsed=breadcrumb_collapsed_enabled(db, user),
             accent_color=effective_accent_color(session, db),
             header_color=effective_header_color(session, db),
+            start_stable_id=last_stable_id,
         )
         if selected is None:
             return
-        await _act_on(selected)
+        last_stable_id = _stable_id(selected)
+        if await _act_on(selected):
+            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_any_key()

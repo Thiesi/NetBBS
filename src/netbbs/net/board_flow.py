@@ -752,8 +752,8 @@ async def _show_board(
             await _render_and_advance_cursor(page)
         elif choice == "p" and can_post:
             await session.write_line("")
-            await _saved_draft_menu(from_post=True)
-            page_anchor = None  # a freshly-created post always lands on the newest page
+            if await _saved_draft_menu(from_post=True):
+                page_anchor = None  # a freshly-created post always lands on the newest page
             page = _refetch_current_page()
             await _render_and_advance_cursor(page)
         elif choice == "d" and _has_saved_draft():
