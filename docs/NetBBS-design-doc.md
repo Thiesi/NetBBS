@@ -3735,14 +3735,15 @@ This one piece of state is what makes the remaining four gaps closable as
 straightforward reads/writes against it, not four separate mechanisms:
 
 **1. Explicit cancel-or-replace, not silent stacking.** Re-running
-`[D]rain`/`[S]hutdown` while one is already scheduled now shows its
-remaining time and offers "Cancel it?" before proceeding (unless it's a
+`[D]rain`/`[S]hutdown` while one is already scheduled shows its remaining
+time and offers `[C]ancel it`, `[R]eplace it`, and `[B]ack` (unless it's a
 non-cancellable signal-triggered shutdown — see the provenance paragraph
-above, which gets a status-only message and an immediate return instead)
-— answering yes cancels cleanly and stops; answering no continues into
-the ordinary
-prompts, and the resulting new schedule replaces the old one via
-`schedule()`. `[S]hutdown` also gained a per-invocation delay prompt for
+above, which gets a status-only message and an immediate return instead).
+Cancel cancels cleanly and stops; Replace continues into the ordinary field
+editor, and the resulting new schedule replaces the old one via
+`schedule()`; Back leaves the existing schedule untouched (issue #282
+replaced the earlier "Cancel it?" yes/no, whose "no" fell into the editor
+regardless). `[S]hutdown` also gained a per-invocation delay prompt for
 the first time (previously a fixed `graceful_delay_seconds` config value
 with no override) — it now behaves exactly like `[D]rain`, Thiesi's own
 explicit ask to close a "these two feel like different features" mental
