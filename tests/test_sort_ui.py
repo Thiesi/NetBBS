@@ -145,6 +145,21 @@ def test_backing_out_of_the_mode_prompt_returns_none_and_never_calls_persist(db,
     assert "Remember this as" not in _written_text(session)
 
 
+def test_backing_out_of_the_scope_prompt_returns_none_and_never_calls_persist(db, alice):
+    """Issue #282: the scope step used to accept only its own keys
+    forever -- a mode once chosen could not be un-chosen."""
+    session = FakeSession(["a", "b"])
+    persist_calls = []
+
+    async def persist(mode, scope_kwargs):
+        persist_calls.append((mode, scope_kwargs))
+
+    mode = asyncio.run(prompt_sort_change(session, persist=persist))
+    assert mode is None
+    assert persist_calls == []
+    assert "Remember this as" in _written_text(session)
+
+
 def test_an_unrecognized_mode_key_is_rejected_and_reprompted(db, alice):
     session = FakeSession(["z", "a", "j"])
     mode = asyncio.run(prompt_sort_change(session, persist=_persist_for(db, alice, "channel")))

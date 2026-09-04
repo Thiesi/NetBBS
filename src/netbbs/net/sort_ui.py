@@ -63,7 +63,9 @@ async def prompt_sort_change(
     time") which scope to remember it at, calls `persist(mode,
     scope_kwargs)` to actually save that, and returns the newly chosen
     mode. Returns `None`, with `persist` never called, if the user backs
-    out of the mode prompt itself without choosing one.
+    out of either prompt -- the scope step used to have no `[B]ack` at
+    all (issue #282), so a mode once chosen was committed to at least
+    "just this time" no matter what.
 
     `community_id`/`category_id` describe *where* the picker being
     customized currently is, so the matching save-scope option can be
@@ -120,11 +122,15 @@ async def prompt_sort_change(
         scope_actions["w"] = {"community_id": community_id}
     scope_nav.append(menu_key("G", "lobal default"))
     scope_actions["g"] = {}
+    scope_nav.append(menu_key("B", "ack"))
 
     await session.write_line(f"Remember this as: {'  '.join(scope_nav)}")
     while True:
         await session.write("Choice: ")
         choice = (await session.read_key()).lower()
+        if choice == "b":
+            await session.write_line("")
+            return None
         if choice in scope_actions:
             break
         await session.write(reject_unhandled_key(choice))
