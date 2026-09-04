@@ -1,6 +1,6 @@
 [38;5;46m[[1m NETBBS :: THREAD MATRIX [0m[38;5;46m][38;5;22m────────────────────────────────────────────────[0m
-[38;5;82mroot@boards[38;5;40m ─┬─ general ............ [38;5;118m128 msgs  +12 new[0m
-[38;5;40m             ├─ tech ─┬─ netbsd ..... [38;5;118m64 msgs   +4 new[0m
-[38;5;34m             │        └─ crypto ...... [38;5;82m31 msgs   +1 new[0m
-[38;5;28m             └─ mesh ─── federation .. [38;5;47mLIVE      9 peers[0m
+[38;5;82mroot@boards[38;5;40m ─┬─ bright threads ...... [38;5;118mreplies in flight[0m
+[38;5;40m             ├─ deep threads ........ [38;5;118mnew signals rising[0m
+[38;5;34m             │  └─ quiet threads ..... [38;5;82marchive echoes[0m
+[38;5;28m             └─ mesh threads ......... [38;5;47mlinked routes open[0m
 [38;5;22mroute>[38;5;118m follow a branch, seed a topic, keep the signal alive █[0m

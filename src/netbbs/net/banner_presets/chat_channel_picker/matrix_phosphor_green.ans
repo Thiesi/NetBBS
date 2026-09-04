@@ -1,6 +1,6 @@
 [38;5;46m┌─ [1mSIGNAL MULTIPLEXER[0m[38;5;46m ─────────────────────────────────────────────┐[0m
-[38;5;40m│ CH01 ███████░ ─┐                                           │[0m
-[38;5;34m│ CH02 ███░░░░░ ─┼──▶ [38;5;118m[ LIVE BUS // 12 CALLERS ][38;5;34m ──▶ CARRIER OK │[0m
-[38;5;28m│ CH03 █████░░░ ─┼─┐                                         │[0m
-[38;5;22m│ CH04 ██░░░░░░ ─┘ └── whisper lane encrypted                │[0m
+[38;5;40m│ BAND A ███████░ ─┐                                         │[0m
+[38;5;34m│ BAND B ███░░░░░ ─┼──▶ [38;5;118m[ LIVE BUS // SIGNALS MIXED ][38;5;34m ─▶ CARRIER OK │[0m
+[38;5;28m│ BAND C █████░░░ ─┼─┐                                       │[0m
+[38;5;22m│ BAND D ██░░░░░░ ─┘ └── whisper lane encrypted              │[0m
 [38;5;46m└─ route> [38;5;118mselect channel / lock signal / enter stream █[38;5;46m ───────────┘[0m

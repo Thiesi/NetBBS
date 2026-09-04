@@ -1,6 +1,6 @@
 [38;5;159m0 [38;5;153m"NETBBS FILE VAULT" NB 5A[0m
-[38;5;159m12  "TEXTFILES"         PRG    88  "ARTSCENE"          PRG[0m
-[38;5;153m24  "DOORS"             PRG   144  "UTILITIES"         PRG[0m
-[38;5;159m31  "NETBSD"            SEQ    64  "LINK-DROPS"        REL[0m
-[38;5;153m377 BLOCKS FREE.[0m
+[38;5;159m    "TEXTFILES"         PRG        "ARTSCENE"          PRG[0m
+[38;5;153m    "DOORS"             PRG        "UTILITIES"         PRG[0m
+[38;5;159m    "NETBSD"            SEQ        "LINK-DROPS"        REL[0m
+[38;5;153mDIRECTORY READY.[0m
 [38;5;231mREADY.  [38;5;159mLOAD [38;5;231m"*",8,1[38;5;159m  OR SELECT A DIRECTORY[0m
