@@ -247,9 +247,53 @@ def test_create_backup_writes_a_readable_manifest(tmp_path, db_path, identity_di
     manifest = json.loads((destination / "manifest.json").read_text())
     assert manifest["source_db_path"] == str(db_path)
     assert manifest["source_identity_dir"] == str(identity_dir)
+    assert manifest["database_filename"] == db_path.name
     assert isinstance(manifest["db_user_version"], int)
     assert manifest["netbbs_version"]
     assert manifest["created_at"]
+
+
+def test_backup_preserves_a_custom_database_filename(tmp_path, identity_dir):
+    db_path = tmp_path / "dogfood-blue.db"
+    Database(db_path).close()
+    destination = tmp_path / "backup1"
+
+    create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
+
+    assert (destination / db_path.name).exists()
+    assert not (destination / "netbbs.db").exists()
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert manifest["database_filename"] == db_path.name
+    assert db_path.name in manifest["checksums"]
+
+    db_path.unlink()
+    restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+    assert db_path.exists()
+
+
+def test_restore_accepts_legacy_backup_without_database_filename(tmp_path, db_path, identity_dir):
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup1"
+    )
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["database_filename"]
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
+
+
+def test_restore_rejects_unsafe_database_filename(tmp_path, db_path, identity_dir):
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup1"
+    )
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["database_filename"] = "../outside.db"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    with pytest.raises(BackupError, match="invalid database filename"):
+        restore_backup(source=destination, db_path=db_path, identity_dir=identity_dir)
 
 
 def test_create_backup_refuses_if_destination_already_exists(tmp_path, db_path, identity_dir):

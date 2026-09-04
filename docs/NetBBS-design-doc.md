@@ -3344,7 +3344,9 @@ of "the operator/an external trigger drives it, not a built-in timer").
    `netbbs.selfupdate.snapshot_database` verbatim
    (`sqlite3.Connection.backup()`, already proven safe against a live WAL
    database in `test_snapshot_and_restore_database_round_trip`) — written to
-   `destination/netbbs.db`. Never a raw file copy. The primary, previous, and
+   `destination/<configured-database-filename>` and recorded in the manifest
+   (older backups without that field retain the legacy `netbbs.db` name).
+   Never a raw file copy. The primary, previous, and
    transition-journal credentials are double-collected around that snapshot,
    and the snapshot's `managed_dns_*` configuration is compared with the live
    database afterward. Any detected overlap with a credential/name transition

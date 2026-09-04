@@ -99,10 +99,10 @@ from netbbs.storage.migrations import MIGRATIONS
 from netbbs.timeutil import utc_now_iso
 
 _MANIFEST_FILENAME = "manifest.json"
-_DB_FILENAME = "netbbs.db"
+_LEGACY_DB_FILENAME = "netbbs.db"
 _FILES_DIRNAME = "files"
 _IDENTITY_DIRNAME = "identity"
-_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _DB_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
+_RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAME)
 
 # node_config keys (netbbs.config's generic key-value store) -- same
 # reasoning as netbbs.selfupdate's own last-check bookkeeping: purely
@@ -118,6 +118,31 @@ _MANAGED_DNS_SNAPSHOT_ATTEMPTS = 3
 
 class BackupError(Exception):
     """Raised for any backup/restore failure."""
+
+
+def _validate_database_filename(filename: object) -> str:
+    """Return a safe, backup-root-relative database filename.
+
+    The value is persisted in the manifest and therefore untrusted on
+    restore. Keep it to one ordinary filename so it cannot escape the
+    backup directory or collide with another reserved top-level artifact.
+    """
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+        or filename in _RESERVED_BACKUP_ENTRIES
+    ):
+        raise BackupError(f"invalid database filename in backup: {filename!r}")
+    return filename
+
+
+def _database_filename_from_manifest(manifest: dict) -> str:
+    # Backups created before custom database filenames were preserved always
+    # stored their snapshot under this legacy canonical name.
+    return _validate_database_filename(manifest.get("database_filename", _LEGACY_DB_FILENAME))
 
 
 def _storage_root_for(db_path: Path) -> Path:
@@ -229,7 +254,7 @@ def _managed_dns_config_generation(db_path: Path) -> tuple[tuple[str, str], ...]
 
 
 def _snapshot_database_and_managed_dns_credentials(
-    db_path: Path, destination: Path,
+    db_path: Path, destination: Path, database_filename: str,
 ) -> None:
     """Capture the database and its three mutable DNS secrets coherently.
 
@@ -238,7 +263,7 @@ def _snapshot_database_and_managed_dns_credentials(
     transaction. Double-collect both sides around SQLite's online snapshot and
     retry whenever a transition overlaps the collection window.
     """
-    staged_snapshot = destination / f".{_DB_FILENAME}.managed-dns-snapshot"
+    staged_snapshot = destination / f".{database_filename}.managed-dns-snapshot"
     credential_paths = (
         _managed_dns_credential_path_for(db_path),
         _managed_dns_previous_credential_path_for(db_path),
@@ -256,7 +281,7 @@ def _snapshot_database_and_managed_dns_credentials(
             before_credentials == captured_credentials == after_credentials
             and snapshot_config == live_config
         ):
-            staged_snapshot.replace(destination / _DB_FILENAME)
+            staged_snapshot.replace(destination / database_filename)
             for source_path, contents in zip(credential_paths, captured_credentials, strict=True):
                 if contents is not None:
                     _save_managed_dns_credential(
@@ -306,10 +331,12 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
     if not db_path.exists():
         raise BackupError(f"no database found at {db_path}")
 
+    database_filename = _validate_database_filename(db_path.name)
+
     destination.mkdir(parents=True)
 
-    _snapshot_database_and_managed_dns_credentials(db_path, destination)
-    checksums = {_DB_FILENAME: _sha256_of_file(destination / _DB_FILENAME)}
+    _snapshot_database_and_managed_dns_credentials(db_path, destination, database_filename)
+    checksums = {database_filename: _sha256_of_file(destination / database_filename)}
     for credential_path in (
         _managed_dns_credential_path_for(db_path),
         _managed_dns_previous_credential_path_for(db_path),
@@ -350,6 +377,7 @@ def create_backup(*, db_path: Path, identity_dir: Path, destination: Path) -> Pa
         "created_at": utc_now_iso(),
         "netbbs_version": __version__,
         "db_user_version": _read_user_version(db_path),
+        "database_filename": database_filename,
         "source_db_path": str(db_path),
         "source_identity_dir": str(identity_dir),
         "checksums": checksums,
@@ -420,7 +448,8 @@ def _validate_backup_source(source: Path, *, allow_migrate: bool) -> dict:
     except (OSError, json.JSONDecodeError) as exc:
         raise BackupError(f"could not read manifest at {manifest_path}: {exc}") from exc
 
-    db_snapshot = source / _DB_FILENAME
+    database_filename = _database_filename_from_manifest(manifest)
+    db_snapshot = source / database_filename
     if not db_snapshot.exists():
         raise BackupError(f"backup is missing its database snapshot: {db_snapshot}")
 
@@ -596,7 +625,7 @@ def _write_restore_state(state_path: Path, *, staging_dir: Path, rollback_dir: P
 
 
 def _restore_switch_plan(
-    staging_dir: Path, db_path: Path, identity_dir: Path,
+    staging_dir: Path, db_path: Path, identity_dir: Path, database_filename: str,
 ) -> list[tuple[str, Path | None, Path]]:
     """`(name, staged_path, live_path)` for every artifact this backup
     actually contains, in the same DB/files/identity/extras order
@@ -604,7 +633,7 @@ def _restore_switch_plan(
     reasoning) -- SSH host key, welcome banner, and forward-compatibly
     anything a future `create_backup` adds restore generically, keeping
     their filename, exactly like the pre-issue-#75 restore logic did."""
-    plan: list[tuple[str, Path, Path]] = [("db", staging_dir / _DB_FILENAME, db_path)]
+    plan: list[tuple[str, Path, Path]] = [("db", staging_dir / database_filename, db_path)]
 
     staged_files = staging_dir / _FILES_DIRNAME
     if staged_files.is_dir():
@@ -615,7 +644,7 @@ def _restore_switch_plan(
         plan.append(("identity", staged_identity, identity_dir))
 
     for entry in sorted(staging_dir.iterdir()):
-        if entry.name in _RESERVED_BACKUP_ENTRIES:
+        if entry.name in (*_RESERVED_BACKUP_ENTRIES, database_filename):
             continue
         if entry.is_file():
             live_path = db_path.parent / entry.name
@@ -719,9 +748,14 @@ def restore_backup(*, source: Path, db_path: Path, identity_dir: Path) -> Path |
     staging_dir.mkdir(parents=True)
     try:
         shutil.copytree(source, staging_dir, dirs_exist_ok=True)
-        _validate_backup_source(staging_dir, allow_migrate=True)
+        staged_manifest = _validate_backup_source(staging_dir, allow_migrate=True)
 
-        plan = _restore_switch_plan(staging_dir, db_path, identity_dir)
+        plan = _restore_switch_plan(
+            staging_dir,
+            db_path,
+            identity_dir,
+            _database_filename_from_manifest(staged_manifest),
+        )
         _write_restore_state(
             state_path, staging_dir=staging_dir, rollback_dir=rollback_dir, pending=[name for name, _, _ in plan]
         )
