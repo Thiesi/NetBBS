@@ -1187,3 +1187,37 @@ def test_server_enables_transport_keepalives(db, monkeypatch):
     asyncio.run(scenario())
     assert captured["keepalive_interval"] == SSH_KEEPALIVE_INTERVAL_SECONDS > 0
     assert captured["keepalive_count_max"] == SSH_KEEPALIVE_COUNT_MAX >= 1
+
+
+def test_stop_aborts_lingering_connections_even_when_wait_closed_returns_early(db, monkeypatch):
+    """Python 3.11's `asyncio.Server.wait_closed()` returns immediately
+    after `close()` with clients still attached (3.12+ blocks on them).
+    Simulated here on whatever interpreter runs the suite by making the
+    acceptor's wait return at once: the deadline must be judged on the
+    tracked connections, or nothing is ever aborted on 3.11 (Codex
+    review, PR #283)."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    release = asyncio.Event()
+
+    async def handler(session: Session):
+        await release.wait()
+
+    async def scenario():
+        server = await _run_server(db, handler, stop_timeout_seconds=0.3)
+
+        async def immediate_wait_closed():
+            return None
+
+        monkeypatch.setattr(server._acceptor, "wait_closed", immediate_wait_closed)
+        conn = await asyncssh.connect(
+            "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+        )
+        try:
+            await conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None)
+            await asyncio.wait_for(server.stop(), timeout=5)
+            await asyncio.wait_for(conn.wait_closed(), timeout=2)
+        finally:
+            release.set()
+            conn.abort()
+
+    asyncio.run(scenario())

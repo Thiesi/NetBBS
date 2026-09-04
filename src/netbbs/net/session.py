@@ -34,6 +34,31 @@ _MAX_TERMINAL_WIDTH = 500
 _MAX_TERMINAL_HEIGHT = 200
 
 
+async def wait_until_drained(
+    is_drained: Callable[[], bool], timeout: float, *, poll_interval: float = 0.05
+) -> bool:
+    """Wait up to `timeout` seconds for `is_drained()` to become true.
+
+    Shared by `TelnetServer.stop`/`SSHServer.stop`: each listener tracks
+    the connections it admitted itself and waits on *that* set, because
+    `asyncio.Server.wait_closed()` is the wrong signal on every supported
+    interpreter -- on Python 3.11 it returns immediately after `close()`
+    even with clients still attached (so nothing would ever be aborted),
+    while on 3.12+ it blocks until every client has dropped (the
+    nine-minute dead-peer hang). Polling a plain set is deliberately
+    simpler than threading an Event through two transports' connection
+    callbacks; at this interval the added latency is invisible next to
+    the seconds-scale bound.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not is_drained():
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(poll_interval)
+    return True
+
+
 def clamp_terminal_size(width: int, height: int) -> tuple[int, int]:
     """
     Clamp a client-reported terminal size to a sane operational range

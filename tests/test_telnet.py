@@ -1254,3 +1254,40 @@ def test_session_close_aborts_a_transport_that_never_drains():
 
     asyncio.run(scenario())
     assert events == ["close", "abort"]
+
+
+def test_stop_aborts_lingering_connections_even_when_wait_closed_returns_early(monkeypatch):
+    """Python 3.11's `asyncio.Server.wait_closed()` returns immediately
+    after `close()` with clients still attached (3.12+ blocks on them).
+    Simulated here by making the server's wait return at once: the
+    deadline must be judged on the tracked connections, or nothing is
+    ever aborted on 3.11 (Codex review, PR #283)."""
+    release = asyncio.Event()
+
+    async def handler(session: Session):
+        await release.wait()
+
+    async def scenario():
+        server = TelnetServer(
+            host="127.0.0.1", port=0, session_handler=handler, stop_timeout_seconds=0.3
+        )
+        await server.start()
+
+        async def immediate_wait_closed():
+            return None
+
+        monkeypatch.setattr(server._server, "wait_closed", immediate_wait_closed)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        try:
+            await skip_initial_negotiation(reader)
+            await asyncio.wait_for(server.stop(), timeout=5)
+            try:
+                remainder = await asyncio.wait_for(reader.read(), timeout=2)
+            except ConnectionError:
+                remainder = b""
+            assert remainder == b""
+        finally:
+            release.set()
+            writer.close()
+
+    asyncio.run(scenario())

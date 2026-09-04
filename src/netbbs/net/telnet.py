@@ -47,7 +47,7 @@ import socket
 from typing import Awaitable, Callable
 
 from netbbs.net import char_input
-from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size
+from netbbs.net.session import Session, SessionClosedError, clamp_terminal_size, wait_until_drained
 
 # Telnet protocol constants (RFC 854, plus NAWS from RFC 1073 and
 # NEW-ENVIRON from RFC 1572).
@@ -545,32 +545,31 @@ class TelnetServer:
         """
         Stop listening and make sure every admitted connection is gone.
 
-        `Server.close()` only stops accepting, and on Python 3.12+
-        `wait_closed()` blocks until every admitted connection has
-        actually dropped (the CPython behavior change
-        `docs/NetBBS-worklog.md` records for `LinkRealtimeServer.stop`,
-        which already carries the bounded wait this mirrors). A dead
-        peer -- or a connection still in option negotiation that never
-        reached the session registry -- would otherwise hold shutdown
-        for the kernel's whole TCP retransmission timeout. Wait briefly,
-        then abort whatever is left.
+        `Server.close()` only stops accepting. A dead peer -- or a
+        connection still in option negotiation that never reached the
+        session registry -- would otherwise either hold shutdown for the
+        kernel's whole TCP retransmission timeout (Python 3.12+, whose
+        `wait_closed()` blocks on admitted connections) or simply be left
+        open (3.11, whose `wait_closed()` returns at once). So the
+        deadline is judged on the connections this listener tracks
+        itself (see `wait_until_drained`), never on `wait_closed()`:
+        wait briefly for them to close on their own, abort whatever is
+        left, and only then release the listener.
         """
         if self._server is None:
             return
         self._server.close()
-        try:
-            await asyncio.wait_for(self._server.wait_closed(), timeout=self._stop_timeout_seconds)
-            return
-        except asyncio.TimeoutError:
-            pass
-        lingering = list(self._writers)
-        _logger.warning(
-            "%d Telnet connection(s) did not close within %.1fs of shutdown; aborting them",
-            len(lingering),
-            self._stop_timeout_seconds,
-        )
-        for writer in lingering:
-            writer.transport.abort()
+        if not await wait_until_drained(lambda: not self._writers, self._stop_timeout_seconds):
+            lingering = list(self._writers)
+            _logger.warning(
+                "%d Telnet connection(s) did not close within %.1fs of shutdown; aborting them",
+                len(lingering),
+                self._stop_timeout_seconds,
+            )
+            for writer in lingering:
+                writer.transport.abort()
+        # Bounded only as a defensive ceiling: nothing is expected to
+        # still be attached after the aborts above.
         try:
             await asyncio.wait_for(self._server.wait_closed(), timeout=self._stop_timeout_seconds)
         except asyncio.TimeoutError:
