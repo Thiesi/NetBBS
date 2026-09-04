@@ -93,6 +93,17 @@ MIGRATIONS = [
         );
         """,
     ),
+    Migration(
+        description=(
+            "Allow one authenticated, pending replacement name to mature alongside the current "
+            "canonical registration during a bounded managed-DNS rename."
+        ),
+        sql="""
+        ALTER TABLE registrations ADD COLUMN replaces_name TEXT;
+        CREATE UNIQUE INDEX idx_registrations_one_pending_replacement
+            ON registrations(replaces_name) WHERE replaces_name IS NOT NULL AND status = 'pending';
+        """,
+    ),
 ]
 
 
@@ -169,6 +180,7 @@ class Registration:
     released_at: str | None
     last_known_address: str | None
     contact_started_at: str | None
+    replaces_name: str | None
 
 
 def _row_to_registration(row: sqlite3.Row) -> Registration:
@@ -184,11 +196,13 @@ def _row_to_registration(row: sqlite3.Row) -> Registration:
         released_at=row["released_at"],
         last_known_address=row["last_known_address"],
         contact_started_at=row["contact_started_at"],
+        replaces_name=row["replaces_name"],
     )
 
 
 def insert_registration(
-    db: Database, *, name: str, credential_hash: str, node_fingerprint: str, dynamic: bool, created_at: str
+    db: Database, *, name: str, credential_hash: str, node_fingerprint: str, dynamic: bool, created_at: str,
+    replaces_name: str | None = None,
 ) -> Registration:
     """Insert a brand-new `pending` registration. Raises `sqlite3.
     IntegrityError` if `name` is already taken -- callers enforcing
@@ -198,10 +212,10 @@ def insert_registration(
     db.connection.execute(
         """
         INSERT INTO registrations
-            (name, credential_hash, node_fingerprint, status, dynamic, created_at)
-        VALUES (?, ?, ?, 'pending', ?, ?)
+            (name, credential_hash, node_fingerprint, status, dynamic, created_at, replaces_name)
+        VALUES (?, ?, ?, 'pending', ?, ?, ?)
         """,
-        (name, credential_hash, node_fingerprint, int(dynamic), created_at),
+        (name, credential_hash, node_fingerprint, int(dynamic), created_at, replaces_name),
     )
     db.connection.commit()
     return get_registration_by_name(db, name)
@@ -212,11 +226,40 @@ def get_registration_by_name(db: Database, name: str) -> Registration | None:
     return _row_to_registration(row) if row is not None else None
 
 
+def get_replacement_for_name(db: Database, name: str) -> Registration | None:
+    """The still-manageable pending/abandoned replacement for ``name``."""
+    row = db.connection.execute(
+        "SELECT * FROM registrations WHERE replaces_name = ? "
+        "AND status IN ('pending', 'abandoned') ORDER BY created_at DESC LIMIT 1",
+        (name,),
+    ).fetchone()
+    return _row_to_registration(row) if row is not None else None
+
+
+def detach_replacement_from_name(db: Database, replacement_name: str, previous_name: str) -> None:
+    """Detach a stale replacement relationship without changing ownership."""
+    db.connection.execute(
+        "UPDATE registrations SET replaces_name = NULL "
+        "WHERE name = ? AND replaces_name = ? AND status IN ('pending', 'abandoned')",
+        (replacement_name, previous_name),
+    )
+    db.connection.commit()
+
+
 def get_registration_by_credential_hash(db: Database, credential_hash: str) -> Registration | None:
     row = db.connection.execute(
         "SELECT * FROM registrations WHERE credential_hash = ?", (credential_hash,)
     ).fetchone()
     return _row_to_registration(row) if row is not None else None
+
+
+def replace_registration_credential(db: Database, name: str, credential_hash: str) -> None:
+    """Atomically rotate a pending replacement's recoverable bearer secret."""
+    db.connection.execute(
+        "UPDATE registrations SET credential_hash = ? WHERE name = ? AND status = 'pending'",
+        (credential_hash, name),
+    )
+    db.connection.commit()
 
 
 def count_registrations_for_node(db: Database, node_fingerprint: str, *, statuses: tuple[str, ...]) -> int:
@@ -295,6 +338,76 @@ def mark_released(db: Database, name: str, *, released_at: str) -> None:
         (released_at, name),
     )
     db.connection.commit()
+
+
+def complete_rename(
+    db: Database, new_name: str, old_name: str, *, node_fingerprint: str,
+    matured_at: str, released_at: str,
+) -> None:
+    """Commit the local half of a provider-completed DNS rename atomically."""
+    with db.connection:
+        db.connection.execute(
+            "UPDATE registrations SET status = 'matured', matured_at = ?, replaces_name = NULL "
+            "WHERE name = ? AND node_fingerprint = ? AND status = 'pending' AND replaces_name = ?",
+            (matured_at, new_name, node_fingerprint, old_name),
+        )
+        db.connection.execute(
+            "UPDATE registrations SET status = 'released', released_at = ? "
+            "WHERE name = ? AND node_fingerprint = ? AND status IN ('pending', 'matured')",
+            (released_at, old_name, node_fingerprint),
+        )
+
+
+def cancel_pending_replacement(
+    db: Database, name: str, previous_name: str, *, revive_previous: bool,
+    contact_at: str, pending_contact_started_at: str | None = None,
+) -> bool:
+    """Cancel a rename in one transaction: remove the replacement row
+    and, when `revive_previous` is set, reactivate the `abandoned`
+    previous registration in the same commit -- never one without the
+    other, so a crash between the two can't leave a node with no active
+    row and no credential the service still honours (the replacement's
+    row gone, the previous one still inactive).
+
+    The revived row restores whichever status it actually had before it
+    was abandoned (`matured_at IS NOT NULL`, the same rule `reclaim`
+    follows) -- a registration abandoned while still `pending` re-enters
+    the age gate rather than being promoted straight to `matured`. Its
+    contact window restarts at `contact_at`, as `services.managed_dns.
+    server._reclaim` restarts it for an abandoned reclaim.
+
+    Returns whether the replacement row was actually removed; `False`
+    means the rename was no longer pending and nothing changed."""
+    with db.connection:
+        cursor = db.connection.execute(
+            "DELETE FROM registrations WHERE name = ? AND status IN ('pending', 'abandoned') "
+            "AND replaces_name IS NOT NULL",
+            (name,),
+        )
+        if cursor.rowcount != 1:
+            return False
+        if revive_previous:
+            db.connection.execute(
+                "UPDATE registrations SET "
+                "status = CASE WHEN matured_at IS NULL THEN 'pending' ELSE 'matured' END, "
+                "released_at = NULL, last_contact_at = ?, contact_started_at = ?, "
+                "last_known_address = NULL "
+                "WHERE name = ? AND status = 'abandoned'",
+                (contact_at, contact_at, previous_name),
+            )
+        else:
+            # Cancellation itself is authenticated contact for the retained
+            # old registration. An uninterrupted pending row keeps its earned
+            # maturation window, while a stale one restarts exactly as it
+            # would on its next heartbeat. Matured publication is untouched.
+            db.connection.execute(
+                "UPDATE registrations SET last_contact_at = ?, "
+                "contact_started_at = CASE WHEN status = 'pending' "
+                "THEN COALESCE(?, contact_started_at) ELSE contact_started_at END "
+                "WHERE name = ? AND status IN ('pending', 'matured')",
+                (contact_at, pending_contact_started_at, previous_name),
+            )
+    return True
 
 
 def reclaim(

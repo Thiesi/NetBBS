@@ -24,6 +24,12 @@ from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.chat.channels import list_channels
 from netbbs.chat.nick import display_label
 from netbbs.link.protocol import LinkProtocolError, RealtimeProtocolVersionError
+from netbbs.link.node_profiles import (
+    identity_for_fingerprint,
+    identity_for_peer,
+    latest_identity_observation,
+    resolve_peer_reference,
+)
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LinkTransportError
 from netbbs.messaging_preferences import accepts_direct_messages
@@ -57,7 +63,7 @@ class SendOutcome(str, Enum):
 
 UNREACHABLE_NOTE = (
     "can't be reached for live chat right now. Link mail still works: "
-    "[M]ail from the main menu, addressed user@node-fingerprint."
+    "[M]ail from the main menu, addressed user@node-name-or-dns."
 )
 # The wire bounds (netbbs.link.protocol's direct_message validator), checked
 # here first so a caller gets a plain notice instead of a protocol error
@@ -78,24 +84,43 @@ def parse_remote_address(text: str) -> tuple[str, str] | None:
 
 
 def resolve_node_fingerprint(link_context: LinkContext, node_prefix: str) -> str | list[str]:
-    """The one known peer whose fingerprint starts with `node_prefix`
-    (case-insensitively), or the list of candidates when it isn't
-    unique/known. Live sessions and completed peers both count -- a
-    relayed counterpart is a known peer this node holds no session
-    with yet."""
-    prefix = node_prefix.lower()
-    candidates: list[str] = []
-    seen: set[str] = set()
-    sources: list[str] = list(link_context.link_node.peers)
+    """Resolve a DNS name, unique friendly name, or legacy fingerprint prefix."""
+    needle = node_prefix.strip().lower()
+    exact = {
+        fingerprint for fingerprint in link_context.link_node.peers
+        if fingerprint.lower() == needle
+    }
     if link_context.realtime_registry is not None:
-        sources += [s.remote_fingerprint for s in link_context.realtime_registry.all_sessions()]
-    for fingerprint in sources:
-        if fingerprint.lower().startswith(prefix) and fingerprint not in seen:
-            seen.add(fingerprint)
+        exact.update(
+            active.remote_fingerprint
+            for active in link_context.realtime_registry.all_sessions()
+            if active.remote_fingerprint.lower() == needle
+        )
+    if len(exact) == 1:
+        return next(iter(exact))
+    peer_result = resolve_peer_reference(link_context.link_node.peers.values(), node_prefix)
+    if not isinstance(peer_result, list):
+        return peer_result.fingerprint
+    candidates = [peer.fingerprint for peer in peer_result]
+    seen = set(candidates)
+    for fingerprint in link_context.link_node.peers:
+        if fingerprint.lower().startswith(node_prefix.lower()) and fingerprint not in seen:
             candidates.append(fingerprint)
+            seen.add(fingerprint)
+    if link_context.realtime_registry is not None:
+        for active in link_context.realtime_registry.all_sessions():
+            fingerprint = active.remote_fingerprint
+            if fingerprint.lower().startswith(node_prefix.lower()) and fingerprint not in seen:
+                candidates.append(fingerprint)
+                seen.add(fingerprint)
     if len(candidates) == 1:
         return candidates[0]
     return candidates
+
+
+def _node_label(link_context: LinkContext, fingerprint: str) -> str:
+    peer = link_context.link_node.peers.get(fingerprint)
+    return identity_for_peer(peer).label if peer is not None else fingerprint
 
 
 async def check_live_reachability(
@@ -112,7 +137,7 @@ async def check_live_reachability(
     conversation is viable *before* it tells the caller it has begun."""
     parsed = parse_remote_address(address)
     if parsed is None:
-        await session.write_line(colored("Address a linked node's user as user@node-fingerprint.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Address a linked node's user as user@node-name-or-dns.", fg_color=MUTED_COLOR))
         return None
     target_user, node_prefix = parsed
     if link_context is None or link_context.direct_chat is None or link_context.realtime_bridge is None:
@@ -125,16 +150,26 @@ async def check_live_reachability(
     if isinstance(resolved, list):
         if not resolved:
             await session.write_line(
-                colored(f"No linked node this board knows starts with {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
+                colored(f"No linked node this board knows as {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
             )
         else:
-            shown = ", ".join(sanitize_text(fp[:16]) + "…" for fp in resolved[:5])
+            shown = ", ".join(
+                f"{sanitize_text(_node_label(link_context, fingerprint))} "
+                f"[{sanitize_text(fingerprint)}]"
+                for fingerprint in resolved[:5]
+            )
             await session.write_line(
-                colored(f"{sanitize_text(node_prefix)!r} matches more than one node ({shown}) -- give more of the fingerprint.", fg_color=MUTED_COLOR)
+                colored(
+                    f"{sanitize_text(node_prefix)!r} matches more than one node. "
+                    f"Candidate technical identities: {shown}. Address the node as "
+                    "user@technical-identity.",
+                    fg_color=MUTED_COLOR,
+                )
             )
         return None
     fingerprint = resolved
-    label = f"{sanitize_text(target_user)}@{sanitize_text(fingerprint[:12])}…"
+    node_label = _node_label(link_context, fingerprint)
+    label = f"{sanitize_text(target_user)}@{sanitize_text(node_label)}"
     direct_chat = link_context.direct_chat
     bridge = link_context.realtime_bridge
     try:
@@ -144,7 +179,7 @@ async def check_live_reachability(
         return None
     except RealtimeProtocolVersionError:
         await session.write_line(colored(
-            f"{sanitize_text(fingerprint[:12])}… uses an incompatible real-time protocol version -- "
+            f"{sanitize_text(node_label)} uses an incompatible real-time protocol version -- "
             "upgrade one of the nodes. Link mail still works.", fg_color=MUTED_COLOR,
         ))
         return None
@@ -158,7 +193,7 @@ async def check_live_reachability(
     online = bridge.remote_node_presence().get(fingerprint)
     if online is None:
         await session.write_line(
-            colored(f"Couldn't confirm who is online at {sanitize_text(fingerprint[:12])}… just now -- try again in a moment.", fg_color=MUTED_COLOR)
+            colored(f"Couldn't confirm who is online at {sanitize_text(node_label)} just now -- try again in a moment.", fg_color=MUTED_COLOR)
         )
         return None
     if target_user.lower() not in {name.lower() for name in online}:
@@ -180,7 +215,7 @@ async def send_live_direct_message(
     `session` and returns it (see `SendOutcome`)."""
     parsed = parse_remote_address(address)
     if parsed is None:
-        await session.write_line(colored("Address a linked node's user as user@node-fingerprint.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Address a linked node's user as user@node-name-or-dns.", fg_color=MUTED_COLOR))
         return SendOutcome.LINE_REJECTED
     target_user, _node_prefix = parsed
     if not body.strip():
@@ -198,7 +233,19 @@ async def send_live_direct_message(
     if fingerprint is None:
         return SendOutcome.UNREACHABLE
     assert link_context is not None and link_context.direct_chat is not None
-    label = f"{sanitize_text(target_user)}@{sanitize_text(fingerprint[:12])}…"
+    label = f"{sanitize_text(target_user)}@{sanitize_text(_node_label(link_context, fingerprint))}"
+    identity_notice = await lane.run(latest_identity_observation, fingerprint)
+    if identity_notice is not None:
+        if identity_notice.severity == "security":
+            warning = (
+                "Caution: this node name now has a different cryptographic identity. "
+                "It may have been legitimately replaced or recovered; proceed only if that change is expected."
+            )
+        else:
+            warning = (
+                "Note: this node's displayed name or DNS name changed, while its cryptographic identity stayed the same."
+            )
+        await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=identity_notice.severity == "security"))
     direct_chat = link_context.direct_chat
     resolved = fingerprint
 
@@ -243,23 +290,34 @@ def build_direct_message_deliverer(
             try:
                 target = get_user_by_username(db, message.to_user_id)
             except AuthError:
-                return None, []
+                return None, [], "linked node", None
             if not accepts_direct_messages(db, target):
-                return None, []
+                return None, [], "linked node", None
             live = [
                 (channel.name, pid)
                 for channel in list_channels(db)
                 for pid in hub.participants_for_username(channel.name, target.username)
             ]
-            return target, live
+            return (
+                target,
+                live,
+                identity_for_fingerprint(db, message.from_node_fingerprint),
+                latest_identity_observation(db, message.from_node_fingerprint),
+            )
 
-        target, live = await lane.run(_lookup)
+        target, live, node_identity, identity_notice = await lane.run(_lookup)
         if target is None or not presence.is_online(target.username):
             return False
-        origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(message.from_node_fingerprint[:12])}…"
+        origin = f"{sanitize_text(message.from_display_label)}@{sanitize_text(node_identity.label)}"
         notice = colored(
             f"*** Private message from {origin}: {sanitize_text(message.body)}", fg_color=MUTED_COLOR, bold=True,
         )
+        if identity_notice is not None and identity_notice.severity == "security":
+            notice = colored(
+                "*** Caution: this familiar node name has a different cryptographic identity. ",
+                fg_color=MUTED_COLOR,
+                bold=True,
+            ) + notice
         delivered = False
         live_keys = {pid.session_key for _channel, pid in live}
         for channel_name, pid in live:

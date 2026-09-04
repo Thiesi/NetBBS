@@ -56,10 +56,14 @@ from services.managed_dns.store import (
     count_registrations,
     count_registrations_for_node,
     clear_last_known_address,
+    complete_rename,
     delete_expired_registrations,
     delete_registration,
+    detach_replacement_from_name,
+    cancel_pending_replacement,
     get_registration_by_credential_hash,
     get_registration_by_name,
+    get_replacement_for_name,
     hash_credential,
     insert_registration,
     list_stale_active_registrations,
@@ -68,6 +72,7 @@ from services.managed_dns.store import (
     mark_matured,
     mark_released,
     reclaim,
+    replace_registration_credential,
     save_rate_limit_state,
     set_contact_window,
     set_last_contact_at,
@@ -234,6 +239,8 @@ class ManagedDnsServer:
         app.router.add_post("/register", self._handle_register)
         app.router.add_post("/heartbeat", self._handle_heartbeat)
         app.router.add_post("/release", self._handle_release)
+        app.router.add_post("/rename", self._handle_rename)
+        app.router.add_post("/cancel-rename", self._handle_cancel_rename)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
@@ -282,7 +289,11 @@ class ManagedDnsServer:
                 latest_contact = registration.last_contact_at or registration.created_at
                 if datetime.fromisoformat(latest_contact) >= abandonment_cutoff:
                     continue
-                if registration.status == "matured":
+                if (
+                    registration.status == "matured"
+                    or registration.replaces_name is not None
+                    or registration.last_known_address is not None
+                ):
                     if not await self._delete_record(registration.name):
                         continue
                 mark_abandoned(self._db, registration.name, released_at=now.isoformat())
@@ -495,6 +506,315 @@ class ManagedDnsServer:
         set_last_known_address(self._db, name, address)
         return True
 
+    def _contact_started_at_after_contact(
+        self, registration: Registration, now: datetime,
+    ) -> str:
+        """Preserve an uninterrupted age window, or restart a stale one."""
+        if (
+            registration.contact_started_at is None
+            or registration.last_contact_at is None
+            or now - datetime.fromisoformat(registration.last_contact_at)
+            > timedelta(seconds=self._abandonment_seconds)
+        ):
+            return now.isoformat()
+        return registration.contact_started_at
+
+    def _record_authenticated_contact(
+        self, registration: Registration, now: datetime,
+    ) -> None:
+        set_contact_window(
+            self._db,
+            registration.name,
+            last_contact_at=now.isoformat(),
+            contact_started_at=self._contact_started_at_after_contact(registration, now),
+        )
+
+    async def _handle_rename(self, request: web.Request) -> web.Response:
+        """Reserve a replacement while the authenticated old name stays live."""
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "request body must be a JSON object"}, status=400)
+        credential = body.get("credential")
+        raw_name = body.get("name")
+        if not isinstance(credential, str) or not credential or not isinstance(raw_name, str):
+            return web.json_response(
+                {"error": "request must contain a string credential and string name"}, status=400
+            )
+        try:
+            name = normalize_name(raw_name)
+        except InvalidNameError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if is_reserved(name):
+            return web.json_response({"error": f"{name!r} is a reserved name"}, status=403)
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            current = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            if current is None or current.status not in _ACTIVE_STATUSES:
+                return web.json_response({"error": "unknown or inactive registration"}, status=401)
+            if current.replaces_name is not None:
+                return web.json_response({"error": "a rename is already pending"}, status=409)
+            if name == current.name:
+                return web.json_response({"error": "the replacement name is unchanged"}, status=400)
+            now = self._clock()
+            existing_replacement = get_replacement_for_name(self._db, current.name)
+            if (
+                existing_replacement is not None
+                and existing_replacement.node_fingerprint != current.node_fingerprint
+            ):
+                # The old name may have passed cooldown and been reissued while
+                # its former replacement remained pending or abandoned. That
+                # stale relationship gives the new owner no authority over the
+                # other node's credential. Detach it in storage too: otherwise
+                # the partial unique index would still block the new owner's
+                # unrelated replacement even after Python forgets this row.
+                detach_replacement_from_name(
+                    self._db, existing_replacement.name, current.name
+                )
+                existing_replacement = None
+            if (
+                existing_replacement is not None
+                and existing_replacement.status == "abandoned"
+                and existing_replacement.released_at is not None
+                and now - datetime.fromisoformat(existing_replacement.released_at)
+                >= timedelta(seconds=self._cooldown_seconds)
+            ):
+                # Recovery privilege has expired, but so has the reservation:
+                # remove it exactly as ordinary registration does and admit a
+                # fresh rename request through the normal limits below.
+                delete_registration(self._db, existing_replacement.name)
+                existing_replacement = None
+            if existing_replacement is not None:
+                if existing_replacement.name != name:
+                    return web.json_response({"error": "a rename is already pending"}, status=409)
+                secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
+                replacement_status = existing_replacement.status
+                if existing_replacement.status == "abandoned":
+                    if (
+                        existing_replacement.released_at is None
+                        or now - datetime.fromisoformat(existing_replacement.released_at)
+                        >= timedelta(seconds=self._cooldown_seconds)
+                    ):
+                        return web.json_response(
+                            {"error": "the replacement name is no longer within its reclaim cooldown"},
+                            status=409,
+                        )
+                    if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+                        return web.json_response(
+                            {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                        )
+                    retry_at = now.isoformat()
+                    reclaim(
+                        self._db, existing_replacement.name, matured=False,
+                        last_contact_at=retry_at, contact_started_at=retry_at,
+                    )
+                    replacement_status = "pending"
+                self._record_authenticated_contact(current, now)
+                self._record_authenticated_contact(existing_replacement, now)
+                replace_registration_credential(
+                    self._db, existing_replacement.name, hash_credential(secret)
+                )
+                return web.json_response(
+                    {
+                        "name": existing_replacement.name, "previous_name": current.name,
+                        "previous_status": current.status, "credential": secret,
+                        "status": replacement_status,
+                        "created_at": existing_replacement.created_at,
+                    },
+                    status=201,
+                )
+            target = get_registration_by_name(self._db, name)
+            if target is not None:
+                cooldown_elapsed = (
+                    target.status in ("released", "abandoned")
+                    and target.released_at is not None
+                    and now - datetime.fromisoformat(target.released_at)
+                    >= timedelta(seconds=self._cooldown_seconds)
+                )
+                if cooldown_elapsed:
+                    delete_registration(self._db, target.name)
+                else:
+                    return web.json_response(
+                        {"error": f"{name!r} is already registered or reserved"}, status=409
+                    )
+            if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
+                return web.json_response(
+                    {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                )
+            if not self._rate_limiter.allow():
+                return web.json_response(
+                    {"error": "too many registrations right now -- try again shortly"}, status=429
+                )
+            tokens, last_refill = self._rate_limiter.snapshot()
+            save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
+            secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
+            created_at = now.isoformat()
+            self._record_authenticated_contact(current, now)
+            try:
+                replacement = insert_registration(
+                    self._db, name=name, credential_hash=hash_credential(secret),
+                    node_fingerprint=current.node_fingerprint, dynamic=current.dynamic,
+                    created_at=created_at, replaces_name=current.name,
+                )
+            except sqlite3.IntegrityError:
+                return web.json_response({"error": "a rename is already pending"}, status=409)
+            return web.json_response(
+                {
+                    "name": replacement.name, "previous_name": current.name,
+                    "previous_status": current.status,
+                    "credential": secret, "status": replacement.status,
+                    "created_at": replacement.created_at,
+                },
+                status=201,
+            )
+
+    async def _handle_cancel_rename(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            return web.json_response({"error": f"malformed JSON body: {exc}"}, status=400)
+        if not isinstance(body, dict) or not isinstance(body.get("credential"), str):
+            return web.json_response({"error": "request must contain a string credential"}, status=400)
+        credential = body["credential"]
+        if self._dns_transition_lock.locked():
+            return web.json_response(
+                {"error": "a managed-DNS transition is already in progress; retry shortly"}, status=503
+            )
+        async with self._dns_transition_lock:
+            authenticated = get_registration_by_credential_hash(self._db, hash_credential(credential))
+            replacement = authenticated
+            if authenticated is not None and authenticated.replaces_name is None:
+                replacement = get_replacement_for_name(self._db, authenticated.name)
+            if (
+                replacement is None or replacement.status not in ("pending", "abandoned")
+                or replacement.replaces_name is None
+            ):
+                return web.json_response({"error": "unknown or inactive rename"}, status=401)
+            previous_name = replacement.replaces_name
+            previous = get_registration_by_name(self._db, previous_name)
+            if previous is None:
+                return web.json_response({"error": "previous registration no longer exists"}, status=409)
+            if previous.node_fingerprint != replacement.node_fingerprint:
+                return web.json_response(
+                    {"error": "previous registration no longer belongs to this node"}, status=409
+                )
+            now = self._clock()
+            revive_previous = previous.status == "abandoned"
+            if revive_previous:
+                if (
+                    previous.released_at is None
+                    or now - datetime.fromisoformat(previous.released_at)
+                    >= timedelta(seconds=self._cooldown_seconds)
+                ):
+                    return web.json_response(
+                        {"error": "the previous name is no longer within its reclaim cooldown"}, status=409
+                    )
+                # Swapping a still-active pending replacement for its
+                # previous row is capacity-neutral. Reviving an abandoned
+                # previous row behind an *abandoned* replacement is not:
+                # neither side counted while both were inactive, so this
+                # is admission of one more active registration and gets
+                # the same per-node and service-wide checks as any other.
+                replacement_active = 1 if replacement.status in _ACTIVE_STATUSES else 0
+                active_for_node = count_registrations_for_node(
+                    self._db, previous.node_fingerprint, statuses=_ACTIVE_STATUSES
+                )
+                if active_for_node - replacement_active >= _MAX_REGISTRATIONS_PER_NODE:
+                    return web.json_response(
+                        {"error": "this node already has an active managed-DNS registration"}, status=403
+                    )
+                if (
+                    count_registrations(self._db, statuses=_ACTIVE_STATUSES) - replacement_active
+                    >= self._cumulative_cap
+                ):
+                    return web.json_response(
+                        {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                    )
+            if not await self._delete_record(replacement.name):
+                return web.json_response(
+                    {"error": "replacement DNS record could not be removed; retry shortly"}, status=503
+                )
+            if revive_previous:
+                # The provider call yielded. Re-read every admission input:
+                # an ordinary registration request does not take this
+                # transition lock and may have filled the last capacity slot
+                # or claimed a cooldown-expired row while deletion ran.
+                replacement = get_registration_by_name(self._db, replacement.name)
+                previous = get_registration_by_name(self._db, previous_name)
+                if (
+                    replacement is None or replacement.status not in ("pending", "abandoned")
+                    or previous is None or previous.status != "abandoned"
+                    or replacement.node_fingerprint != previous.node_fingerprint
+                    or previous.released_at is None
+                    or self._clock() - datetime.fromisoformat(previous.released_at)
+                    >= timedelta(seconds=self._cooldown_seconds)
+                ):
+                    return web.json_response(
+                        {"error": "the previous name is no longer reclaimable"}, status=409
+                    )
+                replacement_active = 1 if replacement.status in _ACTIVE_STATUSES else 0
+                if (
+                    count_registrations_for_node(
+                        self._db, previous.node_fingerprint, statuses=_ACTIVE_STATUSES
+                    ) - replacement_active >= _MAX_REGISTRATIONS_PER_NODE
+                ):
+                    return web.json_response(
+                        {"error": "this node already has an active managed-DNS registration"}, status=403
+                    )
+                if (
+                    count_registrations(self._db, statuses=_ACTIVE_STATUSES) - replacement_active
+                    >= self._cumulative_cap
+                ):
+                    return web.json_response(
+                        {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
+                    )
+            # Provider cleanup may have yielded. Record the successful
+            # cancellation at the actual post-cleanup contact time.
+            contact_now = self._clock()
+            now_iso = contact_now.isoformat()
+            if not cancel_pending_replacement(
+                self._db, replacement.name, previous_name,
+                revive_previous=revive_previous, contact_at=now_iso,
+                pending_contact_started_at=self._contact_started_at_after_contact(
+                    previous, contact_now,
+                ),
+            ):
+                return web.json_response({"error": "rename is no longer pending"}, status=409)
+            previous_status = previous.status
+            if revive_previous:
+                # The row keeps its real maturation history: abandoned
+                # while still pending means back into the age gate, not
+                # a promotion past it.
+                previous_status = "matured" if previous.matured_at is not None else "pending"
+                if previous_status == "matured":
+                    # Same shape as `_reclaim`: a revived live name needs
+                    # its record back now (the sweep deleted it on
+                    # abandonment); on failure, clear the stale address
+                    # so the next heartbeat republishes.
+                    observed_address = self._observed_address(request)
+                    if not (
+                        observed_address
+                        and await self._best_effort_publish(previous_name, observed_address)
+                    ):
+                        clear_last_known_address(self._db, previous_name)
+            authoritative_previous = get_registration_by_name(self._db, previous_name)
+            return web.json_response(
+                {
+                    "name": replacement.name, "previous_name": previous_name,
+                    "previous_status": previous_status,
+                    "previous_last_known_address": (
+                        authoritative_previous.last_known_address
+                        if authoritative_previous is not None else None
+                    ),
+                    "status": "cancelled",
+                }
+            )
+
     def _observed_address(self, request: web.Request) -> str | None:
         if self._trust_x_forwarded_for:
             forwarded = request.headers.get("X-Forwarded-For")
@@ -536,27 +856,57 @@ class ManagedDnsServer:
 
         now = self._clock()
         now_iso = now.isoformat()
-        contact_started_at = registration.contact_started_at
-        if (
-            contact_started_at is None or registration.last_contact_at is None
-            or now - datetime.fromisoformat(registration.last_contact_at)
-            > timedelta(seconds=self._abandonment_seconds)
-        ):
-            contact_started_at = now_iso
+        contact_started_at = self._contact_started_at_after_contact(registration, now)
         set_contact_window(
             self._db, registration.name, last_contact_at=now_iso, contact_started_at=contact_started_at
         )
 
         newly_matured = False
         status = registration.status
-        if status == "pending":
-            if now - datetime.fromisoformat(contact_started_at) >= timedelta(seconds=self._min_age_seconds):
+        last_known_address = registration.last_known_address
+        observed_address = self._observed_address(request)
+        if status == "pending" and now - datetime.fromisoformat(contact_started_at) >= timedelta(
+            seconds=self._min_age_seconds
+        ):
+            if registration.replaces_name is not None:
+                if observed_address and await self._best_effort_publish(registration.name, observed_address):
+                    last_known_address = observed_address
+                    old = get_registration_by_name(self._db, registration.replaces_name)
+                    if (
+                        old is not None and old.status == "matured"
+                        and old.node_fingerprint == registration.node_fingerprint
+                    ):
+                        # Clear before the provider mutation: if the process
+                        # exits after deletion, the old credential's next
+                        # heartbeat must republish instead of trusting a stale
+                        # marker for a record that no longer exists.
+                        clear_last_known_address(self._db, old.name)
+                        if not await self._delete_record(old.name):
+                            return web.json_response(
+                                {
+                                    "name": registration.name, "previous_name": old.name,
+                                    "status": "pending", "last_known_address": observed_address,
+                                }
+                            )
+                    complete_rename(
+                        self._db, registration.name, registration.replaces_name,
+                        node_fingerprint=registration.node_fingerprint,
+                        matured_at=now_iso, released_at=now_iso,
+                    )
+                    status = "matured"
+                    newly_matured = True
+                else:
+                    return web.json_response(
+                        {
+                            "name": registration.name, "previous_name": registration.replaces_name,
+                            "status": "pending", "last_known_address": registration.last_known_address,
+                        }
+                    )
+            else:
                 mark_matured(self._db, registration.name, matured_at=now_iso)
                 status = "matured"
                 newly_matured = True
 
-        last_known_address = registration.last_known_address
-        observed_address = self._observed_address(request)
         # Publish on the transition to matured (the record must exist
         # at all once a registration goes live, regardless of whether
         # this is a "dynamic" registration) or, for a dynamic
@@ -577,9 +927,10 @@ class ManagedDnsServer:
             if await self._best_effort_publish(registration.name, observed_address):
                 last_known_address = observed_address
 
-        return web.json_response(
-            {"name": registration.name, "status": status, "last_known_address": last_known_address}
-        )
+        result = {"name": registration.name, "status": status, "last_known_address": last_known_address}
+        if registration.replaces_name is not None:
+            result["previous_name"] = registration.replaces_name
+        return web.json_response(result)
 
     async def _handle_release(self, request: web.Request) -> web.Response:
         """Voluntary release (design doc §16 Decision 5). The DNS record
@@ -611,6 +962,15 @@ class ManagedDnsServer:
         registration = get_registration_by_credential_hash(self._db, hash_credential(credential))
         if registration is None or registration.status not in _ACTIVE_STATUSES:
             return web.json_response({"error": "unknown or inactive registration"}, status=401)
+
+        if (
+            registration.replaces_name is not None
+            or get_replacement_for_name(self._db, registration.name) is not None
+        ):
+            return web.json_response(
+                {"error": "a pending rename must be cancelled before either name can be released"},
+                status=409,
+            )
 
         if registration.status == "matured":
             if not await self._delete_record(registration.name):

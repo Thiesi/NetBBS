@@ -3644,3 +3644,317 @@ given invocation by prepending the worktree's own `src/` via
 `PYTHONPATH` (`PYTHONPATH="$(pwd)/src" .venv/Scripts/python.exe -m
 pytest ...`), which takes priority over the editable install's
 site-packages entry.
+### Link node presentation identity
+
+Link fingerprints remain the sole cryptographic identity, trust, protocol, and
+persistence key even though ordinary UI uses the friendly name and canonical
+DNS claim from the signed endpoint descriptor. Treat both names as mutable
+authenticated presentation. Same-fingerprint name changes preserve identity;
+reuse of a friendly or DNS name by a new fingerprint must remain visible as a
+non-blocking security warning and must never inherit trust automatically.
+
+Managed `netbbs.org` renames are make-before-break. Keep the old registration
+and its bearer credential until the new name has matured and its DNS record was
+successfully published; heartbeat both registrations and make cancellation
+remove any already-published replacement before deleting its row. Rename
+admission remains subject to the global active-registration cap. The old
+credential can cancel or safely retry a replacement whose one-time credential
+was lost before local persistence. Backup/restore must carry both credential
+files during that interval. External DNS remains operator-managed: publish its
+replacement before changing `link.advertised_host`.
+
+Authenticated node-profile observations are remotely influenced retained
+state. Keep both a per-peer bound and a global bound, and check collisions on
+profile changes as well as first sight; a familiar name adopted by an already-
+known fingerprint is still a cryptographic-identity warning. Retained previous
+names participate in that collision check because familiarity outlives the
+current descriptor. An exact full fingerprint always resolves before any name
+claim, and an empty administrative reference never acts as a fingerprint
+prefix.
+
+The node-side managed-DNS updater must reconcile rename state from both bearer
+credentials and the service heartbeat response, not rely solely on the local
+configuration transaction: a crash can occur after credential replacement but
+before the new and previous names are committed. While the service has a
+pending replacement, `/release` rejects both registrations; the explicit
+cancel-rename operation is the only safe way to unwind that pair.
+
+Managed-DNS recovery is bidirectional: if cancellation succeeds remotely but
+the node crashes before restoring the old credential locally, a successful old
+credential heartbeat plus a definitive inactive-primary response promotes the
+old credential and clears the transition. Retrying an already-reserved rename
+rotates only that replacement's credential and is exempt from new-registration
+admission; it must never delete the reservation before a throttle decision.
+Abandonment withdraws any row with a recorded published address, including a
+partially published replacement which intentionally remains pending.
+
+Every presentation claim shares one collision namespace: a DNS claim can
+collide with a friendly-name claim and vice versa. Exact fingerprints across
+both persisted peers and active-only real-time sessions take precedence over
+that namespace. UI rendering resolves current friendly identities at display
+time while retaining fingerprints in protocol and persistence fields; when no
+authenticated profile is available, it falls back to the technical identity.
+
+Identity-change notices remain non-blocking but must be acknowledgeable from
+the SysOp Link-status surface; acknowledgement dismisses the retained notices
+so direct-message and Link-mail warnings do not repeat forever. Link mail shows
+undismissed cryptographic-identity warnings both before sending and when
+browsing received mail. Durable channel rows keep their technical author
+address, while rendering recovers the signed author fingerprint from the saved
+event and resolves its current presentation, so historical scrollback follows
+later benign renames without rewriting persistence.
+
+Pending managed-DNS replacements are cleaned up with unconditional idempotent
+provider deletion during cancellation and abandonment. A null local publication
+marker cannot prove that the provider mutation never happened because the
+service may have crashed between those two operations.
+
+Friendly node names reserve the UI's middle-dot label delimiter and reject
+Unicode control/format characters, including C1 terminal controls and bidi
+overrides. Apply this canonical profile validation to every authenticated
+descriptor ingress, including verified peer-list refreshes. Resolver input
+normalizes a trailing dot only for DNS comparison, never for friendly-name or
+fingerprint comparison. Spaced `/msg` addresses require explicit double quotes
+around the complete `user@node name` target so message words can never be
+reinterpreted as a longer peer name.
+
+When a managed-DNS rename retry finds its same-target replacement abandoned,
+reactivate that row as pending before rotating and returning its credential.
+During a pending rename, advertise the previous managed name only when its
+saved status proves it had already matured and been published.
+
+Managed-DNS credential replacement is a journaled two-file transition: stage
+both bearer secrets atomically before changing either live credential, and
+finish any staged swap before heartbeat or interactive rename/cancellation.
+Transient failure of the old-name heartbeat must not erase its last known
+status. Reactivating an abandoned replacement remains a capacity admission;
+cancelling against an abandoned previous name restores that previous
+registration before reporting success.
+
+The canonical friendly-name grammar is enforced at both local configuration
+and authenticated descriptor ingress. It reserves the composite-label
+delimiter and the quoted-address delimiter as well as Unicode control/format
+characters. Administrative fallback to an unseen technical identity accepts
+only a complete 32-character lowercase-base32 node fingerprint (case-insensitive
+on input); arbitrary unmatched names are errors.
+
+Identity-collision detection includes this node's own currently advertised
+friendly and DNS claims, not only remote peer history. Content whose
+authenticated origin has no admitted profile falls back to that origin's
+fingerprint on every catalogue and roster surface.
+
+An authoritative inactive response for a previous managed-DNS credential
+withdraws its cached publication claim; only transient failures preserve the
+last known state. Reviving an abandoned DNS row clears its publication marker
+inside the same transaction so a crash cannot suppress the required
+republish. Address-discovery operations, including cancellation revival,
+bypass forward proxies. Backup and restore treat the credential-transition
+journal as recoverable state and restore its absence as well as its presence.
+
+Undismissed cryptographic-identity observations outrank newer benign profile
+changes when choosing the warning shown at an interaction boundary; only
+explicit acknowledgement suppresses them. The `Unnamed linked node` fallback
+is a reserved, case-insensitive sentinel and cannot be advertised as a real
+friendly name.
+
+Managed-DNS HTTP 401 responses are authoritative inactive state: clear the
+corresponding cached publication claim even when no alternate credential is
+live. Keep both bearer secrets during a pending rename, including after either
+row is abandoned, because the replacement credential can still cancel the
+transition and the previous secret is required to use the revived old row.
+Classify that response from the client's structured HTTP status, never by
+searching provider-controlled error text.
+
+Managed-DNS cancellation revalidates cooldown and capacity synchronously after
+awaiting provider deletion: fresh registrations do not take the transition lock
+and can consume the last slot while the provider call runs. A previous abandoned
+name is not revivable once its cooldown has elapsed, even if the periodic sweep
+has not deleted its row yet. Rename completion clears the old row's publication
+marker before deleting its provider record so a crash in between forces the old
+credential's next heartbeat to republish rather than trusting stale state.
+
+Bounded identity-observation pruning gives undismissed security warnings first
+claim on both per-peer and global retention budgets. Retain a bounded history of
+the local node's replaced friendly and DNS claims too, and resolve friendly and
+DNS matches as one ambiguity set rather than giving either claim kind precedence.
+
+Managed-DNS rename configuration is a single `node_config` transaction; never
+publish a new name while retaining the old registration's matured/published
+flags. Cancellation commits the revived old-name state before removing its
+retained credential, then journals the reverse file swap. Backup restore treats
+absence as state for the primary credential, previous credential, and transition
+journal alike.
+
+Endpoint hosts in signed `addresses` entries remain transport metadata and do
+not enter the friendly/DNS identity-claim namespace. High-impact selectors such
+as board-origin transfer expose the full fingerprint when presentation labels
+collide, with the fingerprint placed first so terminal truncation cannot hide it.
+Status screens which describe current authenticated presentation load the live
+node name from configuration rather than a session's login-time breadcrumb cache.
+The last locally advertised friendly claim participates in collision detection
+until the next own-hello build moves it into bounded history. Parse persisted
+peer descriptors by their explicit `canonical_dns_name` only; endpoint hosts
+remain transport data after restart as well as in memory. Live linked-channel
+events retain their authenticated sending-node fingerprint in memory so an
+undismissed identity collision can be rendered at that interaction boundary.
+
+An abandoned managed-DNS replacement may be retried only inside its cooldown;
+after expiry the old credential has no privileged reclaim path while the sweep
+waits to delete the row. Keep servicing a retained previous credential when the
+replacement is locally abandoned, since a transient old-name failure followed
+by a definitive replacement 401 must not stop all later old-name heartbeats.
+Live backup double-collects all three credential artifacts around the SQLite
+snapshot and compares the snapshot's `managed_dns_*` rows with live state;
+retry a moving generation rather than combining database and secrets from
+opposite sides of a rename or cancellation.
+
+Heartbeat reconciliation commits the managed-DNS active and previous names,
+statuses, publication flags, and contact timestamp as one transaction. When an
+inactive replacement makes the retained previous credential authoritative,
+commit that state before journaling and applying the reverse credential swap;
+never delete the only working fallback secret ahead of the database commit.
+Cancellation likewise consumes the service's authoritative revived-publication
+state instead of restoring a cached flag which may predate a failed republish.
+
+A rename's `replaces_name` is not proof that the row currently at that name still
+belongs to the same node: cooldown expiry permits reissue. Check the previous
+row's node fingerprint before provider deletion or release, and guard the store
+mutation as well. Reactivating an abandoned replacement restarts both contact
+timestamps so the next sweep cannot immediately abandon the recovered row.
+
+Complete fingerprint-shaped strings are reserved friendly names at both local
+configuration and signed-profile admission. Unchanged peer hellos still
+re-evaluate collisions with current local claims after a local rename, while
+identical recorded collisions are deduplicated. Where a user picker contains
+identical remote node presentation labels, put the full fingerprint first so
+terminal truncation cannot hide the distinction. Durable channel rendering
+recovers the signed author fingerprint from the retained Link event for both the
+friendly label and any undismissed cryptographic-identity warning.
+
+Ephemeral live-scrollback snapshots must likewise keep each authenticated
+author's home-node fingerprint in memory; the durable event may not have arrived
+yet, but identity-collision warnings still apply. Prime this node's current DNS
+claim before opening the Link listener, then refresh the shared own-hello cache
+through the background database lane before inbound peer persistence and once
+per outbound sync pass. The synchronous hello builder must never touch SQLite.
+
+Long-lived user and network waits invalidate identity-warning snapshots. Re-read
+a selected file origin after its picker returns, and re-read a warned trust
+subject immediately before applying an override; the latter requires explicit
+default-no confirmation of the full fingerprint. Resolve presentation claims and
+fingerprint prefixes as one ambiguity set after exact-full-fingerprint
+precedence. Verified peer-list refreshes must reload local presentation claims
+after the HTTP wait and before persisting an updated known peer, so a local rename
+during that wait still participates in collision detection.
+
+Outbound hello persistence has the same post-network local-claim refresh
+invariant, including candidate fallback. Lost-rename recovery refreshes both the
+current registration and an existing pending replacement before returning a
+rotated credential; otherwise a sweep can immediately abandon the recovered
+replacement. A successful standalone register/reclaim result clears all local
+previous-name metadata atomically and removes the obsolete previous credential,
+so an expired rename cannot remain visible as a phantom transition.
+
+Treat each managed-DNS credential's structured HTTP 401 independently: a
+previous-name 401 remains authoritative when the replacement heartbeat fails
+transiently, and simultaneous inactive results update both cached registrations
+in one transaction. Before cancellation performs any provider deletion, verify
+that the row named by `replaces_name` still has the replacement's node
+fingerprint even when that previous row is active rather than abandoned.
+
+Managed-DNS updater passes and interactive registration, release, rename, and
+cancellation transitions share a process-local lock scoped by event loop and
+node database. Hold it across the remote mutation and local reconciliation, but
+never across a human prompt; otherwise a heartbeat begun from stale local state
+can overwrite the result of a completed SysOp transition. On the service,
+successful replacement maturation is one publication operation: carry its
+observed address into the remaining heartbeat logic so the generic address
+change path cannot publish the same replacement twice.
+
+The `Unnamed linked node` and `Unknown linked node` presentation fallbacks are
+both reserved, case-insensitive friendly-name sentinels at local configuration
+and signed-profile admission. Bounded local identity-claim history is ordered by
+most recent retirement or reuse: remove an existing normalized claim before
+appending it again, so pruning does not discard a recently reused name merely
+because it first appeared early.
+
+A managed-DNS replacement selected through `replaces_name` remains recoverable
+only when its node fingerprint matches the currently authenticated registration.
+An old name can be reissued after cooldown while its former replacement row still
+exists; the new owner must never receive a rotated credential for that stale row.
+Treat both rename sides' heartbeat outcomes independently: when the previous-name
+heartbeat succeeds but the primary times out, preserve the primary cache while
+atomically applying the old name's authoritative status and publication result.
+
+Presentation ambiguity must end in a usable address. When friendly and DNS
+claims still collide, show each candidate's full fingerprint and direct the
+caller to `user@technical-identity`; do not recommend the same ambiguous DNS
+claim. Trust-role selectors are a higher-impact boundary: when a presentation
+name resolves to a fingerprint with an undismissed security observation, show
+that technical identity and require a default-no confirmation before mutation.
+A complete fingerprint entered directly needs no second confirmation.
+
+Rename admission deletes a released or abandoned target as soon as its cooldown
+has elapsed, including an expired former replacement, then treats the attempt as
+a fresh rename subject to normal limits. Cancellation is authenticated contact
+for the retained previous registration: refresh `last_contact_at` even when that
+row is still pending or matured, while preserving a pending row's original
+`contact_started_at` so cancellation does not reset maturation progress.
+
+Every hello-bearing ingress must refresh the lane-backed local identity claims
+before `save_peer`; the ordinary hello endpoint and relay-mailbox pickup share
+that ordering invariant. Durable Link post/file attribution must retain its
+technical suffix long enough to query undismissed identity observations and
+render a caution plus the full fingerprint when the current friendly label is
+cryptographically ambiguous. Board-origin acceptance is likewise a high-impact
+consent boundary and discloses the warned origin fingerprint before confirmation.
+
+When cooldown reissue leaves another fingerprint's pending replacement pointing
+at the newly owned previous name, ignoring the stale row in memory is
+insufficient: detach its `replaces_name` in SQLite before inserting the new
+owner’s replacement, or the partial unique index still denies an unrelated
+rename. Detachment changes neither the stale row's owner nor its credential.
+
+Origin-transfer identity disclosure is symmetric: both offering and accepting
+consult the undismissed observation for the signed fingerprint before their
+default-no confirmation. An incoming offer with no live peer profile falls back
+to its signed `old_origin_fingerprint`, never a generic unknown-node label.
+Remote-file catalogues similarly preload warned origin fingerprints through one
+database-lane call, put the technical identity in the catalogue row, and repeat
+the caution immediately before fetch consent.
+
+An authoritative replacement-credential 401 plus a successful previous-name
+heartbeat does not by itself prove that the server removed the replacement's
+`replaces_name` relationship. The updater first attempts `/cancel-rename` with
+the working previous credential. Promote and journal the reverse credential swap
+only after cancellation succeeds or a 401 proves the relationship is already
+absent; on transient or policy failure, atomically retain the transition and both
+credentials while recording the replacement as abandoned and the previous
+heartbeat's authoritative state.
+
+Managed-DNS rename and cancellation are authenticated contact. Before a
+successful rename response, refresh the current row with heartbeat-equivalent
+gap semantics so a waiting abandonment sweep cannot immediately withdraw it.
+Cancellation preserves an uninterrupted pending previous name's maturation
+window, but must restart a stale window whose last contact crossed the threshold.
+Interactive registration/reclaim stores name, status, conservative unpublished
+state, dynamic choice, and opt-in as one transaction.
+
+Identity-notice ordering is security-sensitive: undismissed cryptographic
+observations sort ahead of benign changes before the SysOp screen applies its
+five-item display and acknowledgement bound, so repeated friendly-name changes
+cannot bury the actionable warning.
+
+A local claim change is itself a collision event. Persisting a new local
+friendly or canonical-DNS claim re-runs the identity check over every stored
+peer descriptor, so a peer which preclaimed that name and then stays silent is
+still recorded as a cryptographic-identity warning. The SysOp board-detail
+screen presents an origin, an incoming offer's source, and an outstanding
+offer's target by fingerprint whenever the peer profile is unavailable, which is
+the same rule every other surface already follows.
+
+This is the last review-driven change on this branch. The remaining
+crash-between-two-writes finding in the interrupted-cancellation path was
+declined: the managed-DNS service is a single-operator service where manual
+repair of one row is the realistic recovery, and the branch already carries
+twice the feature's own size in such safeguards.

@@ -81,10 +81,13 @@ from netbbs.managed_dns.state import (
     RegistrationStatus as ManagedDnsRegistrationStatus,
     get_last_contact_at as get_managed_dns_last_contact_at,
     get_opt_in as get_managed_dns_opt_in,
+    get_previous_name as get_managed_dns_previous_name,
     get_registered_name as get_managed_dns_registered_name,
     get_registration_status as get_managed_dns_registration_status,
 )
-from netbbs.net.managed_dns_flow import register_via_prompt, release_registration
+from netbbs.net.managed_dns_flow import (
+    cancel_registration_rename, register_via_prompt, release_registration, rename_registration,
+)
 from netbbs.boards.boards import Board, BoardError, create_board, delete_board, list_boards, update_board
 from netbbs.boards.categories import Category, CategoryError
 from netbbs.boards.categories import create_category as create_board_category
@@ -181,6 +184,11 @@ from netbbs.link.diagnostics import (
 )
 from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
+from netbbs.link.node_profiles import (
+    dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
+    is_node_fingerprint, latest_identity_observation, list_identity_observations,
+    name_key, own_canonical_dns_name, resolve_stored_peer_reference,
+)
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
 from netbbs.link.remote_attestation import (
@@ -1960,10 +1968,11 @@ async def _trust_menu(session: Session, lane: DatabaseLane, actor: User) -> None
             await session.write(reject_unhandled_key(choice))
 
 
-def _trust_subject_name(subject: TrustSubject) -> str:
+def _trust_subject_name(subject: TrustSubject, node_label: str | None = None) -> str:
+    node = node_label or "Unknown linked node"
     if subject.kind == "node":
-        return f"node:{subject.node_fingerprint}"
-    return f"user:{subject.node_fingerprint}/{subject.opaque_user_id}"
+        return f"node:{node}"
+    return f"user:{subject.opaque_user_id}@{node}"
 
 
 _TRUST_STATE_TONE = {
@@ -1985,9 +1994,14 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    subjects = await _load_subjects()
+    labels = {
+        subject.node_fingerprint: (await lane.run(identity_for_fingerprint, subject.node_fingerprint)).label
+        for subject in subjects
+    }
     selected = await pick_item(
-        session, await _load_subjects(),
-        name_of=_trust_subject_name,
+        session, subjects,
+        name_of=lambda subject: _trust_subject_name(subject, labels.get(subject.node_fingerprint)),
         stable_id_of=_trust_subject_stable_id,
         description_of=lambda subject: subject.kind,
         title="Trust subjects",
@@ -2016,7 +2030,16 @@ async def _trust_subjects_screen(session: Session, lane: DatabaseLane, actor: Us
             for dimension in TrustDimension
         ]
         await session.write_line(
-            colored(f"\r\n{_trust_subject_name(selected)}", fg_color=await lane.run(effective_header_color_256), bold=True)
+            colored(
+                f"\r\n{sanitize_text(_trust_subject_name(selected, labels.get(selected.node_fingerprint)))}",
+                fg_color=await lane.run(effective_header_color_256), bold=True,
+            )
+        )
+        await session.write_line(
+            colored(f"Technical identity: {selected.node_fingerprint}", fg_color=METADATA_COLOR)
+        )
+        await _warn_about_changed_node_identity(
+            session, lane, selected.node_fingerprint, role="This subject's"
         )
         for state in states:
             await session.write_line(
@@ -2151,6 +2174,33 @@ async def _set_trust_override_screen(
         if not confirmed:
             await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
             return
+    while True:
+        identity_notice = await lane.run(
+            latest_identity_observation, subject.node_fingerprint
+        )
+        if identity_notice is None or identity_notice.severity != "security":
+            break
+        await _warn_about_changed_node_identity(
+            session, lane, subject.node_fingerprint, role="This subject's"
+        )
+        confirmed = await prompt_yes_no(
+            session,
+            "Apply this trust override to technical identity "
+            f"{sanitize_text(subject.node_fingerprint)} despite the identity warning?",
+            default=False,
+        )
+        if not confirmed:
+            await session.write_line(colored("No change made.", fg_color=MUTED_COLOR))
+            return
+        refreshed_notice = await lane.run(
+            latest_identity_observation, subject.node_fingerprint
+        )
+        if (
+            refreshed_notice is None
+            or refreshed_notice.severity != "security"
+            or refreshed_notice.id == identity_notice.id
+        ):
+            break
     try:
         await lane.run(
             set_trust_override, subject, dimension, state,
@@ -2252,13 +2302,76 @@ async def _trust_domains_screen(session: Session, lane: DatabaseLane, actor: Use
     await session.write_line(colored("Trust domain saved and audited.", fg_color=SUCCESS_COLOR))
 
 
+async def _resolve_admin_node_reference(
+    session: Session, lane: DatabaseLane, reference: str,
+) -> str | None:
+    """Resolve names for trust administration while retaining technical-id entry."""
+    resolved = await lane.run(resolve_stored_peer_reference, reference)
+    if isinstance(resolved, str):
+        entered_technical_identity = (
+            is_node_fingerprint(reference)
+            and reference.strip().lower() == resolved.lower()
+        )
+        if not entered_technical_identity:
+            identity = await lane.run(identity_for_fingerprint, resolved)
+            await session.write_line(
+                f"Resolved node: {sanitize_text(identity.label)}"
+            )
+            await session.write_line(
+                f"Technical identity: {sanitize_text(resolved)}"
+            )
+            observation = await lane.run(latest_identity_observation, resolved)
+            if observation is not None and observation.severity == "security":
+                await session.write_line(
+                    colored(
+                        "Caution: this familiar node name now has a different "
+                        "cryptographic identity. Recovery or replacement may be "
+                        "legitimate, but impersonation is possible.",
+                        fg_color=ERROR_COLOR,
+                        bold=True,
+                    )
+                )
+                if not await prompt_yes_no(
+                    session,
+                    f"Continue with technical identity {sanitize_text(resolved)}?",
+                    default=False,
+                ):
+                    await session.write_line("No trust policy change made.")
+                    return None
+        return resolved
+    if resolved:
+        candidates = []
+        for fingerprint in resolved[:5]:
+            identity = await lane.run(identity_for_fingerprint, fingerprint)
+            candidates.append(
+                f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
+            )
+        await session.write_line(
+            colored(
+                "That name matches multiple nodes. Enter one complete technical "
+                f"identity: {', '.join(candidates)}.",
+                fg_color=ERROR_COLOR,
+            )
+        )
+        return None
+    # Trust administration can preconfigure an unseen node, but only from a
+    # complete technical identity -- never from a typo in a human-facing name.
+    if is_node_fingerprint(reference):
+        return reference.strip().lower()
+    await session.write_line(colored("No linked node matches that name or fingerprint.", fg_color=ERROR_COLOR))
+    return None
+
+
 async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
     anchors = await lane.run(list_trust_anchors)
     await session.write_line(
         colored("\r\nTrust anchors:", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
     for anchor in anchors:
-        await session.write_line(f"{anchor.fingerprint}: {anchor.reason}")
+        identity = await lane.run(identity_for_fingerprint, anchor.fingerprint)
+        await session.write_line(
+            f"{sanitize_text(identity.label)}: {sanitize_text(anchor.reason)}"
+        )
     while True:
         await session.write(
             f"{action_bar([menu_key('A', 'dd/update'), menu_key('R', 'emove'), menu_key('B', 'ack')], width=session.terminal_width)}: "
@@ -2270,8 +2383,10 @@ async def _trust_anchors_screen(session: Session, lane: DatabaseLane, actor: Use
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Fingerprint: ")
-    fingerprint = (await session.read_line()).strip()
+    await session.write("Node name, DNS name, or technical identity: ")
+    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
+    if fingerprint is None:
+        return
     try:
         if choice == "a":
             await session.write("Mandatory reason: ")
@@ -2307,8 +2422,10 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
     )
     for reporter in reporters:
         scopes = ", ".join(f"{d.value}:{c}" for d, c in reporter.scopes) or "no scopes"
+        identity = await lane.run(identity_for_fingerprint, reporter.fingerprint)
         await session.write_line(
-            f"{reporter.fingerprint} domain={reporter.domain_id} scopes={scopes} "
+            f"{sanitize_text(identity.label)} domain={sanitize_text(reporter.domain_id)} "
+            f"scopes={sanitize_text(scopes)} "
             f"vouch(node={reporter.can_vouch_nodes}, user={reporter.can_vouch_users})"
         )
     while True:
@@ -2322,8 +2439,10 @@ async def _trust_reporters_screen(session: Session, lane: DatabaseLane, actor: U
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Reporter fingerprint: ")
-    fingerprint = (await session.read_line()).strip()
+    await session.write("Reporter node name, DNS name, or technical identity: ")
+    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
+    if fingerprint is None:
+        return
     try:
         if choice == "r":
             await lane.run(remove_trusted_reporter, fingerprint, actor_user_id=actor.id)
@@ -2356,8 +2475,11 @@ async def _attestation_authorities_screen(
         )
     )
     for authority in authorities:
+        identity = await lane.run(identity_for_fingerprint, authority.fingerprint)
         await session.write_line(
-            f"{authority.fingerprint} scope={','.join(authority.attributes)} -- {authority.reason}"
+            f"{sanitize_text(identity.label)} "
+            f"scope={sanitize_text(','.join(authority.attributes))} -- "
+            f"{sanitize_text(authority.reason)}"
         )
     if not authorities:
         await session.write_line(
@@ -2374,8 +2496,10 @@ async def _attestation_authorities_screen(
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Authority node fingerprint: ")
-    fingerprint = (await session.read_line()).strip()
+    await session.write("Authority node name, DNS name, or technical identity: ")
+    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
+    if fingerprint is None:
+        return
     try:
         if choice == "r":
             await lane.run(
@@ -2502,8 +2626,9 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
     exceptions = await lane.run(list_sole_authorities)
     await session.write_line(colored("\r\nSole-authority safety deviations:", fg_color=ALERT_COLOR, bold=True))
     for item in exceptions:
+        reporter = await lane.run(identity_for_fingerprint, item.reporter_fingerprint)
         await session.write_line(
-            f"{item.reporter_fingerprint} {item.dimension.value}:{item.category} -- {item.reason}"
+            f"{sanitize_text(reporter.label)} {item.dimension.value}:{item.category} -- {item.reason}"
         )
     if not exceptions:
         await session.write_line(colored("None. Two independent domains remain required.", fg_color=SUCCESS_COLOR))
@@ -2518,8 +2643,10 @@ async def _trust_exceptions_screen(session: Session, lane: DatabaseLane, actor: 
             break
         await session.write(reject_unhandled_key(choice))
     await session.write_line("")
-    await session.write("Reporter fingerprint: ")
-    fingerprint = (await session.read_line()).strip()
+    await session.write("Reporter node name, DNS name, or technical identity: ")
+    fingerprint = await _resolve_admin_node_reference(session, lane, (await session.read_line()).strip())
+    if fingerprint is None:
+        return
     dimension = await _pick_trust_dimension(session)
     if dimension is None:
         return
@@ -3889,6 +4016,7 @@ async def _draw_managed_dns_status(
     time."""
     opt_in = await lane.run(get_managed_dns_opt_in)
     name = await lane.run(get_managed_dns_registered_name)
+    previous_name = await lane.run(get_managed_dns_previous_name)
     status = await lane.run(get_managed_dns_registration_status)
     last_contact_at = await lane.run(get_managed_dns_last_contact_at)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
@@ -3940,6 +4068,20 @@ async def _draw_managed_dns_status(
         await session.write_line(
             colored("Name: ", fg_color=LABEL_COLOR) + colored(f"{name}.netbbs.org", fg_color=METADATA_COLOR)
         )
+        if previous_name is not None:
+            await session.write_line(
+                colored("Current name: ", fg_color=LABEL_COLOR)
+                + colored(f"{previous_name}.netbbs.org", fg_color=METADATA_COLOR)
+            )
+            if status is ManagedDnsRegistrationStatus.ABANDONED:
+                await session.write_line(
+                    colored(
+                        "The new name is inactive. Cancel the change to restore the current name.",
+                        fg_color=WARNING_COLOR,
+                    )
+                )
+            else:
+                await session.write_line(colored("The new name is reserved and maturing.", fg_color=MUTED_COLOR))
         if last_contact_at is not None:
             display_format, display_timezone = await lane.run(resolve_display_preferences)
             when = format_for_display(
@@ -3948,8 +4090,12 @@ async def _draw_managed_dns_status(
             await session.write_line(colored("Last contact: ", fg_color=LABEL_COLOR) + colored(when, fg_color=METADATA_COLOR))
 
     actions = [menu_key("R", "egister")]
-    if status in _MANAGED_DNS_ACTIVE_STATUSES:
-        actions.append(menu_key("l", "ease", prefix="Re"))
+    if previous_name is not None:
+        actions.append(menu_key("C", "ancel change"))
+    elif status in _MANAGED_DNS_ACTIVE_STATUSES:
+        if previous_name is None:
+            actions.append(menu_key("l", "ease", prefix="Re"))
+            actions.append(menu_key("N", "ame", prefix="Change "))
     actions.append(menu_key("B", "ack"))
     await session.write_line("\r\n" + "    ".join(actions))
     return status
@@ -3976,9 +4122,25 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
             await session.write_line("")
             await register_via_prompt(session, lane)
             status = await _draw_managed_dns_status(session, lane, actor)
-        elif choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES:
+        elif (
+            choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES
+            and await lane.run(get_managed_dns_previous_name) is None
+        ):
             await session.write_line("")
             await release_registration(session, lane)
+            status = await _draw_managed_dns_status(session, lane, actor)
+        elif (
+            choice == "n" and status in _MANAGED_DNS_ACTIVE_STATUSES
+            and await lane.run(get_managed_dns_previous_name) is None
+        ):
+            await session.write_line("")
+            await rename_registration(session, lane)
+            status = await _draw_managed_dns_status(session, lane, actor)
+        elif (
+            choice == "c" and await lane.run(get_managed_dns_previous_name) is not None
+        ):
+            await session.write_line("")
+            await cancel_registration_rename(session, lane)
             status = await _draw_managed_dns_status(session, lane, actor)
         else:
             await session.write(reject_unhandled_key(choice))
@@ -4164,13 +4326,68 @@ async def _link_status_screen(
         node_name_gradient=session.node_name_gradient)
     )
     await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
+    own_dns = await lane.run(own_canonical_dns_name, config.advertised_host if config else None)
+    own_name = await lane.run(get_node_display_name)
     await session.write_line(
-        colored("Node fingerprint: ", fg_color=LABEL_COLOR)
+        colored("Node: ", fg_color=LABEL_COLOR)
         + colored(
-            sanitize_text(link_context.node_identity.fingerprint),
+            sanitize_text(own_name + (f" · {own_dns}" if own_dns else "")),
             fg_color=METADATA_COLOR,
         )
     )
+    await session.write_line(
+        colored("Technical identity: ", fg_color=LABEL_COLOR)
+        + colored(sanitize_text(link_context.node_identity.fingerprint), fg_color=METADATA_COLOR)
+    )
+    identity_notices = await lane.run(list_identity_observations)
+    if identity_notices:
+        security_count = sum(item.severity == "security" for item in identity_notices)
+        await session.write_line(
+            colored(
+                f"Identity changes observed: {len(identity_notices)}"
+                + (f" ({security_count} cryptographic)" if security_count else ""),
+                fg_color=ALERT_COLOR if security_count else WARNING_COLOR,
+            )
+        )
+        for notice in identity_notices[:5]:
+            if notice.kind == "friendly_name_changed":
+                message = (
+                    f"{notice.previous_friendly_name or 'A linked node'} is now called "
+                    f"{notice.friendly_name}; its verified identity is unchanged."
+                )
+            elif notice.kind == "dns_name_changed":
+                message = (
+                    f"{notice.friendly_name or 'A linked node'} moved from "
+                    f"{notice.previous_dns_name or 'no DNS name'} to "
+                    f"{notice.canonical_dns_name or 'no DNS name'}; its verified identity is unchanged."
+                )
+            else:
+                current_claims = {
+                    value.lower(): value for value in (
+                        notice.friendly_name, notice.canonical_dns_name,
+                    ) if value
+                }
+                previous_claims = {
+                    value.lower() for value in (
+                        notice.previous_friendly_name, notice.previous_dns_name,
+                    ) if value
+                }
+                shared_claim = next(
+                    (value for key, value in current_claims.items() if key in previous_claims),
+                    "a familiar node name",
+                )
+                message = (
+                    f"The cryptographic identity presented as {shared_claim} changed. "
+                    "This may be recovery or replacement, but could indicate impersonation."
+                )
+            await session.write_line(colored("  " + sanitize_text(message), fg_color=METADATA_COLOR))
+        if await prompt_yes_no(
+            session, "Acknowledge these identity changes and stop repeating their notices?",
+            default=False,
+        ):
+            for notice in identity_notices[:5]:
+                await lane.run(dismiss_identity_observation, notice.id)
+            await session.write_line(colored("Identity changes acknowledged.", fg_color=SUCCESS_COLOR))
 
     if config is not None:
         await session.write_line(
@@ -4264,7 +4481,7 @@ async def _link_status_screen(
 
     selected = await pick_item(
         session, list(node.peers.values()),
-        name_of=lambda peer: peer.fingerprint,
+        name_of=lambda peer: identity_for_peer(peer).label,
         stable_id_of=lambda peer: id(peer),  # in-memory only, no persisted/NetBBS-owned identifier exists here
         description_of=_peer_description,
         title="Verified peers",
@@ -4278,6 +4495,9 @@ async def _link_status_screen(
     if selected is None:
         return
 
+    selected_identity = identity_for_peer(selected)
+    await session.write_line(f"Node: {sanitize_text(selected_identity.label)}")
+    await session.write_line(f"Technical identity: {sanitize_text(selected.fingerprint)}")
     await session.write_line(f"Reliability: {scores.get(selected.fingerprint, 0.5):.2f}")
     when = last_contact.get(selected.fingerprint)
     last = (
@@ -4347,13 +4567,17 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
     await session.write_line(", ".join(f"{status}: {count}" for status, count in sorted(counts.items())))
 
     actionable = [item for item in items if item.status in ("retrying", "dead_lettered")]
+    target_labels = {
+        item.target_fingerprint: (await lane.run(identity_for_fingerprint, item.target_fingerprint)).label
+        for item in actionable
+    }
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     arrow = " → " if unicode_style else " -> "
     selected = await pick_item(
         session, actionable,
-        name_of=lambda item: f"{item.kind}{arrow}{item.target_fingerprint}",
+        name_of=lambda item: f"{item.kind}{arrow}{target_labels[item.target_fingerprint]}",
         stable_id_of=lambda item: item.id,
         description_of=lambda item: f"{item.status}, {item.attempts} attempt(s)",
         title="Retrying/dead-lettered work items",
@@ -4368,7 +4592,8 @@ async def _outbox_screen(session: Session, lane: DatabaseLane, actor: User) -> N
         return
 
     await session.write_line(f"\r\nKind: {sanitize_text(selected.kind)}")
-    await session.write_line(f"Target: {sanitize_text(selected.target_fingerprint)}")
+    await session.write_line(f"Target: {sanitize_text(target_labels[selected.target_fingerprint])}")
+    await session.write_line(f"Technical identity: {sanitize_text(selected.target_fingerprint)}")
     await session.write_line(f"Status: {selected.status}, {selected.attempts} attempt(s)")
     if selected.last_error:
         await session.write_line(f"Last error: {sanitize_text(selected.last_error)}")
@@ -10016,6 +10241,26 @@ def _linked_boards_excluding(db: Database, exclude_board_id: int) -> list[Board]
     ]
 
 
+async def _warn_about_changed_node_identity(
+    session: Session,
+    lane: DatabaseLane,
+    fingerprint: str,
+    *,
+    role: str,
+) -> None:
+    identity_notice = await lane.run(latest_identity_observation, fingerprint)
+    if identity_notice is None or identity_notice.severity != "security":
+        return
+    await session.write_line(
+        colored(
+            "Caution: this familiar node name now has a different cryptographic identity. "
+            f"{role} technical identity is {sanitize_text(fingerprint)}.",
+            fg_color=MUTED_COLOR,
+            bold=True,
+        )
+    )
+
+
 async def _transfer_board_origin_screen(
     session: Session, lane: DatabaseLane, board: Board, link_context: LinkContext
 ) -> None:
@@ -10028,30 +10273,52 @@ async def _transfer_board_origin_screen(
     trusting *this* node until that peer's own SysOp explicitly accepts
     on their own node (`_accept_board_origin_transfer_screen`, there).
 
-    No picker here, deliberately -- unlike `board`/`Board` rows, a peer
-    has no local integer id `pick_item`'s `stable_id_of` could use;
-    fingerprints are typed directly, the same way this UI already shows
-    them everywhere else a specific peer needs naming (e.g. `Origin:
-    <fingerprint>` on this same screen).
+    Peers are selected by their authenticated friendly/DNS presentation;
+    the fingerprint remains the value placed in the signed offer.
     """
-    peers = sorted(link_context.link_node.peers.keys())
+    peers = sorted(
+        link_context.link_node.peers.values(), key=lambda peer: identity_for_peer(peer).label.lower()
+    )
+    identities = {peer.fingerprint: identity_for_peer(peer) for peer in peers}
+    label_counts: dict[str, int] = {}
+    for identity in identities.values():
+        key = name_key(identity.label)
+        label_counts[key] = label_counts.get(key, 0) + 1
+
+    def _candidate_label(peer) -> str:
+        identity = identities[peer.fingerprint]
+        if label_counts[name_key(identity.label)] > 1:
+            # Put the full technical identity first so a narrow picker
+            # cannot truncate away the only distinguishing value.
+            return f"{peer.fingerprint} ({identity.label})"
+        return identity.label
+
     await session.write_line(
         colored("\r\nTransfer message board origin", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
     if not peers:
         await session.write_line(colored("No known peers to transfer this message board to.", fg_color=MUTED_COLOR))
         return
-    await session.write_line("Known peers:")
-    for fingerprint in peers:
-        await session.write_line(f"  {fingerprint}")
-    await session.write("New origin's fingerprint (blank to cancel): ")
-    target = (await session.read_line()).strip()
-    if not target:
+    selected = await pick_item(
+        session, peers,
+        name_of=_candidate_label,
+        stable_id_of=lambda peer: id(peer),
+        title="New message-board origin",
+        empty_message="No known peers.",
+        redraw_in_place=False,
+        unicode_style=False,
+        collapsed=False,
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
+    if selected is None:
         return
-    if target not in link_context.link_node.peers:
-        await session.write_line(colored("Not a known peer -- cancelled.", fg_color=MUTED_COLOR))
-        return
-    if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target}?", default=False):
+    target = selected.fingerprint
+    target_label = sanitize_text(_candidate_label(selected))
+    await _warn_about_changed_node_identity(
+        session, lane, target, role="The proposed new origin's",
+    )
+    if not await prompt_yes_no(session, f"Offer to hand {board.name!r} off to {target_label}?", default=False):
         await session.write_line("Cancelled.")
         return
 
@@ -10134,7 +10401,17 @@ async def _accept_board_origin_transfer_screen(
     await session.write_line(
         colored("\r\nAccept message board origin", fg_color=await lane.run(effective_header_color_256), bold=True)
     )
-    if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_origin}?", default=False):
+    old_peer = link_context.link_node.peers.get(old_origin)
+    old_label = sanitize_text(
+        identity_for_peer(old_peer).label
+        if old_peer is not None
+        else old_origin if isinstance(old_origin, str) else "an unknown linked node"
+    )
+    if isinstance(old_origin, str):
+        await _warn_about_changed_node_identity(
+            session, lane, old_origin, role="The offering node's",
+        )
+    if not await prompt_yes_no(session, f"Accept origin of {board.name!r} from {old_label}?", default=False):
         await session.write_line("Cancelled.")
         return
 
@@ -10158,6 +10435,18 @@ async def _accept_board_origin_transfer_screen(
     await session.write_line(
         f"Accepted -- this node is now {board.name!r}'s origin. Pushed to peers on the next sync pass."
     )
+
+
+def _linked_node_label(link_context, fingerprint) -> str:
+    """Present a linked node by its admitted profile, else by its signed
+    fingerprint -- never by a shared placeholder that would make two
+    unavailable origins indistinguishable."""
+    peer = link_context.link_node.peers.get(fingerprint) if isinstance(fingerprint, str) else None
+    if peer is not None:
+        return identity_for_peer(peer).label
+    if isinstance(fingerprint, str) and fingerprint:
+        return fingerprint
+    return "an unknown linked node"
 
 
 async def _draw_board_detail(
@@ -10235,8 +10524,11 @@ async def _draw_board_detail(
                         " (ORPHANED -- origin's signing key was revoked, no replacement on file)",
                         fg_color=MUTED_COLOR,
                     )
-            origin_label = "this node" if is_origin else origin_fingerprint
-            await session.write_line(f"Origin: {origin_label}{orphan_note}")
+            origin_label = (
+                "this node" if is_origin
+                else _linked_node_label(link_context, origin_fingerprint)
+            )
+            await session.write_line(f"Origin: {sanitize_text(origin_label)}{orphan_note}")
 
             offer = link_context.link_node.pending_origin_transfers.get(board.board_id)
             if offer is not None:
@@ -10245,7 +10537,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: an incoming origin-transfer offer from "
-                            f"{offer.payload.get('old_origin_fingerprint')}",
+                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('old_origin_fingerprint')))}",
                             fg_color=MUTED_COLOR,
                         )
                     )
@@ -10253,7 +10545,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: your own outstanding transfer offer to "
-                            f"{offer.payload.get('new_origin_fingerprint')}",
+                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('new_origin_fingerprint')))}",
                             fg_color=MUTED_COLOR,
                         )
                     )

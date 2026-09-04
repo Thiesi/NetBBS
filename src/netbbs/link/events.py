@@ -402,6 +402,8 @@ def build_endpoint_descriptor(
     created_at: str,
     relays: list[str] | None = None,
     live_relays: list[str] | None = None,
+    friendly_name: str | None = None,
+    canonical_dns_name: str | None = None,
 ) -> EndpointDescriptor:
     """
     Build and sign one `endpoint_descriptor` event, per design doc §12
@@ -451,6 +453,10 @@ def build_endpoint_descriptor(
         # "omitted when empty" convention as `relays`; a stale entry only
         # ever costs a failed rendezvous.
         payload["live_relays"] = live_relays
+    if friendly_name:
+        payload["friendly_name"] = friendly_name
+    if canonical_dns_name:
+        payload["canonical_dns_name"] = canonical_dns_name
 
     envelope = build_envelope(ENDPOINT_DESCRIPTOR_OBJECT_TYPE, payload)
     signature = signing_identity.sign(canonical_bytes(envelope))

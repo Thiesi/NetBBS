@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Sequence
 
@@ -139,6 +140,11 @@ from netbbs.communities import get_community, get_effective_min_age, get_effecti
 from netbbs.directory import VCard, get_vcard
 from netbbs.link.boards import LinkContext
 from netbbs.link.channels import queue_channel_message_if_linked
+from netbbs.link.node_profiles import (
+    identity_for_fingerprint,
+    identity_for_peer,
+    latest_identity_observation,
+)
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.moderation import ChannelPermission, has_permission
 from netbbs.net.char_input import Completer, InputHistory, LiveInputBuffer, reject_unhandled_key
@@ -781,6 +787,22 @@ def _resolve_message_author(db: Database, author_label: str) -> User | None:
         return None
 
 
+def _durable_link_author(db: Database, message: ChannelMessage) -> tuple[str, str] | None:
+    """Return a materialized Link message's authenticated author and home key."""
+    if message.link_content_id is None or message.link_event_json is not None:
+        return None
+    try:
+        row = db.connection.execute(
+            "SELECT envelope_json FROM link_events WHERE content_id = ?",
+            (message.link_content_id,),
+        ).fetchone()
+        payload = json.loads(row["envelope_json"])["envelope"]["payload"]
+        remote_author = payload["author"]
+        return remote_author["local_user_id"], remote_author["home_node_fingerprint"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _message_author_label(db: Database, channel: Channel, message: ChannelMessage) -> str:
     """
     The author label to show for one `ChannelMessage` of kind
@@ -798,6 +820,11 @@ def _message_author_label(db: Database, channel: Channel, message: ChannelMessag
     string, even one that once came from a verified user, must never
     itself be treated as proof.
     """
+    durable_author = _durable_link_author(db, message)
+    if durable_author is not None:
+        local_user_id, fingerprint = durable_author
+        node_label = identity_for_fingerprint(db, fingerprint).label
+        return sanitize_text(f"{local_user_id}@{node_label}")
     author = _resolve_message_author(db, message.author_label)
     if author is None:
         return sanitize_text(message.author_label)
@@ -878,6 +905,20 @@ def _render_channel_message(
         color = SELF_COLOR if self_message else effective_accent_color_256(db)
         label = _colored_around("<", author_label, ">", fg_color=color, bold=self_message)
         line = f"{label} {sanitize_text(message.body)}"
+    durable_author = _durable_link_author(db, message)
+    author_fingerprint = (
+        message.author_fingerprint
+        or (durable_author[1] if durable_author is not None else None)
+    )
+    if author_fingerprint:
+        identity_notice = latest_identity_observation(db, author_fingerprint)
+        if identity_notice is not None and identity_notice.severity == "security":
+            warning = colored(
+                "Caution: this familiar node name has a different cryptographic identity. ",
+                fg_color=MUTED_COLOR,
+                bold=True,
+            )
+            line = warning + line
     return format_with_preference(db, viewer, line, message.created_at)
 
 
@@ -1063,11 +1104,12 @@ class _SwitchTo:
 
 @dataclass(frozen=True)
 class RemotePrivateTarget:
-    """Issue #270: a `/private user@node-fingerprint` counterpart on a
+    """Issue #270: a `/private user@node-name-or-dns` counterpart on a
     linked node -- every plain line goes out as a live direct message."""
 
     username: str
     node_fingerprint: str
+    node_label: str
 
     @property
     def address(self) -> str:
@@ -1075,7 +1117,7 @@ class RemotePrivateTarget:
 
     @property
     def label(self) -> str:
-        return f"{self.username}@{self.node_fingerprint[:12]}…"
+        return f"{self.username}@{self.node_label}"
 
 
 @dataclass(frozen=True)
@@ -1289,14 +1331,22 @@ async def _handle_msg(ctx: ChatCommandContext, args: str) -> None:
     online-only private message. Scoped as a chat-context command only,
     matching every other chat command — no parallel main-menu entry point.
     """
-    parts = args.split(maxsplit=1)
+    args = args.lstrip()
+    if args.startswith('"'):
+        closing_quote = args.find('"', 1)
+        parts = (
+            [args[1:closing_quote], args[closing_quote + 1:].strip()]
+            if closing_quote > 1 and args[closing_quote + 1:].strip() else []
+        )
+    else:
+        parts = args.split(maxsplit=1)
     if len(parts) < 2:
         await _show_usage(ctx.session, "msg")
         return
     target_name, body = parts
 
     if "@" in target_name:
-        # Issue #168: `user@node-fingerprint` reaches a user on a linked
+        # Issue #168: `user@node-name-or-dns` reaches a user on a linked
         # node live, over a direct or relayed real-time session. Lazy
         # import: link_direct imports this module for delivery helpers.
         from netbbs.net.link_direct import send_live_direct_message
@@ -1328,7 +1378,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
     it was the only command with two names and added no value beyond
     what `/private` already provides.
     """
-    target_name = args.split(maxsplit=1)[0] if args.split() else ""
+    target_name = args.strip()
     if not target_name:
         await _show_usage(ctx.session, "private")
         return None
@@ -1340,7 +1390,7 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         parsed = parse_remote_address(target_name)
         if parsed is None or ctx.link_context is None or ctx.link_context.direct_chat is None:
             await ctx.session.write_line(
-                colored("Address a linked node's user as user@node-fingerprint (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
+                colored("Address a linked node's user as user@node-name-or-dns (this node must be on NetBBS Link).", fg_color=MUTED_COLOR)
             )
             return None
         remote_user, _node_prefix = parsed
@@ -1350,7 +1400,9 @@ async def _handle_private(ctx: ChatCommandContext, args: str) -> ChatAction | No
         resolved = await check_live_reachability(ctx.session, target_name, link_context=ctx.link_context)
         if resolved is None:
             return None
-        remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved)
+        peer = ctx.link_context.link_node.peers.get(resolved)
+        node_label = identity_for_peer(peer).label if peer is not None else resolved
+        remote = RemotePrivateTarget(username=remote_user, node_fingerprint=resolved, node_label=node_label)
         close_hint = menu_key("/close", "")
         await ctx.session.write_line(
             colored(
@@ -2145,7 +2197,14 @@ async def _handle_who(ctx: ChatCommandContext, args: str) -> None:
             suffix = ""
         await ctx.session.write_line(f"{label}{suffix}")
     for label, fingerprint in remote_entries:
-        node_note = f" (on linked node {fingerprint[:12]}…)" if fingerprint else " (on a linked node)"
+        peer = ctx.link_context.link_node.peers.get(fingerprint) if ctx.link_context is not None else None
+        # An authenticated session with no persisted peer record still
+        # has a technical identity -- show it, as the directory and
+        # direct-message paths do, so two such nodes stay distinguishable.
+        node_name = identity_for_peer(peer).label if peer is not None else fingerprint
+        node_note = (
+            f" (on linked node {sanitize_text(node_name)})" if node_name else " (on a linked node)"
+        )
         await ctx.session.write_line(f"{label}{node_note}")
 
 
@@ -2397,8 +2456,8 @@ _COMMAND_INFO: dict[str, tuple[str, str]] = {
     "leave": ("/leave", "Leave this chat channel and return to the chat channel picker."),
     "join": ("/join <channel>", "Switch to another chat channel."),
     "topic": ("/topic [text]", "Set the chat channel topic; a bare /topic clears it (requires edit permission)."),
-    "msg": ("/msg <user> <text>", "Send a one-off private message to an online user (user@node-fingerprint for a linked node)."),
-    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-fingerprint for a linked node)."),
+    "msg": ("/msg <user> <text>", "Send a one-off private message; quote a user@node name containing spaces."),
+    "private": ("/private <user>", "Enter a private conversation with an online user (user@node-name-or-dns for a linked node)."),
     "close": ("/close", "Leave the current private conversation."),
     "dm": ("/dm <user>", "Invite an online user to a live, fullscreen direct chat."),
     "help": ("/help [command]", "List available commands, or show detail for one."),

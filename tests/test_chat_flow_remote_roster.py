@@ -28,7 +28,7 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.realtime_channels import LiveChannelBridge
 from netbbs.link.transport import LinkRealtimeSessionRegistry
 from netbbs.net import chat_flow
@@ -120,7 +120,23 @@ def test_who_annotates_a_remote_participant_with_its_linked_node(lane, hub, pres
     session = asyncio.run(_run(lane, hub, presence, channel, alice, ["/who", "/quit"], link_context=link_context))
     text = _written_text(session)
     assert "Remote User" in text
-    assert f"on linked node {origin_fingerprint[:12]}" in text
+    # No persisted peer record for the origin: its technical identity is
+    # the only one it has, and is shown so two such nodes stay distinct.
+    assert f"on linked node {origin_fingerprint}" in text
+
+
+def test_remote_node_hello_with_an_unsafe_friendly_name_is_refused():
+    """A friendly name carrying terminal-control or bidi-override
+    characters never reaches `/who` at all: the hello is refused as a
+    non-canonical profile claim at admission, so there is nothing left
+    for render-time sanitization to catch."""
+    remote_identity = bootstrap_node_identity("remote")
+    remote_node = LinkNode(identity=remote_identity)
+    with pytest.raises(LinkProtocolError, match="invalid profile claims"):
+        remote_node.handle_hello(remote_node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+            friendly_name="Safe\x9b31m\u202eevil", canonical_dns_name="safe.example.org",
+        ))
 
 
 def test_names_includes_a_remote_participant_unannotated(lane, hub, presence, alice, channel, node_identity):

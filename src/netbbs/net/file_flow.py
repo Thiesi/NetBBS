@@ -77,6 +77,9 @@ from netbbs.files.categories import (
 )
 from netbbs.files.storage import new_incoming_temp_path
 from netbbs.link.boards import LinkContext
+from netbbs.link.node_profiles import (
+    identity_for_peer, latest_identity_observation, present_link_author_label,
+)
 from netbbs.link.files import RemoteFile, is_area_linked, list_remote_files
 from netbbs.link.protocol import LinkProtocolError
 from netbbs.net import zmodem
@@ -821,9 +824,27 @@ async def _browse_remote_files(
         await session.write_line(f"\r\n{state}")
         return
 
+    def warned_origins(db: Database) -> set[str]:
+        return {
+            remote_file.origin_fingerprint
+            for remote_file in remote_files
+            if (
+                (notice := latest_identity_observation(db, remote_file.origin_fingerprint))
+                is not None and notice.severity == "security"
+            )
+        }
+
+    identity_warnings = await lane.run(warned_origins)
+
     def render_description(remote_file: RemoteFile) -> str:
         status = "[LOCAL] already fetched" if remote_file.fetched_file_id is not None else "[REMOTE] not yet fetched"
-        return f"{_format_size(remote_file.size_bytes)} — {status} — from {remote_file.origin_fingerprint[:12]}…"
+        origin = _remote_file_origin_label(link_context, remote_file)
+        if remote_file.origin_fingerprint in identity_warnings:
+            return (
+                f"[IDENTITY CHANGED: {remote_file.origin_fingerprint}] "
+                f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
+            )
+        return f"{_format_size(remote_file.size_bytes)} — {status} — from {origin}"
 
     selected = await pick_item(
         session,
@@ -856,6 +877,19 @@ async def _browse_remote_files(
     await session.write_line(
         f"\r\n{sanitize_text(selected.filename)!r} ({_format_size(selected.size_bytes)}), not yet fetched."
     )
+    identity_notice = await lane.run(
+        latest_identity_observation, selected.origin_fingerprint
+    )
+    if identity_notice is not None and identity_notice.severity == "security":
+        await session.write_line(
+            colored(
+                "Caution: this familiar origin name now has a different cryptographic identity. "
+                f"The file origin's technical identity is "
+                f"{sanitize_text(selected.origin_fingerprint)}.",
+                fg_color=MUTED_COLOR,
+                bold=True,
+            )
+        )
     if not await prompt_yes_no(session, "Fetch it from its origin now?", default=False):
         await session.write_line(colored("Cancelled.", fg_color=MUTED_COLOR))
         return
@@ -864,6 +898,11 @@ async def _browse_remote_files(
         session, lane, selected, link_context, redraw_in_place=redraw_in_place, unicode_style=unicode_style,
         collapsed=collapsed,
     )
+
+
+def _remote_file_origin_label(link_context: LinkContext, remote_file: RemoteFile) -> str:
+    peer = link_context.link_node.peers.get(remote_file.origin_fingerprint)
+    return identity_for_peer(peer).label if peer is not None else remote_file.origin_fingerprint
 
 
 async def _fetch_remote_file(
@@ -961,12 +1000,15 @@ def _uploader_display_name(db: Database, entry, *, name_requirement: str | None)
     plain historical `uploader_label` unchanged, for the identical
     reason (a mutable `display_name` must not retroactively rewrite an
     already-uploaded entry's attribution). Still `db`-first, unchanged
-    -- see this module's own docstring for why."""
+    -- see this module's own docstring for why. A fetched Link file's
+    `remote@<origin-fingerprint>` label is presented by the origin
+    node's current friendly identity, exactly as a carried post's
+    author is."""
     if name_requirement == "verified_and_displayed":
         uploader = get_user_by_id(db, entry.uploader_user_id)
         if uploader is not None:
             return format_name_for_resource(db, uploader, name_requirement=name_requirement)
-    return sanitize_text(entry.uploader_label)
+    return sanitize_text(present_link_author_label(db, entry.uploader_label))
 
 
 async def _render_file_page(

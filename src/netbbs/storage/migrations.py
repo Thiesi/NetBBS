@@ -2529,4 +2529,29 @@ MIGRATIONS = [
             FROM users WHERE public_key IS NOT NULL;
         """,
     ),
+    Migration(
+        description=(
+            "Authenticated Link node-profile observation history. Fingerprints remain identity "
+            "keys; friendly and DNS names are mutable presentation claims."
+        ),
+        sql="""
+        CREATE TABLE link_node_identity_observations (
+            id                     INTEGER PRIMARY KEY,
+            node_fingerprint       TEXT NOT NULL,
+            previous_fingerprint   TEXT,
+            friendly_name          TEXT,
+            previous_friendly_name TEXT,
+            canonical_dns_name     TEXT,
+            previous_dns_name      TEXT,
+            severity               TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'security')),
+            kind                   TEXT NOT NULL CHECK (kind IN ('first_seen', 'friendly_name_changed', 'dns_name_changed', 'cryptographic_identity_changed')),
+            observed_at            TEXT NOT NULL,
+            dismissed_at           TEXT
+        );
+        CREATE INDEX idx_link_node_identity_observations_fingerprint
+            ON link_node_identity_observations(node_fingerprint, id DESC);
+        CREATE INDEX idx_link_node_identity_observations_dns
+            ON link_node_identity_observations(canonical_dns_name, id DESC);
+        """,
+    ),
 ]

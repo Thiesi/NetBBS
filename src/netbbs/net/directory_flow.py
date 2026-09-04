@@ -17,6 +17,7 @@ from netbbs.auth.users import AuthError, User, get_user_by_username, list_users
 from netbbs.chat import ChatHub, DirectChatInvites, PresenceRegistry
 from netbbs.directory import get_vcard, has_bio, is_bio_visible
 from netbbs.link.boards import LinkContext
+from netbbs.link.node_profiles import identity_for_fingerprint, name_key
 from netbbs.messaging_preferences import accepts_direct_messages
 from netbbs.net.breadcrumb_preference import breadcrumb_collapsed_enabled
 from netbbs.net.char_input import reject_unhandled_key
@@ -157,6 +158,8 @@ class _RemoteWhoEntry:
 
     node_fingerprint: str
     username: str
+    node_label: str
+    show_fingerprint: bool = False
 
     @property
     def stable_id(self) -> int:
@@ -180,17 +183,34 @@ def _who_entry_name(entry: _WhoEntry) -> str:
 
 def _who_entry_description(db: Database, entry: _WhoEntry) -> str:
     if isinstance(entry, _RemoteWhoEntry):
-        return f"on linked node {entry.node_fingerprint[:12]}…"
+        return f"on linked node {_remote_who_node_label(db, entry)}"
     when = format_for_display(entry.connected_at, db)
     return f"connected since {when}"
 
 
-def _remote_who_entries(link_context: LinkContext | None) -> list[_RemoteWhoEntry]:
+def _remote_who_node_label(db: Database, entry: _RemoteWhoEntry) -> str:
+    if entry.show_fingerprint:
+        return f"{entry.node_fingerprint} ({entry.node_label})"
+    return entry.node_label
+
+
+def _remote_who_entries(db: Database, link_context: LinkContext | None) -> list[_RemoteWhoEntry]:
     if link_context is None or link_context.realtime_bridge is None:
         return []
+    presence = link_context.realtime_bridge.remote_node_presence()
+    labels = {
+        fingerprint: identity_for_fingerprint(db, fingerprint).label
+        for fingerprint in presence
+    }
+    label_owners: dict[str, set[str]] = {}
+    for fingerprint, label in labels.items():
+        label_owners.setdefault(name_key(label), set()).add(fingerprint)
     return [
-        _RemoteWhoEntry(node_fingerprint=fingerprint, username=username)
-        for fingerprint, online in link_context.realtime_bridge.remote_node_presence().items()
+        _RemoteWhoEntry(
+            node_fingerprint=fingerprint, username=username, node_label=labels[fingerprint],
+            show_fingerprint=len(label_owners[name_key(labels[fingerprint])]) > 1,
+        )
+        for fingerprint, online in presence.items()
         for username in online
     ]
 
@@ -250,7 +270,7 @@ async def _caller_who_screen(
             for entry in node_controls.session_registry.list_entries()
             if entry.username is not None and entry.session is not session
         ]
-        return local + _remote_who_entries(link_context)
+        return local + _remote_who_entries(db, link_context)
 
     selected = await pick_item(
         session, await _load_entries(),
@@ -287,9 +307,8 @@ async def _caller_who_screen(
                 )
             )
             return
-        await session.write(
-            f"Message to {sanitize_text(selected.username)}@{sanitize_text(selected.node_fingerprint[:12])}…: "
-        )
+        node_label = _remote_who_node_label(db, selected)
+        await session.write(f"Message to {sanitize_text(selected.username)}@{sanitize_text(node_label)}: ")
         message = (await session.read_line()).strip()
         if not message:
             await session.write_line(colored("Cancelled: message cannot be blank.", fg_color=MUTED_COLOR))

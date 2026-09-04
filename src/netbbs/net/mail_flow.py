@@ -44,6 +44,9 @@ from pathlib import Path
 from netbbs.auth.users import AuthError, User, get_user_by_id, get_user_by_username
 from netbbs.link.boards import LinkContext
 from netbbs.link.mail import LinkMailError, compose_link_message
+from netbbs.link.node_profiles import (
+    identity_for_fingerprint, latest_identity_observation, resolve_stored_peer_reference,
+)
 from netbbs.mail import (
     MAX_MAIL_BODY_BYTES,
     MailboxFullError,
@@ -118,7 +121,7 @@ async def browse_mail(
     """Entry point from the main menu's `[E]-mail` option.
 
     `link_context` (design doc), if given, lets `_compose_mail`
-    recognize a `user@node-fingerprint` address and send a Link message
+    recognize a `user@node-name-or-dns` address and send a Link message
     instead of ordinary local mail -- `None` whenever this node has Link
     disabled, the same convention `netbbs.link.boards.LinkContext`
     itself already establishes for boards."""
@@ -187,8 +190,15 @@ async def _show_inbox(session: Session, lane: DatabaseLane, user: User) -> None:
         display_format, display_timezone = await lane.run(resolve_display_preferences)
         # Pre-fetched once, outside pick_item's synchronous callbacks --
         # see this module's own docstring for why.
+        sender_labels = {
+            m.id: await _display_sender_label(lane, m) for m in messages
+        }
+        identity_warnings = {
+            m.id: await _link_mail_identity_warning(lane, m.sender_label) for m in messages
+        }
         descriptions = {
-            m.id: f"from {m.sender_label} "
+            m.id: f"from {sender_labels[m.id]} "
+            f"{'[IDENTITY CHANGED] ' if identity_warnings[m.id] else ''}"
             f"({format_for_display(m.created_at, override_format=display_format, override_timezone=display_timezone)})"
             for m in messages
         }
@@ -288,10 +298,14 @@ async def _render_message(
             + colored(sanitize_text(to_label), fg_color=accent)
         )
     else:
+        sender_label = await _display_sender_label(lane, message)
         await session.write_line(
             colored("From: ", fg_color=LABEL_COLOR)
-            + colored(sanitize_text(message.sender_label), fg_color=accent)
+            + colored(sanitize_text(sender_label), fg_color=accent)
         )
+        warning = await _link_mail_identity_warning(lane, message.sender_label)
+        if warning is not None:
+            await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
     display_format, display_timezone = await lane.run(resolve_display_preferences)
     displayed_date = format_for_display(
         message.created_at, override_format=display_format, override_timezone=display_timezone
@@ -309,6 +323,30 @@ async def _render_message(
     body = reflow(sanitize_text(message.body, allow_newlines=True), width=session.terminal_width)
     await session.write_line(colored(body, fg_color=VALUE_COLOR))
     await session.write_line(divider)
+
+
+async def _display_sender_label(lane: DatabaseLane, message: MailMessage) -> str:
+    """Resolve a Link sender's technical home node only at render time."""
+    if "@" not in message.sender_label:
+        return message.sender_label
+    user_id, fingerprint = message.sender_label.split("@", 1)
+    node_label = (await lane.run(identity_for_fingerprint, fingerprint)).label
+    return f"{user_id}@{node_label}"
+
+
+async def _link_mail_identity_warning(
+    lane: DatabaseLane, technical_address: str,
+) -> str | None:
+    if "@" not in technical_address:
+        return None
+    _user_id, fingerprint = technical_address.split("@", 1)
+    observation = await lane.run(latest_identity_observation, fingerprint)
+    if observation is None or observation.severity != "security":
+        return None
+    return (
+        "Caution: this familiar node name now has a different cryptographic identity. "
+        "Mail remains available, but verify the change if it was unexpected."
+    )
 
 
 async def _show_inbox_message(session: Session, lane: DatabaseLane, user: User, message: MailMessage) -> None:
@@ -408,7 +446,7 @@ async def _compose_mail(
 ) -> None:
     """
     `link_context`, if given, lets the "To:" prompt accept a `user@
-    node-fingerprint` address (design doc) in addition to a
+    node-name-or-dns` address (design doc) in addition to a
     plain local username -- routed to `netbbs.link.mail.compose_link_
     message` instead of `netbbs.mail.send_mail`. Only checked on the
     fresh-compose path: a reply always targets an already-resolved
@@ -432,7 +470,7 @@ async def _compose_mail(
         recipient_text = prefill_recipient.username
         await session.write_line(f"To: {sanitize_text(recipient_text)}")
     else:
-        prompt = "username or user@node-fingerprint" if link_context is not None else "username"
+        prompt = "username or user@node-name-or-dns" if link_context is not None else "username"
         while True:
             await session.write(f"\r\nTo ({prompt}): ")
             recipient_text = (await session.read_line()).strip()
@@ -523,9 +561,39 @@ async def _compose_mail(
             continue
 
         if link_context is not None and "@" in recipient_text:
+            remote_user, node_reference = recipient_text.split("@", 1)
+            resolved = await lane.run(resolve_stored_peer_reference, node_reference)
+            if isinstance(resolved, list):
+                if resolved:
+                    candidates = []
+                    for fingerprint in resolved[:5]:
+                        identity = await lane.run(identity_for_fingerprint, fingerprint)
+                        candidates.append(
+                            f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
+                        )
+                    await session.write_line(
+                        colored(
+                            f"Could not send: {sanitize_text(node_reference)!r} matches more than one node "
+                            f"({', '.join(candidates)}). Address the recipient as "
+                            "user@technical-identity.",
+                            fg_color=ERROR_COLOR,
+                        )
+                    )
+                else:
+                    await session.write_line(
+                        colored(
+                            f"Could not send: no linked node is known as {sanitize_text(node_reference)!r}.",
+                            fg_color=ERROR_COLOR,
+                        )
+                    )
+                continue
+            technical_recipient = f"{remote_user}@{resolved}"
+            warning = await _link_mail_identity_warning(lane, technical_recipient)
+            if warning is not None:
+                await session.write_line(colored(warning, fg_color=MUTED_COLOR, bold=True))
             try:
                 await lane.run(
-                    compose_link_message, user, recipient_text, subject, body,
+                    compose_link_message, user, technical_recipient, subject, body,
                     node_identity=link_context.node_identity,
                 )
             except (LinkMailError, MailError) as exc:

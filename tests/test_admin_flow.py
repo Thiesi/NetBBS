@@ -431,6 +431,93 @@ def test_sysop_can_apply_reasoned_override_through_real_menu_path(db, lane, syso
     assert "Trust override applied and audited." in _written_text(session)
 
 
+def test_warned_node_requires_technical_identity_confirmation_for_trust_override(
+    db, lane, sysop,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    familiar = LinkNode(identity=bootstrap_node_identity("trust-familiar"))
+    changed = LinkNode(identity=bootstrap_node_identity("trust-changed"))
+
+    def admitted(node, *, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=f"2026-09-04T09:{minute:02d}:00+00:00",
+            friendly_name="Familiar Trust Node",
+        ))
+
+    save_peer(db, admitted(familiar, minute=0))
+    changed_peer = admitted(changed, minute=1)
+    save_peer(db, changed_peer)
+    subject = TrustSubject.node(changed_peer.fingerprint)
+    register_subject(db, subject, first_accepted_at="2026-09-04T09:01:00.000000Z")
+    session = FakeSession([
+        "s", "p", "s", "0", "1",
+        "o", "r", "b", "reviewed but identity changed", "n",
+        "b", "b", "b", "b",
+    ])
+
+    _run(session, lane, sysop)
+
+    output = _written_text(session)
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert "different cryptographic identity" in output
+    assert changed_peer.fingerprint in output
+    assert "despite the identity warning" in output
+    assert "Trust override applied and audited." not in output
+    assert state.state == TrustState.PROBATIONARY
+
+
+def test_trust_override_reconfirms_when_identity_warning_changes_during_prompt(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net import admin_flow
+
+    first_familiar = LinkNode(identity=bootstrap_node_identity("first-trust-name"))
+    second_familiar = LinkNode(identity=bootstrap_node_identity("second-trust-name"))
+    changed = LinkNode(identity=bootstrap_node_identity("changing-trust-subject"))
+
+    def admitted(node, *, name, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-04T10:{minute:02d}:00+00:00",
+            friendly_name=name,
+        ))
+
+    save_peer(db, admitted(first_familiar, name="First Familiar", minute=0))
+    save_peer(db, admitted(second_familiar, name="Second Familiar", minute=0))
+    current = admitted(changed, name="First Familiar", minute=1)
+    save_peer(db, current)
+    subject = TrustSubject.node(current.fingerprint)
+    register_subject(db, subject, first_accepted_at="2026-09-04T10:01:00.000000Z")
+    confirmations = 0
+
+    async def confirm(session, prompt, *, default):
+        nonlocal confirmations
+        confirmations += 1
+        assert default is False
+        if confirmations == 1:
+            save_peer(db, admitted(changed, name="Second Familiar", minute=2))
+            return True
+        return False
+
+    monkeypatch.setattr(admin_flow, "prompt_yes_no", confirm)
+    session = FakeSession(["r", "b", "identity changed again"])
+
+    asyncio.run(admin_flow._set_trust_override_screen(session, lane, sysop, subject))
+
+    state = get_effective_trust_state(db, subject, TrustDimension.RESOURCE_BEHAVIOR)
+    assert confirmations == 2
+    assert state.state == TrustState.PROBATIONARY
+    assert "Trust override applied and audited." not in _written_text(session)
+
+
 def test_sysop_can_clear_a_trust_override_and_view_decision_history_through_real_menu_path(
     db, lane, sysop
 ):
@@ -475,12 +562,13 @@ def test_sysop_can_clear_a_trust_override_and_view_decision_history_through_real
 
 
 def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop):
+    reporter = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
             "s", "p",
             "d", "a", "emergency", "Emergency operator", "1.0",
-            "r", "a", "reporter", "emergency", "identity_integrity:signed_equivocation", "n", "n",
-            "e", "a", "reporter", "i", "signed_equivocation", "because", "n",
+            "r", "a", reporter, "emergency", "identity_integrity:signed_equivocation", "n", "n",
+            "e", "a", reporter, "i", "signed_equivocation", "because", "n",
             "b", "b", "b",
         ]
     )
@@ -492,17 +580,73 @@ def test_declined_sole_authority_confirmation_leaves_policy_safe(db, lane, sysop
 def test_sysop_menu_reaches_separate_attestation_authority_configuration(
     db, lane, sysop
 ):
+    identity_node = "abcdefghijklmnopqrstuvwxyz234567"
     session = FakeSession(
         [
-            "s", "p", "i", "a", "identity-node", "age,name",
+            "s", "p", "i", "a", identity_node, "age,name",
             "verified identity contractor", "b", "b", "b",
         ]
     )
     _run(session, lane, sysop)
     authority = list_attestation_authorities(db)[0]
-    assert authority.fingerprint == "identity-node"
+    assert authority.fingerprint == identity_node
     assert authority.attributes == ("age", "name")
     assert "Attestation authority changed and audited." in _written_text(session)
+
+
+def test_trust_configuration_requires_confirmation_for_a_reused_familiar_name(
+    db, lane, sysop,
+):
+    from netbbs.link.events import build_endpoint_descriptor
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+    from netbbs.link.store import save_peer
+
+    original = bootstrap_node_identity("original-familiar-node")
+    replacement = bootstrap_node_identity("replacement-familiar-node")
+
+    def save_profile(identity, *, friendly_name, created_at):
+        save_peer(
+            db,
+            PeerRecord(
+                fingerprint=identity.fingerprint,
+                root_public_key=bytes(identity.root.verify_key),
+                transitions=identity.transitions,
+                descriptor=build_endpoint_descriptor(
+                    signing_identity=identity.signing_key,
+                    subject_fingerprint=identity.fingerprint,
+                    addresses=None,
+                    outgoing_only=True,
+                    created_at=created_at,
+                    friendly_name=friendly_name,
+                ),
+            ),
+        )
+
+    save_profile(
+        original, friendly_name="Familiar Node",
+        created_at="2026-09-04T08:00:00+00:00",
+    )
+    save_profile(
+        original, friendly_name="Renamed Original",
+        created_at="2026-09-04T08:01:00+00:00",
+    )
+    save_profile(
+        replacement, friendly_name="Familiar Node",
+        created_at="2026-09-04T08:02:00+00:00",
+    )
+    session = FakeSession(
+        ["s", "p", "i", "a", "Familiar Node", "n", "b", "b", "b"]
+    )
+
+    _run(session, lane, sysop)
+
+    text = _written_text(session)
+    assert list_attestation_authorities(db) == []
+    assert f"Technical identity: {replacement.fingerprint}" in text
+    assert "different cryptographic identity" in text
+    assert "impersonation is possible" in text
+    assert "No trust policy change made." in text
 
 
 def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
@@ -2733,7 +2877,7 @@ def test_transfer_board_origin_flow(db, lane, sysop):
     inputs = [
         "m", "m", "l", "0", "1",  # navigate to board detail
         "t",  # [T]ransfer origin
-        peer.fingerprint,  # new origin's fingerprint
+        "0", "1",  # select the only peer by friendly name
         "y",  # confirm
         "b", "b", "b", "b",
     ]
@@ -2746,6 +2890,86 @@ def test_transfer_board_origin_flow(db, lane, sysop):
     offer = link_context.link_node.pending_origin_transfers[board.board_id]
     assert offer.payload["new_origin_fingerprint"] == peer.fingerprint
     assert offer.payload["old_origin_fingerprint"] == link_context.node_identity.fingerprint
+    assert peer.fingerprint not in text
+
+
+def test_transfer_board_origin_disambiguates_duplicate_peer_labels(db, lane, sysop):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    peers = []
+    for label in ("duplicate-a", "duplicate-b"):
+        identity = bootstrap_node_identity(label)
+        remote = LinkNode(identity=identity)
+        peer = link_context.link_node.handle_hello(remote.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-09-04T00:00:00+00:00",
+            friendly_name="Shared Node",
+            canonical_dns_name="shared.example.org",
+        ))
+        link_context.link_node.peers[peer.fingerprint] = peer
+        peers.append(peer)
+
+    inputs = [
+        "m", "m", "l", "0", "1",
+        "t", "0", "1", "n",
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _visible(_written_text(session))
+    assert all(peer.fingerprint in text for peer in peers)
+    assert "Offer sent" not in text
+
+
+def test_transfer_board_origin_warns_before_offering_to_a_changed_identity(
+    db, lane, sysop,
+):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net.admin_flow import _transfer_board_origin_screen
+
+    familiar_node = LinkNode(identity=bootstrap_node_identity("familiar-target"))
+    changed_node = LinkNode(identity=bootstrap_node_identity("changed-target"))
+
+    def admitted(node):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at="2026-09-04T09:30:00+00:00",
+            friendly_name="Familiar Target",
+            canonical_dns_name="familiar-target.example.org",
+        ))
+
+    save_peer(db, admitted(familiar_node))
+    changed_peer = admitted(changed_node)
+    save_peer(db, changed_peer)
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=link_context.node_identity)
+    link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
+
+    session = FakeSession(["0", "1", "n"])
+    asyncio.run(
+        _transfer_board_origin_screen(session, lane, board, link_context)
+    )
+
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert changed_peer.fingerprint in text
+    assert "Cancelled." in text
+    assert board.board_id not in link_context.link_node.pending_origin_transfers
 
 
 def test_close_board_flow(db, lane, sysop):
@@ -2813,6 +3037,33 @@ def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, s
     assert "your own outstanding transfer offer" in text
 
 
+def test_board_detail_shows_the_origin_fingerprint_when_its_profile_is_unavailable(db, lane, sysop):
+    """A carried board whose origin node is not in the in-memory peer map
+    must still be attributed to its signed fingerprint, not to a shared
+    placeholder that makes two such origins indistinguishable."""
+    import json
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote_identity = bootstrap_node_identity("elsewhere")
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    genesis = link_board(db, board, node_identity=remote_identity)
+    db.connection.execute(
+        "UPDATE boards SET link_genesis_json = ? WHERE id = ?", (json.dumps(genesis.to_dict()), board.id)
+    )
+    db.connection.commit()
+
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert f"Origin: {remote_identity.fingerprint}" in text
+    assert "unknown linked node" not in text
+
+
 def test_accept_board_origin_transfer_flow(db, lane, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.link.boards import link_board, offer_board_origin_transfer
@@ -2850,11 +3101,64 @@ def test_accept_board_origin_transfer_flow(db, lane, sysop):
 
     text = _written_text(session)
     assert "Accepted" in text
+    assert remote_identity.fingerprint in text
     assert board.board_id not in link_context.link_node.pending_origin_transfers
     assert link_context.link_node.board_origin[board.board_id] == link_context.node_identity.fingerprint
 
     from netbbs.link.boards import board_origin_fingerprint
     assert board_origin_fingerprint(db, board) == link_context.node_identity.fingerprint
+
+
+def test_accept_board_origin_transfer_warns_about_a_changed_cryptographic_identity(
+    db, lane, sysop,
+):
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board, offer_board_origin_transfer
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+    from netbbs.net.admin_flow import _accept_board_origin_transfer_screen
+
+    familiar_node = LinkNode(identity=bootstrap_node_identity("familiar-origin"))
+    changed_node = LinkNode(identity=bootstrap_node_identity("changed-origin"))
+
+    def admitted(node):
+        return node.handle_hello(
+            node.build_hello(
+                addresses=None,
+                outgoing_only=True,
+                created_at="2026-09-04T09:00:00+00:00",
+                friendly_name="Familiar Origin",
+                canonical_dns_name="familiar-origin.example.org",
+            )
+        )
+
+    save_peer(db, admitted(familiar_node))
+    changed_peer = admitted(changed_node)
+    save_peer(db, changed_peer)
+
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    link_board(db, board, node_identity=changed_node.identity)
+    offer = offer_board_origin_transfer(
+        db,
+        board,
+        node_identity=changed_node.identity,
+        new_origin_fingerprint=link_context.node_identity.fingerprint,
+    )
+    link_context.link_node.peers[changed_peer.fingerprint] = changed_peer
+    link_context.link_node.pending_origin_transfers[board.board_id] = offer
+
+    session = FakeSession(["n"])
+    asyncio.run(
+        _accept_board_origin_transfer_screen(session, lane, board, link_context)
+    )
+
+    text = _written_text(session)
+    assert "different cryptographic identity" in text
+    assert changed_peer.fingerprint in text
+    assert "Cancelled." in text
+    assert board.board_id in link_context.link_node.pending_origin_transfers
 
 
 def test_approving_a_pending_post_on_a_linked_board_queues_a_board_post(db, lane, sysop):
@@ -6067,7 +6371,64 @@ def test_managed_dns_status_offers_release_when_active(db, lane, sysop):
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Re[l]ease" in text
+    assert "Change [n]ame" in text
     assert "[R]egister" in text
+
+
+def test_managed_dns_pending_rename_offers_cancel_change_without_hotkey_collisions(db, lane, sysop):
+    from netbbs.managed_dns.state import (
+        OptIn,
+        RegistrationStatus,
+        set_opt_in,
+        set_previous_name,
+        set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "newboard")
+    set_previous_name(db, "oldboard")
+    set_registration_status(db, RegistrationStatus.PENDING)
+
+    session = FakeSession(["d", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "[C]ancel change" in text
+    assert "Change [n]ame" not in text
+    assert "Re[l]ease" not in text
+
+
+def test_managed_dns_abandoned_replacement_still_offers_cancel_change(
+    db, lane, sysop, monkeypatch,
+):
+    from netbbs.managed_dns.state import (
+        OptIn,
+        RegistrationStatus,
+        set_opt_in,
+        set_previous_name,
+        set_registered_name,
+        set_registration_status,
+    )
+
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_registered_name(db, "newboard")
+    set_previous_name(db, "oldboard")
+    set_registration_status(db, RegistrationStatus.ABANDONED)
+
+    cancelled = []
+
+    async def fake_cancel(_session, _lane):
+        cancelled.append(True)
+
+    monkeypatch.setattr("netbbs.net.admin_flow.cancel_registration_rename", fake_cancel)
+    session = FakeSession(["d", "c", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "The new name is inactive" in text
+    assert "[C]ancel change" in text
+    assert "Change [n]ame" not in text
+    assert "Re[l]ease" not in text
+    assert cancelled == [True]
 
 
 def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_active(db, lane, sysop):
@@ -6223,6 +6584,8 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
+    assert "Node: " in _visible(text)
+    assert "Technical identity:" in _visible(text)
     assert link_context.node_identity.fingerprint in text
     assert "Mode: " in text
     assert "[OUTGOING ONLY]" in text
@@ -6230,6 +6593,85 @@ def test_link_status_screen_shows_summary_counts(db, lane, sysop):
     assert "Linked boards: 1" in text
     assert "Known events: 1" in text
     assert "No verified peers." in text
+
+
+def test_link_status_screen_reads_the_current_node_name(db, lane, sysop):
+    from netbbs.config import set_node_display_name
+
+    session = FakeSession(["s", "l", "b", "b"])
+    assert session.node_display_name == "NetBBS"
+    set_node_display_name(db, "Renamed While Connected")
+
+    asyncio.run(admin_menu(session, lane, sysop, link_context=_link_context()))
+
+    assert "Node: Renamed While Connected" in _visible(_written_text(session))
+
+
+def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sysop):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.node_profiles import list_identity_observations
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    link_context = _link_context()
+    peer_identity = bootstrap_node_identity("renamed-peer")
+    peer_node = LinkNode(identity=peer_identity)
+    first = peer_node.handle_hello(peer_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="Old Name",
+    ))
+    save_peer(db, first)
+    for index in range(6):
+        changed = peer_node.handle_hello(peer_node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at=f"2026-09-03T13:0{index}:00+00:00",
+            friendly_name=f"New Name {index}",
+        ))
+        save_peer(db, changed)
+    link_context.link_node.peers[changed.fingerprint] = changed
+
+    session = FakeSession(["s", "l", "y", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    assert "Identity changes acknowledged." in _written_text(session)
+    remaining = list_identity_observations(db)
+    assert len(remaining) == 1
+    assert remaining[0].previous_friendly_name == "Old Name"
+
+
+def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
+    db, lane, sysop,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    link_context = _link_context()
+
+    def descriptor(node, *, name, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=f"2026-09-03T13:{minute:02d}:00+00:00",
+            friendly_name=name,
+        ))
+
+    familiar = LinkNode(identity=bootstrap_node_identity("familiar-warning"))
+    changed = LinkNode(identity=bootstrap_node_identity("changed-warning"))
+    save_peer(db, descriptor(familiar, name="Familiar Warning", minute=0))
+    current = descriptor(changed, name="Familiar Warning", minute=1)
+    save_peer(db, current)
+    for index in range(6):
+        current = descriptor(changed, name=f"Benign Rename {index}", minute=index + 2)
+        save_peer(db, current)
+    link_context.link_node.peers[current.fingerprint] = current
+
+    session = FakeSession(["s", "l", "n", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "cryptographic identity presented as Familiar Warning changed" in text
+    assert "could indicate impersonation" in text
 
 
 def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):

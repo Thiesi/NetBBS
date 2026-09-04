@@ -299,6 +299,12 @@ async def run_link_sync(
     that gap is what this issue closes.
     """
     while stop_event is None or not stop_event.is_set():
+        refresh = getattr(own_hello_provider, "refresh", None)
+        if refresh is not None:
+            # Mutable friendly/DNS claims are read once per pass through the
+            # database lane; the synchronous provider remains DB-free at each
+            # individual handshake call below.
+            await refresh(lane)
         # Design doc §16 (issue #219): the reliable-nodes roster joins the
         # dial list only once the SysOp has accepted participation --
         # never merely because the list exists. Re-read from the lane
@@ -393,7 +399,10 @@ async def _sync_one_seed(
     successful hello back to failure; those are secondary,
     independently-tolerated steps, not the "are we isolated" signal."""
     try:
-        seed_peer = await dial_hello(node, session, seed_url, own_hello_provider(), lane)
+        seed_peer = await dial_hello(
+            node, session, seed_url, own_hello_provider(), lane,
+            refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+        )
     except (LinkTransportError, LinkProtocolError) as exc:
         _logger.warning("Link sync: could not complete hello with seed %s: %s", seed_url, exc)
         return False
@@ -438,7 +447,10 @@ async def _sync_one_seed(
     # candidate pool `_try_candidate_fallback` (below) draws from.
     if peer_state == TrustState.ESTABLISHED:
         try:
-            await request_peer_list(node, session, seed_url, seed_peer.fingerprint, lane)
+            await request_peer_list(
+                node, session, seed_url, seed_peer.fingerprint, lane,
+                refresh_identity_claims=getattr(own_hello_provider, "refresh", None),
+            )
         except LinkTransportError as exc:
             _logger.warning("Link sync: could not request a peer list from seed %s: %s", seed_url, exc)
 

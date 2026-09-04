@@ -1176,6 +1176,147 @@ def test_dial_hello_completes_a_real_http_handshake(tmp_path):
         bob.close()
 
 
+def test_dial_hello_refreshes_local_claims_before_persisting_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import (
+        latest_identity_observation, remember_own_identity_claims,
+    )
+
+    alice_node = LinkNode(identity=bootstrap_node_identity("dial-claim-alice"))
+    bob_node = LinkNode(identity=bootstrap_node_identity("dial-claim-bob"))
+    alice = _NodeDb(tmp_path, "dial-claim-alice")
+    bob = _NodeDb(tmp_path, "dial-claim-bob")
+
+    def bob_hello():
+        return bob_node.build_hello(
+            addresses=None, outgoing_only=True,
+            created_at="2026-09-04T11:00:00+00:00",
+            friendly_name="Alice's New Dial Name",
+        )
+
+    async def refresh_local_claims(lane):
+        def refresh(db):
+            set_node_display_name(db, "Alice's New Dial Name")
+            remember_own_identity_claims(db, canonical_dns_name=None)
+
+        await lane.run(refresh)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, bob_hello, bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                return await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    _hello_for(alice_node), alice.lane,
+                    refresh_identity_claims=refresh_local_claims,
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        peer = asyncio.run(scenario())
+        observation = latest_identity_observation(alice.db, peer.fingerprint)
+        assert observation is not None
+        assert observation.severity == "security"
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_hello_server_refreshes_local_claims_before_persisting_the_peer(tmp_path, monkeypatch):
+    alice_node = LinkNode(identity=bootstrap_node_identity("ordered-alice"))
+    bob_node = LinkNode(identity=bootstrap_node_identity("ordered-bob"))
+    alice = _NodeDb(tmp_path, "ordered-alice")
+    bob = _NodeDb(tmp_path, "ordered-bob")
+    events: list[str] = []
+
+    class RefreshableHello:
+        async def refresh(self, lane):
+            assert lane is bob.lane
+            events.append("refresh")
+
+        def __call__(self):
+            events.append("provide")
+            return _hello_for(bob_node)
+
+    real_save_peer = link_transport.save_peer
+
+    def recording_save_peer(db, peer):
+        events.append("save")
+        return real_save_peer(db, peer)
+
+    monkeypatch.setattr(link_transport, "save_peer", recording_save_peer)
+
+    async def scenario():
+        server = await _run_server(bob_node, RefreshableHello(), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{server.port}",
+                    _hello_for(alice_node), alice.lane,
+                )
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        assert events[:3] == ["refresh", "save", "provide"]
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_relay_mailbox_pickup_refreshes_local_claims_before_persisting_the_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import latest_identity_observation, remember_own_identity_claims
+    from netbbs.managed_dns.state import set_node_fingerprint
+
+    caller_node = LinkNode(identity=bootstrap_node_identity("pickup-caller"))
+    relay_node = LinkNode(identity=bootstrap_node_identity("pickup-relay"))
+    caller = _NodeDb(tmp_path, "pickup-caller")
+    relay = _NodeDb(tmp_path, "pickup-relay")
+    set_node_display_name(relay.db, "Relay")
+    set_node_fingerprint(relay.db, relay_node.identity.fingerprint)
+
+    class RefreshableHello:
+        async def refresh(self, lane):
+            await lane.run(
+                remember_own_identity_claims,
+                canonical_dns_name="fresh-relay.example.org",
+            )
+
+        def __call__(self):
+            return _hello_for(relay_node)
+
+    caller_hello = caller_node.build_hello(
+        addresses=None,
+        outgoing_only=True,
+        created_at="2026-09-04T09:00:00+00:00",
+        friendly_name="Caller",
+        canonical_dns_name="fresh-relay.example.org",
+    )
+
+    async def scenario():
+        server = await _run_server(relay_node, RefreshableHello(), relay.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                assert await pickup_from_relay_mailbox(
+                    session, f"http://127.0.0.1:{server.port}", caller_hello
+                ) == []
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(scenario())
+        notice = latest_identity_observation(relay.db, caller_node.identity.fingerprint)
+        assert notice is not None
+        assert notice.kind == "cryptographic_identity_changed"
+        assert notice.previous_fingerprint == relay_node.identity.fingerprint
+    finally:
+        caller.close()
+        relay.close()
+
+
 def test_trust_subscription_pull_uses_real_transport_and_persists_restart_safe_state(tmp_path):
     alice_identity = bootstrap_node_identity("trust-subscriber")
     reporter_identity = bootstrap_node_identity("trust-reporter")
@@ -2036,6 +2177,69 @@ def test_request_peer_list_records_a_real_peers_candidates_over_http(tmp_path):
             "SELECT fingerprint FROM link_peer_candidates"
         ).fetchone()
         assert row["fingerprint"] == carol_identity.fingerprint
+    finally:
+        alice.close()
+        bob.close()
+
+
+def test_request_peer_list_refreshes_local_claims_before_persisting_known_peer(tmp_path):
+    from netbbs.config import set_node_display_name
+    from netbbs.link.node_profiles import (
+        latest_identity_observation, remember_own_identity_claims,
+    )
+    from netbbs.link.store import save_peer
+
+    alice_identity = bootstrap_node_identity("claim-refresh-alice")
+    bob_identity = bootstrap_node_identity("claim-refresh-bob")
+    carol_identity = bootstrap_node_identity("claim-refresh-carol")
+    alice_node = LinkNode(identity=alice_identity)
+    bob_node = LinkNode(identity=bob_identity)
+    carol_node = LinkNode(identity=carol_identity)
+    alice = _NodeDb(tmp_path, "claim-refresh-alice")
+    bob = _NodeDb(tmp_path, "claim-refresh-bob")
+
+    old_carol = carol_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True,
+        created_at="2026-09-04T09:00:00+00:00",
+        friendly_name="Carol Before Rename",
+    ))
+    alice_node.peers[old_carol.fingerprint] = old_carol
+    save_peer(alice.db, old_carol)
+    bob_node.handle_hello(carol_node.build_hello(
+        addresses=None, outgoing_only=True,
+        created_at="2026-09-04T09:01:00+00:00",
+        friendly_name="Alice's New Local Name",
+    ))
+
+    async def refresh_local_claims(lane):
+        def refresh(db):
+            set_node_display_name(db, "Alice's New Local Name")
+            remember_own_identity_claims(db, canonical_dns_name=None)
+
+        await lane.run(refresh)
+
+    async def scenario():
+        bob_server = await _run_server(bob_node, lambda: _hello_for(bob_node), bob.lane)
+        try:
+            async with aiohttp.ClientSession() as session:
+                await dial_hello(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    _hello_for(alice_node), alice.lane,
+                )
+                return await request_peer_list(
+                    alice_node, session, f"http://127.0.0.1:{bob_server.port}",
+                    bob_identity.fingerprint, alice.lane,
+                    refresh_identity_claims=refresh_local_claims,
+                )
+        finally:
+            await bob_server.stop()
+
+    try:
+        recorded = asyncio.run(scenario())
+        assert recorded == [carol_identity.fingerprint]
+        observation = latest_identity_observation(alice.db, carol_identity.fingerprint)
+        assert observation is not None
+        assert observation.severity == "security"
     finally:
         alice.close()
         bob.close()

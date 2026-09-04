@@ -11,6 +11,9 @@ from netbbs.config import (
     set_config,
     set_invitation_expiry_days,
     set_max_upload_bytes,
+    canonical_node_display_name,
+    get_node_display_name,
+    set_node_display_name,
 )
 from netbbs.storage.database import Database
 
@@ -31,6 +34,21 @@ def test_set_then_get_roundtrip(tmp_path):
     db = Database(tmp_path / "node.db")
     set_config(db, "display_timestamp_format", "%d.%m.%Y %H:%M")
     assert get_config(db, "display_timestamp_format") == "%d.%m.%Y %H:%M"
+    db.close()
+
+
+@pytest.mark.parametrize("name", ["Trusted · Node", 'The "Rusty" Anchor', "Anchor\x9b31m", "Anchor\u202eevil"])
+def test_node_display_name_rejects_reserved_and_invisible_characters(tmp_path, name):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError, match="reserved or invisible"):
+        set_node_display_name(db, name)
+    db.close()
+
+
+def test_node_display_name_reserves_the_unnamed_node_sentinel(tmp_path):
+    db = Database(tmp_path / "node.db")
+    with pytest.raises(ValueError, match="reserved for nodes without"):
+        set_node_display_name(db, "UNNAMED LINKED NODE")
     db.close()
 
 
@@ -109,3 +127,24 @@ def test_set_invitation_expiry_days_rejects_non_positive(tmp_path):
     with pytest.raises(ValueError):
         set_invitation_expiry_days(db, -1)
     db.close()
+
+
+def test_node_display_name_is_stored_in_unicode_nfc(tmp_path):
+    """A combining-accent spelling and the precomposed one are the same
+    name on every terminal, so only one form is ever advertised."""
+    db = Database(tmp_path / "node.db")
+    set_node_display_name(db, "  Cafe\u0301 Node ")
+    assert get_node_display_name(db) == "Caf\u00e9 Node"
+    assert canonical_node_display_name("Caf\u00e9 Node") == "Caf\u00e9 Node"
+    db.close()
+
+
+def test_node_display_name_cannot_be_a_complete_fingerprint():
+    with pytest.raises(ValueError, match="must not look like a node fingerprint"):
+        canonical_node_display_name("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+
+
+@pytest.mark.parametrize("name", ["Unknown linked node", "UNKNOWN LINKED NODE"])
+def test_node_display_name_reserves_the_unknown_profile_sentinel(name):
+    with pytest.raises(ValueError, match="without an authenticated profile"):
+        canonical_node_display_name(name)

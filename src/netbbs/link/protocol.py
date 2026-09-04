@@ -1712,6 +1712,7 @@ class LinkNode:
     def build_hello(
         self, *, addresses: list[dict] | None, outgoing_only: bool, created_at: str,
         live_relays: list[str] | None = None,
+        friendly_name: str | None = None, canonical_dns_name: str | None = None,
     ) -> HelloMessage:
         """Build this node's own hello bundle. `addresses`/
         `outgoing_only`/`created_at` are the caller's to supply (node
@@ -1732,6 +1733,8 @@ class LinkNode:
             created_at=created_at,
             relays=list(self.relay_state.relays_serving_me.keys()) or None,
             live_relays=live_relays or None,
+            friendly_name=friendly_name,
+            canonical_dns_name=canonical_dns_name,
         )
         return HelloMessage(
             root_public_key=bytes(self.identity.root.verify_key),
@@ -1803,6 +1806,11 @@ class LinkNode:
                 f"hello claiming to be {claimed_fingerprint} carries a descriptor for a "
                 f"different subject ({message.descriptor.payload.get('subject_fingerprint')!r})"
             )
+
+        from netbbs.link.node_profiles import profile_claims_are_canonical
+
+        if not profile_claims_are_canonical(message.descriptor.payload):
+            raise LinkProtocolError(f"hello from {claimed_fingerprint} carries invalid profile claims")
 
         existing = self.peers.get(claimed_fingerprint)
         if existing is not None and message.descriptor.payload["created_at"] < existing.descriptor.payload["created_at"]:
@@ -1909,6 +1917,9 @@ class LinkNode:
         except (LinkProtocolError, NodeIdentityError):
             return False
         if not verify_endpoint_descriptor(descriptor, signing_verify_key):
+            return False
+        from netbbs.link.node_profiles import profile_claims_are_canonical
+        if not profile_claims_are_canonical(descriptor.payload):
             return False
         self.peers[fingerprint] = PeerRecord(
             fingerprint=peer.fingerprint, root_public_key=peer.root_public_key,

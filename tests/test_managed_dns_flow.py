@@ -7,19 +7,33 @@ from __future__ import annotations
 
 import asyncio
 
-from netbbs.managed_dns.credential import credential_path_for, load_credential
+import pytest
+
+from netbbs.managed_dns.credential import (
+    credential_path_for, load_credential, previous_credential_path_for, save_credential,
+)
 from netbbs.managed_dns.state import (
     OptIn,
     RegistrationStatus,
     get_opt_in,
+    get_previous_name,
+    get_published,
     get_registered_name,
     get_registration_status,
     get_service_url,
     set_node_fingerprint,
     set_opt_in,
+    set_previous_name,
+    set_previous_published,
+    set_previous_status,
+    set_registered_name,
+    set_registration_status,
     set_service_url,
 )
-from netbbs.net.managed_dns_flow import offer_managed_dns_opt_in, register_via_prompt, release_registration
+from netbbs.net.managed_dns_flow import (
+    cancel_registration_rename, offer_managed_dns_opt_in, register_via_prompt,
+    release_registration, rename_registration,
+)
 from netbbs.storage.database import Database
 from netbbs.storage.execution import DatabaseLane
 from services.managed_dns.server import ManagedDnsServer
@@ -177,6 +191,41 @@ def test_offer_opt_in_accept_and_register_succeeds_end_to_end(tmp_path):
     assert any("Registered myboard.netbbs.org" in line for line in session.written)
     credential = load_credential(credential_path_for(db.path))
     assert credential is not None and len(credential) > 0
+    db.close()
+
+
+def test_fresh_registration_clears_expired_local_rename_state_and_credential(tmp_path):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            set_registered_name(db, "expired-replacement")
+            set_registration_status(db, RegistrationStatus.ABANDONED)
+            set_previous_name(db, "expired-old")
+            set_previous_status(db, RegistrationStatus.ABANDONED)
+            set_previous_published(db, False)
+            save_credential(credential_path_for(db.path), "expired-primary-secret")
+            save_credential(previous_credential_path_for(db.path), "expired-old-secret")
+            lane = DatabaseLane(db.path)
+
+            session = FakeSession(["fresh-name", "n", "n", "y"])
+            await register_via_prompt(session, lane)
+
+            lane.close()
+            return db, session
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, session = asyncio.run(scenario())
+    assert get_registered_name(db) == "fresh-name"
+    assert get_previous_name(db) is None
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    assert any("Registered fresh-name.netbbs.org" in line for line in session.written)
     db.close()
 
 
@@ -384,4 +433,200 @@ def test_register_via_prompt_accepting_standard_ports_shows_no_caveat(tmp_path):
     db, session = asyncio.run(scenario())
     assert get_registered_name(db) == "myboard"
     assert not any("won't be part of the promise" in line for line in session.written)
+    db.close()
+
+
+def test_managed_name_change_and_cancel_preserve_the_old_registration(tmp_path, monkeypatch):
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["old-name", "n", "n"]), lane)
+            old_credential = load_credential(credential_path_for(db.path))
+            await rename_registration(FakeSession(["new-name", "y"]), lane)
+            assert get_registered_name(db) == "new-name"
+            assert get_previous_name(db) == "old-name"
+            assert load_credential(previous_credential_path_for(db.path)) == old_credential
+            monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+            monkeypatch.setenv("NO_PROXY", "")
+            await cancel_registration_rename(FakeSession(["y"]), lane)
+            lane.close()
+            return db, old_credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, old_credential = asyncio.run(scenario())
+    assert get_registered_name(db) == "old-name"
+    assert get_previous_name(db) is None
+    assert load_credential(credential_path_for(db.path)) == old_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    db.close()
+
+
+def test_cancel_rename_does_not_restore_stale_publication_state(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import CancelRenameResult
+
+    db = Database(tmp_path / "node.db")
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "replacement-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    lane = DatabaseLane(db.path)
+
+    async def fake_cancel(*_args, **_kwargs):
+        return CancelRenameResult(
+            "new-name", "old-name", "cancelled", "matured", None,
+        )
+
+    monkeypatch.setattr("netbbs.managed_dns.client.cancel_rename", fake_cancel)
+    asyncio.run(cancel_registration_rename(FakeSession(["y"]), lane))
+
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert not get_published(db)
+    lane.close()
+    db.close()
+
+
+def test_cancellation_waits_for_inflight_heartbeat_reconciliation(tmp_path, monkeypatch):
+    from netbbs.managed_dns.client import CancelRenameResult
+    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+
+    db = Database(tmp_path / "node.db")
+    set_opt_in(db, OptIn.ACCEPTED)
+    set_service_url(db, "https://dns.example")
+    set_registered_name(db, "new-name")
+    set_registration_status(db, RegistrationStatus.PENDING)
+    set_previous_name(db, "old-name")
+    set_previous_status(db, RegistrationStatus.MATURED)
+    set_previous_published(db, True)
+    save_credential(credential_path_for(db.path), "replacement-secret")
+    save_credential(previous_credential_path_for(db.path), "old-secret")
+    lane = DatabaseLane(db.path)
+
+    primary_started = asyncio.Event()
+    allow_primary_result = asyncio.Event()
+    pass_finished = asyncio.Event()
+    park_updater = asyncio.Event()
+    cancellation_called = asyncio.Event()
+
+    async def fake_heartbeat(_base_url, credential):
+        if credential == "old-secret":
+            return None, False
+        primary_started.set()
+        await allow_primary_result.wait()
+        return None, True
+
+    async def fake_cancel(*_args, **_kwargs):
+        cancellation_called.set()
+        return CancelRenameResult(
+            "new-name", "old-name", "cancelled", "matured", "127.0.0.1",
+        )
+
+    async def stop_after_pass(_seconds):
+        pass_finished.set()
+        await park_updater.wait()
+
+    monkeypatch.setattr("netbbs.managed_dns.updater._send_heartbeat", fake_heartbeat)
+    monkeypatch.setattr("netbbs.managed_dns.client.cancel_rename", fake_cancel)
+
+    async def scenario():
+        updater = asyncio.create_task(
+            run_scheduled_managed_dns_updater(db, sleep=stop_after_pass)
+        )
+        await asyncio.wait_for(primary_started.wait(), timeout=2)
+        cancelling = asyncio.create_task(
+            cancel_registration_rename(FakeSession(["y"]), lane)
+        )
+        await asyncio.sleep(0)
+        assert not cancellation_called.is_set()
+
+        allow_primary_result.set()
+        await asyncio.wait_for(pass_finished.wait(), timeout=2)
+        await asyncio.wait_for(cancelling, timeout=2)
+        updater.cancel()
+        await asyncio.gather(updater, return_exceptions=True)
+
+    try:
+        asyncio.run(scenario())
+        assert get_registered_name(db) == "old-name"
+        assert get_previous_name(db) is None
+        assert get_registration_status(db) is RegistrationStatus.MATURED
+        assert get_published(db)
+        assert load_credential(credential_path_for(db.path)) == "old-secret"
+        assert load_credential(previous_credential_path_for(db.path)) is None
+    finally:
+        lane.close()
+        db.close()
+
+
+def test_cancelled_rename_is_recoverable_if_reverse_credential_journaling_crashes(
+    tmp_path, monkeypatch,
+):
+    from netbbs.managed_dns.updater import run_scheduled_managed_dns_updater
+
+    async def scenario():
+        backend_db = ManagedDnsServerDatabase(tmp_path / "managed_dns_backend.db")
+        server = ManagedDnsServer("127.0.0.1", 0, backend_db)
+        await server.start()
+        try:
+            db = Database(tmp_path / "node.db")
+            set_opt_in(db, OptIn.ACCEPTED)
+            set_service_url(db, f"http://127.0.0.1:{server.port}")
+            set_node_fingerprint(db, "fp-1")
+            lane = DatabaseLane(db.path)
+            await register_via_prompt(FakeSession(["old-name", "n", "n"]), lane)
+            old_credential = load_credential(credential_path_for(db.path))
+            await rename_registration(FakeSession(["new-name", "y"]), lane)
+            replacement_credential = load_credential(credential_path_for(db.path))
+
+            def simulated_crash(*_args, **_kwargs):
+                raise RuntimeError("simulated crash before reverse journal")
+
+            monkeypatch.setattr(
+                "netbbs.net.managed_dns_flow.stage_credential_cancellation",
+                simulated_crash,
+            )
+            with pytest.raises(RuntimeError, match="simulated crash"):
+                await cancel_registration_rename(FakeSession(["y"]), lane)
+
+            assert get_registered_name(db) == "old-name"
+            assert get_previous_name(db) is None
+            assert load_credential(credential_path_for(db.path)) == replacement_credential
+            assert load_credential(previous_credential_path_for(db.path)) == old_credential
+
+            pass_finished = asyncio.Event()
+            parked = asyncio.Event()
+
+            async def stop_after_one_pass(_seconds):
+                pass_finished.set()
+                await parked.wait()
+
+            task = asyncio.create_task(
+                run_scheduled_managed_dns_updater(db, sleep=stop_after_one_pass)
+            )
+            await asyncio.wait_for(pass_finished.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            lane.close()
+            return db, old_credential
+        finally:
+            await server.stop()
+            backend_db.close()
+
+    db, old_credential = asyncio.run(scenario())
+    assert load_credential(credential_path_for(db.path)) == old_credential
+    assert load_credential(previous_credential_path_for(db.path)) is None
+    assert get_registered_name(db) == "old-name"
     db.close()

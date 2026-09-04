@@ -1,7 +1,7 @@
 """
 Tests for netbbs.backup (design doc §13.4, issue #60's first
 operational slice): create_backup/restore_backup capturing and
-restoring all thirteen recoverable-state artifacts, the ordering/safety
+restoring all fourteen recoverable-state artifacts, the ordering/safety
 invariants around them, and the `python -m netbbs.backup` CLI.
 """
 
@@ -25,6 +25,14 @@ from netbbs.backup import (
 )
 from netbbs import backup as backup_module
 from netbbs.link.node_identity import NodeIdentity, bootstrap_node_identity
+from netbbs.managed_dns.state import (
+    RegistrationStatus,
+    get_previous_name,
+    get_registered_name,
+    get_registration_status,
+    set_cancelled_rename_state,
+    set_pending_rename_state,
+)
 from netbbs.storage.database import Database
 
 _BLOB_CONTENT = b"blob content"
@@ -46,6 +54,14 @@ def _ssh_host_key_path(db_path):
 
 def _managed_dns_credential_path(db_path):
     return db_path.parent / f"{db_path.stem}_managed_dns_credential"
+
+
+def _managed_dns_previous_credential_path(db_path):
+    return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
+
+
+def _managed_dns_transition_credential_path(db_path):
+    return db_path.parent / f"{db_path.stem}_managed_dns_credential_transition"
 
 
 def _welcome_banner_path(db_path):
@@ -93,7 +109,7 @@ def identity_dir(tmp_path):
 
 
 def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
-    """Populate every one of the thirteen backup artifacts with
+    """Populate the ordinary backup artifacts with
     distinguishable content, including the transient `.incoming`
     staging file that must never survive into a backup."""
     blob_path = _storage_root(db_path) / _BLOB_HASH[:2] / _BLOB_HASH
@@ -109,6 +125,7 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 
     _ssh_host_key_path(db_path).write_bytes(b"fake ssh host key")
     _managed_dns_credential_path(db_path).write_text("fake managed-dns credential")
+    _managed_dns_previous_credential_path(db_path).write_text("fake previous managed-dns credential")
     _welcome_banner_path(db_path).write_text("fake banner")
     _main_menu_banner_path(db_path).write_text("fake masthead")
     _logoff_banner_path(db_path).write_text("fake logoff banner")
@@ -124,7 +141,71 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 # -- create_backup --------------------------------------------------------
 
 
-def test_create_backup_captures_all_thirteen_artifacts(tmp_path, db_path, identity_dir):
+def test_create_backup_captures_a_staged_credential_transition(tmp_path, db_path, identity_dir):
+    _seed_full_node(db_path, identity_dir)
+    _managed_dns_transition_credential_path(db_path).write_text("staged secrets")
+
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup-transition"
+    )
+
+    assert (destination / _managed_dns_transition_credential_path(db_path).name).read_text() == "staged secrets"
+
+
+def test_create_backup_retries_when_cancellation_overlaps_the_database_and_credential_snapshot(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    live_db = Database(db_path)
+    set_pending_rename_state(
+        live_db,
+        name="new-name",
+        previous_name="old-name",
+        previous_status=RegistrationStatus.MATURED,
+        previous_published=True,
+    )
+    primary = _managed_dns_credential_path(db_path)
+    previous = _managed_dns_previous_credential_path(db_path)
+    transition = _managed_dns_transition_credential_path(db_path)
+    primary.write_text("replacement-secret")
+    previous.write_text("old-secret")
+    transition.write_text('{"primary":"replacement-secret","previous":"old-secret"}')
+
+    real_snapshot = backup_module.snapshot_database
+    snapshot_calls = 0
+
+    def cancellation_after_first_snapshot(source, target):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        real_snapshot(source, target)
+        if snapshot_calls == 1:
+            set_cancelled_rename_state(
+                live_db, name="old-name", status=RegistrationStatus.MATURED, published=True,
+            )
+            primary.write_text("old-secret")
+            previous.unlink()
+            transition.unlink()
+
+    monkeypatch.setattr(backup_module, "snapshot_database", cancellation_after_first_snapshot)
+
+    destination = create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup-raced"
+    )
+
+    assert snapshot_calls == 2
+    backed_up_db = Database(destination / "netbbs.db")
+    try:
+        assert get_registered_name(backed_up_db) == "old-name"
+        assert get_registration_status(backed_up_db) is RegistrationStatus.MATURED
+        assert get_previous_name(backed_up_db) is None
+    finally:
+        backed_up_db.close()
+        live_db.close()
+    assert (destination / primary.name).read_text() == "old-secret"
+    assert not (destination / previous.name).exists()
+    assert not (destination / transition.name).exists()
+
+
+def test_create_backup_captures_all_ordinary_artifacts(tmp_path, db_path, identity_dir):
     _seed_full_node(db_path, identity_dir)
     destination = tmp_path / "backup1"
 
@@ -136,6 +217,7 @@ def test_create_backup_captures_all_thirteen_artifacts(tmp_path, db_path, identi
     assert (destination / "identity" / "transitions.json").exists()
     assert (destination / f"{db_path.stem}_ssh_host_key").read_bytes() == b"fake ssh host key"
     assert (destination / f"{db_path.stem}_managed_dns_credential").read_text() == "fake managed-dns credential"
+    assert (destination / f"{db_path.stem}_managed_dns_previous_credential").read_text() == "fake previous managed-dns credential"
     assert (destination / f"{db_path.stem}_welcome_banner.ans").read_text() == "fake banner"
     assert (destination / f"{db_path.stem}_main_menu_banner.ans").read_text() == "fake masthead"
     assert (destination / f"{db_path.stem}_logoff_banner.ans").read_text() == "fake logoff banner"
@@ -241,7 +323,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     destination = tmp_path / "backup1"
     create_backup(db_path=db_path, identity_dir=identity_dir, destination=destination)
 
-    # Simulate data loss: wipe every one of the thirteen artifacts.
+    # Simulate data loss: wipe every ordinary artifact.
     conn = sqlite3.connect(str(db_path))
     conn.execute("DELETE FROM node_config")
     conn.commit()
@@ -251,6 +333,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     shutil.rmtree(identity_dir)
     _ssh_host_key_path(db_path).unlink()
     _managed_dns_credential_path(db_path).unlink()
+    _managed_dns_previous_credential_path(db_path).unlink()
     _welcome_banner_path(db_path).unlink()
     _main_menu_banner_path(db_path).unlink()
     _logoff_banner_path(db_path).unlink()
@@ -266,6 +349,7 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     assert (identity_dir / "root.identity").exists()
     assert _ssh_host_key_path(db_path).read_bytes() == b"fake ssh host key"
     assert _managed_dns_credential_path(db_path).read_text() == "fake managed-dns credential"
+    assert _managed_dns_previous_credential_path(db_path).read_text() == "fake previous managed-dns credential"
     assert _welcome_banner_path(db_path).read_text() == "fake banner"
     assert _main_menu_banner_path(db_path).read_text() == "fake masthead"
     assert _logoff_banner_path(db_path).read_text() == "fake logoff banner"
@@ -278,6 +362,31 @@ def test_restore_backup_round_trip(tmp_path, db_path, identity_dir):
     marker = conn.execute("SELECT value FROM node_config WHERE key = 'marker'").fetchone()
     conn.close()
     assert marker == ("present-before-backup",)
+
+
+def test_restore_removes_newer_managed_dns_credentials_absent_from_backup(
+    tmp_path, db_path, identity_dir,
+):
+    _seed_full_node(db_path, identity_dir)
+    primary = _managed_dns_credential_path(db_path)
+    previous = _managed_dns_previous_credential_path(db_path)
+    primary.unlink()
+    previous.unlink()
+    source = create_backup(db_path=db_path, identity_dir=identity_dir, destination=tmp_path / "backup1")
+    transition = _managed_dns_transition_credential_path(db_path)
+    primary.write_text("post-backup primary secret")
+    previous.write_text("post-backup previous secret")
+    transition.write_text("post-backup staged secrets")
+
+    rollback = restore_backup(source=source, db_path=db_path, identity_dir=identity_dir)
+
+    assert not primary.exists()
+    assert not previous.exists()
+    assert not transition.exists()
+    assert rollback is not None
+    assert (rollback / primary.name).read_text() == "post-backup primary secret"
+    assert (rollback / previous.name).read_text() == "post-backup previous secret"
+    assert (rollback / transition.name).read_text() == "post-backup staged secrets"
 
 
 def test_restore_backup_onto_a_fresh_target_with_nothing_existing_yet(tmp_path, db_path, identity_dir):
@@ -500,7 +609,9 @@ def test_restore_rebases_managed_dns_credential_to_a_different_database_stem(
     restore_backup(source=source, db_path=target_db, identity_dir=target_identity)
 
     assert _managed_dns_credential_path(target_db).read_text() == "fake managed-dns credential"
+    assert _managed_dns_previous_credential_path(target_db).read_text() == "fake previous managed-dns credential"
     assert not (target_db.parent / f"{db_path.stem}_managed_dns_credential").exists()
+    assert not (target_db.parent / f"{db_path.stem}_managed_dns_previous_credential").exists()
 
 
 def test_restore_backup_no_staging_or_state_files_left_behind_on_success(tmp_path, db_path, identity_dir):

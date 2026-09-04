@@ -1648,6 +1648,15 @@ class LinkServer:
             return None
         return await self._lane.run(decide_node_action, fingerprint, action)
 
+    async def _refresh_own_claims_before_peer_persistence(self) -> None:
+        """Refresh lane-backed local claims before any hello saves its peer."""
+        refresh = getattr(self._own_hello_provider, "refresh", None)
+        if refresh is not None:
+            # A newly-configured local DNS name must win collision chronology,
+            # while the synchronous provider remains an in-memory read on the
+            # event loop. Both hello-bearing endpoints use this helper.
+            await refresh(self._lane)
+
     async def _handle_hello(self, request: web.Request) -> web.Response:
         try:
             body = await request.json(loads=strict_json_loads)
@@ -1666,6 +1675,7 @@ class LinkServer:
             return self._policy_rejection(decision)
         if self._enforce_trust_policy:
             await self._lane.run(ensure_node_subject, peer.fingerprint)
+        await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
         return web.json_response(self._own_hello_provider().to_dict())
 
@@ -2094,6 +2104,7 @@ class LinkServer:
         decision = await self._decide(peer.fingerprint, LinkPolicyAction.RELAY)
         if decision is not None and not decision.allowed:
             return self._policy_rejection(decision)
+        await self._refresh_own_claims_before_peer_persistence()
         await self._lane.run(save_peer, peer)
 
         envelopes = await self._lane.run(pickup_relay_mailbox_envelopes, peer.fingerprint)
@@ -2107,6 +2118,7 @@ async def dial_hello(
     hello: HelloMessage,
     lane: DatabaseLane,
     *,
+    refresh_identity_claims: Callable[[DatabaseLane], Awaitable[None]] | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> PeerRecord:
     """
@@ -2120,6 +2132,10 @@ async def dial_hello(
     body). If the peer's own returned hello fails verification,
     `LinkProtocolError` propagates unwrapped from `node.handle_hello` —
     same exception every other caller of that method already handles.
+
+    A sync caller may supply `refresh_identity_claims`; it runs after the
+    response hello verifies and immediately before `save_peer`, closing the
+    local-rename window created by the HTTP await.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/hello"
     try:
@@ -2139,6 +2155,8 @@ async def dial_hello(
         raise LinkTransportError(f"malformed hello response from {url}: {exc}") from exc
 
     peer = node.handle_hello(peer_hello)
+    if refresh_identity_claims is not None:
+        await refresh_identity_claims(lane)
     await lane.run(save_peer, peer)
     return peer
 
@@ -2518,6 +2536,7 @@ async def request_peer_list(
     peer_fingerprint: str,
     lane: DatabaseLane,
     *,
+    refresh_identity_claims: Callable[[DatabaseLane], Awaitable[None]] | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> list[str]:
     """
@@ -2535,6 +2554,11 @@ async def request_peer_list(
     `LinkProtocolError` unwrapped if `peer_fingerprint` turns out not to
     be a completed peer after all — same division of responsibility
     `dial_hello`'s own `node.handle_hello` call already has.
+
+    When supplied, `refresh_identity_claims` is awaited after the network
+    response has been verified and immediately before any descriptor is
+    persisted, so local presentation changes made while the request was in
+    flight participate in collision detection.
     """
     url = f"{base_url}{LINK_PATH_PREFIX}/peers/{node.identity.fingerprint}"
     authorization = await lane.run(
@@ -2561,6 +2585,11 @@ async def request_peer_list(
         raise LinkTransportError(f"malformed peer list response from {url}: {exc}") from exc
 
     recorded = node.handle_peer_list(peer_fingerprint, message)
+    if recorded and refresh_identity_claims is not None:
+        # The network request above may have left a picker-sized window for
+        # local friendly/DNS configuration to change. Refresh those claims
+        # immediately before save_peer evaluates secondhand descriptors.
+        await refresh_identity_claims(lane)
     for candidate_fingerprint in recorded:
         if candidate_fingerprint in node.peers:
             # Issue #270: a known peer's descriptor refreshed secondhand

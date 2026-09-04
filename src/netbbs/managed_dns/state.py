@@ -58,6 +58,90 @@ LAST_CONTACT_AT_CONFIG_KEY = "managed_dns_last_contact_at"
 DYNAMIC_CONFIG_KEY = "managed_dns_dynamic"
 NODE_FINGERPRINT_CONFIG_KEY = "managed_dns_node_fingerprint"
 SERVICE_URL_CONFIG_KEY = "managed_dns_service_url"
+PREVIOUS_NAME_CONFIG_KEY = "managed_dns_previous_name"
+PREVIOUS_STATUS_CONFIG_KEY = "managed_dns_previous_status"
+PUBLISHED_CONFIG_KEY = "managed_dns_published"
+PREVIOUS_PUBLISHED_CONFIG_KEY = "managed_dns_previous_published"
+
+
+def _set_config_values(db: Database, values: tuple[tuple[str, str], ...]) -> None:
+    """Commit a related set of node-config values as one transaction."""
+    with db.connection:
+        db.connection.executemany(
+            """
+            INSERT INTO node_config (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            values,
+        )
+
+
+def set_pending_rename_state(
+    db: Database, *, name: str, previous_name: str,
+    previous_status: RegistrationStatus, previous_published: bool,
+) -> None:
+    """Atomically switch the local presentation to a pending replacement."""
+    _set_config_values(db, (
+        (PREVIOUS_NAME_CONFIG_KEY, previous_name),
+        (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, RegistrationStatus.PENDING.value),
+        (PUBLISHED_CONFIG_KEY, "0"),
+    ))
+
+
+def set_registration_result_state(
+    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool,
+) -> None:
+    """Commit an interactive registration result as one conservative view."""
+    _set_config_values(db, (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, status.value),
+        # Registration/reclaim never proves provider publication. A later
+        # heartbeat supplies that authoritative fact.
+        (PUBLISHED_CONFIG_KEY, "0"),
+        (DYNAMIC_CONFIG_KEY, "1" if dynamic else "0"),
+        (OPT_IN_CONFIG_KEY, OptIn.ACCEPTED.value),
+        (PREVIOUS_NAME_CONFIG_KEY, ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
+    ))
+
+
+def set_cancelled_rename_state(
+    db: Database, *, name: str, status: RegistrationStatus, published: bool,
+) -> None:
+    """Atomically restore the previous registration after cancellation."""
+    _set_config_values(db, (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, status.value),
+        (PUBLISHED_CONFIG_KEY, "1" if published else "0"),
+        (PREVIOUS_NAME_CONFIG_KEY, ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "0"),
+    ))
+
+
+def set_heartbeat_reconciliation_state(
+    db: Database, *, name: str, status: RegistrationStatus, published: bool,
+    last_contact_at: str | None, previous_name: str | None,
+    previous_status: RegistrationStatus | None, previous_published: bool,
+) -> None:
+    """Commit one heartbeat's complete authoritative local view atomically."""
+    values = (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, status.value),
+        (PUBLISHED_CONFIG_KEY, "1" if published else "0"),
+        (PREVIOUS_NAME_CONFIG_KEY, previous_name or ""),
+        (PREVIOUS_STATUS_CONFIG_KEY, previous_status.value if previous_status else ""),
+        (PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if previous_published else "0"),
+    )
+    # None means preserve an absent/existing contact timestamp; inactive-only
+    # reconciliation has no successful contact to record.
+    if last_contact_at is not None:
+        values += ((LAST_CONTACT_AT_CONFIG_KEY, last_contact_at),)
+    _set_config_values(db, values)
 
 
 def get_opt_in(db: Database) -> OptIn:
@@ -128,6 +212,46 @@ def get_registered_name(db: Database) -> str | None:
 
 def set_registered_name(db: Database, name: str | None) -> None:
     set_config(db, NAME_CONFIG_KEY, name or "")
+
+
+def get_previous_name(db: Database) -> str | None:
+    return get_config(db, PREVIOUS_NAME_CONFIG_KEY) or None
+
+
+def set_previous_name(db: Database, name: str | None) -> None:
+    set_config(db, PREVIOUS_NAME_CONFIG_KEY, name or "")
+
+
+def get_previous_status(db: Database) -> RegistrationStatus | None:
+    value = get_config(db, PREVIOUS_STATUS_CONFIG_KEY)
+    return RegistrationStatus(value) if value else None
+
+
+def set_previous_status(db: Database, status: RegistrationStatus | None) -> None:
+    set_config(db, PREVIOUS_STATUS_CONFIG_KEY, status.value if status else "")
+
+
+def get_published(db: Database) -> bool:
+    """Whether the service last confirmed a published DNS record for the
+    registered name (a heartbeat reporting a `last_known_address`).
+    Distinct from `matured`: the service matures a registration before
+    its first provider upsert, so a matured name can still have no
+    record -- and must not be advertised as this node's canonical DNS
+    name until it does (`netbbs.link.node_profiles.own_canonical_dns_name`)."""
+    return get_config(db, PUBLISHED_CONFIG_KEY) == "1"
+
+
+def set_published(db: Database, published: bool) -> None:
+    set_config(db, PUBLISHED_CONFIG_KEY, "1" if published else "0")
+
+
+def get_previous_published(db: Database) -> bool:
+    """`get_published` for the previous name while a rename is pending."""
+    return get_config(db, PREVIOUS_PUBLISHED_CONFIG_KEY) == "1"
+
+
+def set_previous_published(db: Database, published: bool) -> None:
+    set_config(db, PREVIOUS_PUBLISHED_CONFIG_KEY, "1" if published else "0")
 
 
 def get_registration_status(db: Database) -> RegistrationStatus:

@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
+
+import pytest
 
 from netbbs.auth.users import create_user
 from netbbs.chat import ChatHub, MessageMailbox, PresenceRegistry
 from netbbs.link.boards import LinkContext
 from netbbs.link.node_identity import bootstrap_node_identity
-from netbbs.link.protocol import LinkNode
+from netbbs.link.protocol import LinkNode, LinkProtocolError
 from netbbs.link.realtime_channels import LiveChannelBridge
 from netbbs.link.realtime_direct import DirectChatUnreachable, IncomingDirectMessage
 from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG, LinkRealtimeSessionRegistry
@@ -111,6 +114,25 @@ def test_resolve_node_fingerprint_by_unique_prefix_case_insensitively(tmp_path):
     rig.close()
 
 
+def test_exact_active_session_fingerprint_cannot_be_shadowed_by_a_peer_name(tmp_path):
+    rig = _Rig(tmp_path)
+    active_identity = bootstrap_node_identity("active-only")
+    claiming_identity = bootstrap_node_identity("claiming-peer")
+    claiming_node = LinkNode(identity=claiming_identity)
+    with pytest.raises(LinkProtocolError, match="invalid profile claims"):
+        rig.link_node.handle_hello(claiming_node.build_hello(
+            addresses=None, outgoing_only=True, created_at=utc_now_iso(),
+            friendly_name=active_identity.fingerprint,
+        ))
+    rig.registry._sessions[active_identity.fingerprint] = SimpleNamespace(
+        remote_fingerprint=active_identity.fingerprint
+    )
+
+    assert resolve_node_fingerprint(rig.context(), active_identity.fingerprint) == active_identity.fingerprint
+    rig.registry._sessions.clear()
+    rig.close()
+
+
 def test_send_delivers_when_the_peer_is_reachable(tmp_path):
     rig = _Rig(tmp_path)
     fp = rig.peer_identity.fingerprint
@@ -173,11 +195,35 @@ def test_send_refuses_when_presence_says_the_user_is_not_online_there(tmp_path):
 def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     rig = _Rig(tmp_path)
     ok, text = _send(rig, "bob@nope", "hi")
-    assert not ok and "No linked node this board knows starts with" in text
+    assert not ok and "No linked node this board knows as 'nope'" in text
     ok, text = _send(rig, "bob", "hi")
-    assert not ok and "user@node-fingerprint" in text
+    assert not ok and "user@node-name-or-dns" in text
     ok, text = _send(rig, "bob@abc", "hi", context=LinkContext(node_identity=rig.identity, link_node=rig.link_node))
     assert not ok and "isn't on NetBBS Link" in text
+    rig.close()
+
+
+def test_ambiguous_live_node_guidance_shows_usable_technical_identities(tmp_path):
+    rig = _Rig(tmp_path)
+    candidates = []
+    for seed in ("shared-one", "shared-two"):
+        identity = bootstrap_node_identity(seed)
+        candidate = LinkNode(identity=identity)
+        rig.link_node.handle_hello(candidate.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=utc_now_iso(),
+            friendly_name="Shared Node",
+            canonical_dns_name="shared.example.org",
+        ))
+        candidates.append(identity.fingerprint)
+
+    ok, text = _send(rig, "bob@shared.example.org", "hi")
+
+    assert not ok
+    assert "Candidate technical identities" in text
+    assert "user@technical-identity" in text
+    assert all(fingerprint in text for fingerprint in candidates)
     rig.close()
 
 
@@ -206,7 +252,7 @@ def test_deliverer_queues_for_an_online_recipient_and_drops_otherwise(tmp_path):
     assert asyncio.run(deliver(message)) is True
     queued = mailbox.flush(bob_session)
     assert len(queued) == 1
-    assert "Private message from Alice@ffffffffffff" in queued[0][0]
+    assert f"Private message from Alice@{'f' * 64}" in queued[0][0]
     assert "\x1b[31m" not in queued[0][0].split("Private message from")[1]
     # Opted out: dropped even while online.
     set_accepts_direct_messages(rig.db, bob, False)

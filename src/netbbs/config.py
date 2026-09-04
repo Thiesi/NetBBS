@@ -18,6 +18,9 @@ for where that resolution order already lives.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from enum import Enum
 
 from netbbs.storage.database import Database
@@ -137,6 +140,12 @@ _DEFAULT_NODE_DISPLAY_NAME = "NetBBS"
 # netbbs.boards.boards' own board-name length cap, just sized for a
 # string shown on every single screen rather than one board listing.
 MAX_NODE_DISPLAY_NAME_LENGTH = 32
+_NODE_FINGERPRINT_RE = re.compile(r"^[a-z2-7]{32}$")
+
+
+def is_node_fingerprint_shape(value: str) -> bool:
+    """Whether ``value`` could be mistaken for a complete Link fingerprint."""
+    return bool(_NODE_FINGERPRINT_RE.fullmatch(value.strip().lower()))
 
 
 def get_node_display_name(db: Database) -> str:
@@ -159,13 +168,33 @@ def is_node_display_name_placeholder(db: Database) -> bool:
     return is_placeholder_node_display_name(get_node_display_name(db))
 
 
-def set_node_display_name(db: Database, name: str) -> None:
-    name = name.strip()
+def canonical_node_display_name(name: str) -> str:
+    """Validate `name` and return the exact form Link may advertise:
+    trimmed, in Unicode NFC (so a combining-accent spelling and the
+    precomposed spelling of the same name are one name, never two
+    claims a peer could tell apart -- `netbbs.link.node_profiles.
+    normalize_friendly_name` applies the same rule on admission), and
+    free of the label delimiter `·`, double quotes, and control/format
+    characters that would let a name forge or hide part of a presented
+    identity. Raises `ValueError` naming the problem."""
+    name = unicodedata.normalize("NFC", name.strip())
     if not name:
         raise ValueError("node display name must not be blank")
     if len(name) > MAX_NODE_DISPLAY_NAME_LENGTH:
         raise ValueError(f"node display name cannot exceed {MAX_NODE_DISPLAY_NAME_LENGTH} characters, got {len(name)}")
-    set_config(db, NODE_DISPLAY_NAME_CONFIG_KEY, name)
+    if name.lower() == "unnamed linked node":
+        raise ValueError("node display name is reserved for nodes without a friendly name")
+    if name.lower() == "unknown linked node":
+        raise ValueError("node display name is reserved for nodes without an authenticated profile")
+    if is_node_fingerprint_shape(name):
+        raise ValueError("node display name must not look like a node fingerprint")
+    if "·" in name or '"' in name or any(unicodedata.category(char) in {"Cc", "Cf"} for char in name):
+        raise ValueError("node display name contains a reserved or invisible character")
+    return name
+
+
+def set_node_display_name(db: Database, name: str) -> None:
+    set_config(db, NODE_DISPLAY_NAME_CONFIG_KEY, canonical_node_display_name(name))
 
 
 class RegistrationMode(str, Enum):

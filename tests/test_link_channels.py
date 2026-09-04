@@ -26,8 +26,11 @@ from netbbs.link.channels import (
 )
 from netbbs.link.events import build_channel_genesis, build_channel_message
 from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
+from netbbs.link.store import save_peer
 from netbbs.link.trust import TrustDimension, TrustState, TrustSubject, register_subject, set_trust_override
 from netbbs.storage.database import Database
+from netbbs.net import chat_flow
 
 
 @pytest.fixture
@@ -223,6 +226,32 @@ def test_materialize_carried_channel_message_creates_a_local_row(db, remote_node
         "SELECT 1 FROM link_events WHERE content_id = ?", (message.content_id,)
     ).fetchone()
     assert row is not None  # the underlying signed event was persisted too, same call
+
+
+def test_materialized_channel_message_uses_signed_home_fingerprint_for_identity_warning(
+    db, alice, remote_node_identity,
+):
+    def peer(identity, dns_name):
+        node = LinkNode(identity=identity)
+        return node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-09-04T00:00:00+00:00",
+            friendly_name="Familiar Node", canonical_dns_name=dns_name,
+        ))
+
+    original_identity = bootstrap_node_identity("original-familiar-node")
+    save_peer(db, peer(original_identity, "original.example.org"))
+    save_peer(db, peer(remote_node_identity, "replacement.example.org"))
+    channel_id = _carried_channel(db, remote_node_identity)
+    event = _remote_channel_message(remote_node_identity, channel_id=channel_id)
+    materialize_carried_channel_message(
+        db, event, sender_fingerprint=remote_node_identity.fingerprint,
+    )
+    channel = get_channel_by_name(db, "Remote Lobby")
+    message = get_scrollback(db, channel)[0]
+
+    assert message.author_fingerprint is None
+    rendered = chat_flow._render_channel_message(db, channel, alice, message)
+    assert "Caution: this familiar node name has a different cryptographic identity." in rendered
 
 
 def test_materialize_carried_channel_message_is_idempotent(db, remote_node_identity):

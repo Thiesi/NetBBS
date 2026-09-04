@@ -132,50 +132,139 @@ def _build_link_throttle(link_config: LinkConfig) -> LinkRequestThrottle:
     )
 
 
-def _build_own_hello_provider(link_node: LinkNode, link_config: LinkConfig, live_relays_provider=None):
+def _load_own_identity_claims(
+    db: Database,
+    advertised_host: str | None,
+    previous_claims: tuple[str, str | None] | None,
+) -> tuple[str, str | None]:
+    """Load and, when changed, persist the local human-facing identity."""
+    from netbbs.config import get_node_display_name
+    from netbbs.link.node_profiles import own_canonical_dns_name, remember_own_identity_claims
+
+    claims = (
+        get_node_display_name(db),
+        own_canonical_dns_name(db, advertised_host),
+    )
+    if claims != previous_claims:
+        remember_own_identity_claims(db, canonical_dns_name=claims[1])
+    return claims
+
+
+class _OwnHelloProvider:
+    """DB-free hello builder backed by identity claims refreshed through a lane."""
+
+    def __init__(
+        self,
+        link_node: LinkNode,
+        link_config: LinkConfig,
+        claims: tuple[str, str | None],
+        live_relays_provider=None,
+    ) -> None:
+        self._link_node = link_node
+        self._link_config = link_config
+        self._friendly_name, self._canonical_dns_name = claims
+        self._live_relays_provider = live_relays_provider
+
+    async def refresh(self, lane: DatabaseLane) -> None:
+        claims = await lane.run(
+            _load_own_identity_claims,
+            self._link_config.advertised_host,
+            (self._friendly_name, self._canonical_dns_name),
+        )
+        self._friendly_name, self._canonical_dns_name = claims
+
+    def __call__(self) -> HelloMessage:
+        addresses = None
+        if not self._link_config.outgoing_only:
+            from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG
+
+            advertised_port = (
+                self._link_config.advertised_port
+                if self._link_config.advertised_port is not None
+                else self._link_config.port
+            )
+            realtime_advertised_port = (
+                self._link_config.realtime_advertised_port
+                if self._link_config.realtime_advertised_port is not None
+                else effective_realtime_port(self._link_config)
+            )
+            addresses = [
+                {
+                    "protocol": "http",
+                    "address": self._link_config.advertised_host,
+                    "port": advertised_port,
+                },
+                {
+                    "protocol": LINK_REALTIME_PROTOCOL_TAG,
+                    "address": self._link_config.advertised_host,
+                    "port": realtime_advertised_port,
+                },
+            ]
+        return self._link_node.build_hello(
+            addresses=addresses,
+            outgoing_only=self._link_config.outgoing_only,
+            created_at=utc_now_iso(),
+            live_relays=(
+                self._live_relays_provider()
+                if self._live_relays_provider is not None
+                else None
+            ),
+            friendly_name=self._friendly_name,
+            canonical_dns_name=self._canonical_dns_name,
+        )
+
+
+def _build_own_hello_provider(
+    link_node: LinkNode, link_config: LinkConfig, db: Database, live_relays_provider=None,
+) -> _OwnHelloProvider:
     """
-    Returns a plain callable producing this node's current `HelloMessage`
-    on demand (design doc: `LinkServer`'s `own_hello_provider`
+    Return a cached callable producing this node's current `HelloMessage`
+    (design doc: `LinkServer`'s `own_hello_provider`
     — a transport-level concern deliberately kept out of `LinkNode`
     itself). `addresses` is only populated for a full peer
     (`not outgoing_only`) -- `config.validate()` already guarantees
     `advertised_host` is set whenever that's the case, so this can build
     the descriptor unconditionally rather than re-checking here. The
     real-time (Noise) address (design doc §8.10) is added as a second
-    `addresses` entry alongside the HTTP one -- imported lazily, here in
-    the closure rather than at module top level, since by the time this
+    `addresses` entry alongside the HTTP one -- imported lazily in the
+    provider call rather than at module top level, since by the time this
     is ever actually called Link (and therefore `aiohttp`) is already
     confirmed running; see `_start_servers`'s own matching lazy import
     for why this module must not import `netbbs.link.transport` eagerly.
+    Startup loads and persists the current claims synchronously before any
+    listener can accept a peer. Runtime callers invoke only the in-memory
+    builder; `refresh()` is dispatched through the background database lane.
     """
+    claims = _load_own_identity_claims(db, link_config.advertised_host, None)
+    return _OwnHelloProvider(link_node, link_config, claims, live_relays_provider)
 
-    def _provide() -> HelloMessage:
-        addresses = None
-        if not link_config.outgoing_only:
-            from netbbs.link.transport import LINK_REALTIME_PROTOCOL_TAG
 
-            advertised_port = (
-                link_config.advertised_port if link_config.advertised_port is not None else link_config.port
-            )
-            realtime_advertised_port = (
-                link_config.realtime_advertised_port
-                if link_config.realtime_advertised_port is not None else effective_realtime_port(link_config)
-            )
-            addresses = [
-                {"protocol": "http", "address": link_config.advertised_host, "port": advertised_port},
-                {
-                    "protocol": LINK_REALTIME_PROTOCOL_TAG, "address": link_config.advertised_host,
-                    "port": realtime_advertised_port,
-                },
-            ]
-        return link_node.build_hello(
-            addresses=addresses, outgoing_only=link_config.outgoing_only, created_at=utc_now_iso(),
-            # Issue #270: the reliable nodes this node is standing by at,
-            # so a peer that cannot dial us knows where to meet us.
-            live_relays=live_relays_provider() if live_relays_provider is not None else None,
+def _validate_persisted_node_display_name(db: Database) -> None:
+    """A display name persisted by an older release never went through
+    today's `set_node_display_name` validation, yet Link signs and
+    advertises it -- and every updated peer refuses a non-canonical
+    claim, which would break Link with no local explanation. So, before
+    Link starts: a name that only needs canonicalizing (Unicode form,
+    surrounding whitespace) is migrated in place and logged; one that
+    can't be (a reserved or invisible character) is refused here, with
+    the fix named, the same way the placeholder name is."""
+    from netbbs.config import canonical_node_display_name, get_node_display_name, set_node_display_name
+
+    persisted = get_node_display_name(db)
+    try:
+        canonical = canonical_node_display_name(persisted)
+    except ValueError as exc:
+        raise StartupError(
+            f"NetBBS Link is enabled but this node's display name {persisted!r} cannot be "
+            f"advertised to other nodes ({exc}). Set a new one first (SysOp console: Settings > "
+            "Node name, reachable offline via `python -m netbbs.admin`), then start again."
+        ) from exc
+    if canonical != persisted:
+        set_node_display_name(db, canonical)
+        _logger.info(
+            "Canonicalized this node's persisted display name for NetBBS Link (%r -> %r)",
+            persisted, canonical,
         )
-
-    return _provide
 
 
 async def _start_servers(
@@ -190,6 +279,7 @@ async def _start_servers(
     link_realtime_bridge=None,
     link_realtime_relay=None,
     live_relays_provider=None,
+    own_hello_provider=None,
 ) -> list:
     """
     Start every enabled, available listener. On any failure partway
@@ -317,13 +407,17 @@ async def _start_servers(
             )
         else:
             assert link_node is not None  # run() constructs it exactly when config.link.enabled
+            if own_hello_provider is None:
+                own_hello_provider = _build_own_hello_provider(
+                    link_node, config.link, db, live_relays_provider
+                )
             await _start_one(
                 "link",
                 LinkServer(
                     host=config.link.host,
                     port=config.link.port,
                     node=link_node,
-                    own_hello_provider=_build_own_hello_provider(link_node, config.link, live_relays_provider),
+                    own_hello_provider=own_hello_provider,
                     lane=link_lane,
                     relay_serving_enabled=config.link.relay_serving_enabled,
                     max_relay_clients=config.link.max_relay_clients,
@@ -703,6 +797,7 @@ async def run(
     link_realtime_relay_client = None
     link_direct_chat = None
     link_anchor_state = None
+    own_hello_provider = None
     reliable_anchor_task: asyncio.Task | None = None
     try:
         # Design doc §13.10, issue #75: this node's own PID, so a later
@@ -793,6 +888,8 @@ async def run(
                 "Node name, reachable offline via `python -m netbbs.admin`), then start "
                 "again. A node that doesn't use Link needs no name."
             )
+        if config.link.enabled:
+            _validate_persisted_node_display_name(db)
 
         # Constructed here, once, rather than
         # inside _start_servers -- the background sync task below needs
@@ -921,6 +1018,14 @@ async def run(
                 return None
             return link_anchor_state.live(link_realtime_registry) or None
 
+        # Prime the current local friendly/DNS claims before the Link
+        # listener accepts any peer. The same cache is shared by inbound
+        # replies and outbound sync and refreshed only through the DB lane.
+        if link_node is not None:
+            own_hello_provider = _build_own_hello_provider(
+                link_node, config.link, db, _live_relays_provider
+            )
+
         # Design doc §13.11, issue #60: attached once, here, only when
         # Link is actually enabled -- a disabled node has no netbbs.link
         # activity to ever log a warning about in the first place.
@@ -967,6 +1072,7 @@ async def run(
         servers = await _start_servers(
             config, db, session_handler, ssh_session_handler, throttle, link_node, background_lane,
             link_realtime_registry, link_realtime_bridge, link_realtime_relay, _live_relays_provider,
+            own_hello_provider,
         )
 
         # Design doc: the piece that makes this node
@@ -998,6 +1104,7 @@ async def run(
                     "skipping the Link sync task (pip install netbbs[web])"
                 )
             else:
+                assert own_hello_provider is not None
                 # trust_env=True: honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY so a
                 # node whose only outbound path is a forward proxy (e.g. a
                 # corporate Squid array) can still reach Link seeds/peers.
@@ -1005,7 +1112,7 @@ async def run(
                 link_sync_task = asyncio.create_task(
                     run_link_sync(
                         link_node, link_sync_session, config.link.seeds,
-                        _build_own_hello_provider(link_node, config.link, _live_relays_provider),
+                        own_hello_provider,
                         background_lane,
                         interval_seconds=config.link.sync_interval_seconds,
                         stop_event=link_sync_stop_event,

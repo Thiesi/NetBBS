@@ -35,6 +35,9 @@ from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.nick import NICK_MARKER, set_nick
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback, record_message
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
+from netbbs.link.store import save_peer
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
 from netbbs.rendering import MUTED_COLOR, VERIFIED_COLOR, fg
@@ -163,6 +166,32 @@ def test_unresolvable_author_never_gets_verified_styling(db, gated_channel):
     label = chat_flow._message_author_label(db, gated_channel, message)
     assert label == "ghost"
     assert "\x1b[" not in label
+
+
+def test_live_linked_channel_message_surfaces_an_undismissed_node_identity_collision(
+    db, open_channel, alice, tmp_path,
+):
+    def peer(label: str):
+        node = LinkNode(identity=bootstrap_node_identity(tmp_path / label))
+        return node.handle_hello(node.build_hello(
+            addresses=None, outgoing_only=True, created_at="2026-09-04T00:00:00+00:00",
+            friendly_name="Familiar Node", canonical_dns_name=f"{label}.example.org",
+        ))
+
+    original = peer("original")
+    replacement = peer("replacement")
+    save_peer(db, original)
+    save_peer(db, replacement)
+    message = record_message(
+        db, open_channel, kind="message", author_label="remote-user@Familiar Node",
+        author_fingerprint=replacement.fingerprint, body="hello from the replacement",
+    )
+
+    rendered = chat_flow._render_channel_message(db, open_channel, alice, message)
+
+    assert "Caution: this familiar node name has a different cryptographic identity." in rendered
+    assert "remote-user@Familiar Node" in rendered
+    assert "hello from the replacement" in rendered
 
 
 # -- live self / live other / scrollback replay parity ------------------------

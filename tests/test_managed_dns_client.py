@@ -13,7 +13,14 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from netbbs.managed_dns.client import ManagedDnsError, heartbeat, register, release
+from netbbs.managed_dns.client import (
+    ManagedDnsError,
+    cancel_rename,
+    heartbeat,
+    register,
+    release,
+    rename,
+)
 from services.managed_dns.server import ManagedDnsServer
 from services.managed_dns.store import Database
 
@@ -148,10 +155,11 @@ def test_heartbeat_raises_managed_dns_error_on_an_unknown_credential(db):
         await server.start()
         try:
             async with aiohttp.ClientSession() as session:
-                with pytest.raises(ManagedDnsError):
+                with pytest.raises(ManagedDnsError) as caught:
                     await heartbeat(
                         session, f"http://127.0.0.1:{server.port}", credential="not-a-real-credential",
                     )
+                assert caught.value.status_code == 401
         finally:
             await server.stop()
 
@@ -234,3 +242,33 @@ def test_register_reclaims_with_a_credential_after_release(db):
     result = asyncio.run(scenario())
     assert result.status == "pending"
     assert isinstance(result.credential, str) and len(result.credential) > 0
+
+
+def test_rename_and_cancel_round_trip_against_a_real_server(db):
+    async def scenario():
+        server = ManagedDnsServer("127.0.0.1", 0, db)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                base_url = f"http://127.0.0.1:{server.port}"
+                registered = await register(
+                    session, base_url, name="oldboard", node_fingerprint="fp-1", dynamic=False,
+                )
+                renamed = await rename(
+                    session, base_url, credential=registered.credential, name="newboard",
+                )
+                cancelled = await cancel_rename(
+                    session, base_url, credential=renamed.credential,
+                )
+                return renamed, cancelled
+        finally:
+            await server.stop()
+
+    renamed, cancelled = asyncio.run(scenario())
+    assert renamed.name == "newboard"
+    assert renamed.previous_name == "oldboard"
+    assert renamed.status == "pending"
+    assert cancelled.name == "newboard"
+    assert cancelled.previous_name == "oldboard"
+    assert cancelled.status == "cancelled"
+    assert cancelled.previous_last_known_address is None

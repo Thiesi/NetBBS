@@ -21,6 +21,9 @@ from netbbs.chat.hub import ChatHub
 from netbbs.chat.mailbox import MessageMailbox
 from netbbs.chat.presence import PresenceRegistry
 from netbbs.chat.scrollback import get_scrollback
+from netbbs.link.boards import LinkContext
+from netbbs.link.node_identity import bootstrap_node_identity
+from netbbs.link.protocol import LinkNode
 from netbbs.moderation.log import list_actions_for_object
 from netbbs.net import chat_flow
 from netbbs.net.char_input import InputHistory
@@ -88,12 +91,16 @@ def _written(session: FakeSession) -> str:
     return "\n".join(session.written)
 
 
-async def _run(lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None):
+async def _run(
+    lane, hub, presence, mailbox, channel, user, lines, *, session_registry=None,
+    link_context=None,
+):
     session = FakeSession(lines)
     history = InputHistory()
     await asyncio.wait_for(
         chat_flow._chat_loop(
-            session, lane, hub, presence, mailbox, history, channel, user, session_registry=session_registry
+            session, lane, hub, presence, mailbox, history, channel, user,
+            session_registry=session_registry, link_context=link_context,
         ),
         timeout=2,
     )
@@ -134,6 +141,32 @@ def test_msg_to_unknown_user_shows_friendly_message(lane, hub, presence, mailbox
 def test_msg_with_no_text_shows_usage(lane, hub, presence, mailbox, alice, channel):
     session = asyncio.run(_run(lane, hub, presence, mailbox, channel, alice, ["/msg bob", "/quit"]))
     assert "Usage: /msg" in _written(session)
+
+
+def test_msg_resolves_a_friendly_node_name_containing_spaces(
+    lane, hub, presence, mailbox, alice, channel, monkeypatch,
+):
+    own_identity = bootstrap_node_identity("own")
+    remote_identity = bootstrap_node_identity("remote")
+    link_node = LinkNode(identity=own_identity)
+    remote_node = LinkNode(identity=remote_identity)
+    link_node.handle_hello(remote_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="The Rusty Anchor",
+    ))
+    context = LinkContext(node_identity=own_identity, link_node=link_node)
+    sent = []
+
+    async def fake_send(session, lane_arg, user, address, body, *, link_context):
+        sent.append((address, body))
+
+    monkeypatch.setattr("netbbs.net.link_direct.send_live_direct_message", fake_send)
+    asyncio.run(_run(
+        lane, hub, presence, mailbox, channel, alice,
+        ['/msg    "bob@The Rusty Anchor" hello there', "/quit"], link_context=context,
+    ))
+
+    assert sent == [("bob@The Rusty Anchor", "hello there")]
 
 
 # -- /msg: delivery -----------------------------------------------------------
@@ -510,11 +543,39 @@ def test_private_with_a_remote_target_sends_each_line_live(lane, hub, presence, 
         link_context=_FakeLinkContext(fingerprint, direct),
     ))
     text = _written(session)
-    assert "Entering private conversation with bob@remote-node-" in text
+    assert f"Entering private conversation with bob@{fingerprint}" in text
     assert [kw["body"] for _fp, kw in direct.sent] == ["hello over there", "second line"]
     assert all(fp == fingerprint for fp, _kw in direct.sent)
     assert direct.sent[0][1]["to_user_id"] == "bob"
     assert "(sent to bob@" in text
+
+
+def test_private_accepts_a_friendly_node_name_containing_spaces(
+    lane, hub, presence, mailbox, alice, channel,
+):
+    own_identity = bootstrap_node_identity("private-own")
+    remote_identity = bootstrap_node_identity("private-remote")
+    link_node = LinkNode(identity=own_identity)
+    remote_node = LinkNode(identity=remote_identity)
+    link_node.handle_hello(remote_node.build_hello(
+        addresses=None, outgoing_only=True, created_at="2026-09-03T12:00:00+00:00",
+        friendly_name="The Rusty Anchor",
+    ))
+    direct = _FakeDirectChat()
+    context = LinkContext(
+        node_identity=own_identity, link_node=link_node,
+        realtime_bridge=_FakeBridge({remote_identity.fingerprint: {"bob": "bob"}}),
+        direct_chat=direct,
+    )
+
+    asyncio.run(_run_linked(
+        lane, hub, presence, mailbox, channel, alice,
+        ["/private bob@The Rusty Anchor", "hello", "/close", "/quit"],
+        link_context=context,
+    ))
+
+    assert direct.sent[0][0] == remote_identity.fingerprint
+    assert direct.sent[0][1]["body"] == "hello"
 
 
 def test_private_with_a_remote_target_ends_the_mode_when_the_peer_becomes_unreachable(
@@ -539,7 +600,7 @@ def test_private_with_an_unknown_remote_node_is_refused(lane, hub, presence, mai
         lane, hub, presence, mailbox, channel, alice, ["/private bob@nope", "/quit"],
         link_context=_FakeLinkContext("remote-node-fingerprint-abc123", _FakeDirectChat()),
     ))
-    assert "No linked node this board knows starts with" in _written(session)
+    assert "No linked node this board knows as 'nope'" in _written(session)
 
 
 def test_private_with_a_remote_target_survives_a_rejected_line(lane, hub, presence, mailbox, alice, channel, db):

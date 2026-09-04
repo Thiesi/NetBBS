@@ -14,18 +14,38 @@ at-rest protection at all (see its own module docstring), appropriate
 for settings like a display name but not for a secret that authenticates
 mutating calls against project-operated infrastructure.
 
-`credential_path_for(db_path)` follows the exact naming convention
-`netbbs.backup._ssh_host_key_path_for` already uses for its own
-derived-path artifacts, so `netbbs.backup` can adopt this file as its
-13th backup artifact (design doc §16 Decision 7) by importing this
-function rather than re-deriving the path a second time.
+The three path helpers follow the exact derived-path convention used by
+the backup subsystem. The primary credential, rename-time previous
+credential, and crash-recovery transition journal are all recoverable
+artifacts; restore must preserve each artifact's presence and absence.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import json
 import stat
 from pathlib import Path
+from weakref import WeakKeyDictionary
+
+
+_transition_locks: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]
+] = WeakKeyDictionary()
+
+
+def managed_dns_transition_lock(db_path: Path) -> asyncio.Lock:
+    """One process-local lock for remote/local DNS transitions per node.
+
+    Locks are scoped by event loop as well as database path so isolated
+    ``asyncio.run`` calls in tests never reuse a lock bound to an earlier loop.
+    Prompts stay outside this lock; callers hold it only across the remote call
+    and the corresponding credential/database reconciliation.
+    """
+    loop = asyncio.get_running_loop()
+    locks = _transition_locks.setdefault(loop, {})
+    return locks.setdefault(db_path.resolve(), asyncio.Lock())
 
 
 def credential_path_for(db_path: Path) -> Path:
@@ -33,6 +53,68 @@ def credential_path_for(db_path: Path) -> Path:
     convention: a single file, sibling to the database, named from the
     database's own stem."""
     return db_path.parent / f"{db_path.stem}_managed_dns_credential"
+
+
+def previous_credential_path_for(db_path: Path) -> Path:
+    """Temporary old credential retained while a managed rename is pending."""
+    return db_path.parent / f"{db_path.stem}_managed_dns_previous_credential"
+
+
+def transition_credential_path_for(db_path: Path) -> Path:
+    """Crash-recovery journal for the two-file rename credential swap."""
+    return db_path.parent / f"{db_path.stem}_managed_dns_credential_transition"
+
+
+def stage_credential_transition(db_path: Path, old_secret: str, new_secret: str) -> None:
+    """Journal the forward credential swap which begins a rename."""
+    save_credential(
+        transition_credential_path_for(db_path),
+        json.dumps({"primary": new_secret, "previous": old_secret}),
+    )
+
+
+def stage_credential_cancellation(db_path: Path, restored_secret: str) -> None:
+    """Journal the reverse swap which completes a cancelled rename."""
+    save_credential(
+        transition_credential_path_for(db_path),
+        json.dumps({"primary": restored_secret, "previous": None}),
+    )
+
+
+def recover_credential_transition(db_path: Path) -> bool:
+    """Finish an interrupted forward or reverse credential swap."""
+    path = transition_credential_path_for(db_path)
+    raw = load_credential(path)
+    if raw is None:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "primary" in payload:
+        primary_secret = payload.get("primary")
+        previous_secret = payload.get("previous")
+    else:
+        # Backups can restore forward-only journals created by an older
+        # version, so retain read compatibility with {old, new}.
+        primary_secret = payload.get("new")
+        previous_secret = payload.get("old")
+    if (
+        not isinstance(primary_secret, str) or not primary_secret
+        or (previous_secret is not None and (
+            not isinstance(previous_secret, str) or not previous_secret
+        ))
+    ):
+        return False
+    save_credential(credential_path_for(db_path), primary_secret)
+    if previous_secret is None:
+        delete_credential(previous_credential_path_for(db_path))
+    else:
+        save_credential(previous_credential_path_for(db_path), previous_secret)
+    delete_credential(path)
+    return True
 
 
 def save_credential(path: Path, secret: str) -> None:

@@ -493,12 +493,106 @@ foreign-key policy.
 
 ### 4.4 Human-facing Link addresses
 
-The native cross-node address is:
+The normal human-facing cross-node address is:
 
-`user@node-fingerprint`
+`user@friendly-name` or, where a friendly name is ambiguous,
+`user@canonical-dns-name`
 
-The node fingerprint is derived from the node’s long-lived root identity, not a
-DNS name. Network location may change without changing identity.
+Link endpoint descriptors carry both claims inside the node-signed hello
+bundle. User-facing screens show the friendly name, qualified by the canonical
+DNS name where useful, and do not expose fingerprints by default. DNS names are
+unique routing names, but neither a friendly name nor DNS is cryptographic
+identity authority. Transport endpoints in the descriptor's `addresses` list
+are connectivity data, not presentation claims; an older peer which omits
+`canonical_dns_name` does not implicitly claim its endpoint host as a DNS name.
+
+The underlying address and every protocol/persistence relationship remain
+`user@node-fingerprint`. Durable linked content -- channel scrollback, mail,
+carried board posts, fetched Link files -- therefore persists the fingerprint
+and resolves the home node's *current* friendly identity when rendered, so a
+benign rename is followed and nothing stored has to be rewritten. When that
+technical author identity has an undismissed cryptographic-identity warning,
+durable board and file attribution shows the warning and full fingerprint
+alongside the friendly label; browsing remains available. A node with
+no authenticated profile (one that has never been admitted, or is known only by
+an administratively configured fingerprint) is shown by that fingerprint rather
+than a shared placeholder. A full fingerprint is available as **Technical
+identity** in the relevant SysOp detail view and remains accepted as an
+advanced/backward-compatible input. Friendly-name resolution must be unique;
+an ambiguous presentation name is refused with a request to use an unambiguous
+DNS name or the technical identity. DNS and friendly claims share that one
+namespace, so a reference matching one node's DNS claim and another node's
+friendly claim is ambiguous rather than silently preferring either. Presentation
+claims and abbreviated fingerprint input likewise resolve as one candidate set:
+a name which equals another node's fingerprint prefix is ambiguous rather than
+silently shadowing that technical address. Exact full fingerprints retain
+precedence. When
+ambiguity remains because friendly and DNS claims collide, the refusal
+shows each candidate's full technical identity; it never repeats the unusable
+advice to enter the already-ambiguous DNS claim. Fingerprints remain hidden in
+the ordinary unique-name path. Friendly names are compared in one Unicode
+normalization form (NFC), so canonically
+equivalent spellings are one name, never two claims. UI delimiters, invisible
+control/format characters, and the `Unnamed linked node` and `Unknown linked
+node` fallback labels are reserved and cannot be claimed as friendly names. A
+complete 32-character
+base32 node fingerprint is reserved too: exact fingerprint lookup has precedence,
+so allowing the same shape as a friendly name would make that claim unreachable
+or misleading.
+
+Peers retain authenticated observations of all three values. A friendly-name
+change under the same fingerprint is an informational continuity notice. A DNS
+change under the same fingerprint is a more prominent routing notice. Reuse of
+a familiar friendly or DNS name by a different fingerprint is a strong
+cryptographic-identity warning: the UI explains that recovery/replacement may
+be legitimate but impersonation is possible, and it does not prevent the user
+from continuing. Presentation names never transfer trust or reputation between
+fingerprints.
+An undismissed cryptographic-identity warning continues to be shown at
+interaction boundaries even if a newer benign profile change is observed;
+only SysOp acknowledgement dismisses it. Bounded observation pruning therefore
+retains undismissed security warnings ahead of newer benign observations. The
+file catalogue re-reads the selected origin's warning after the picker returns,
+before asking for fetch consent. Trust-subject details show the same warning and
+full technical identity; applying an override to a warned subject requires a
+fresh, default-no confirmation of that fingerprint immediately before mutation.
+Neither warning prevents continued interaction. The
+local node likewise retains a bounded history of its previous friendly and DNS
+claims so another fingerprint cannot adopt a just-renamed local identity without
+raising the same warning. Reusing a retired claim moves it to the recent end of
+that bounded history, so retention follows the latest use rather than the claim's
+first retirement. The last friendly/DNS pair actually advertised in an
+outbound hello remains part of that collision namespace until it has been moved
+into history; an inbound hello racing the local rename therefore cannot claim
+the just-replaced name in the gap before the next outbound descriptor is built.
+Committing a changed local friendly or canonical-DNS claim also re-evaluates
+every peer descriptor already on disk against the new claim, because a peer
+which claimed that name first sends no further hello merely because this node
+renamed; an identical already-recorded collision is not duplicated.
+Startup primes the current local friendly/DNS pair before opening the Link
+listener. Thereafter the shared own-hello cache is refreshed through the
+background database lane before an inbound peer is persisted and once per
+outbound sync pass. Each outbound hello repeats that refresh after its network
+wait and immediately before persisting the authenticated peer; candidate
+fallback uses the same path. A verified peer-list refresh likewise repeats it
+after its network wait and immediately before persisting any updated known peer.
+Every endpoint which accepts a signed hello, including
+relay-mailbox pickup, performs that refresh before peer persistence; building
+the signed response itself performs no synchronous
+database I/O on the event loop. Authenticated live scrollback snapshots retain
+their authors' home-node fingerprints in memory as well as their friendly
+labels, so the same non-blocking identity warnings remain available even before
+the corresponding durable event has arrived.
+
+High-impact consent screens retain the same non-blocking model but disclose
+security context before confirmation. Offering or accepting a board-origin
+transfer involving a node with an undismissed cryptographic-identity warning
+shows that node's full technical identity before the default-no prompt. If an
+incoming offer's authenticated origin profile is unavailable, the confirmation
+falls back to the signed origin fingerprint rather than an anonymous placeholder.
+Likewise, a remote-file catalogue marks warned origins with their full technical
+identity and repeats that caution before the fetch confirmation, before any bytes
+are transferred.
 
 ### 4.5 Identity tiers
 
@@ -566,6 +660,11 @@ Routine operational-key rotation and compromise response do not change the
 node address. Root-key loss or compromise has no cryptographic recovery in the
 current design. Social/M-of-N recovery remains a possible future extension, not
 an assumed capability.
+
+Replacing the root identity necessarily changes the fingerprint and is treated
+as a new cryptographic identity. Keeping the same friendly or DNS name makes
+that replacement recognizable to humans but does not establish continuity;
+peers raise the strong warning above and continue to permit interaction.
 
 Root and operational keys are generated at initial bootstrap. Rotation is a
 guided SysOp action. Root-key custody is part of ordinary node backup and
@@ -1851,7 +1950,11 @@ attributes them to the sending node, and the UI renders the human identity as
 a personal signing key. The sending node remains responsible for enforcing its
 local membership, mute, and moderation rules before transmission; the
 receiving node independently enforces its own node/user/content policy before
-display.
+display. The receiving node retains the authenticated sending-node fingerprint
+on the in-memory message even though ordinary rendering shows the friendly
+label. If that fingerprint has an undismissed cryptographic-identity collision,
+the live channel line carries the same non-blocking caution used at mail and
+direct-message interaction boundaries.
 
 Presence is leased, scoped to subscribed linked channels, and advisory. A
 snapshot establishes current state after subscription; deltas update it.
@@ -2150,6 +2253,10 @@ Voluntary board-origin transfer requires mutual consent:
 1. the current origin signs an offer naming the proposed new origin;
 2. the proposed origin signs acceptance;
 3. peers project the new origin only after both valid events.
+
+Because this transfers authority, a SysOp picker must disambiguate peers whose
+friendly/DNS presentation labels collide by showing their full fingerprints
+before selection and confirmation.
 
 Only one outstanding transfer offer is meaningful at a time.
 
@@ -2735,6 +2842,12 @@ Establishment and authority to influence policy are different roles:
 
 No role is inferred transitively. A vouch may help probation graduation but
 cannot create a trust anchor, reporter, attestation authority, or trust domain.
+When a SysOp selects a node by friendly or DNS name for one of these
+security-policy roles, the UI shows the resolved technical identity. If that
+fingerprint has an undismissed cryptographic-identity warning, the warning is
+shown and explicit confirmation of that technical identity defaults to no
+before policy can change. Entering the complete fingerprint already supplies
+that confirmation.
 
 Per identity and trust dimension, local state is `probationary`, `established`,
 `quarantined`, or `blocked`. Manual block has highest precedence, followed by
@@ -3109,7 +3222,7 @@ introduced.
 
 ### 13.4 Backup and restore (issue #60's first operational slice)
 
-A node's recoverable state is not only its database — it is thirteen
+A node's recoverable state is not only its database — it is fourteen
 artifacts, today scattered across derived, `db_path`-relative filenames
 with no single existing tool that treats them as one recoverable set:
 
@@ -3120,6 +3233,7 @@ with no single existing tool that treats them as one recoverable set:
 | Node identity | `identity_dir` (`root.identity`, `signing.identity`, `transport.identity`, `transitions.json`) | `netbbs.link.node_identity` |
 | SSH host key | `db_path.parent / f"{db_path.stem}_ssh_host_key"` | `netbbs.net.ssh.ensure_host_key`, once, at first startup |
 | Managed-DNS credential | `db_path.parent / f"{db_path.stem}_managed_dns_credential"` | `netbbs.managed_dns.credential`, once, at registration (§16 Decision 7, issue #201) |
+| Managed-DNS rename credentials | Previous credential plus the temporary credential-transition journal beside `db_path`; restore preserves the presence and absence of the primary, previous, and journal artifacts | `netbbs.managed_dns.credential`, during a managed-name transition |
 | Welcome banner | `db_path.parent / f"{db_path.stem}_welcome_banner.ans"` | SysOp, via the welcome-banner menu screen |
 | Main-menu masthead | `db_path.parent / f"{db_path.stem}_main_menu_banner.ans"` | SysOp, via the masthead menu screen (issue #161) |
 | Logoff banner | `db_path.parent / f"{db_path.stem}_logoff_banner.ans"` | SysOp, via the logoff-banner menu screen (issue #177) |
@@ -3133,7 +3247,7 @@ A backup covering only the database silently loses the SSH host key (every
 client gets a MITM warning on next connect after restore) and, far more
 seriously, the Link node identity (root-key custody is explicitly "part of
 ordinary node backup and restore" per §4.5's node identity model, not a
-separate ceremony) — so this design treats all thirteen as one atomic backup
+separate ceremony) — so this design treats all fourteen as one atomic backup
 operation, never a DB-only one.
 
 **Mechanism**: a new `netbbs.backup` module (synchronous, path-based — no
@@ -3148,10 +3262,16 @@ of "the operator/an external trigger drives it, not a built-in timer").
 
 `create_backup(*, db_path, identity_dir, destination)`:
 
-1. **Database**: reuses `netbbs.selfupdate.snapshot_database` verbatim
+1. **Database and managed-DNS credential generation**: reuses
+   `netbbs.selfupdate.snapshot_database` verbatim
    (`sqlite3.Connection.backup()`, already proven safe against a live WAL
    database in `test_snapshot_and_restore_database_round_trip`) — written to
-   `destination/netbbs.db`. Never a raw file copy.
+   `destination/netbbs.db`. Never a raw file copy. The primary, previous, and
+   transition-journal credentials are double-collected around that snapshot,
+   and the snapshot's `managed_dns_*` configuration is compared with the live
+   database afterward. Any detected overlap with a credential/name transition
+   retries the bounded collection, so a backup cannot pair one transition generation's
+   database with another generation's bearer secrets.
 2. **Content blobs**: `shutil.copytree` of the blob root into
    `destination/files/`, `.incoming/` excluded. Must run strictly *after*
    step 1, not before or concurrently — this is what makes the DB-then-
@@ -5649,8 +5769,66 @@ heartbeat, release, or reclaim therefore cannot commit from state made
 stale by another provider await; concurrent HTTP transitions receive a
 retryable rejection before entering the worker queue. Publication and
 deletion failures remain retryable state (release is not finalized until
-deletion succeeds, and a failed static publication is retried), and the
-service-wide token-bucket state survives backend restarts.
+deletion succeeds, and a failed static publication is retried). Successful
+replacement maturation carries that publication result through the rest of the
+heartbeat and never issues a second publication from the stale pre-transition
+row. The service-wide token-bucket state survives backend restarts.
+
+Node-side updater passes and interactive registration, release, rename, and
+cancellation transitions share one process-local transition lock per node
+database. The lock covers the remote mutation and its local reconciliation, but
+never a human prompt, so a heartbeat response from an older snapshot cannot
+overwrite a completed SysOp transition. Node-side rename state and interactive
+registration/reclaim results are each one local database transaction: the
+replacement name, pending/unpublished state, and previous-name presentation state
+never become visible in a partial combination, nor can a reclaimed status appear
+with a stale published flag. Heartbeat reconciliation follows the same
+rule for the active and previous names, statuses, publication flags, and contact
+time. A credential-specific HTTP 401 is authoritative independently of the
+other credential's transient result, and all inactive outcomes from one pass
+are applied in that single transaction. Cancellation and updater-led recovery
+first commit the remotely revived
+previous name as a coherent local state, then use the credential transition
+journal in reverse to restore the previous bearer secret and remove the
+replacement-era extra secret. The service's cancellation response supplies the
+revived name's authoritative publication state; a failed republish cannot revive
+a stale local publication claim. A crash on either side remains recoverable by
+the retained two credentials and the updater. Point-in-time restore likewise
+removes any primary, previous, or journal credential artifact absent from the
+backup generation. A replacement abandoned during a rename remains eligible
+for credential-recovery retry only while its own release/abandonment cooldown
+is still open, and reactivation restarts its contact window at the retry time.
+Recovery of a replacement which is still marked pending also records fresh
+contact and restarts its maturation window only if the prior contact gap crossed
+the abandonment threshold. A successful standalone registration or reclaim
+clears any expired previous-name presentation state and obsolete previous
+credential rather than leaving a phantom cancellable transition.
+Rename completion releases or deletes the previous row only when it still belongs
+to the same node fingerprint; a cooldown-expired name reissued to another node is
+never mutated through the stale replacement link. Cancellation performs the
+same ownership check before any provider deletion, including when the reissued
+previous row is already active. Rename retry likewise treats an existing
+`replaces_name` relationship as recoverable only when the replacement and
+currently authenticated registration have the same node fingerprint; reissue
+never transfers control of an old replacement credential. If its heartbeat
+becomes
+authoritatively inactive while the old
+name's heartbeat fails transiently, the node continues heartbeating the retained
+old credential on later passes rather than letting the still-live name expire.
+A successful old-name heartbeat is also reconciled when the replacement
+heartbeat fails transiently: the replacement's cached state remains unchanged,
+while the old name's authoritative status and publication result are committed
+atomically.
+An authenticated successful rename also refreshes the current registration's
+contact window before reserving or recovering its replacement, so a waiting
+abandonment sweep cannot immediately withdraw the promised old name. An inactive
+rename target whose cooldown has elapsed is deleted and admitted as a fresh
+replacement immediately, matching ordinary registration rather than waiting for
+the periodic sweep. Successful cancellation refreshes the retained
+previous registration's last-contact time even when it was still active. An
+uninterrupted pending name preserves its earned maturation window, while one whose
+last contact crossed the abandonment threshold restarts that window just like a
+heartbeat.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 
