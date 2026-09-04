@@ -6438,9 +6438,19 @@ def test_managed_dns_status_allows_recovery_registration_when_cached_status_is_a
     set_registered_name(db, "myboard")
     set_registration_status(db, RegistrationStatus.PENDING)
 
-    session = FakeSession(["d", "r", "b", "b"])
+    session = FakeSession(["d", "r", " ", "b", "b"])
     _run(session, lane, sysop)
     assert "hasn't been configured" in _visible(_written_text(session))
+
+
+def test_managed_dns_status_pauses_after_register_message_before_redraw(db, lane, sysop):
+    session = FakeSession(["d", "r", " ", "b", "b"])
+
+    _run(session, lane, sysop)
+
+    text = _visible(_written_text(session))
+    assert "hasn't been configured" in text
+    assert "Press any key to continue..." in text
 
 
 def test_managed_dns_status_rejects_the_release_hotkey_when_not_active(db, lane, sysop):
@@ -6464,7 +6474,7 @@ def test_managed_dns_status_register_hotkey_registers_end_to_end(db, lane, sysop
             # own asyncio.run) -- the server above needs to keep running
             # in *this* coroutine's own event loop while the admin
             # screen dials it.
-            session = FakeSession(["d", "r", "myboard", "n", "n", "b", "b"])
+            session = FakeSession(["d", "r", "myboard", "n", "n", " ", "b", "b"])
             await admin_menu(session, lane, sysop)
         finally:
             await server.stop()
@@ -6488,7 +6498,7 @@ def test_managed_dns_status_release_hotkey_releases_end_to_end(db, lane, sysop):
             set_node_fingerprint(db, "fp-1")
             # Register first (outside the admin screen, to set up state),
             # then exercise the screen's own [L] Release hotkey.
-            await admin_menu(FakeSession(["d", "r", "myboard", "n", "n", "b", "b"]), lane, sysop)
+            await admin_menu(FakeSession(["d", "r", "myboard", "n", "n", " ", "b", "b"]), lane, sysop)
             await admin_menu(FakeSession(["d", "l", "y", "b", "b"]), lane, sysop)
         finally:
             await server.stop()

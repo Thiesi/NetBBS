@@ -4121,6 +4121,11 @@ async def _managed_dns_status_screen(session: Session, lane: DatabaseLane, actor
         elif choice == "r":
             await session.write_line("")
             await register_via_prompt(session, lane)
+            # register_via_prompt reports every terminal outcome inline,
+            # including missing configuration and service rejections. Keep
+            # that result visible before this status screen redraws over it.
+            await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
+            await session.read_any_key()
             status = await _draw_managed_dns_status(session, lane, actor)
         elif (
             choice == "l" and status in _MANAGED_DNS_ACTIVE_STATUSES
