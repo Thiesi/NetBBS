@@ -1885,9 +1885,11 @@ async def _set_node_name_gradient_screen(
 ) -> None:
     """Preset-only (GitHub issue #175's own deliberately narrow scope --
     `netbbs.rendering.gradient.GRADIENTS`'s own keys, not free-form RGB
-    stop entry) -- previews the candidate against the real current node
-    name before asking for confirmation, the same "preview before
-    confirm" requirement issue #162's own RGB slots established."""
+    stop entry). The list itself shows every candidate rendered against
+    the real current node name, so it *is* the preview issue #162's own
+    "preview before confirm" requirement asks for: one keystroke on a
+    listed digit applies that gradient (issue #282 -- previously a typed
+    index, then a second preview, then a yes/no), `[B]ack` leaves it."""
     def _load(db: Database) -> tuple[str, str | None]:
         return get_node_display_name(db), node_name_gradient_override(db)
 
@@ -1900,29 +1902,28 @@ async def _set_node_name_gradient_screen(
         preview = gradient_text(name, choice, truecolor=False) if choice is not None else colored(name, fg_color=header_color, bold=True)
         marker = colored(" (current)", fg_color=MUTED_COLOR) if choice == current else ""
         await session.write_line(colored(f"  {i}. {label:<8}", fg_color=LABEL_COLOR) + preview + marker)
-    await write_prompt(session, f"Choice (0-{len(choices) - 1}, blank to leave unchanged): ")
-
-    raw = (await session.read_line()).strip()
-    if not raw:
-        await session.write_line("No change.")
-        return
-    try:
-        index = int(raw)
-        chosen = choices[index]
-    except (ValueError, IndexError):
-        await session.write_line(colored("Not a valid choice -- no change.", fg_color=ERROR_COLOR))
-        return
+    await session.write_line(
+        action_bar([menu_key(f"0-{len(choices) - 1}", ""), menu_key("B", "ack")], width=session.terminal_width)
+    )
+    await write_prompt(session, "Choice: ")
+    while True:
+        raw = (await session.read_key()).lower()
+        if raw == "b":
+            await session.write_line("")
+            return
+        # ASCII digits only: str.isdigit() is also true for characters like
+        # "²" or "①", for which int() then raises (Codex review on #291).
+        if len(raw) == 1 and raw in "0123456789" and int(raw) < len(choices):
+            await session.write_line("")
+            chosen = choices[int(raw)]
+            break
+        await session.write(reject_unhandled_key(raw))
 
     if chosen == current:
         await session.write_line("Already set to that -- no change.")
         return
 
     label = "solid" if chosen is None else chosen
-    preview = gradient_text(name, chosen, truecolor=False) if chosen is not None else colored(name, fg_color=header_color, bold=True)
-    await session.write_line(colored("\r\nPreview: ", fg_color=MUTED_COLOR) + preview)
-    if not await prompt_yes_no(session, f"Apply {label!r} as the node name gradient?", default=False):
-        await session.write_line("Not applied.")
-        return
 
     def _apply(db: Database) -> None:
         set_node_name_gradient_override(db, chosen)
@@ -6552,6 +6553,30 @@ async def _edit_welcome_banner_screen(session: Session, lane: DatabaseLane, acto
     await session.write_line(f"\r\nSaved {path}. Use [P]review to verify it looks right.")
 
 
+async def _preview_apply_choice(session: Session, label: str) -> bool:
+    """After a gallery/filesystem preview (issue #282): `[A]pply` or
+    `[B]ack` to the list, instead of a yes/no whose "no" then also needed
+    a "Press any key" to get back -- two keystrokes per declined preset
+    while shopping through a gallery. Returns whether to apply."""
+    await session.write_line(
+        "\r\n" + action_bar([menu_key("A", "pply"), menu_key("B", "ack to the list")], width=session.terminal_width)
+    )
+    await write_prompt(session, f"{label}? ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice in ("a", "b"):
+            # A caller who habitually types "A<Enter>" must not carry that
+            # Enter into the success pause or back into the picker (where
+            # Enter activates the highlighted entry) -- the same drain the
+            # yes/no primitive this replaces performs (Codex review on #291).
+            discard_buffered_enter = getattr(session, "discard_buffered_enter", None)
+            if discard_buffered_enter is not None:
+                await discard_buffered_enter()
+            await session.write_line("")
+            return choice == "a"
+        await session.write(reject_unhandled_key(choice))
+
+
 async def _welcome_banner_gallery_screen(
     session: Session, lane: DatabaseLane, actor: User, description_level: str,
     redraw_in_place: bool, unicode_style: bool, collapsed: bool,
@@ -6596,14 +6621,7 @@ async def _welcome_banner_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the welcome banner now?", default=False):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            # Dogfood report: without this pause, redraw_in_place (the
-            # default for new accounts) clears this message the instant
-            # the loop re-enters pick_item's own next redraw -- same fix
-            # `_preview_welcome_banner_screen` already established.
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the welcome banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -6772,10 +6790,7 @@ async def _welcome_banner_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the welcome banner now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the welcome banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7025,10 +7040,7 @@ async def _main_menu_banner_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the masthead now?", default=False):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7104,10 +7116,7 @@ async def _main_menu_banner_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the masthead now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7412,10 +7421,7 @@ async def _logoff_banner_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the logoff banner now?", default=False):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the logoff banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7489,10 +7495,7 @@ async def _logoff_banner_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the logoff banner now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the logoff banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7713,12 +7716,7 @@ async def _new_account_banner_before_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(
-            session, f"\r\nApply {preset.name!r} as the new-account (before) banner now?", default=False
-        ):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (before) banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -7794,10 +7792,7 @@ async def _new_account_banner_before_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (before) banner now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (before) banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8020,12 +8015,7 @@ async def _new_account_banner_after_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(
-            session, f"\r\nApply {preset.name!r} as the new-account (after) banner now?", default=False
-        ):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the new-account (after) banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8101,10 +8091,7 @@ async def _new_account_banner_after_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the new-account (after) banner now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the new-account (after) banner"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8405,10 +8392,7 @@ async def _board_list_masthead_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the board list masthead now?", default=False):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the board list masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8484,10 +8468,7 @@ async def _board_list_masthead_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the board list masthead now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the board list masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8702,10 +8683,7 @@ async def _file_area_masthead_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nApply {preset.name!r} as the file area masthead now?", default=False):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the file area masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -8779,10 +8757,7 @@ async def _file_area_masthead_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(session, f"\r\nLoad {path.name!r} as the file area masthead now?", default=False):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the file area masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -9001,12 +8976,7 @@ async def _chat_channel_picker_masthead_gallery_screen(
         await session.write_line(colored(f"\r\nPreviewing {preset.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(
-            session, f"\r\nApply {preset.name!r} as the chat channel picker masthead now?", default=False
-        ):
-            await session.write_line(colored("Not applied.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Apply {preset.name!r} as the chat channel picker masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -9082,12 +9052,7 @@ async def _chat_channel_picker_masthead_filesystem_screen(
         await session.write_line(colored(f"\r\nPreviewing {path.name!r}:", fg_color=MUTED_COLOR))
         await session.write_line(decode_ansi_bytes(data) + RESET)
 
-        if not await prompt_yes_no(
-            session, f"\r\nLoad {path.name!r} as the chat channel picker masthead now?", default=False
-        ):
-            await session.write_line(colored("Not loaded.", fg_color=MUTED_COLOR))
-            await session.write_line(colored("Press any key to continue...", fg_color=MUTED_COLOR))
-            await session.read_any_key()
+        if not await _preview_apply_choice(session, f"Load {path.name!r} as the chat channel picker masthead"):
             continue
 
         def _apply(db: Database) -> Path:
@@ -9143,163 +9108,169 @@ def _theme_color_status_line(label: str, rgb: tuple[int, int, int] | None) -> st
     return colored(f"{label}: ", fg_color=LABEL_COLOR) + swatch + colored(f"  {value}", fg_color=METADATA_COLOR)
 
 
-async def _draw_theme_colors_menu(
-    session: Session, lane: DatabaseLane, description_level: str, redraw_in_place: bool,
-    unicode_style: bool, collapsed: bool,
-) -> None:
-    def _load(db: Database):
-        return accent_color_override(db), header_color_override(db), clock_color_override(db), effective_header_color_256(db)
+def _parse_rgb(raw: str) -> tuple[int, int, int] | None:
+    parts = raw.split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        candidate = tuple(int(part.strip()) for part in parts)
+    except ValueError:
+        return None
+    if not all(0 <= value <= 255 for value in candidate):
+        return None
+    return candidate  # type: ignore[return-value]
 
-    accent_rgb, header_rgb, clock_rgb, header_color = await lane.run(_load)
-    await session.write_line("\r\n" + screen_title("Node colors",
-            breadcrumb=(session.node_display_name,), width=session.terminal_width, clear=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-            header_color=header_color, node_name_gradient=session.node_name_gradient))
-    await session.write_line(await _load_condensed_status_line(lane, unicode_style=unicode_style, terminal_width=session.terminal_width))
-    await session.write_line(
+
+def _theme_color_field(slot: str) -> Callable[[Session, DatabaseLane, dict], Awaitable[None]]:
+    """One branding slot on the node-colours editor: an R,G,B triple,
+    'default' to clear the override, blank to keep. Validation happens
+    here, with the draft untouched on a bad entry; nothing is written
+    until [S]ave."""
+    label = _THEME_SLOT_LABELS[slot]
+
+    async def prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        current = draft[slot]
+        current_text = f"{current[0]},{current[1]},{current[2]}" if current is not None else "default"
+        await session.write_line(
+            colored(
+                "Enter a color as R,G,B (each 0-255), 'default' to clear the override, "
+                "or leave blank to keep it.",
+                fg_color=MUTED_COLOR,
+            )
+        )
+        await write_prompt(session, f"{label} [{current_text}]: ")
+        raw = (await session.read_line()).strip()
+        if not raw:
+            return
+        if raw.lower() == "default":
+            if current is None:
+                await session.write_line("Already using the default -- no change.")
+                return
+            draft[slot] = None
+            return
+        rgb = _parse_rgb(raw)
+        if rgb is None:
+            await session.write_line(colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR))
+            return
+        draft[slot] = rgb
+
+    return prompt
+
+
+def _theme_preview_preamble(draft: dict) -> str:
+    """The editor's own live preview (issue #282): every slot's sample
+    line at truecolor and 256-color depth for whatever the draft holds
+    right now -- what the separate [P]review screen used to show, and
+    the "preview before confirm" issue #162 required, without a second
+    trip or a yes/no."""
+    lines = [
         colored(
             "Branding only -- status colors (error/success/warning/etc.) always stay standard, "
             "so a caller can trust what they mean on any node.",
             fg_color=MUTED_COLOR,
         )
-    )
-    await session.write_line(_theme_color_status_line("Accent", accent_rgb))
-    await session.write_line(_theme_color_status_line("Header", header_rgb))
-    await session.write_line(_theme_color_status_line("Clock ", clock_rgb))
-    await session.write_line(
-        "\r\n" + _menu_row(
-            [
-                MenuEntry(label=menu_key("A", "ccent"), brief="Board/channel/user-name color"),
-                MenuEntry(label=menu_key("H", "eader"), brief="Section-header color"),
-                MenuEntry(label=menu_key("C", "lock"), brief="Main-menu clock color"),
-                MenuEntry(label=menu_key("P", "review"), brief="Sample text, truecolor vs. 256-color"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to Settings"),
-            ],
-            description_level,
-            width=session.terminal_width,
-            height=session.terminal_height,
-        )
-    )
-    await session.write("Choice: ")
-
-
-async def _set_theme_color_screen(session: Session, lane: DatabaseLane, actor: User, *, slot: str) -> None:
-    """Set or clear one of the three overridable branding colors.
-
-    Previews the candidate RGB against real sample text at both
-    truecolor and 256-color depth *before* asking for confirmation --
-    issue #162's own explicit requirement -- rather than applying first
-    and letting a SysOp discover a bad choice only on the next real
-    screen that happens to use it."""
-    label = _THEME_SLOT_LABELS[slot]
-    getter = _THEME_SLOT_GETTERS[slot]
-    setter = _THEME_SLOT_SETTERS[slot]
-    current = await lane.run(getter)
-    current_text = f"{current[0]},{current[1]},{current[2]}" if current is not None else "default"
-
-    await session.write_line(colored(f"\r\n{label}:", fg_color=await lane.run(effective_header_color_256), bold=True))
-    await session.write_line(f"Currently: {current_text}")
-    await session.write_line(
-        colored(
-            "Enter a color as R,G,B (each 0-255), 'default' to clear the override, "
-            "or leave blank to make no change.",
-            fg_color=MUTED_COLOR,
-        )
-    )
-    await write_prompt(session, f"{label} [{current_text}]: ")
-    raw = (await session.read_line()).strip()
-    if not raw:
-        await session.write_line("No change.")
-        return
-
-    if raw.lower() == "default":
-        if current is None:
-            await session.write_line("Already using the default -- no change.")
-            return
-        if not await prompt_yes_no(session, f"Clear the {label.lower()} override and revert to the default?", default=False):
-            await session.write_line("Cancelled.")
-            return
-        await lane.run(setter, None)
-        await lane.run(record_action, actor=actor, action=f"clear_{slot}_color_override", detail=current_text)
-        await session.write_line(f"{label} reverted to the default.")
-        return
-
-    parts = raw.split(",")
-    rgb: tuple[int, int, int] | None = None
-    if len(parts) == 3:
-        try:
-            candidate = tuple(int(part.strip()) for part in parts)
-        except ValueError:
-            candidate = None
-        if candidate is not None and all(0 <= value <= 255 for value in candidate):
-            rgb = candidate  # type: ignore[assignment]
-    if rgb is None:
-        await session.write_line(colored("Not a valid R,G,B triple (each 0-255) -- no change.", fg_color=ERROR_COLOR))
-        return
-
-    await session.write_line(colored("\r\nPreview:", fg_color=MUTED_COLOR))
-    await session.write_line(colored("  Truecolor: ", fg_color=LABEL_COLOR) + _theme_sample_line(slot, rgb))
-    await session.write_line(colored("  256-color: ", fg_color=LABEL_COLOR) + _theme_sample_line(slot, nearest_256(rgb)))
-
-    if not await prompt_yes_no(session, f"Apply this {label.lower()}?", default=False):
-        await session.write_line("Not applied.")
-        return
-
-    await lane.run(setter, rgb)
-    await lane.run(record_action, actor=actor, action=f"set_{slot}_color_override", detail=f"{rgb[0]},{rgb[1]},{rgb[2]}")
-    await session.write_line(f"{label} updated.")
-
-
-async def _preview_theme_colors_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    def _load(db: Database):
-        return accent_color_override(db), header_color_override(db), clock_color_override(db)
-
-    overrides = await lane.run(_load)
-    await session.write_line(colored("\r\nNode color preview:", fg_color=MUTED_COLOR))
-    for slot, rgb in zip(("accent", "header", "clock"), overrides):
-        label = _THEME_SLOT_LABELS[slot]
-        await session.write_line(colored(f"\r\n{label}:", fg_color=LABEL_COLOR, bold=True))
+    ]
+    for slot in ("accent", "header", "clock"):
+        rgb = draft[slot]
+        lines.append(colored(f"{_THEME_SLOT_LABELS[slot]}:", fg_color=LABEL_COLOR, bold=True))
         if rgb is None:
-            await session.write_line(
+            lines.append(
                 colored("  Default:   ", fg_color=MUTED_COLOR) + _theme_sample_line(slot, _THEME_SLOT_DEFAULTS[slot])
             )
         else:
-            await session.write_line(colored("  Truecolor: ", fg_color=MUTED_COLOR) + _theme_sample_line(slot, rgb))
-            await session.write_line(
-                colored("  256-color: ", fg_color=MUTED_COLOR) + _theme_sample_line(slot, nearest_256(rgb))
-            )
-    await session.write_line(colored("\r\nPress any key to continue...", fg_color=MUTED_COLOR))
-    await session.read_key()
+            lines.append(colored("  Truecolor: ", fg_color=MUTED_COLOR) + _theme_sample_line(slot, rgb))
+            lines.append(colored("  256-color: ", fg_color=MUTED_COLOR) + _theme_sample_line(slot, nearest_256(rgb)))
+    return "\r\n".join(lines)
 
 
 async def _theme_colors_menu(session: Session, lane: DatabaseLane, actor: User) -> None:
-    description_level = await lane.run(menu_description_level, actor)
+    """Settings -> Node colors (issue #162, reshaped by issue #282): one
+    draft editor for the three overridable branding slots, previewed
+    live above the fields, applied together on [S]ave. Replaces a menu
+    whose per-slot screens only showed the current value inside an
+    editable prompt and then asked "Apply this ...?" -- three times over
+    -- plus a separate preview screen."""
+    def _load(db: Database) -> dict:
+        return {
+            "accent": accent_color_override(db),
+            "header": header_color_override(db),
+            "clock": clock_color_override(db),
+        }
+
+    draft = await lane.run(_load)
+    starting = dict(draft)
+
+    def _render(slot: str) -> Callable[[dict], str]:
+        return lambda d: f"{d[slot][0]},{d[slot][1]},{d[slot][2]}" if d[slot] is not None else "default"
+
+    fields = [
+        FieldSpec(
+            key="accent", hotkey="a", menu_text=menu_key("A", "ccent"), label="Accent",
+            render=_render("accent"), prompt=_theme_color_field("accent"),
+            brief="Board/channel/user-name color",
+            help="Used for board, channel, and user names and other navigable items. R,G,B or 'default'.",
+        ),
+        FieldSpec(
+            key="header", hotkey="h", menu_text=menu_key("H", "eader"), label="Header",
+            render=_render("header"), prompt=_theme_color_field("header"),
+            brief="Section-header color",
+            help="Used for section titles and frame borders. R,G,B or 'default'.",
+        ),
+        FieldSpec(
+            key="clock", hotkey="c", menu_text=menu_key("C", "lock"), label="Clock",
+            render=_render("clock"), prompt=_theme_color_field("clock"),
+            brief="Main-menu clock color",
+            help="Used for the main-menu prompt's time display. R,G,B or 'default'.",
+        ),
+    ]
+
+    async def save(draft: dict) -> bool:
+        def _apply(db: Database) -> list[str]:
+            messages = []
+            for slot in ("accent", "header", "clock"):
+                if draft[slot] == starting[slot]:
+                    continue
+                label = _THEME_SLOT_LABELS[slot]
+                _THEME_SLOT_SETTERS[slot](db, draft[slot])
+                if draft[slot] is None:
+                    previous = starting[slot]
+                    record_action(
+                        db, actor=actor, action=f"clear_{slot}_color_override",
+                        detail=f"{previous[0]},{previous[1]},{previous[2]}",
+                    )
+                    messages.append(f"{label} reverted to the default.")
+                else:
+                    rgb = draft[slot]
+                    record_action(db, actor=actor, action=f"set_{slot}_color_override", detail=f"{rgb[0]},{rgb[1]},{rgb[2]}")
+                    messages.append(f"{label} updated.")
+            return messages
+
+        messages = await lane.run(_apply)
+        for message in messages or ["No changes."]:
+            await session.write_line(message)
+        return True
+
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
-    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
-    await _draw_theme_colors_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-    while True:
-        choice = (await session.read_key()).lower()
-        if choice == "b":
-            await session.write_line("")
-            return
-        elif choice == "a":
-            await session.write_line("")
-            await _set_theme_color_screen(session, lane, actor, slot="accent")
-            await _draw_theme_colors_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        elif choice == "h":
-            await session.write_line("")
-            await _set_theme_color_screen(session, lane, actor, slot="header")
-            await _draw_theme_colors_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        elif choice == "c":
-            await session.write_line("")
-            await _set_theme_color_screen(session, lane, actor, slot="clock")
-            await _draw_theme_colors_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        elif choice == "p":
-            await session.write_line("")
-            await _preview_theme_colors_screen(session, lane, actor)
-            await _draw_theme_colors_menu(session, lane, description_level, redraw_in_place, unicode_style, collapsed)
-        else:
-            await session.write(reject_unhandled_key(choice))
+    # Issue #206's condensed status line on every nested console screen
+    # without a full panel of its own -- kept above the live preview.
+    status_line = await _load_condensed_status_line(
+        lane, unicode_style=unicode_style, terminal_width=session.terminal_width
+    )
+    newline = chr(13) + chr(10)
+    await edit_resource_draft(
+        session, lane,
+        title="Node colors",
+        fields=fields, draft=draft, save=save,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        preamble=lambda d: status_line + newline + _theme_preview_preamble(d),
+        unicode_style=unicode_style,
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
+    )
 
 
 # -- boards & areas (design doc) ---------------------------------------
@@ -12214,13 +12185,23 @@ async def _resolve_door_name_collision(
     await session.write_line(
         colored(f"\r\n{default_name!r} is already registered as a door.", fg_color=MUTED_COLOR)
     )
-    await write_prompt(
-        session,
-        f"{menu_key('N', 'ew instance under a different name')}  "
-        f"{menu_key('E', 'dit the existing one')}  {menu_key('C', 'ancel')}: "
+    await session.write_line(
+        action_bar(
+            [
+                menu_key("N", "ew instance under a different name"),
+                menu_key("E", "dit the existing one"),
+                menu_key("C", "ancel"),
+            ],
+            width=session.terminal_width,
+        )
     )
-    choice = (await session.read_key()).lower()
-    await session.write_line(choice.upper())
+    await write_prompt(session, "Choice: ")
+    while True:
+        choice = (await session.read_key()).lower()
+        if choice in ("n", "e", "c"):
+            await session.write_line(choice.upper())
+            break
+        await session.write(reject_unhandled_key(choice))
     if choice == "e":
         await _door_detail_screen(session, lane, actor, existing)
         return None
@@ -12912,6 +12893,10 @@ async def _channel_detail_screen(
             await session.write_line("")
             mrc_mapping = await _mrc_room_screen(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
             await _redraw()
+        elif choice == "u" and mrc_mapping is not None:
+            await session.write_line("")
+            mrc_mapping = await _unbridge_mrc_room(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
+            await _redraw()
         elif choice == "p" and mrc_mapping is not None:
             await session.write_line("")
             mrc_mapping = await _toggle_mrc_pause(session, lane, actor, channel, mrc_mapping, mrc_bridge=mrc_bridge)
@@ -12962,6 +12947,14 @@ async def _draw_channel_detail(
     else:
         state = "paused" if mrc_mapping.paused else "bridged"
         await session.write_line(f"MRC room: #{sanitize_text(mrc_mapping.room)} ({state})")
+        if not (await lane.run(load_mrc_settings)).enabled:
+            await session.write_line(
+                colored(
+                    "MRC is switched off node-wide -- nothing is relayed until you enable it under "
+                    "Settings > Inter-BBS chat (MRC).",
+                    fg_color=MUTED_COLOR,
+                )
+            )
     options = [
         MenuEntry(label=menu_key("E", "dit"), brief="Change this channel's settings"),
         MenuEntry(label=menu_key("D", "elete"), brief="Permanently remove this channel"),
@@ -12971,6 +12964,7 @@ async def _draw_channel_detail(
         options.append(MenuEntry(label=menu_key("L", "ink this chat channel"), brief="Share it via NetBBS Link"))
     options.append(MenuEntry(label=menu_key("M", "RC room"), brief="Bridge to a Multi Relay Chat room"))
     if mrc_mapping is not None:
+        options.append(MenuEntry(label=menu_key("U", "nbridge"), brief="Stop relaying and forget the room"))
         if mrc_mapping.paused:
             options.append(MenuEntry(label=menu_key("P", "ause MRC bridge", prefix="Un"), brief="Resume relaying to MRC"))
         else:
@@ -12988,9 +12982,13 @@ async def _mrc_room_screen(
     *, mrc_bridge: MrcBridge | None,
 ) -> MrcChannelMapping | None:
     """Issue #275 (design doc §16, #165 Decision 2): map this channel to
-    one MRC room, or unmap it -- the SysOp's explicit, per-channel
-    opt-in; nothing is ever bridged by default. Applied live through
-    the running node's bridge when there is one."""
+    one MRC room -- the SysOp's explicit, per-channel opt-in; nothing is
+    ever bridged by default. Applied live through the running node's
+    bridge when there is one. Issue #282: the current mapping, the
+    relay warning, and the node-wide off notice all live on the channel
+    detail screen now; this prompt only sets a room (blank keeps), and
+    unmapping is the detail screen's own `[U]nbridge` hotkey rather
+    than a magic "-" typed here."""
     shown = f"#{sanitize_text(current.room)}" if current is not None else "none"
     await session.write_line(
         colored(
@@ -12999,28 +12997,10 @@ async def _mrc_room_screen(
             fg_color=MUTED_COLOR,
         )
     )
-    await write_prompt(session, f"MRC room [{shown}] (blank = keep, - = unbridge): ")
+    await write_prompt(session, f"MRC room [{shown}] (blank = keep): ")
     raw = (await session.read_line()).strip()
     if not raw:
         return current
-    if raw == "-":
-        if current is None:
-            return None
-
-        def _clear(db: Database) -> None:
-            clear_mrc_room(db, channel)
-            record_action(
-                db, actor=actor, action="clear_mrc_room", object_type="channel", object_id=channel.id,
-                detail=f"was #{current.room}",
-            )
-
-        await lane.run(_clear)
-        if mrc_bridge is not None:
-            await mrc_bridge.refresh_channel_mappings()
-        await session.write_line(f"Channel {channel.name!r} is no longer bridged to MRC.")
-        if mrc_bridge is None:
-            await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
-        return None
 
     def _set(db: Database) -> MrcChannelMapping:
         mapping = set_mrc_room(db, channel, raw)
@@ -13040,16 +13020,30 @@ async def _mrc_room_screen(
     await session.write_line(f"Channel {channel.name!r} is now bridged to MRC room #{mapping.room}.")
     if mrc_bridge is None:
         await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
-    settings = await lane.run(load_mrc_settings)
-    if not settings.enabled:
-        await session.write_line(
-            colored(
-                "MRC is switched off node-wide -- nothing is relayed until you enable it under "
-                "Settings > Inter-BBS chat (MRC).",
-                fg_color=MUTED_COLOR,
-            )
-        )
     return mapping
+
+
+async def _unbridge_mrc_room(
+    session: Session, lane: DatabaseLane, actor: User, channel: Channel, current: MrcChannelMapping,
+    *, mrc_bridge: MrcBridge | None,
+) -> None:
+    """The channel detail's `[U]nbridge` (issue #282): forget the MRC
+    room mapping, live through the running bridge when there is one."""
+
+    def _clear(db: Database) -> None:
+        clear_mrc_room(db, channel)
+        record_action(
+            db, actor=actor, action="clear_mrc_room", object_type="channel", object_id=channel.id,
+            detail=f"was #{current.room}",
+        )
+
+    await lane.run(_clear)
+    if mrc_bridge is not None:
+        await mrc_bridge.refresh_channel_mappings()
+    await session.write_line(f"Channel {channel.name!r} is no longer bridged to MRC.")
+    if mrc_bridge is None:
+        await session.write_line(colored(_MRC_STANDALONE_NOTE, fg_color=MUTED_COLOR))
+    return None
 
 
 async def _toggle_mrc_pause(

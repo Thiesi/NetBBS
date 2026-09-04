@@ -4145,13 +4145,13 @@ def test_gallery_selecting_a_preset_previews_its_decoded_content_before_applying
     from netbbs.net.welcome_banner import is_welcome_banner_enabled
 
     # item 01 on the picker's first page -- Synthwave / Magenta-Cyan Neon Grid.
-    # Declining loops back into the gallery's own picker (dogfood fix),
-    # so exiting cleanly needs one extra "b" beyond the usual 3.
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "n", "x", "b", "b", "b", "b", "b", "b"])
+    # [B]ack from the preview returns to the gallery's own picker, so
+    # exiting cleanly needs one extra "b" beyond the usual 3.
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
-    assert "Not applied." in text
+    assert "[A]pply" in _visible(text) and "Applied and enabled." not in text
     assert is_welcome_banner_enabled(db) is False
 
 
@@ -4159,7 +4159,7 @@ def test_gallery_applying_a_preset_writes_its_bytes_and_enables_the_banner(db, l
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -4191,15 +4191,33 @@ def test_gallery_declining_a_preset_returns_to_the_same_gallery_to_try_another(d
     from netbbs.net.banner_presets import WELCOME_BANNER_PRESETS, load_welcome_banner_preset
     from netbbs.net.welcome_banner import banner_path, is_welcome_banner_enabled
 
-    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "n", "x", "0", "3", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "g", "0", "1", "b", "0", "3", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'Synthwave / Magenta-Cyan Neon Grid':" in text
-    assert "Not applied." in text
     assert "Previewing 'Cyberpunk Megacity / Sunset Amber-Gold':" in text
     assert "Applied and enabled." in text
     assert is_welcome_banner_enabled(db) is True
     assert banner_path(db).read_bytes() == load_welcome_banner_preset(WELCOME_BANNER_PRESETS[2])
+
+
+def test_gallery_apply_choice_drains_a_trailing_enter(db, lane, sysop):
+    """Codex review on #291: "A<Enter>" must not carry the Enter into the
+    success pause (or, on Back, into the picker)."""
+    from netbbs.net.welcome_banner import is_welcome_banner_enabled
+
+    class DrainingSession(FakeSession):
+        def __init__(self, inputs):
+            super().__init__(inputs)
+            self.drains = 0
+
+        async def discard_buffered_enter(self) -> None:
+            self.drains += 1
+
+    session = DrainingSession(["s", "m", "n", "w", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop))
+    assert session.drains >= 1
+    assert is_welcome_banner_enabled(db) is True
 
 
 # -- welcome-banner filesystem picker (issue #170) --------------------------
@@ -4244,14 +4262,13 @@ def test_from_disk_selecting_and_declining_previews_but_does_not_load(db, lane, 
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    # Declining loops back into this same picker (same dogfood fix as
-    # the bundled gallery), so exiting cleanly needs one extra "b". The
-    # "x" dismisses the "Not loaded." pause (same redraw_in_place fix).
-    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "n", "x", "b", "b", "b", "b", "b", "b"])
+    # [B]ack from the preview returns to this same picker, so exiting
+    # cleanly needs one extra "b".
+    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Previewing 'custom.ans':" in text
-    assert "Not loaded." in text
+    assert "[A]pply" in _visible(text) and "Loaded and enabled." not in text
     assert is_welcome_banner_enabled(db) is False
     assert not banner_path(db).exists()
 
@@ -4261,7 +4278,7 @@ def test_from_disk_selecting_and_confirming_loads_and_enables_it(db, lane, sysop
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN ART")
 
-    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "w", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -4534,7 +4551,7 @@ def test_masthead_gallery_applying_a_preset_writes_its_bytes_and_enables_the_mas
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled, main_menu_banner_path
 
-    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -4552,11 +4569,11 @@ def test_masthead_gallery_applying_a_preset_writes_its_bytes_and_enables_the_mas
 def test_masthead_gallery_declining_the_apply_prompt_leaves_the_masthead_disabled(db, lane, sysop):
     from netbbs.net.main_menu_banner import is_main_menu_banner_enabled
 
-    # Declining loops back into the gallery's own picker (dogfood fix),
-    # so exiting cleanly needs one extra "b" beyond the usual 3.
-    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "n", "x", "b", "b", "b", "b", "b", "b"])
+    # [B]ack from the preview returns to the gallery's own picker, so
+    # exiting cleanly needs one extra "b" beyond the usual 3.
+    session = FakeSession(["s", "m", "m", "m", "g", "0", "1", "b", "b", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Not applied." in _written_text(session)
+    assert "Applied and enabled." not in _written_text(session)
     assert is_main_menu_banner_enabled(db) is False
 
 
@@ -4574,7 +4591,7 @@ def test_masthead_from_disk_selecting_and_confirming_loads_and_enables_it(db, la
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN MASTHEAD")
 
-    session = FakeSession(["s", "m", "m", "m", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "m", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -4961,7 +4978,7 @@ def test_node_name_gradient_option_appears_in_the_node_name_menu(db, lane, sysop
 def test_node_name_gradient_lists_every_preset(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
-    session = FakeSession(["s", "n", "g", "", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "solid" in text
@@ -4974,7 +4991,7 @@ def test_node_name_gradient_can_be_set_and_persists(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
     index = 1 + sorted(GRADIENTS).index("rainbow")
-    session = FakeSession(["s", "n", "g", str(index), "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", str(index), "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Node name gradient set to 'rainbow'." in _written_text(session)
     assert node_name_gradient_override(db) == "rainbow"
@@ -4984,35 +5001,37 @@ def test_node_name_gradient_can_be_cleared_back_to_solid(db, lane, sysop):
     from netbbs.net.node_theme import node_name_gradient_override, set_node_name_gradient_override
 
     set_node_name_gradient_override(db, "gold")
-    session = FakeSession(["s", "n", "g", "0", "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", "0", "b", "b", "b"])
     _run(session, lane, sysop)
     assert "Node name gradient set to 'solid'." in _written_text(session)
     assert node_name_gradient_override(db) is None
 
 
-def test_node_name_gradient_declining_confirmation_makes_no_change(db, lane, sysop):
-    from netbbs.rendering.gradient import GRADIENTS
-
+def test_node_name_gradient_back_makes_no_change(db, lane, sysop):
     from netbbs.net.node_theme import node_name_gradient_override
 
-    index = 1 + sorted(GRADIENTS).index("red")
-    session = FakeSession(["s", "n", "g", str(index), "n", "b", "b", "b"])
+    # The previewed list is the picker (issue #282): [B]ack leaves it.
+    session = FakeSession(["s", "n", "g", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Not applied." in _written_text(session)
+    assert "gradient set to" not in _written_text(session)
     assert node_name_gradient_override(db) is None
 
 
 def test_node_name_gradient_invalid_choice_makes_no_change(db, lane, sysop):
-    session = FakeSession(["s", "n", "g", "99", "b", "b", "b"])
+    from netbbs.net.node_theme import node_name_gradient_override
+
+    # An out-of-range digit is rejected in place; [B]ack then leaves.
+    session = FakeSession(["s", "n", "g", "9", "b", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "Not a valid choice" in _written_text(session)
+    assert "gradient set to" not in _written_text(session)
+    assert node_name_gradient_override(db) is None
 
 
 def test_node_name_gradient_change_is_audit_logged(db, lane, sysop):
     from netbbs.rendering.gradient import GRADIENTS
 
     index = 1 + sorted(GRADIENTS).index("blue")
-    session = FakeSession(["s", "n", "g", str(index), "y", "b", "b", "b"])
+    session = FakeSession(["s", "n", "g", str(index), "b", "b", "b"])
     _run(session, lane, sysop)
 
     rows = db.connection.execute(
@@ -5140,7 +5159,7 @@ def test_logoff_banner_gallery_applies_a_bundled_preset(db, lane, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.logoff_banner import is_logoff_banner_enabled, logoff_banner_path
 
-    session = FakeSession(["s", "m", "n", "l", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5153,7 +5172,7 @@ def test_logoff_banner_from_disk_loads_and_enables_a_local_file(db, lane, sysop,
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN LOGOFF ART")
 
-    session = FakeSession(["s", "m", "n", "l", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "l", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5232,7 +5251,7 @@ def test_new_account_banner_before_gallery_applies_a_bundled_preset(db, lane, sy
         new_account_banner_before_path,
     )
 
-    session = FakeSession(["s", "m", "n", "e", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "e", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5248,7 +5267,7 @@ def test_new_account_banner_before_from_disk_loads_and_enables_a_local_file(db, 
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN SIGNUP ART")
 
-    session = FakeSession(["s", "m", "n", "e", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "e", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5314,7 +5333,7 @@ def test_new_account_banner_after_gallery_applies_a_bundled_preset(db, lane, sys
         new_account_banner_after_path,
     )
 
-    session = FakeSession(["s", "m", "n", "f", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "f", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5330,7 +5349,7 @@ def test_new_account_banner_after_from_disk_loads_and_enables_a_local_file(db, l
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN WELCOME ART")
 
-    session = FakeSession(["s", "m", "n", "f", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "n", "f", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5451,7 +5470,7 @@ def test_board_list_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.board_list_banner import board_list_banner_path, is_board_list_banner_enabled
 
-    session = FakeSession(["s", "m", "m", "o", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5464,7 +5483,7 @@ def test_board_list_masthead_from_disk_loads_and_enables_a_local_file(db, lane, 
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN BOARD ART")
 
-    session = FakeSession(["s", "m", "m", "o", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "o", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5531,7 +5550,7 @@ def test_file_area_masthead_gallery_applies_a_bundled_preset(db, lane, sysop):
     from netbbs.net.banner_presets import MAIN_MENU_BANNER_PRESETS, load_main_menu_banner_preset
     from netbbs.net.file_area_banner import file_area_banner_path, is_file_area_banner_enabled
 
-    session = FakeSession(["s", "m", "m", "f", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "f", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5544,7 +5563,7 @@ def test_file_area_masthead_from_disk_loads_and_enables_a_local_file(db, lane, s
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN FILE AREA ART")
 
-    session = FakeSession(["s", "m", "m", "f", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "f", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5610,7 +5629,7 @@ def test_chat_channel_picker_masthead_gallery_applies_a_bundled_preset(db, lane,
         is_chat_channel_picker_banner_enabled,
     )
 
-    session = FakeSession(["s", "m", "m", "c", "g", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "c", "g", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Applied and enabled." in text
@@ -5626,7 +5645,7 @@ def test_chat_channel_picker_masthead_from_disk_loads_and_enables_a_local_file(d
 
     (tmp_path / "custom.ans").write_bytes(b"MY OWN CHANNEL ART")
 
-    session = FakeSession(["s", "m", "m", "c", "f", "0", "1", "y", "x", "b", "b", "b", "b", "b"])
+    session = FakeSession(["s", "m", "m", "c", "f", "0", "1", "a", "x", "b", "b", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Loaded and enabled." in text
@@ -5649,15 +5668,19 @@ def test_chat_channel_picker_masthead_ctrl_h_shows_where_to_place_the_file(db, l
 def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sysop):
     session = FakeSession(["s", "c", "b", "b", "b"])
     _run(session, lane, sysop)
-    text = _written_text(session)
-    assert "Accent: " in text and "Header: " in text and "Clock " in text
+    text = _visible(_written_text(session))  # the editor colors each field label separately
+    assert "Accent: " in text and "Header: " in text and "Clock: " in text
+    # Issue #206's condensed status line stays on this nested screen.
+    assert "Backup: " in text and "Update: " in text
     assert text.count("default") >= 3
 
 
 def test_setting_a_color_previews_both_depths_before_asking_to_apply(db, lane, sysop):
     from netbbs.net.node_theme import accent_color_override
 
-    session = FakeSession(["s", "c", "a", "255,0,0", "y", "b", "b", "b"])
+    # Set the accent field, then [S]ave; the editor's own preamble shows the
+    # candidate at both depths before anything is written.
+    session = FakeSession(["s", "c", "a", "255,0,0", "s", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Truecolor: " in text
@@ -5673,12 +5696,13 @@ def test_setting_a_color_previews_both_depths_before_asking_to_apply(db, lane, s
     assert rows[0]["detail"] == "255,0,0"
 
 
-def test_declining_the_apply_prompt_leaves_the_override_unset(db, lane, sysop):
+def test_backing_out_of_a_changed_color_leaves_the_override_unset(db, lane, sysop):
     from netbbs.net.node_theme import header_color_override
 
-    session = FakeSession(["s", "c", "h", "0,255,0", "n", "b", "b", "b"])
+    # Change a field, then [B]ack and confirm discarding the draft.
+    session = FakeSession(["s", "c", "h", "0,255,0", "b", "y", "b", "b"])
     _run(session, lane, sysop)
-    assert "Not applied." in _written_text(session)
+    assert "updated." not in _written_text(session)
     assert header_color_override(db) is None
 
 
@@ -5701,16 +5725,19 @@ def test_an_out_of_range_rgb_component_is_rejected_with_no_change(db, lane, syso
 
 
 def test_blank_input_makes_no_change(db, lane, sysop):
+    from netbbs.net.node_theme import accent_color_override
+
     session = FakeSession(["s", "c", "a", "", "b", "b", "b"])
     _run(session, lane, sysop)
-    assert "No change." in _written_text(session)
+    assert "updated." not in _written_text(session)
+    assert accent_color_override(db) is None
 
 
 def test_clearing_an_existing_override_reverts_to_the_default(db, lane, sysop):
     from netbbs.net.node_theme import clock_color_override, set_clock_color_override
 
     set_clock_color_override(db, (10, 20, 30))
-    session = FakeSession(["s", "c", "c", "default", "y", "b", "b", "b"])
+    session = FakeSession(["s", "c", "c", "default", "s", "b", "b"])
     _run(session, lane, sysop)
     assert "reverted to the default" in _written_text(session)
     assert clock_color_override(db) is None
@@ -5722,13 +5749,13 @@ def test_clearing_an_existing_override_reverts_to_the_default(db, lane, sysop):
     assert rows[0]["detail"] == "10,20,30"
 
 
-def test_declining_to_clear_leaves_the_override_in_place(db, lane, sysop):
+def test_backing_out_of_a_clear_leaves_the_override_in_place(db, lane, sysop):
     from netbbs.net.node_theme import clock_color_override, set_clock_color_override
 
     set_clock_color_override(db, (10, 20, 30))
-    session = FakeSession(["s", "c", "c", "default", "n", "b", "b", "b"])
+    session = FakeSession(["s", "c", "c", "default", "b", "y", "b", "b"])
     _run(session, lane, sysop)
-    assert "Cancelled." in _written_text(session)
+    assert "reverted" not in _written_text(session)
     assert clock_color_override(db) == (10, 20, 30)
 
 
@@ -5738,14 +5765,15 @@ def test_clearing_when_already_default_makes_no_change(db, lane, sysop):
     assert "Already using the default" in _written_text(session)
 
 
-def test_preview_screen_shows_overridden_and_default_slots_side_by_side(db, lane, sysop):
+def test_editor_preamble_shows_overridden_and_default_slots_side_by_side(db, lane, sysop):
     from netbbs.net.node_theme import set_accent_color_override
 
     set_accent_color_override(db, (200, 100, 50))
     # Trailing "x" dismisses the preview's own "Press any key to
     # continue..." wait, matching the welcome-banner preview's own
     # dismissal precedent.
-    session = FakeSession(["s", "c", "p", "x", "b", "b", "b"])
+    # The editor's preamble is the preview now (issue #282): no [P]review trip.
+    session = FakeSession(["s", "c", "b", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert "Accent color:" in text
