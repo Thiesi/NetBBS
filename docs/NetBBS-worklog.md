@@ -3914,3 +3914,16 @@ only after cancellation succeeds or a 401 proves the relationship is already
 absent; on transient or policy failure, atomically retain the transition and both
 credentials while recording the replacement as abandoned and the previous
 heartbeat's authoritative state.
+
+Managed-DNS rename and cancellation are authenticated contact. Before a
+successful rename response, refresh the current row with heartbeat-equivalent
+gap semantics so a waiting abandonment sweep cannot immediately withdraw it.
+Cancellation preserves an uninterrupted pending previous name's maturation
+window, but must restart a stale window whose last contact crossed the threshold.
+Interactive registration/reclaim stores name, status, conservative unpublished
+state, dynamic choice, and opt-in as one transaction.
+
+Identity-notice ordering is security-sensitive: undismissed cryptographic
+observations sort ahead of benign changes before the SysOp screen applies its
+five-item display and acknowledgement bound, so repeated friendly-name changes
+cannot bury the actionable warning.

@@ -39,12 +39,10 @@ from netbbs.managed_dns.state import (
     get_registered_name,
     get_service_url,
     set_cancelled_rename_state,
-    set_dynamic,
     set_opt_in,
     get_published,
-    set_published,
-    set_registered_name,
     set_registration_status,
+    set_registration_result_state,
     set_pending_rename_state,
 )
 from netbbs.net.confirm import prompt_yes_no
@@ -242,14 +240,15 @@ async def register_via_prompt(session: Session, lane: DatabaseLane) -> None:
         was_reclaim = stored_credential is not None and result.credential == stored_credential
 
         save_credential(credential_path_for(lane.path), result.credential)
-        await lane.run(set_registered_name, result.name)
-        await lane.run(set_registration_status, RegistrationStatus(result.status))
         # Publication is only ever confirmed by a heartbeat's reported
         # address -- a reclaim that comes back `matured` may still have had
         # its republish fail, so the next heartbeat decides.
-        await lane.run(set_published, False)
-        await lane.run(set_dynamic, dynamic)
-        await lane.run(set_opt_in, OptIn.ACCEPTED)
+        await lane.run(
+            set_registration_result_state,
+            name=result.name,
+            status=RegistrationStatus(result.status),
+            dynamic=dynamic,
+        )
 
         if was_reclaim:
             if result.status == "matured":

@@ -506,6 +506,29 @@ class ManagedDnsServer:
         set_last_known_address(self._db, name, address)
         return True
 
+    def _contact_started_at_after_contact(
+        self, registration: Registration, now: datetime,
+    ) -> str:
+        """Preserve an uninterrupted age window, or restart a stale one."""
+        if (
+            registration.contact_started_at is None
+            or registration.last_contact_at is None
+            or now - datetime.fromisoformat(registration.last_contact_at)
+            > timedelta(seconds=self._abandonment_seconds)
+        ):
+            return now.isoformat()
+        return registration.contact_started_at
+
+    def _record_authenticated_contact(
+        self, registration: Registration, now: datetime,
+    ) -> None:
+        set_contact_window(
+            self._db,
+            registration.name,
+            last_contact_at=now.isoformat(),
+            contact_started_at=self._contact_started_at_after_contact(registration, now),
+        )
+
     async def _handle_rename(self, request: web.Request) -> web.Response:
         """Reserve a replacement while the authenticated old name stays live."""
         try:
@@ -538,6 +561,7 @@ class ManagedDnsServer:
                 return web.json_response({"error": "a rename is already pending"}, status=409)
             if name == current.name:
                 return web.json_response({"error": "the replacement name is unchanged"}, status=400)
+            now = self._clock()
             existing_replacement = get_replacement_for_name(self._db, current.name)
             if (
                 existing_replacement is not None
@@ -557,7 +581,7 @@ class ManagedDnsServer:
                 existing_replacement is not None
                 and existing_replacement.status == "abandoned"
                 and existing_replacement.released_at is not None
-                and self._clock() - datetime.fromisoformat(existing_replacement.released_at)
+                and now - datetime.fromisoformat(existing_replacement.released_at)
                 >= timedelta(seconds=self._cooldown_seconds)
             ):
                 # Recovery privilege has expired, but so has the reservation:
@@ -573,7 +597,7 @@ class ManagedDnsServer:
                 if existing_replacement.status == "abandoned":
                     if (
                         existing_replacement.released_at is None
-                        or self._clock() - datetime.fromisoformat(existing_replacement.released_at)
+                        or now - datetime.fromisoformat(existing_replacement.released_at)
                         >= timedelta(seconds=self._cooldown_seconds)
                     ):
                         return web.json_response(
@@ -584,12 +608,13 @@ class ManagedDnsServer:
                         return web.json_response(
                             {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
                         )
-                    retry_at = self._clock().isoformat()
+                    retry_at = now.isoformat()
                     reclaim(
                         self._db, existing_replacement.name, matured=False,
                         last_contact_at=retry_at, contact_started_at=retry_at,
                     )
                     replacement_status = "pending"
+                self._record_authenticated_contact(current, now)
                 replace_registration_credential(
                     self._db, existing_replacement.name, hash_credential(secret)
                 )
@@ -607,7 +632,7 @@ class ManagedDnsServer:
                 cooldown_elapsed = (
                     target.status in ("released", "abandoned")
                     and target.released_at is not None
-                    and self._clock() - datetime.fromisoformat(target.released_at)
+                    and now - datetime.fromisoformat(target.released_at)
                     >= timedelta(seconds=self._cooldown_seconds)
                 )
                 if cooldown_elapsed:
@@ -627,7 +652,8 @@ class ManagedDnsServer:
             tokens, last_refill = self._rate_limiter.snapshot()
             save_rate_limit_state(self._db, tokens=tokens, last_refill=last_refill)
             secret = secrets.token_urlsafe(_CREDENTIAL_BYTES)
-            created_at = self._clock().isoformat()
+            created_at = now.isoformat()
+            self._record_authenticated_contact(current, now)
             try:
                 replacement = insert_registration(
                     self._db, name=name, credential_hash=hash_credential(secret),
@@ -676,11 +702,12 @@ class ManagedDnsServer:
                 return web.json_response(
                     {"error": "previous registration no longer belongs to this node"}, status=409
                 )
+            now = self._clock()
             revive_previous = previous.status == "abandoned"
             if revive_previous:
                 if (
                     previous.released_at is None
-                    or self._clock() - datetime.fromisoformat(previous.released_at)
+                    or now - datetime.fromisoformat(previous.released_at)
                     >= timedelta(seconds=self._cooldown_seconds)
                 ):
                     return web.json_response(
@@ -745,10 +772,16 @@ class ManagedDnsServer:
                     return web.json_response(
                         {"error": "the managed-DNS service is at capacity -- try again later"}, status=503
                     )
-            now_iso = self._clock().isoformat()
+            # Provider cleanup may have yielded. Record the successful
+            # cancellation at the actual post-cleanup contact time.
+            contact_now = self._clock()
+            now_iso = contact_now.isoformat()
             if not cancel_pending_replacement(
                 self._db, replacement.name, previous_name,
                 revive_previous=revive_previous, contact_at=now_iso,
+                pending_contact_started_at=self._contact_started_at_after_contact(
+                    previous, contact_now,
+                ),
             ):
                 return web.json_response({"error": "rename is no longer pending"}, status=409)
             previous_status = previous.status
@@ -822,13 +855,7 @@ class ManagedDnsServer:
 
         now = self._clock()
         now_iso = now.isoformat()
-        contact_started_at = registration.contact_started_at
-        if (
-            contact_started_at is None or registration.last_contact_at is None
-            or now - datetime.fromisoformat(registration.last_contact_at)
-            > timedelta(seconds=self._abandonment_seconds)
-        ):
-            contact_started_at = now_iso
+        contact_started_at = self._contact_started_at_after_contact(registration, now)
         set_contact_window(
             self._db, registration.name, last_contact_at=now_iso, contact_started_at=contact_started_at
         )

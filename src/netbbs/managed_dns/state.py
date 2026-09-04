@@ -91,6 +91,21 @@ def set_pending_rename_state(
     ))
 
 
+def set_registration_result_state(
+    db: Database, *, name: str, status: RegistrationStatus, dynamic: bool,
+) -> None:
+    """Commit an interactive registration result as one conservative view."""
+    _set_config_values(db, (
+        (NAME_CONFIG_KEY, name),
+        (STATUS_CONFIG_KEY, status.value),
+        # Registration/reclaim never proves provider publication. A later
+        # heartbeat supplies that authoritative fact.
+        (PUBLISHED_CONFIG_KEY, "0"),
+        (DYNAMIC_CONFIG_KEY, "1" if dynamic else "0"),
+        (OPT_IN_CONFIG_KEY, OptIn.ACCEPTED.value),
+    ))
+
+
 def set_cancelled_rename_state(
     db: Database, *, name: str, status: RegistrationStatus, published: bool,
 ) -> None:

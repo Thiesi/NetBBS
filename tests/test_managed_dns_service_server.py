@@ -136,6 +136,33 @@ def test_rename_keeps_old_name_active_until_replacement_matures(db):
     assert get_registration_by_name(db, "new-name").status == "matured"
 
 
+def test_rename_refreshes_a_stale_current_registration_before_sweep(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, abandonment_seconds=60)
+        try:
+            original = await _register(server, name="old-name")
+            await _heartbeat(server, credential=original["credential"])
+            clock.now += timedelta(seconds=61)
+            renamed = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            await server._sweep_once()
+            return renamed
+        finally:
+            await server.stop()
+
+    status, body = asyncio.run(scenario())
+    current = get_registration_by_name(db, "old-name")
+
+    assert status == 201
+    assert body["previous_name"] == "old-name"
+    assert current.status == "pending"
+    assert current.last_contact_at == clock.now.isoformat()
+    assert current.contact_started_at == clock.now.isoformat()
+
+
 def test_pending_rename_can_be_cancelled_without_releasing_old_name(db):
     provider = LoggingDnsProvider()
 
@@ -694,7 +721,7 @@ def test_cancel_rename_refuses_a_previous_name_after_its_cooldown_expires(db):
     assert get_registration_by_name(db, "new-name").status == "pending"
 
 
-def test_cancel_rename_refreshes_a_still_active_previous_name_before_sweep(db):
+def test_cancel_rename_restarts_a_stale_pending_previous_name_before_sweep(db):
     clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
 
     async def scenario():
@@ -702,9 +729,6 @@ def test_cancel_rename_refreshes_a_still_active_previous_name_before_sweep(db):
         try:
             original = await _register(server, name="old-name")
             await _heartbeat(server, credential=original["credential"])
-            original_contact_started_at = get_registration_by_name(
-                db, "old-name"
-            ).contact_started_at
             _, replacement = await _rename(
                 server, credential=original["credential"], name="new-name"
             )
@@ -713,11 +737,11 @@ def test_cancel_rename_refreshes_a_still_active_previous_name_before_sweep(db):
                 server, credential=replacement["credential"]
             )
             await server._sweep_once()
-            return original_contact_started_at, cancelled
+            return cancelled
         finally:
             await server.stop()
 
-    contact_started_at, (status, body) = asyncio.run(scenario())
+    status, body = asyncio.run(scenario())
     previous = get_registration_by_name(db, "old-name")
 
     assert status == 200
@@ -725,7 +749,7 @@ def test_cancel_rename_refreshes_a_still_active_previous_name_before_sweep(db):
     assert get_registration_by_name(db, "new-name") is None
     assert previous.status == "pending"
     assert previous.last_contact_at == clock.now.isoformat()
-    assert previous.contact_started_at == contact_started_at
+    assert previous.contact_started_at == clock.now.isoformat()
 
 
 def test_cancel_rename_reviving_an_abandoned_name_obeys_the_per_node_cap(db):

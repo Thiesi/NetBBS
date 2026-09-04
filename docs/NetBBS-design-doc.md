@@ -5761,10 +5761,11 @@ Node-side updater passes and interactive registration, release, rename, and
 cancellation transitions share one process-local transition lock per node
 database. The lock covers the remote mutation and its local reconciliation, but
 never a human prompt, so a heartbeat response from an older snapshot cannot
-overwrite a completed SysOp transition. Node-side rename state is one local
-database transaction: the replacement name,
-pending/unpublished state, and previous-name presentation state never become
-visible in a partial combination. Heartbeat reconciliation follows the same
+overwrite a completed SysOp transition. Node-side rename state and interactive
+registration/reclaim results are each one local database transaction: the
+replacement name, pending/unpublished state, and previous-name presentation state
+never become visible in a partial combination, nor can a reclaimed status appear
+with a stale published flag. Heartbeat reconciliation follows the same
 rule for the active and previous names, statuses, publication flags, and contact
 time. A credential-specific HTTP 401 is authoritative independently of the
 other credential's transient result, and all inactive outcomes from one pass
@@ -5796,11 +5797,16 @@ A successful old-name heartbeat is also reconciled when the replacement
 heartbeat fails transiently: the replacement's cached state remains unchanged,
 while the old name's authoritative status and publication result are committed
 atomically.
-An inactive rename target whose cooldown has elapsed is deleted and admitted as
-a fresh replacement immediately, matching ordinary registration rather than
-waiting for the periodic sweep. Successful cancellation refreshes the retained
-previous registration's last-contact time even when it was still active; for a
-pending previous name this does not restart its original maturation window.
+An authenticated successful rename also refreshes the current registration's
+contact window before reserving or recovering its replacement, so a waiting
+abandonment sweep cannot immediately withdraw the promised old name. An inactive
+rename target whose cooldown has elapsed is deleted and admitted as a fresh
+replacement immediately, matching ordinary registration rather than waiting for
+the periodic sweep. Successful cancellation refreshes the retained
+previous registration's last-contact time even when it was still active. An
+uninterrupted pending name preserves its earned maturation window, while one whose
+last contact crossed the abandonment threshold restarts that window just like a
+heartbeat.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

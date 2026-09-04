@@ -25,6 +25,7 @@ from netbbs.managed_dns.state import (
     set_node_fingerprint,
     set_opt_in,
     set_pending_rename_state,
+    set_registration_result_state,
     set_heartbeat_reconciliation_state,
     set_published,
     set_registered_name,
@@ -182,6 +183,38 @@ def test_pending_rename_state_rolls_back_as_one_transaction(tmp_path):
     assert get_previous_name(db) is None
     assert get_previous_status(db) is None
     assert not get_previous_published(db)
+    db.close()
+
+
+def test_registration_result_state_rolls_back_as_one_transaction(tmp_path):
+    db = Database(tmp_path / "node.db")
+    set_registered_name(db, "old-name")
+    set_registration_status(db, RegistrationStatus.MATURED)
+    set_published(db, True)
+    set_dynamic(db, False)
+    set_opt_in(db, OptIn.DECLINED)
+    db.connection.execute(
+        """
+        CREATE TRIGGER reject_registration_result_status
+        BEFORE UPDATE OF value ON node_config
+        WHEN OLD.key = 'managed_dns_status' AND NEW.value = 'pending'
+        BEGIN
+            SELECT RAISE(ABORT, 'simulated registration result failure');
+        END
+        """
+    )
+    db.connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="simulated registration result failure"):
+        set_registration_result_state(
+            db, name="new-name", status=RegistrationStatus.PENDING, dynamic=True,
+        )
+
+    assert get_registered_name(db) == "old-name"
+    assert get_registration_status(db) is RegistrationStatus.MATURED
+    assert get_published(db)
+    assert not get_dynamic(db)
+    assert get_opt_in(db) is OptIn.DECLINED
     db.close()
 
 

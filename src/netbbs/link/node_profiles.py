@@ -446,7 +446,9 @@ def list_identity_observations(
         clauses.append("kind <> 'first_seen'")
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     rows = db.connection.execute(
-        "SELECT * FROM link_node_identity_observations" + where + " ORDER BY id DESC"
+        "SELECT * FROM link_node_identity_observations" + where
+        + " ORDER BY CASE WHEN severity = 'security' AND dismissed_at IS NULL "
+        "THEN 0 ELSE 1 END, id DESC"
     ).fetchall()
     return [NodeIdentityObservation(**dict(row)) for row in rows]
 

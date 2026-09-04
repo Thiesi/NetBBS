@@ -6525,6 +6525,41 @@ def test_link_status_screen_can_acknowledge_identity_change_notices(db, lane, sy
     assert remaining[0].previous_friendly_name == "Old Name"
 
 
+def test_link_status_screen_prioritizes_a_cryptographic_identity_warning(
+    db, lane, sysop,
+):
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import LinkNode
+    from netbbs.link.store import save_peer
+
+    link_context = _link_context()
+
+    def descriptor(node, *, name, minute):
+        return node.handle_hello(node.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=f"2026-09-03T13:{minute:02d}:00+00:00",
+            friendly_name=name,
+        ))
+
+    familiar = LinkNode(identity=bootstrap_node_identity("familiar-warning"))
+    changed = LinkNode(identity=bootstrap_node_identity("changed-warning"))
+    save_peer(db, descriptor(familiar, name="Familiar Warning", minute=0))
+    current = descriptor(changed, name="Familiar Warning", minute=1)
+    save_peer(db, current)
+    for index in range(6):
+        current = descriptor(changed, name=f"Benign Rename {index}", minute=index + 2)
+        save_peer(db, current)
+    link_context.link_node.peers[current.fingerprint] = current
+
+    session = FakeSession(["s", "l", "n", "b", "b", "b"])
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert "cryptographic identity presented as Familiar Warning changed" in text
+    assert "could indicate impersonation" in text
+
+
 def test_repair_carried_posts_screen_reports_nothing_to_do_when_caught_up(db, lane, sysop):
     link_context = _link_context()
 

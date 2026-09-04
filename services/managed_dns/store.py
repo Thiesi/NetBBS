@@ -359,7 +359,8 @@ def complete_rename(
 
 
 def cancel_pending_replacement(
-    db: Database, name: str, previous_name: str, *, revive_previous: bool, contact_at: str,
+    db: Database, name: str, previous_name: str, *, revive_previous: bool,
+    contact_at: str, pending_contact_started_at: str | None = None,
 ) -> bool:
     """Cancel a rename in one transaction: remove the replacement row
     and, when `revive_previous` is set, reactivate the `abandoned`
@@ -396,12 +397,15 @@ def cancel_pending_replacement(
             )
         else:
             # Cancellation itself is authenticated contact for the retained
-            # old registration. Refresh liveness without restarting a pending
-            # row's maturation window or disturbing a matured publication.
+            # old registration. An uninterrupted pending row keeps its earned
+            # maturation window, while a stale one restarts exactly as it
+            # would on its next heartbeat. Matured publication is untouched.
             db.connection.execute(
-                "UPDATE registrations SET last_contact_at = ? "
+                "UPDATE registrations SET last_contact_at = ?, "
+                "contact_started_at = CASE WHEN status = 'pending' "
+                "THEN COALESCE(?, contact_started_at) ELSE contact_started_at END "
                 "WHERE name = ? AND status IN ('pending', 'matured')",
-                (contact_at, previous_name),
+                (contact_at, pending_contact_started_at, previous_name),
             )
     return True
 
