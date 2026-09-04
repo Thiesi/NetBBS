@@ -43,12 +43,13 @@ reclaim, never a dangling reference). Reversing the order would risk
 the opposite, genuinely broken case: a DB snapshot referencing a blob
 the copy hadn't reached yet.
 
-Standalone `python -m netbbs.backup {create,restore}` CLI, deliberately
-not an interactive SysOp-menu action, since backups need to be
-cron-schedulable -- this project has no background scheduler anywhere
-and won't grow one just for this, matching `netbbs.boards.posts.
-_sweep_expired_posts`'s and `netbbs.files.gc`'s own precedent of "the
-operator/an external trigger drives it, not a built-in timer."
+The live SysOp Backup screen and the standalone `python -m netbbs.backup
+create` CLI both call `create_backup`.  The screen chooses a fresh,
+timestamped destination under `<db-stem>_backups/` beside the database;
+the CLI remains the path-selectable, cron-schedulable entry point.  Restore
+stays CLI-only because it must replace node state while the node is stopped.
+There is still no built-in scheduler: recurring backups remain an external
+operator/cron responsibility.
 
 **Restore (design doc §13.10, issue #75) validates everything before
 touching a live path, stages a full copy, then switches via atomic
@@ -80,6 +81,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from netbbs import __version__
@@ -106,7 +108,7 @@ _RESERVED_BACKUP_ENTRIES = (_MANIFEST_FILENAME, _FILES_DIRNAME, _IDENTITY_DIRNAM
 
 # node_config keys (netbbs.config's generic key-value store) -- same
 # reasoning as netbbs.selfupdate's own last-check bookkeeping: purely
-# for a future read-only SysOp status line, never required for restore.
+# for the SysOp Backup screen, never required for restore.
 _LAST_BACKUP_AT_CONFIG_KEY = "last_backup_at"
 _LAST_BACKUP_PATH_CONFIG_KEY = "last_backup_path"
 
@@ -143,6 +145,29 @@ def _database_filename_from_manifest(manifest: dict) -> str:
     # Backups created before custom database filenames were preserved always
     # stored their snapshot under this legacy canonical name.
     return _validate_database_filename(manifest.get("database_filename", _LEGACY_DB_FILENAME))
+
+
+def default_backup_destination(db_path: Path, *, created_at: str | None = None) -> Path:
+    """Return a fresh, human-readable destination for an in-session backup.
+
+    Managed backups live beside the database under ``<db-stem>_backups``.
+    A numeric suffix avoids reusing an existing directory when two backups
+    share a timestamp; :func:`create_backup` remains the final atomic guard
+    against a concurrent creator winning the same path.
+    """
+    raw_created_at = (created_at or utc_now_iso()).replace("Z", "+00:00")
+    instant = datetime.fromisoformat(raw_created_at)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    timestamp = instant.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = db_path.parent / f"{db_path.stem}_backups"
+    base = root / f"backup-{timestamp}"
+    destination = base
+    suffix = 2
+    while destination.exists():
+        destination = root / f"{base.name}-{suffix}"
+        suffix += 1
+    return destination
 
 
 def _storage_root_for(db_path: Path) -> Path:
@@ -403,14 +428,14 @@ def _record_backup_state(db_path: Path, destination: Path) -> None:
     never fail the backup that already genuinely succeeded above."""
     try:
         db = Database(db_path)
+        try:
+            set_config(db, _LAST_BACKUP_AT_CONFIG_KEY, utc_now_iso())
+            set_config(db, _LAST_BACKUP_PATH_CONFIG_KEY, str(destination))
+            record_operational_run(db, "backup", "succeeded", detail=str(destination))
+        finally:
+            db.close()
     except Exception:
         return
-    try:
-        set_config(db, _LAST_BACKUP_AT_CONFIG_KEY, utc_now_iso())
-        set_config(db, _LAST_BACKUP_PATH_CONFIG_KEY, str(destination))
-        record_operational_run(db, "backup", "succeeded", detail=str(destination))
-    finally:
-        db.close()
 
 
 def get_last_backup_summary(db: Database) -> tuple[str | None, str | None]:

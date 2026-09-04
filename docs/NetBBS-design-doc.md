@@ -461,13 +461,15 @@ Status context in the console is deliberately two-tier (issue #206). The five
 top-level consoles — Users, Content, Operations, Settings, Node — each show a
 full panel of what's actually relevant there: live counts, health badges, or
 current configuration values. Every nested screen beneath them that has no
-such panel of its own instead shows one condensed status line carrying just
-two facts obtainable without live node/session/Link state: last backup and
-last update-check outcome. This keeps recovery-relevant context visible while
-an operator is deep in a nested screen without threading live node state
-through call chains that don't otherwise need it, and without re-deriving a
-richer panel nested screens have no room to show. A screen that already has
-its own full panel does not also show the condensed line.
+such panel of its own instead shows one condensed line carrying the last-backup
+status obtainable without live node/session/Link state. Update-check outcomes
+remain on the SysOp landing dashboard, Settings overview, and dedicated Update
+screen; repeating them on unrelated user, content, presentation, and policy
+screens makes a global result look like a context-specific warning. This keeps
+recovery-relevant backup context visible while an operator is deep in a nested
+screen without re-deriving a richer panel those screens have no room to show.
+A screen that already has its own full panel does not also show the condensed
+line.
 
 ### 3.5 Interaction model for screens (issue #282)
 
@@ -1321,7 +1323,9 @@ remain available when it is off.
 
 The supported apply model is currently operator-driven:
 
-- create a complete backup with `python -m netbbs.backup create`;
+- create a complete backup from the live SysOp `[K] Backup` screen, or use
+  `python -m netbbs.backup create` when a custom destination or external
+  scheduler is required;
 - stop the service through its supervisor, allowing the normal graceful drain;
 - install the selected wheel from the official GitHub release into the same
   virtual environment, preserving the installation's extras;
@@ -3332,11 +3336,15 @@ operation, never a DB-only one.
 `Database` wrapper needed, since a backup must be safely takeable against a
 *live, running* node, not only an offline one) with two entry points, plus a
 `python -m netbbs.backup {create,restore}` CLI in the same spirit as
-`python -m netbbs.admin` — deliberately a standalone process rather than an
-interactive SysOp-menu action, since backups need to be cron-schedulable
-(this project has no background scheduler anywhere, and won't grow one just
-for this — matching `_sweep_expired_posts`'s and `files.gc`'s own precedent
-of "the operator/an external trigger drives it, not a built-in timer").
+`python -m netbbs.admin`. `create_backup` is also exposed through the live
+SysOp `[K] Backup` screen: it uses the running node's effective database and
+identity paths, chooses a fresh timestamped directory under
+`db_path.parent / f"{db_path.stem}_backups"`, requires confirmation, and runs
+the blocking snapshot/copy work off the asyncio event loop. The CLI remains
+the path-selectable, cron-schedulable entry point. There is no built-in
+scheduler; recurring backups are still driven by cron or another external
+operator trigger. Restore remains CLI-only and offline because it replaces
+the node's state.
 
 `create_backup(*, db_path, identity_dir, destination)`:
 
@@ -3383,10 +3391,11 @@ future restore-time check) confirm what a
 given backup directory actually is before trusting it. Also records
 `last_backup_at`/`last_backup_path` into the live node's own `node_config`
 table (same key-value store `netbbs.selfupdate`'s update-check state already
-uses) — for the read-only SysOp status line (`_system_menu`,
-alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
-for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
-required for restore itself.
+uses) — for the SysOp Backup screen and dashboard status (letter `K` for
+"bacKup", since `B` is already every submenu's universal `[B]ack`), not
+required for restore itself. A live-node screen can create another complete
+backup; standalone `python -m netbbs.admin` remains status-only because it
+does not own the running node's effective identity path.
 
 `restore_backup(*, source, db_path, identity_dir)` reverses each of the
 copies above -- **superseded by §13.10's staged/validated workflow (issue
@@ -3407,9 +3416,10 @@ contents at rest (identity material is already unencrypted-by-default on a
 live node — see §4.5 — and this tool preserves whatever it finds rather
 than changing that policy); off-site/remote transport of a completed backup
 directory; retention/rotation of old backups; and any form of automatic
-scheduling. All are operator/cron responsibilities this tool deliberately
-does not take on, the same boundary `files.gc`'s SysOp-triggered-only
-design already draws for blob garbage collection.
+scheduling. The SysOp screen explicitly identifies its output as local; all
+of these remain operator/cron responsibilities, the same boundary
+`files.gc`'s SysOp-triggered-only design already draws for blob garbage
+collection.
 
 ### 13.5 Bounded remote influence
 

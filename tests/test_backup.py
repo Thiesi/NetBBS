@@ -17,6 +17,7 @@ import pytest
 from netbbs.backup import (
     BackupError,
     create_backup,
+    default_backup_destination,
     get_last_backup_summary,
     main,
     remove_pid_file,
@@ -139,6 +140,42 @@ def _seed_full_node(db_path, identity_dir) -> NodeIdentity:
 
 
 # -- create_backup --------------------------------------------------------
+
+
+def test_default_backup_destination_is_timestamped_beside_the_database(tmp_path):
+    db_path = tmp_path / "data" / "node.db"
+
+    destination = default_backup_destination(
+        db_path, created_at="2026-09-04T12:34:56.123456+00:00"
+    )
+
+    assert destination == tmp_path / "data" / "node_backups" / "backup-20260904T123456Z"
+
+
+def test_default_backup_destination_does_not_reuse_an_existing_directory(tmp_path):
+    db_path = tmp_path / "node.db"
+    first = default_backup_destination(db_path, created_at="2026-09-04T12:34:56+00:00")
+    first.mkdir(parents=True)
+
+    second = default_backup_destination(db_path, created_at="2026-09-04T12:34:56+00:00")
+
+    assert second == first.with_name(first.name + "-2")
+
+
+def test_create_backup_still_succeeds_if_status_bookkeeping_fails(
+    tmp_path, db_path, identity_dir, monkeypatch,
+):
+    destination = tmp_path / "backup1"
+
+    def fail_status_write(*args, **kwargs):
+        raise sqlite3.OperationalError("database busy")
+
+    monkeypatch.setattr(backup_module, "set_config", fail_status_write)
+
+    assert create_backup(
+        db_path=db_path, identity_dir=identity_dir, destination=destination
+    ) == destination
+    assert (destination / "manifest.json").exists()
 
 
 def test_create_backup_captures_a_staged_credential_transition(tmp_path, db_path, identity_dir):

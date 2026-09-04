@@ -573,8 +573,16 @@ error.
 
 ## 14. Backup and restore
 
-Backup and restore are **not** SysOp-console menu actions — they're a
-standalone command so they can be cron-scheduled:
+From a live node's SysOp console, open `[K] Backup` (directly from the
+dashboard or through Operations) and choose `[C]reate backup now`. NetBBS
+uses the running node's configured database and identity locations, asks for
+confirmation, and creates a timestamped directory under
+`<db-stem>_backups/` beside the database. The screen shows the completed path.
+This is a local backup; copy or synchronize it off-node separately if it is
+meant to protect against loss of the node itself.
+
+The standalone command remains available for custom destinations and cron
+scheduling, and is the only supported restore entry point:
 
 ```
 python -m netbbs.backup create --db path/to/netbbs.db --identity-dir path/to/identity --to path/to/new-backup-dir
@@ -588,17 +596,18 @@ deleting it — the tool tells you where and reminds you it isn't removed
 automatically, so clean it up yourself once you're satisfied the restore
 is good.
 
-A backup captures five things as one atomic set, not just the database:
-the database itself, content blobs, node identity (root/operational/
-transport keys), the SSH host key, and the welcome banner. A DB-only
-backup would silently lose the Link node identity and the SSH host key —
-the latter means every client gets a MITM warning on the next connection
-after a restore that skipped it.
+A backup captures fourteen artifact groups as one recoverable set, not just
+the database: the database itself, content blobs, node identity
+(root/operational/transport keys), the SSH host key, managed-DNS credentials
+including rename-transition state, and every customizable banner and
+masthead. A DB-only backup would silently lose the Link node identity and the
+SSH host key — the latter means every client gets a MITM warning on the next
+connection after a restore that skipped it.
 
-The console's `[K]ackup status` screen (or the `[K]` quick action) is
-read-only — it shows when the last backup ran and where it went, sourced
-from what the backup tool itself recorded on its last run. It does not
-trigger a backup.
+The console's `[K] Backup` screen also shows when recent backups ran and where
+the last one went. The standalone `python -m netbbs.admin` version of that
+screen is status-only because it does not own the running node's configured
+identity path; use the backup CLI from that context.
 
 Restore is staged and validated, not a blind in-place overwrite — it
 checks the backup before touching any live path, and can recover from

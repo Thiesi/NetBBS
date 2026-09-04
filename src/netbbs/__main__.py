@@ -763,6 +763,7 @@ async def run(
             ),
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
+            backup_identity_dir=config.identity_dir,
         )
 
     async def ssh_session_handler(session):
@@ -787,6 +788,7 @@ async def run(
             ),
             direct_invites=direct_invites,
             mrc_bridge=mrc_bridge,
+            backup_identity_dir=config.identity_dir,
         )
 
     servers: list = []

@@ -297,14 +297,14 @@ def test_operations_are_a_coherent_top_level_console_area(db, lane, sysop):
     text = _written_text(session)
     assert "NetBBS › SysOp › Operations" in _visible(text)
     assert "Observe the running node, investigate trouble, and recover work." in text
-    # "Bac[K]up status", not "[K]backup status" -- K isn't backup's first
+    # "Bac[K]up", not "[K]backup" -- K isn't backup's first
     # letter, so the hotkey is picked out from inside the word via
     # menu_key's own prefix parameter (see admin_flow.py's own history:
     # this was already fixed once and must not silently regress back to
     # a stray bracketed letter sitting in front of the word).
     assert "Bac" in text
-    assert "up status" in text
-    assert "[K]backup status" not in text
+    assert "up" in text
+    assert "[K]backup" not in text
 
 
 def test_operations_console_wraps_actions_on_a_narrow_terminal(db, lane, sysop):
@@ -1613,12 +1613,13 @@ def test_invalid_key_writes_only_a_bell(db, lane, sysop):
 # -- node management -------------------------------------------------------
 
 
-def _node_controls() -> NodeControls:
+def _node_controls(*, backup_identity_dir=None) -> NodeControls:
     return NodeControls(
         session_registry=ActiveSessionRegistry(),
         maintenance=MaintenanceMode(),
         shutdown_event=asyncio.Event(),
         graceful_delay_seconds=60.0,
+        backup_identity_dir=backup_identity_dir,
     )
 
 
@@ -5854,8 +5855,10 @@ def test_theme_colors_menu_shows_default_status_for_all_three_slots(db, lane, sy
     _run(session, lane, sysop)
     text = _visible(_written_text(session))  # the editor colors each field label separately
     assert "Accent: " in text and "Header: " in text and "Clock: " in text
-    # Issue #206's condensed status line stays on this nested screen.
-    assert "Backup: " in text and "Update: " in text
+    # Issue #206's backup-only condensed status line stays on this nested
+    # screen; update status belongs only on its three actionable surfaces.
+    assert "Backup: " in text
+    assert "Update: " not in text
     assert text.count("default") >= 3
 
 
@@ -6146,6 +6149,25 @@ def test_update_screen_reports_newer_release_without_auto_applying(db, lane, sys
     assert "Automatic download/apply is not yet available" in text
     _, outcome = get_last_check_summary(db)
     assert outcome == "newer release available: v999.0.0"
+
+
+def test_update_status_contextualizes_a_release_already_installed(db, lane, sysop):
+    from netbbs import __version__
+    from netbbs.selfupdate import record_check_outcome, save_release_cache
+
+    release = _fake_release(f"v{__version__}")
+    save_release_cache(db, '"etag"', release)
+    record_check_outcome(db, f"newer release available: {release.tag_name}")
+
+    # Exercises all three intended status surfaces: landing dashboard,
+    # Settings overview, and the dedicated Update screen.
+    session = FakeSession(["s", "u", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+
+    expected = f"last check found {release.tag_name}; now running {__version__}"
+    assert text.count(expected) >= 3
+    assert "newer release available" not in text
 
 
 def test_update_screen_handles_check_failure_gracefully(db, lane, sysop, monkeypatch):
@@ -6439,7 +6461,7 @@ def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
     # GitHub issue #206's "broader scope" half: screens nested deeper than
     # the five top-level submenus don't have node_controls/link_context
     # available to show the richer full panel those already have, so they
-    # get this lighter "Backup: ...  Update: ..." line instead -- confirms
+    # get this lighter backup-context line instead -- confirms
     # a Shape-A site (the function already had `lane` in scope, so the line
     # is computed and written inline, no caller threading needed).
     from netbbs.backup import create_backup
@@ -6452,7 +6474,7 @@ def test_link_status_screen_shows_the_condensed_status_line(db, lane, sysop):
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
     text = _visible(_written_text(session))
     assert "Backup: " in text
-    assert "Update: not checked" in text
+    assert "Update:" not in text
 
 
 def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
@@ -6464,7 +6486,22 @@ def test_door_menu_shows_the_condensed_status_line(db, lane, sysop):
     _run(session, lane, sysop)
     text = _visible(_written_text(session))
     assert "Backup: never" in text
-    assert "Update: not checked" in text
+    assert "Update:" not in text
+
+
+def test_nested_status_line_does_not_repeat_an_update_warning(db, lane, sysop):
+    from netbbs.selfupdate import record_check_outcome
+
+    record_check_outcome(db, "newer release available: v999.0.0")
+    session = FakeSession(["c", "d", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+
+    assert "Backup: never" in text
+    assert "Update:" not in text
+    nested_status_lines = [line for line in text.split("\r\n") if "Backup:" in line]
+    assert nested_status_lines
+    assert all("newer release available" not in line for line in nested_status_lines)
 
 
 def test_condensed_status_line_formats_the_backup_time_per_display_preferences(db, lane, sysop):
@@ -6489,15 +6526,7 @@ def test_condensed_status_line_formats_the_backup_time_per_display_preferences(d
 
 
 def test_condensed_status_line_fits_a_narrow_terminal(db, lane, sysop):
-    # Code review follow-up (PR #216): field_row neither wraps nor
-    # truncates, and a recorded update-check outcome can be an
-    # arbitrary-length message (an HTTP client's own exception text,
-    # e.g.) -- unconstrained, this "condensed" row could exceed even the
-    # 40-column floor this module supports, wrapping in the terminal and
-    # disrupting the screen below it.
-    from netbbs.selfupdate import record_check_outcome
-
-    record_check_outcome(db, "update failed: " + "connection reset by peer " * 5)
+    # The backup-only nested line must still respect the terminal width.
     session = FakeSession(["c", "d", "b", "b", "b"])
     session.terminal_width = 40
     _run(session, lane, sysop)
@@ -6700,6 +6729,44 @@ def test_backup_status_hides_history_section_with_only_one_backup(db, lane, syso
     _run(session, lane, sysop)
 
     assert "Recent backups:" not in _written_text(session)
+
+
+def test_live_backup_screen_creates_a_complete_backup_with_configured_identity(
+    db, lane, sysop,
+):
+    identity_dir = db.path.parent / "custom-identity"
+    identity_dir.mkdir()
+    (identity_dir / "identity-marker").write_text("configured identity")
+    controls = _node_controls(backup_identity_dir=identity_dir)
+    session = FakeSession(["s", "k", "c", "y", " ", "b", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    destinations = list((db.path.parent / f"{db.path.stem}_backups").iterdir())
+    assert len(destinations) == 1
+    destination = destinations[0]
+    assert (destination / db.path.name).exists()
+    assert (destination / "identity" / "identity-marker").read_text() == "configured identity"
+    assert (destination / "manifest.json").exists()
+    assert "BACKUP COMPLETE" in _visible(_written_text(session))
+    assert "This is a local backup" in _written_text(session)
+
+
+def test_live_backup_screen_surfaces_a_backup_failure(db, lane, sysop, monkeypatch):
+    from netbbs.net import admin_flow
+
+    def fail_backup(**kwargs):
+        raise admin_flow.BackupError("disk is full")
+
+    monkeypatch.setattr(admin_flow, "create_backup", fail_backup)
+    controls = _node_controls(backup_identity_dir=db.path.parent / "identity")
+    session = FakeSession(["k", "c", "y", " ", "b", "b"])
+
+    asyncio.run(admin_menu(session, lane, sysop, node_controls=controls))
+
+    text = _visible(_written_text(session))
+    assert "BACKUP FAILED" in text
+    assert "disk is full" in text
 
 
 # -- managed DNS status (design doc §16, issue #201) -----------------------

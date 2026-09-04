@@ -2553,6 +2553,14 @@ identically in every environment except one with no direct egress.
 Use SQLite's online backup API; never copy a live WAL database as if it were a
 single inert file.
 
+The live SysOp Backup screen invokes the same synchronous, path-based backup
+primitive via a worker thread, using the database lane's path and the running
+node's effective configured identity directory. Never guess the default
+identity path in this flow: a custom identity directory omitted from a
+nominally successful backup would make it non-recoverable. Standalone admin
+therefore remains status-only; custom destinations and scheduling use the
+CLI, and restore remains offline/CLI-only.
+
 Back up in this order:
 
 1. database snapshot;

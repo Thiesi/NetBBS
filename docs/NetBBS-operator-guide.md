@@ -233,7 +233,7 @@ back up all of it together, not just the database (see §5):
   visible via your service supervisor (`journalctl -u netbbs` under
   systemd; syslog/`daemon` facility under NetBSD's `rc.d`, see
   `examples/netbbs.rc`) since NetBBS still logs to stderr/stdout too |
-| Backups | wherever you choose with `--to` (§5) — not a fixed path |
+| Backups | SysOp-screen backups: `<db-stem>_backups/` beside the database; CLI backups: wherever you choose with `--to` (§5) |
 
 Uninstalling the package (`pip uninstall netbbs`) only ever removes the
 installed Python package itself — every
@@ -246,6 +246,12 @@ separate, deliberate action an operator takes themselves.
 Use the supported tooling, never a raw filesystem copy of a live
 database (SQLite WAL mode makes a plain `cp` of the `.db` file
 inconsistent):
+
+On a running node, the SysOp console's `[K] Backup` screen can create a
+complete local backup without OS access. It selects a fresh timestamped
+directory under `<db-stem>_backups/` beside the database and uses the
+effective configured identity directory. Use the CLI below for a custom
+destination or scheduled job:
 
 ```sh
 python -m netbbs.backup create --db /var/lib/netbbs/netbbs.db \
