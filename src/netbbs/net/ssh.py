@@ -59,6 +59,27 @@ from netbbs.storage.database import Database
 
 _logger = logging.getLogger(__name__)
 
+# Bound on `SSHServer.stop()` waiting for already-admitted connections to
+# drop on their own before it aborts them. Same number as
+# `ShutdownConfig.background_task_drain_seconds`, and `netbbs.__main__`
+# passes that configured value in; this default only covers direct
+# constructions (tests, tooling).
+DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
+
+# Real-world report (ReLink, 2026-09-04): a caller's client vanished
+# without a TCP FIN (laptop asleep, Wi-Fi gone) and nothing on this side
+# noticed -- asyncssh sends no keepalives unless asked. The connection
+# then held a node slot until the kernel's own retransmission timeout
+# gave up (about nine minutes on macOS, longer on Linux), and a shutdown
+# started in that window waited the whole time for it (see `stop`).
+# Transport-level keepalives make a dead peer visible within
+# `interval * count_max` (about ninety seconds) instead. Deliberately
+# not an operator setting: the default is right for every deployment
+# (an idle live client answers keepalives for free, and NAT mappings
+# benefit from the traffic), so there's nothing a SysOp would tune.
+SSH_KEEPALIVE_INTERVAL_SECONDS = 30.0
+SSH_KEEPALIVE_COUNT_MAX = 3
+
 
 def ensure_host_key(db: Database) -> Path:
     """
@@ -253,9 +274,24 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
     handshake lifecycle in a way this per-attempt callback doesn't.
     """
 
-    def __init__(self, db: Database, throttle: LoginThrottle | None):
+    def __init__(
+        self,
+        db: Database,
+        throttle: LoginThrottle | None,
+        *,
+        on_connection_made: Callable[[asyncssh.SSHServerConnection], None] | None = None,
+        on_connection_lost: Callable[[asyncssh.SSHServerConnection], None] | None = None,
+    ):
         self._db = db
         self._throttle = throttle
+        # `SSHServer.stop` needs every live connection, authenticated or
+        # not, so it can abort the ones that don't close on their own --
+        # a connection still in its auth handshake (a port scanner
+        # holding the socket open, say) never reaches the session
+        # registry at all, so the registry can't be the source of truth
+        # here; the listener that admitted the connection is.
+        self._on_connection_made = on_connection_made
+        self._on_connection_lost = on_connection_lost
         self._peer_address: str | None = None
         # Multi-round keyboard-interactive registration state (design
         # doc) -- see get_kbdint_challenge/validate_kbdint_
@@ -281,6 +317,12 @@ class _NetBBSSSHServer(asyncssh.SSHServer):
         peer = conn.get_extra_info("peername")
         self._peer_address = peer[0] if peer else None
         self._conn = conn
+        if self._on_connection_made is not None:
+            self._on_connection_made(conn)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if self._conn is not None and self._on_connection_lost is not None:
+            self._on_connection_lost(self._conn)
 
     def begin_auth(self, username: str) -> bool:
         # Dogfood follow-up: unlike Telnet/web (`netbbs.net.login_flow.
@@ -580,12 +622,15 @@ class SSHServer:
         *,
         throttle: LoginThrottle | None = None,
         login_timeout: float | None = None,
+        stop_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
     ):
         self._host = host
         self._port = port
         self._db = db
         self._session_handler = session_handler
         self._throttle = throttle
+        self._stop_timeout_seconds = stop_timeout_seconds
+        self._connections: set[asyncssh.SSHServerConnection] = set()
         # asyncssh's own login-deadline mechanism — see this class's
         # docstring and _NetBBSSSHServer's for why SSH doesn't reuse
         # netbbs.net.login_flow's idle-timeout/login-deadline logic
@@ -605,13 +650,20 @@ class SSHServer:
         if self._login_timeout is not None:
             extra_options["login_timeout"] = self._login_timeout
         self._acceptor = await asyncssh.create_server(
-            lambda: _NetBBSSSHServer(self._db, self._throttle),
+            lambda: _NetBBSSSHServer(
+                self._db,
+                self._throttle,
+                on_connection_made=self._connections.add,
+                on_connection_lost=self._connections.discard,
+            ),
             self._host,
             self._port,
             server_host_keys=[str(host_key_path)],
             process_factory=self._handle_process,
             encoding=None,
             line_editor=False,
+            keepalive_interval=SSH_KEEPALIVE_INTERVAL_SECONDS,
+            keepalive_count_max=SSH_KEEPALIVE_COUNT_MAX,
             **extra_options,
         )
 
@@ -621,9 +673,47 @@ class SSHServer:
         await self._acceptor.wait_closed()
 
     async def stop(self) -> None:
-        if self._acceptor is not None:
-            self._acceptor.close()
-            await self._acceptor.wait_closed()
+        """
+        Stop listening and make sure every admitted connection is gone.
+
+        `SSHAcceptor.close()` only stops accepting; connections it already
+        admitted stay open, and on Python 3.12+ `wait_closed()` blocks
+        until every one of them has actually dropped (the same CPython
+        behavior change `docs/NetBBS-worklog.md` records for
+        `LinkRealtimeServer.stop`). Ending a caller's session only exits
+        its *channel* (`SSHSession.close`); the connection underneath
+        stays up until the client disconnects -- which a client whose
+        network silently vanished never does, so an unbounded wait here
+        sat for the kernel's whole TCP retransmission timeout (the
+        real ~9-minute Ctrl+C hang reported on ReLink). Wait briefly for
+        connections to close on their own, then abort whatever is left:
+        `abort()` drops the transport immediately without the
+        disconnect handshake a dead peer could never complete.
+        """
+        if self._acceptor is None:
+            return
+        self._acceptor.close()
+        try:
+            await asyncio.wait_for(self._acceptor.wait_closed(), timeout=self._stop_timeout_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        lingering = list(self._connections)
+        _logger.warning(
+            "%d SSH connection(s) did not close within %.1fs of shutdown; aborting them",
+            len(lingering),
+            self._stop_timeout_seconds,
+        )
+        for conn in lingering:
+            conn.abort()
+        # `abort()` fires connection_lost on the next loop iteration, which
+        # detaches each transport from the listener; this second wait is
+        # bounded only as a defensive ceiling, not because anything is
+        # expected to still be attached after the aborts above.
+        try:
+            await asyncio.wait_for(self._acceptor.wait_closed(), timeout=self._stop_timeout_seconds)
+        except asyncio.TimeoutError:
+            _logger.error("SSH listener did not release after aborting its connections; continuing")
 
     async def _handle_process(self, process: asyncssh.SSHServerProcess) -> None:
         session = SSHSession(process)

@@ -36,6 +36,7 @@ from netbbs.net.telnet import (
     WILL,
     WONT,
     TelnetServer,
+    TelnetSession,
 )
 
 # The full 9-byte initial negotiation every connection now sends:
@@ -1176,3 +1177,80 @@ def test_read_byte_undoubles_iac_and_roundtrips_all_byte_values():
 
     asyncio.run(scenario())
     assert received == list(range(256))
+
+
+# -- shutdown with lingering connections ------------------------------------
+
+
+def test_stop_aborts_a_connection_the_client_never_closes():
+    """Same shutdown hang class the SSH listener had (see
+    tests/test_ssh.py's sibling): `Server.close()` leaves admitted
+    connections open and Python 3.12+'s `wait_closed()` waits for every
+    one of them, so a client that never disconnects -- a dead peer, or
+    one still in option negotiation that never reached the session
+    registry -- held shutdown indefinitely. Without the bounded wait +
+    `abort()` this test hangs (bounded here only by the outer
+    `wait_for`)."""
+    release = asyncio.Event()
+
+    async def handler(session: Session):
+        await release.wait()
+
+    async def scenario():
+        server = TelnetServer(
+            host="127.0.0.1", port=0, session_handler=handler, stop_timeout_seconds=0.3
+        )
+        await server.start()
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        try:
+            await skip_initial_negotiation(reader)
+            started = time.monotonic()
+            await asyncio.wait_for(server.stop(), timeout=5)
+            elapsed = time.monotonic() - started
+            # The server dropped the transport: the client reads EOF (or
+            # a reset, depending on the platform) without having closed.
+            try:
+                remainder = await asyncio.wait_for(reader.read(), timeout=2)
+            except ConnectionError:
+                remainder = b""
+            assert remainder == b""
+            return elapsed
+        finally:
+            release.set()
+            writer.close()
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 3
+
+
+def test_session_close_aborts_a_transport_that_never_drains():
+    """`StreamWriter.close()` flushes buffered output first, and a peer
+    whose network silently vanished never ACKs, so `wait_closed()` on
+    such a writer lasts the kernel's TCP retransmission timeout. Shutdown
+    gathers every session's close, so one such peer stalled the node."""
+    events = []
+
+    class _Transport:
+        def abort(self):
+            events.append("abort")
+
+    class _StuckWriter:
+        transport = _Transport()
+
+        def is_closing(self):
+            return False
+
+        def close(self):
+            events.append("close")
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        session = TelnetSession(
+            asyncio.StreamReader(), _StuckWriter(), close_timeout_seconds=0.05
+        )
+        await asyncio.wait_for(session.close(), timeout=2)
+
+    asyncio.run(scenario())
+    assert events == ["close", "abort"]

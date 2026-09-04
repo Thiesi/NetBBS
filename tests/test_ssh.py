@@ -14,6 +14,7 @@ lifecycle.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import asyncssh
 import nacl.signing
@@ -23,7 +24,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from netbbs.auth.users import create_user
 from netbbs.net.confirm import prompt_yes_no
 from netbbs.net.session import Session, SessionClosedError
-from netbbs.net.ssh import SSHServer
+from netbbs.net.ssh import SSH_KEEPALIVE_COUNT_MAX, SSH_KEEPALIVE_INTERVAL_SECONDS, SSHServer
 from netbbs.net.throttle import LoginThrottle
 from netbbs.storage.database import Database
 
@@ -1112,3 +1113,77 @@ def test_server_port_property_before_start_raises(db):
     server = SSHServer(host="127.0.0.1", port=0, db=db, session_handler=lambda session: None)
     with pytest.raises(RuntimeError):
         _ = server.port
+
+
+# -- shutdown with lingering connections ------------------------------------
+
+
+def test_stop_aborts_a_connection_the_client_never_closes(db):
+    """Real-world ReLink report: a caller's client vanished without a TCP
+    FIN, and Ctrl+C then sat for the kernel's whole retransmission
+    timeout (~9 minutes on macOS) because `SSHAcceptor.close()` leaves
+    admitted connections open and Python 3.12+'s `wait_closed()` waits
+    for every one of them. A loopback client can't fake a dead network,
+    but it can do the equivalent for this code path: hold its connection
+    open and never disconnect. Without the bounded wait + `abort()` this
+    test hangs (bounded here only by the outer `wait_for`)."""
+    create_user(db, "alice", password="hunter2", user_level=10)
+    release = asyncio.Event()
+
+    async def handler(session: Session):
+        await release.wait()
+
+    async def scenario():
+        server = await _run_server(db, handler, stop_timeout_seconds=0.3)
+        conn = await asyncssh.connect(
+            "127.0.0.1", server.port, username="alice", password="hunter2", known_hosts=None
+        )
+        try:
+            await conn.create_process(term_type="ansi", term_size=(80, 24), encoding=None)
+            started = time.monotonic()
+            await asyncio.wait_for(server.stop(), timeout=5)
+            elapsed = time.monotonic() - started
+            # The server dropped the transport, so the client sees its
+            # connection close without ever having asked for it.
+            await asyncio.wait_for(conn.wait_closed(), timeout=2)
+            return elapsed
+        finally:
+            release.set()
+            conn.abort()
+
+    elapsed = asyncio.run(scenario())
+    assert elapsed < 3
+
+
+def test_server_enables_transport_keepalives(db, monkeypatch):
+    """Dead peers must become visible on their own, not only at shutdown:
+    without keepalives a vanished client holds its node slot until the
+    kernel's retransmission timeout. Pinned as a contract on the
+    `create_server` call because nothing observable on a loopback
+    client distinguishes a keepalive-enabled server within test time."""
+    captured = {}
+
+    class _Acceptor:
+        def get_port(self):
+            return 0
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    async def fake_create_server(factory, host, port, **kwargs):
+        captured.update(kwargs)
+        return _Acceptor()
+
+    monkeypatch.setattr(asyncssh, "create_server", fake_create_server)
+
+    async def scenario():
+        server = SSHServer(host="127.0.0.1", port=0, db=db, session_handler=lambda session: None)
+        await server.start()
+        await server.stop()
+
+    asyncio.run(scenario())
+    assert captured["keepalive_interval"] == SSH_KEEPALIVE_INTERVAL_SECONDS > 0
+    assert captured["keepalive_count_max"] == SSH_KEEPALIVE_COUNT_MAX >= 1

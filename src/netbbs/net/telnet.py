@@ -71,6 +71,13 @@ NEW_ENVIRON_USERVAR = 3
 
 _logger = logging.getLogger(__name__)
 
+# Bound on `TelnetServer.stop()` (and each `TelnetSession.close()`)
+# waiting for a connection to drop on its own before aborting it. Same
+# number as `ShutdownConfig.background_task_drain_seconds`, and
+# `netbbs.__main__` passes that configured value in; this default only
+# covers direct constructions (tests, tooling).
+DEFAULT_STOP_TIMEOUT_SECONDS = 5.0
+
 # Subnegotiations are control messages, not bulk data. Bound both their
 # decoded body size and total completion time so a pre-authentication client
 # cannot retain a session forever or grow an unbounded bytearray.
@@ -86,9 +93,12 @@ class TelnetSession(Session):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         peer_address: str | None = None,
+        *,
+        close_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
     ):
         self._reader = reader
         self._writer = writer
+        self._close_timeout_seconds = close_timeout_seconds
         # Conservative defaults (also the Session base class defaults);
         # updated in place by _handle_subnegotiation if/when the client
         # actually reports its real size via NAWS. A client that doesn't
@@ -269,10 +279,18 @@ class TelnetSession(Session):
     async def close(self) -> None:
         if not self._writer.is_closing():
             self._writer.close()
-            try:
-                await self._writer.wait_closed()
-            except (ConnectionResetError, BrokenPipeError):
-                pass
+        # `close()` first flushes whatever is still buffered, and a peer
+        # whose network silently vanished never ACKs, so that flush --
+        # and this wait -- would otherwise last the kernel's whole TCP
+        # retransmission timeout (minutes). Shutdown `gather`s every
+        # session's close, so one dead peer would stall the node; give
+        # it a short chance to drain, then drop the transport outright.
+        try:
+            await asyncio.wait_for(self._writer.wait_closed(), timeout=self._close_timeout_seconds)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        except asyncio.TimeoutError:
+            self._writer.transport.abort()
 
     # -- char_input.ByteSource ------------------------------------------
 
@@ -482,11 +500,24 @@ class TelnetServer:
     decision.
     """
 
-    def __init__(self, host: str, port: int, session_handler: SessionHandler):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        session_handler: SessionHandler,
+        *,
+        stop_timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS,
+    ):
         self._host = host
         self._port = port
         self._session_handler = session_handler
+        self._stop_timeout_seconds = stop_timeout_seconds
         self._server: asyncio.base_events.Server | None = None
+        # Every admitted connection's writer, negotiating or not, so
+        # `stop` can abort whatever hasn't closed on its own. The
+        # session registry only knows sessions that reached the login
+        # flow, so it can't stand in for this.
+        self._writers: set[asyncio.StreamWriter] = set()
 
     @property
     def port(self) -> int:
@@ -511,9 +542,39 @@ class TelnetServer:
             await self._server.serve_forever()
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        """
+        Stop listening and make sure every admitted connection is gone.
+
+        `Server.close()` only stops accepting, and on Python 3.12+
+        `wait_closed()` blocks until every admitted connection has
+        actually dropped (the CPython behavior change
+        `docs/NetBBS-worklog.md` records for `LinkRealtimeServer.stop`,
+        which already carries the bounded wait this mirrors). A dead
+        peer -- or a connection still in option negotiation that never
+        reached the session registry -- would otherwise hold shutdown
+        for the kernel's whole TCP retransmission timeout. Wait briefly,
+        then abort whatever is left.
+        """
+        if self._server is None:
+            return
+        self._server.close()
+        try:
+            await asyncio.wait_for(self._server.wait_closed(), timeout=self._stop_timeout_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        lingering = list(self._writers)
+        _logger.warning(
+            "%d Telnet connection(s) did not close within %.1fs of shutdown; aborting them",
+            len(lingering),
+            self._stop_timeout_seconds,
+        )
+        for writer in lingering:
+            writer.transport.abort()
+        try:
+            await asyncio.wait_for(self._server.wait_closed(), timeout=self._stop_timeout_seconds)
+        except asyncio.TimeoutError:
+            _logger.error("Telnet listener did not release after aborting its connections; continuing")
 
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -536,7 +597,10 @@ class TelnetServer:
 
         peer = writer.get_extra_info("peername")
         peer_address = peer[0] if peer else None
-        session = TelnetSession(reader, writer, peer_address)
+        session = TelnetSession(
+            reader, writer, peer_address, close_timeout_seconds=self._stop_timeout_seconds
+        )
+        self._writers.add(writer)
         try:
             await session.negotiate_initial_options()
             await self._session_handler(session)
@@ -545,4 +609,7 @@ class TelnetServer:
         except Exception:
             _logger.exception("unhandled error in session handler for %s", peer)
         finally:
-            await session.close()
+            try:
+                await session.close()
+            finally:
+                self._writers.discard(writer)

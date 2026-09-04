@@ -347,7 +347,10 @@ async def _start_servers(
         await _start_one(
             "telnet",
             TelnetServer(
-                host=config.telnet.host, port=config.telnet.port, session_handler=session_handler
+                host=config.telnet.host,
+                port=config.telnet.port,
+                session_handler=session_handler,
+                stop_timeout_seconds=config.shutdown.background_task_drain_seconds,
             ),
         )
         any_interactive_started = True
@@ -378,6 +381,7 @@ async def _start_servers(
                     session_handler=ssh_session_handler,
                     throttle=throttle,
                     login_timeout=config.throttle.login_deadline_seconds,
+                    stop_timeout_seconds=config.shutdown.background_task_drain_seconds,
                 ),
             )
             any_interactive_started = True

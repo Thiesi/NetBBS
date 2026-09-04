@@ -3405,10 +3405,31 @@ lifecycle is owned independently by `LinkRealtimeSession`/`LinkRealtimeSession
 Registry`, never by the listener. `wait_closed()` is therefore called with a
 short bounded `asyncio.wait_for` timeout and the `TimeoutError` is swallowed --
 it is a defensive ceiling on releasing the listening socket's own resources,
-not a normal-path wait for every connection it ever accepted to finish. Any
-other `asyncio.start_server`-based listener in this codebase needs the same
-bounded-wait treatment if its `stop()` can ever run while a still-open
-connection exists.
+not a normal-path wait for every connection it ever accepted to finish.
+`TelnetServer.stop()` and `SSHServer.stop()` lacked it and produced a real
+~9-minute Ctrl+C hang on ReLink (design doc §13.11, item 5): they now track
+every admitted connection themselves (the session registry never sees a
+connection still in auth or option negotiation), bound `wait_closed()` by
+`background_task_drain_seconds`, then `abort()` the rest. Two invariants
+behind that fix: exiting an SSH *process/channel* (`SSHSession.close`) does
+not close the SSH *connection* -- only the client or `conn.abort()` does; and
+asyncssh sends no transport keepalives by default, so a peer that vanished
+without a FIN is invisible until the kernel's TCP retransmission timeout
+(minutes) unless `keepalive_interval` is set, which the SSH listener now does.
+`TelnetSession.close()` bounds its own `wait_closed()` too, since
+`StreamWriter.close()` drains buffered output first and shutdown gathers every
+session's close. Any other `asyncio.start_server`-based listener in this
+codebase needs the same treatment if its `stop()` can ever run while a
+still-open connection exists.
+
+**Testing method for this class:** no dead network is needed. A loopback
+client that connects and simply never disconnects while the handler blocks
+reproduces the hang deterministically on Python 3.12+ (`stop()` never
+returns; bound the test with an outer `asyncio.wait_for`), and the fix is
+proven by constructing the listener with a sub-second `stop_timeout_seconds`
+and asserting the client then sees its connection dropped -- see
+`test_stop_aborts_a_connection_the_client_never_closes` in
+`tests/test_ssh.py` and `tests/test_telnet.py`.
 
 **Real-time Link session authorization is two independent, direction-specific
 checks, not one.** `LiveChannelBridge`'s subscribe/message/presence handlers

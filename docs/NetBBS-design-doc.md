@@ -4163,6 +4163,38 @@ is not yet a guarantee the OS process has actually exited. See
 `docs/NetBBS-worklog.md` for the fuller mechanism and candidate fixes;
 unresolved as of this writing.
 
+**5. Lingering transport connections at listener stop.** A second real
+~9-minute Ctrl+C hang on ReLink (2026-09-04), distinct from the one above:
+a caller's client had vanished without a TCP FIN (asleep laptop, dropped
+Wi-Fi). Ending its session only exits the SSH *channel*
+(`SSHSession.close`); the connection underneath stays up until the client
+disconnects, which a dead peer never does. `SSHAcceptor.close()` (and
+asyncio's `Server.close()` for Telnet) only stops accepting, and on Python
+3.12+ `wait_closed()` blocks until every admitted connection has actually
+dropped -- so teardown's listener-stop step sat for the kernel's whole TCP
+retransmission timeout (`[Errno 60] Operation timed out` on macOS, about
+nine minutes; longer on Linux). Both listeners now track every connection
+they admit -- authenticated or not, since a connection still in its auth
+handshake or Telnet option negotiation never reaches the session registry
+-- wait `background_task_drain_seconds` for them to close on their own,
+then `abort()` whatever is left (no disconnect handshake, which a dead
+peer could never complete anyway). `TelnetSession.close` bounds its own
+`wait_closed()` the same way, because `StreamWriter.close()` flushes
+buffered output first and shutdown gathers every session's close.
+Rejected: closing the SSH connection from `SSHSession.close` -- a live
+client exits on channel close by itself, so the abort belongs at the one
+place that knows every connection, and only after the normal path has had
+its chance.
+
+The same class of dead peer also holds a node slot during normal operation
+until that kernel timeout, since asyncssh sends no keepalives unless asked.
+The SSH listener now enables transport keepalives (30s interval, three
+misses), so a vanished client is detected within about ninety seconds
+instead. Deliberately not an operator setting: an idle live client answers
+keepalives for free and NAT mappings benefit from the traffic, so there is
+nothing a SysOp would tune. Telnet has no protocol-level equivalent; its
+dead peers surface on the next write, and shutdown no longer waits on them.
+
 **Closes issue #60.** Every acceptance criterion that issue names is now
 either implemented (this slice; §13.4/§13.7/§13.9/§13.10 before it) or an
 explicitly deferred, separately-tracked follow-up with its own stated
