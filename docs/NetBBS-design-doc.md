@@ -565,6 +565,10 @@ first retirement. The last friendly/DNS pair actually advertised in an
 outbound hello remains part of that collision namespace until it has been moved
 into history; an inbound hello racing the local rename therefore cannot claim
 the just-replaced name in the gap before the next outbound descriptor is built.
+Committing a changed local friendly or canonical-DNS claim also re-evaluates
+every peer descriptor already on disk against the new claim, because a peer
+which claimed that name first sends no further hello merely because this node
+renamed; an identical already-recorded collision is not duplicated.
 Startup primes the current local friendly/DNS pair before opening the Link
 listener. Thereafter the shared own-hello cache is refreshed through the
 background database lane before an inbound peer is persisted and once per

@@ -405,6 +405,39 @@ def test_unchanged_peer_is_rechecked_after_local_friendly_name_changes(db, tmp_p
     assert notices[0].previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
 
 
+@pytest.mark.parametrize(
+    ("peer_friendly", "peer_dns", "local_friendly", "local_dns"),
+    [
+        ("Familiar", "peer.example.org", "Familiar", "local.example.org"),
+        ("Other", "adopted.example.org", "Original Local", "adopted.example.org"),
+    ],
+)
+def test_stored_peer_is_rechecked_when_the_local_node_adopts_its_claim(
+    db, tmp_path, peer_friendly, peer_dns, local_friendly, local_dns,
+):
+    """A peer which claimed the name first sends no further hello just because
+    this node renamed, so committing a new local claim must re-evaluate the
+    descriptors already on disk (once, deduplicated)."""
+    peer = _peer(tmp_path, "peer", peer_friendly, peer_dns)
+    set_node_display_name(db, "Original Local")
+    set_node_fingerprint(db, "abcdefghijklmnopqrstuvwxyz234567")
+    remember_own_identity_claims(db, canonical_dns_name="local.example.org")
+    save_peer(db, peer)
+    assert not any(item.severity == "security" for item in list_identity_observations(db))
+
+    set_node_display_name(db, local_friendly)
+    remember_own_identity_claims(db, canonical_dns_name=local_dns)
+    remember_own_identity_claims(db, canonical_dns_name=local_dns)
+
+    notices = [
+        item for item in list_identity_observations(db)
+        if item.kind == "cryptographic_identity_changed"
+    ]
+    assert len(notices) == 1
+    assert notices[0].node_fingerprint == peer.fingerprint
+    assert notices[0].previous_fingerprint == "abcdefghijklmnopqrstuvwxyz234567"
+
+
 def test_new_peer_adopting_a_retained_previous_name_is_security_notice(db, tmp_path):
     alice_identity = bootstrap_node_identity("alice")
     alice_node = LinkNode(identity=alice_identity)

@@ -3037,6 +3037,33 @@ def test_transfer_origin_is_not_offered_once_an_offer_is_outstanding(db, lane, s
     assert "your own outstanding transfer offer" in text
 
 
+def test_board_detail_shows_the_origin_fingerprint_when_its_profile_is_unavailable(db, lane, sysop):
+    """A carried board whose origin node is not in the in-memory peer map
+    must still be attributed to its signed fingerprint, not to a shared
+    placeholder that makes two such origins indistinguishable."""
+    import json
+    from netbbs.boards.boards import create_board
+    from netbbs.link.boards import link_board
+    from netbbs.link.node_identity import bootstrap_node_identity
+
+    remote_identity = bootstrap_node_identity("elsewhere")
+    board = create_board(db, "General", creator=sysop)
+    link_context = _link_context()
+    genesis = link_board(db, board, node_identity=remote_identity)
+    db.connection.execute(
+        "UPDATE boards SET link_genesis_json = ? WHERE id = ?", (json.dumps(genesis.to_dict()), board.id)
+    )
+    db.connection.commit()
+
+    inputs = ["m", "m", "l", "0", "1", "b", "b", "b", "b"]
+    session = FakeSession(inputs)
+    asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
+
+    text = _written_text(session)
+    assert f"Origin: {remote_identity.fingerprint}" in text
+    assert "unknown linked node" not in text
+
+
 def test_accept_board_origin_transfer_flow(db, lane, sysop):
     from netbbs.boards.boards import create_board
     from netbbs.link.boards import link_board, offer_board_origin_transfer

@@ -192,6 +192,23 @@ def remember_own_identity_claims(db: Database, *, canonical_dns_name: str | None
     set_config(db, _OWN_IDENTITY_HISTORY_CONFIG_KEY, json.dumps(history))
     set_config(db, _OWN_FRIENDLY_NAME_CONFIG_KEY, friendly_name)
     set_config(db, _OWN_CANONICAL_DNS_CONFIG_KEY, canonical_dns_name or "")
+    if previous != current:
+        _recheck_stored_peers_against_local_claims(db)
+
+
+def _recheck_stored_peers_against_local_claims(db: Database) -> None:
+    """A peer which claimed a name *before* this node adopted it never sends
+    another hello just because we renamed, so the collision check that runs
+    on peer persistence would not see it. Re-evaluate every stored
+    descriptor once per local-claim change; unchanged, non-colliding peers
+    are a no-op and an identical already-recorded collision is deduplicated."""
+    rows = db.connection.execute(
+        "SELECT fingerprint, descriptor_json FROM link_peers"
+    ).fetchall()
+    for row in rows:
+        _record_identity_observation(
+            db, _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
+        )
 
 
 def resolve_peer_reference(peers, reference: str):
@@ -274,12 +291,15 @@ def resolve_stored_peer_reference(db: Database, reference: str) -> str | list[st
 
 def record_peer_identity_observation(db: Database, peer) -> None:
     """Record authenticated presentation changes before ``save_peer`` overwrites them."""
-    current = identity_for_peer(peer)
+    _record_identity_observation(db, identity_for_peer(peer))
+
+
+def _record_identity_observation(db: Database, current: NodeDisplayIdentity) -> None:
     existing_row = db.connection.execute(
-        "SELECT descriptor_json FROM link_peers WHERE fingerprint = ?", (peer.fingerprint,)
+        "SELECT descriptor_json FROM link_peers WHERE fingerprint = ?", (current.fingerprint,)
     ).fetchone()
     previous = (
-        _identity_from_descriptor_json(peer.fingerprint, existing_row["descriptor_json"])
+        _identity_from_descriptor_json(current.fingerprint, existing_row["descriptor_json"])
         if existing_row is not None else None
     )
     presentation_unchanged = (
@@ -320,7 +340,7 @@ def record_peer_identity_observation(db: Database, peer) -> None:
         )
     for row in db.connection.execute(
         "SELECT fingerprint, descriptor_json FROM link_peers WHERE fingerprint <> ?",
-        (peer.fingerprint,),
+        (current.fingerprint,),
     ):
         known = _identity_from_descriptor_json(row["fingerprint"], row["descriptor_json"])
         known_claims = {
@@ -343,7 +363,7 @@ def record_peer_identity_observation(db: Database, peer) -> None:
             WHERE node_fingerprint <> ?
             ORDER BY id DESC
             """,
-            (peer.fingerprint,),
+            (current.fingerprint,),
         ):
             historical_claims = {
                 name_key(value) for value in (

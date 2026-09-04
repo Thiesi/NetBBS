@@ -10437,6 +10437,18 @@ async def _accept_board_origin_transfer_screen(
     )
 
 
+def _linked_node_label(link_context, fingerprint) -> str:
+    """Present a linked node by its admitted profile, else by its signed
+    fingerprint -- never by a shared placeholder that would make two
+    unavailable origins indistinguishable."""
+    peer = link_context.link_node.peers.get(fingerprint) if isinstance(fingerprint, str) else None
+    if peer is not None:
+        return identity_for_peer(peer).label
+    if isinstance(fingerprint, str) and fingerprint:
+        return fingerprint
+    return "an unknown linked node"
+
+
 async def _draw_board_detail(
     session: Session,
     lane: DatabaseLane,
@@ -10512,10 +10524,9 @@ async def _draw_board_detail(
                         " (ORPHANED -- origin's signing key was revoked, no replacement on file)",
                         fg_color=MUTED_COLOR,
                     )
-            origin_peer = link_context.link_node.peers.get(origin_fingerprint)
             origin_label = (
-                "this node" if is_origin else
-                identity_for_peer(origin_peer).label if origin_peer is not None else "unknown linked node"
+                "this node" if is_origin
+                else _linked_node_label(link_context, origin_fingerprint)
             )
             await session.write_line(f"Origin: {sanitize_text(origin_label)}{orphan_note}")
 
@@ -10526,7 +10537,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: an incoming origin-transfer offer from "
-                            f"{sanitize_text(identity_for_peer(link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint'))).label) if link_context.link_node.peers.get(offer.payload.get('old_origin_fingerprint')) is not None else 'an unknown linked node'}",
+                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('old_origin_fingerprint')))}",
                             fg_color=MUTED_COLOR,
                         )
                     )
@@ -10534,7 +10545,7 @@ async def _draw_board_detail(
                     await session.write_line(
                         colored(
                             f"Pending: your own outstanding transfer offer to "
-                            f"{sanitize_text(identity_for_peer(link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint'))).label) if link_context.link_node.peers.get(offer.payload.get('new_origin_fingerprint')) is not None else 'an unknown linked node'}",
+                            f"{sanitize_text(_linked_node_label(link_context, offer.payload.get('new_origin_fingerprint')))}",
                             fg_color=MUTED_COLOR,
                         )
                     )

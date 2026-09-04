@@ -3944,3 +3944,17 @@ Identity-notice ordering is security-sensitive: undismissed cryptographic
 observations sort ahead of benign changes before the SysOp screen applies its
 five-item display and acknowledgement bound, so repeated friendly-name changes
 cannot bury the actionable warning.
+
+A local claim change is itself a collision event. Persisting a new local
+friendly or canonical-DNS claim re-runs the identity check over every stored
+peer descriptor, so a peer which preclaimed that name and then stays silent is
+still recorded as a cryptographic-identity warning. The SysOp board-detail
+screen presents an origin, an incoming offer's source, and an outstanding
+offer's target by fingerprint whenever the peer profile is unavailable, which is
+the same rule every other surface already follows.
+
+This is the last review-driven change on this branch. The remaining
+crash-between-two-writes finding in the interrupted-cancellation path was
+declined: the managed-DNS service is a single-operator service where manual
+repair of one row is the realistic recovery, and the branch already carries
+twice the feature's own size in such safeguards.
