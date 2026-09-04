@@ -383,15 +383,22 @@ async def _render_board_page(
     redraw_in_place: bool,
     unicode_style: bool = False,
     collapsed: bool = False,
+    has_draft: bool = False,
 ) -> None:
     """Renders one page of posts plus its navigation options — the unit
     that should be redrawn on an actual page change (initial entry,
     Older/Newer/Recent), not on every loop iteration regardless of
-    whether anything changed."""
+    whether anything changed. `has_draft` (issue #282) adds a notice
+    line and a `[D]raft` entry for a saved new-post draft, in place of
+    the modal "[E]dit it, [D]elete it, or [I]gnore" question that used
+    to interrupt every entry to the board before its first post was
+    even shown."""
     await _render_post_page(
         session, db, board_name, page, user, name_requirement=name_requirement, redraw_in_place=redraw_in_place,
         unicode_style=unicode_style, collapsed=collapsed,
     )
+    if has_draft:
+        await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
     options = []
     if page.has_older:
         options.append(MenuEntry(label=menu_key("O", "lder"), brief="Show older posts"))
@@ -404,11 +411,17 @@ async def _render_board_page(
         options.append(MenuEntry(label=menu_key("T", "ombstone"), brief="Remove a post, leave a marker"))
     if can_post:
         options.append(MenuEntry(label=menu_key("P", "ost"), brief="Write a new post"))
+    if has_draft:
+        options.append(_DRAFT_MENU_ENTRY)
     options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
     await session.write_line(
         f"\r\n{menu_row(options, width=session.terminal_width, height=session.terminal_height, description_level=description_level)}"
     )
     await session.write("Choice: ")
+
+
+_SAVED_DRAFT_NOTICE = "You have a saved post draft for this message board from an earlier session."
+_DRAFT_MENU_ENTRY = MenuEntry(label=menu_key("D", "raft"), brief="Resume or discard your saved draft")
 
 
 async def _show_board(
@@ -484,6 +497,7 @@ async def _show_board(
             redraw_in_place=redraw_in_place,
             unicode_style=unicode_style,
             collapsed=collapsed,
+            has_draft=_has_saved_draft(),
         )
         if current_page.posts:
             record_board_seen(db, user, board, current_page.posts[-1])
@@ -572,55 +586,79 @@ async def _show_board(
             await session.write_line(f"Posted (id {post.post_id[:12]}...).")
             return
 
-    async def _offer_saved_draft_if_any() -> None:
-        """Issue #149's other half: proactively surfaces a saved new-
-        post draft for this exact (user, board) the moment the board is
-        entered, rather than only ever resurfacing it if/when the
-        caller happens to pick [P]ost again on their own (the existing
-        crash-recovery prompt inside `_compose_body` still does that,
-        unchanged, for whichever draft this one doesn't consume).
-        Scoped to `kind="new"` only -- an in-progress *edit* of a
-        specific existing post has no equally natural "board entry"
-        moment to announce itself at, so it stays exclusively behind
-        the existing recovery-on-reopen path."""
+    def _has_saved_draft() -> bool:
+        # Gated on `can_post` the same way [P]ost itself already is: no
+        # point surfacing a draft the caller couldn't act on to post if
+        # they resumed it.
+        return can_post and _post_draft_path(db, kind="new", board=board, user=user).exists()
+
+    async def _saved_draft_menu(*, from_post: bool = False) -> bool:
+        """Issue #149's other half, reshaped by issue #282: the saved
+        new-post draft for this exact (user, board) is announced on the
+        board page itself and handled behind its own `[D]raft` entry,
+        rather than as a modal question fired before the first post was
+        rendered on every entry until dealt with. Scoped to `kind="new"`
+        only -- an in-progress *edit* of a specific existing post has no
+        equally natural board-level moment, so it stays exclusively
+        behind the existing recovery-on-reopen path inside
+        `_compose_body`.
+
+        `from_post` (Codex review on the same change): `[P]ost` while a
+        draft exists comes through here too, because there is exactly
+        one autosave slot per (user, board) and composing straight into
+        it would let the editor's own crash-recovery prompt -- or the
+        fullscreen editor's autosave -- consume the saved draft without
+        an explicit choice. In that mode `[D]iscard` deletes the draft
+        and then opens a fresh editor. Returns whether an editor was
+        actually opened, so the caller only resets its page position
+        when a post may have been created.
+        """
         draft_path = _post_draft_path(db, kind="new", board=board, user=user)
         if not draft_path.exists():
-            return
+            if from_post:
+                await _compose_new_post()
+                return True
+            return False
+        await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
         await session.write_line(
-            colored(
-                "\r\nYou have a saved post draft for this message board from an earlier session.",
-                fg_color=MUTED_COLOR,
+            menu_row(
+                [
+                    MenuEntry(label=menu_key("R", "esume"), brief="Open it in the editor"),
+                    MenuEntry(
+                        label=menu_key("D", "iscard"),
+                        brief="Delete it, then start a new post" if from_post else "Delete the draft",
+                    ),
+                    MenuEntry(label=menu_key("B", "ack"), brief="Leave it for later"),
+                ],
+                width=session.terminal_width, height=session.terminal_height,
+                description_level=description_level,
             )
         )
-        await write_prompt(session, "[E]dit it, [D]elete it, or [I]gnore for now? ")
-        choice = (await session.read_key()).lower()
-        if choice == "d":
-            delete_draft(draft_path)
-            await session.write_line(colored("\r\nDraft deleted.", fg_color=MUTED_COLOR))
-            return
-        if choice == "e":
-            await session.write_line("")
-            saved_text = load_draft(draft_path)
-            # Consumed here, before _compose_new_post ever opens an
-            # editor against the same draft_path -- otherwise that
-            # editor's own crash-recovery check would immediately offer
-            # to "resume" the very draft this prompt just handed off,
-            # a redundant second prompt for the same file.
-            delete_draft(draft_path)
-            await _compose_new_post(initial_body=saved_text)
-            return
-        # Anything else (including "i") leaves the draft in place,
-        # unread -- same permissive "everything but the named choices
-        # is a no-op" convention netbbs.net.prose_editor._confirm_quit
-        # already uses.
-
-    if can_post:
-        # Runs once, before any post list is shown -- issue #149's own
-        # "prompt before normal board interaction proceeds" acceptance
-        # criterion. Gated on `can_post` the same way [P]ost itself
-        # already is: no point resurfacing a draft the caller couldn't
-        # act on to post if they resumed it.
-        await _offer_saved_draft_if_any()
+        await write_prompt(session, "Choice: ")
+        while True:
+            choice = (await session.read_key()).lower()
+            if choice == "b":
+                await session.write_line("")
+                return False
+            if choice == "d":
+                delete_draft(draft_path)
+                await session.write_line(colored("\r\nDraft deleted.", fg_color=MUTED_COLOR))
+                if from_post:
+                    await _compose_new_post()
+                    return True
+                return False
+            if choice == "r":
+                await session.write_line("")
+                saved_text = load_draft(draft_path)
+                # Consumed here, before _compose_new_post ever opens an
+                # editor against the same draft_path -- otherwise that
+                # editor's own crash-recovery check would immediately
+                # offer to "resume" the very draft this menu just handed
+                # off, a redundant second prompt for the same file.
+                delete_draft(draft_path)
+                await _compose_new_post(initial_body=saved_text)
+                return True
+            await session.write(reject_unhandled_key(choice))
 
     page_anchor: tuple[str, tuple[str, str]] | None = ("after", initial_cursor) if initial_cursor else None
     page = list_posts_page(db, board, user, after=initial_cursor) if initial_cursor else list_posts_page(db, board, user)
@@ -650,10 +688,13 @@ async def _show_board(
         if not can_post:
             return
         while True:
-            options = [
-                MenuEntry(label=menu_key("P", "ost"), brief="Write the first post"),
-                MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"),
-            ]
+            has_draft = _has_saved_draft()
+            if has_draft:
+                await session.write_line(colored(f"\r\n{_SAVED_DRAFT_NOTICE}", fg_color=MUTED_COLOR))
+            options = [MenuEntry(label=menu_key("P", "ost"), brief="Write the first post")]
+            if has_draft:
+                options.append(_DRAFT_MENU_ENTRY)
+            options.append(MenuEntry(label=menu_key("B", "ack"), brief="Return to the previous menu"))
             await session.write_line(
                 "\r\n" + menu_row(
                     options, width=session.terminal_width, height=session.terminal_height,
@@ -665,9 +706,9 @@ async def _show_board(
             if choice == "b":
                 await session.write_line("")
                 return
-            if choice == "p":
+            if choice in ("p", "d") and (choice == "p" or has_draft):
                 await session.write_line("")
-                await _compose_new_post()
+                await _saved_draft_menu(from_post=choice == "p")
                 page = list_posts_page(db, board, user)
                 if page.posts:
                     # A post was actually created (not cancelled) --
@@ -711,8 +752,14 @@ async def _show_board(
             await _render_and_advance_cursor(page)
         elif choice == "p" and can_post:
             await session.write_line("")
-            await _compose_new_post()
-            page_anchor = None  # a freshly-created post always lands on the newest page
+            if await _saved_draft_menu(from_post=True):
+                page_anchor = None  # a freshly-created post always lands on the newest page
+            page = _refetch_current_page()
+            await _render_and_advance_cursor(page)
+        elif choice == "d" and _has_saved_draft():
+            await session.write_line("")
+            if await _saved_draft_menu():
+                page_anchor = None  # a resumed-and-posted draft lands on the newest page too
             page = _refetch_current_page()
             await _render_and_advance_cursor(page)
         elif choice == "b":

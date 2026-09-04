@@ -267,7 +267,7 @@ def test_who_screen_delivers_a_message_to_the_selected_user(tmp_path):
         other_task = asyncio.create_task(_hold_registered(registry, other, "bob"))
         await asyncio.sleep(0)
 
-        session = FakeSession(["w", "0", "1", "m", "Hi there!", "l", "y"])
+        session = FakeSession(["w", "0", "1", "m", "Hi there!", "x", "b", "l", "y"])
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -296,7 +296,7 @@ def test_who_screen_blank_message_cancels_without_sending(tmp_path):
         other_task = asyncio.create_task(_hold_registered(registry, other, "bob"))
         await asyncio.sleep(0)
 
-        session = FakeSession(["w", "0", "1", "m", "", "l", "y"])  # blank message
+        session = FakeSession(["w", "0", "1", "m", "", "x", "b", "l", "y"])  # blank message -> cancelled, pause, back out
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -333,7 +333,7 @@ def test_who_screen_refuses_to_message_an_opted_out_user(tmp_path):
         # No message text scripted after "01" -- if the screen wrongly
         # prompted for one anyway, read_line would raise and fail the
         # test outright, proving the refusal happens first.
-        session = FakeSession(["w", "0", "1", "l", "y"])
+        session = FakeSession(["w", "0", "1", "x", "b", "l", "y"])
         registry.enter(session)
         registry.mark_authenticated(session, "alice")
         try:
@@ -461,7 +461,7 @@ def test_who_screen_remote_entry_without_a_lane_explains_live_messaging_is_unava
         node_controls = _node_controls()
         link_context = _FakeLinkContext(_FakeBridge({"remote-node-fingerprint-abc123": {"erin": "erin"}}))
 
-        session = FakeSession(["w", "0", "1", "l", "y"])
+        session = FakeSession(["w", "0", "1", "x", "b", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:
@@ -492,7 +492,7 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         )
         # (presence for that node is present, so the honest-delivery guard passes)
         lane = DatabaseLane(database.path)
-        session = FakeSession(["w", "0", "1", "hello erin", "l", "y"])
+        session = FakeSession(["w", "0", "1", "m", "hello erin", "x", "b", "l", "y"])
         node_controls.session_registry.enter(session)
         node_controls.session_registry.mark_authenticated(session, "alice")
         try:
@@ -507,6 +507,41 @@ def test_who_screen_remote_entry_sends_a_live_direct_message(tmp_path):
         assert direct.sent[0][1]["to_user_id"] == "erin"
         assert direct.sent[0][1]["body"] == "hello erin"
         assert "(sent to erin@" in text
+
+    asyncio.run(scenario())
+    database.close()
+
+
+def test_who_screen_remote_entry_back_sends_nothing(tmp_path):
+    """Issue #282: a remote entry used to drop straight into the message
+    prompt; it now offers [M]essage/[B]ack like a local one."""
+    database = db(tmp_path)
+    alice = create_user(database, "alice", password="hunter2", user_level=10)
+    fingerprint = "abcdefghijklmnopqrstuvwxyz234567"
+
+    async def scenario():
+        node_controls = _node_controls()
+        direct = _FakeDirectChat()
+        link_context = _FakeLinkContext(
+            _FakeBridge({fingerprint: {"erin": "erin"}}), direct_chat=direct, known_fingerprints=(fingerprint,),
+        )
+        lane = DatabaseLane(database.path)
+        session = FakeSession(["w", "0", "1", "b", "b", "l", "y"])
+        node_controls.session_registry.enter(session)
+        node_controls.session_registry.mark_authenticated(session, "alice")
+        try:
+            await _run_main_menu(session, database, alice, node_controls, lane=lane, link_context=link_context)
+        finally:
+            node_controls.session_registry.leave(session)
+            lane.close()
+
+        text = _written_text(session)
+        assert "Message to erin@" not in text
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", text)
+        assert "[M]essage" in visible and "[B]ack" in visible
+        assert not direct.sent
+        # [B]ack returned to the list (its title is drawn twice), not the main menu.
+        assert visible.count("Who's online") >= 2
 
     asyncio.run(scenario())
     database.close()
