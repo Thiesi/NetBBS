@@ -1474,7 +1474,7 @@ def test_who_lists_and_disconnects_another_session(db, lane, sysop):
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)  # let the other session register
 
-        admin_session = FakeSession(["n", "w", "0", "1", "y", "", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "0", "1", "d", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1526,8 +1526,9 @@ def test_who_screen_delivers_a_custom_message_to_the_target_before_disconnecting
         other_task = asyncio.create_task(_hold_registered(registry, other))
         await asyncio.sleep(0)
 
+        # pick the session, [M]essage, then [D]isconnect + confirm.
         admin_session = FakeSession(
-            ["n", "w", "0", "1", "y", "Reconnect in a few minutes.", "b", "b", "b"]
+            ["n", "w", "0", "1", "m", "Reconnect in a few minutes.", "d", "y", "b", "b", "b"]
         )
         registry.enter(admin_session)
         try:
@@ -1551,7 +1552,7 @@ def test_who_screen_with_no_custom_message_sends_nothing_extra_to_the_target(db,
 
         # Blank message -- the target must receive nothing at all before
         # being disconnected, same as before this feature existed.
-        admin_session = FakeSession(["n", "w", "0", "1", "y", "", "b", "b", "b"])
+        admin_session = FakeSession(["n", "w", "0", "1", "d", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -1635,8 +1636,8 @@ def test_who_screen_goto_targets_the_exact_session_by_its_real_id(db, lane, syso
 
         # "g" (goto), target session_id 2 (b, page position 01 here --
         # but selection must be driven by the typed ID, not position),
-        # then confirm disconnecting it with no custom message.
-        admin_session = FakeSession(["n", "w", "g", "2", "y", "", "b", "b", "b"])
+        # then [D]isconnect and confirm, with no custom message.
+        admin_session = FakeSession(["n", "w", "g", "2", "d", "y", "b", "b", "b"])
         registry.enter(admin_session)
         try:
             await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
@@ -3397,7 +3398,7 @@ def test_create_and_delete_board_category_flow(db, lane, sysop):
 
     inputs = [
         "m", "c", "m", "c",
-        "Vintage", "Old computers", "n",  # not a sub-category
+        "n", "Vintage", "d", "Old computers", "s",  # draft editor: name, description, save
         "l", "0", "1", "Vintage",
         "b", "b", "b", "b",
     ]
@@ -3416,13 +3417,16 @@ def test_grant_and_revoke_moderator_flow(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     board = create_board(db, "General", creator=sysop)
 
-    grant_inputs = ["m", "g", "0", "1", "b", "0", "1", "a", "y", "b", "b"]
+    # [U]ser -> alice, [O]n -> message board General, [P]reset once -> the
+    # limited (approver-only) preset, [S]ave.
+    grant_inputs = ["m", "g", "u", "0", "1", "o", "b", "0", "1", "p", "s", "b", "b"]
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
     assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.APPROVE)
 
-    revoke_inputs = ["m", "r", "0", "1", "b", "0", "1", "y", "b", "b"]
+    # user picker -> alice, then a picker over her actual grants (the only one), confirm.
+    revoke_inputs = ["m", "r", "0", "1", "0", "1", "y", "b", "b"]
     session2 = FakeSession(revoke_inputs)
     _run(session2, lane, sysop)
     assert "Revoked" in _written_text(session2)
@@ -3439,12 +3443,138 @@ def test_grant_blanket_across_all_boards(db, lane, sysop):
     board = create_board(db, "General", creator=sysop)
 
     # scope 'x' = blanket across all boards, no board picker needed;
-    # 'n' declines scoping the blanket grant to one Community.
-    inputs = ["m", "g", "0", "1", "x", "n", "f", "y", "b", "b"]
+    # the default preset is full, [C]ommunity left at "(whole node)".
+    inputs = ["m", "g", "u", "0", "1", "o", "x", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
     assert has_permission(db, alice, object_type="board", object_id=board.id, permission=BoardPermission.DELETE)
+
+
+def test_create_sub_category_via_the_parent_picker(db, lane, sysop):
+    from netbbs.boards.categories import list_subcategories, list_top_level_categories
+
+    inputs = [
+        "m", "c", "m",
+        "c", "n", "Vintage", "s",
+        # second create: [P]arent picker lists "(none)" first, Vintage second
+        "c", "n", "Amiga", "p", "0", "2", "s",
+        "b", "b", "b", "b",
+    ]
+    session = FakeSession(inputs)
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Created category 'Vintage'." in text and "Created category 'Amiga'." in text
+    parents = list_top_level_categories(db)
+    assert [c.name for c in parents] == ["Vintage"]
+    assert [c.name for c in list_subcategories(db, parents[0].id)] == ["Amiga"]
+
+
+def test_create_category_back_creates_nothing_and_blank_name_is_rejected_at_save(db, lane, sysop):
+    from netbbs.boards.categories import list_top_level_categories
+
+    session = FakeSession(["m", "c", "m", "c", "s", "b", "b", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _written_text(session)
+    assert "Name cannot be blank." in text
+    assert "Make this a sub-category" not in text
+    assert list_top_level_categories(db) == []
+
+
+def test_grant_moderator_back_discards_a_half_built_grant(db, lane, sysop):
+    from netbbs.moderation.roles import list_grants_for_user
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    # [U]ser chosen, then [B]ack (a changed draft asks first: confirm with "y").
+    session = FakeSession(["m", "g", "u", "0", "1", "b", "y", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Granted" not in _written_text(session)
+    assert list_grants_for_user(db, alice) == []
+
+
+def test_grant_moderator_save_without_a_scope_explains_instead_of_granting(db, lane, sysop):
+    from netbbs.moderation.roles import list_grants_for_user
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "g", "u", "0", "1", "s", "b", "y", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Choose a [U]ser and a scope under [O]n first." in _visible(_written_text(session))
+    assert list_grants_for_user(db, alice) == []
+
+
+def test_grant_blanket_scoped_to_a_community_via_the_community_field(db, lane, sysop):
+    from netbbs.communities import create_community
+    from netbbs.moderation.roles import list_grants_for_user
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    retro = create_community(db, "Retro", creator=sysop)
+    # [O]n -> blanket boards, [C]ommunity picker: "(whole node)" first, Retro second.
+    session = FakeSession(["m", "g", "u", "0", "1", "o", "x", "c", "0", "2", "s", "b", "b"])
+    _run(session, lane, sysop)
+    assert "scoped to Community 'Retro'" in _written_text(session)
+    grants = list_grants_for_user(db, alice)
+    assert len(grants) == 1 and grants[0].object_id is None and grants[0].community_id == retro.id
+
+
+def test_revoke_moderator_lists_the_users_real_grants(db, lane, sysop):
+    """Issue #282: revoking used to require re-describing the grant from
+    memory; now the user's actual grants are the picker, which also
+    makes "who moderates what" readable at all."""
+    from netbbs.boards.boards import create_board
+    from netbbs.moderation.roles import BoardPermission, ChannelPermission, grant_permissions, list_grants_for_user
+
+    alice = create_user(db, "alice", password="hunter2", user_level=10)
+    board = create_board(db, "General", creator=sysop)
+    grant_permissions(db, alice, object_type="board", object_id=board.id, permissions=BoardPermission.APPROVE, granted_by=sysop)
+    grant_permissions(db, alice, object_type="channel", object_id=None, permissions=ChannelPermission.MODERATE, granted_by=sysop)
+
+    # Look, then back out: nothing revoked.
+    session = FakeSession(["m", "r", "0", "1", "b", "b", "b"])
+    _run(session, lane, sysop)
+    text = _visible(_written_text(session))
+    assert "message board 'General'" in text
+    assert "all chat channels (blanket)" in text
+    assert "approve" in text and "moderate" in text
+    assert len(list_grants_for_user(db, alice)) == 2
+
+    # Pick the second grant and confirm.
+    session = FakeSession(["m", "r", "0", "1", "0", "2", "y", "b", "b"])
+    _run(session, lane, sysop)
+    assert "Revoked the grant on all chat channels (blanket) from 'alice'." in _written_text(session)
+    remaining = list_grants_for_user(db, alice)
+    assert [g.object_type for g in remaining] == ["board"]
+
+
+def test_revoke_moderator_with_no_grants_says_so(db, lane, sysop):
+    create_user(db, "alice", password="hunter2", user_level=10)
+    session = FakeSession(["m", "r", "0", "1", "b", "b"])
+    _run(session, lane, sysop)
+    assert "'alice' has no moderator grants." in _written_text(session)
+
+
+def test_who_screen_back_from_the_disconnect_screen_touches_nothing(db, lane, sysop):
+    async def scenario():
+        node_controls = _node_controls()
+        registry = node_controls.session_registry
+        other = FakeSession()
+        other_task = asyncio.create_task(_hold_registered(registry, other))
+        await asyncio.sleep(0)
+
+        admin_session = FakeSession(["n", "w", "0", "1", "b", "b", "b", "b"])
+        registry.enter(admin_session)
+        try:
+            await admin_menu(admin_session, lane, sysop, node_controls=node_controls)
+        finally:
+            registry.leave(admin_session)
+
+        text = _visible(_written_text(admin_session))
+        assert "Disconnect " in text and "[D]isconnect" in text
+        assert "disconnected." not in text
+        assert not other_task.done()
+        other_task.cancel()
+        await asyncio.gather(other_task, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 # -- doors (issue #172) ------------------------------------------------------
@@ -3605,7 +3735,7 @@ def test_create_and_delete_channel_category_flow(db, lane, sysop):
 
     inputs = [
         "m", "c", "c", "c",
-        "Vintage", "Old radios", "n",  # not a sub-category
+        "n", "Vintage", "d", "Old radios", "s",  # draft editor: name, description, save
         "l", "0", "1", "Vintage",
         "b", "b", "b", "b",
     ]
@@ -3627,7 +3757,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
     alice = create_user(db, "alice", password="hunter2", user_level=10)
     channel = create_channel(db, "Lobby", creator=sysop)
 
-    grant_inputs = ["m", "g", "0", "1", "n", "0", "1", "f", "y", "b", "b"]
+    grant_inputs = ["m", "g", "u", "0", "1", "o", "n", "0", "1", "s", "b", "b"]
     session = FakeSession(grant_inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -3635,7 +3765,7 @@ def test_grant_and_revoke_moderator_flow_for_channel(db, lane, sysop):
         db, alice, object_type="channel", object_id=channel.id, permission=ChannelPermission.MODERATE
     )
 
-    revoke_inputs = ["m", "r", "0", "1", "n", "0", "1", "y", "b", "b"]
+    revoke_inputs = ["m", "r", "0", "1", "0", "1", "y", "b", "b"]
     session2 = FakeSession(revoke_inputs)
     _run(session2, lane, sysop)
     assert "Revoked" in _written_text(session2)
@@ -3652,8 +3782,8 @@ def test_grant_blanket_across_all_channels(db, lane, sysop):
     channel = create_channel(db, "Lobby", creator=sysop)
 
     # scope 'z' = blanket across all channels, no channel picker needed;
-    # 'n' declines scoping the blanket grant to one Community.
-    inputs = ["m", "g", "0", "1", "z", "n", "f", "y", "b", "b"]
+    # the default preset is full, [C]ommunity left at "(whole node)".
+    inputs = ["m", "g", "u", "0", "1", "o", "z", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
     assert "Granted" in _written_text(session)
@@ -3792,9 +3922,9 @@ def test_grant_blanket_scoped_to_a_community(db, lane, sysop):
     board = create_board(db, "Elections", community_id=community.id, creator=sysop)
     other_board = create_board(db, "General", creator=sysop)  # not in the Community
 
-    # scope 'x' = blanket across all boards, then 'y' to scope it to one
-    # Community, pick #01 (the only one).
-    inputs = ["m", "g", "0", "1", "x", "y", "0", "1", "f", "y", "b", "b"]
+    # [O]n -> 'x' = blanket across all boards; [C]ommunity picker lists
+    # "(whole node)" first, Politics second; full preset is the default.
+    inputs = ["m", "g", "u", "0", "1", "o", "x", "c", "0", "2", "s", "b", "b"]
     session = FakeSession(inputs)
     _run(session, lane, sysop)
 

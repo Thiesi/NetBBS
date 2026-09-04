@@ -255,9 +255,11 @@ from netbbs.mrc.settings import (
 from netbbs.moderation.roles import (
     BoardPermission,
     ChannelPermission,
+    ModeratorGrantError,
     get_grant,
     grant_permissions,
     list_grants_for_community,
+    list_grants_for_user,
     revoke_permissions,
 )
 from netbbs.net.char_input import (
@@ -5499,37 +5501,68 @@ async def _who_screen(session: Session, lane: DatabaseLane, actor: User, node_co
         )
         return
 
-    if not await prompt_yes_no(session, f"Disconnect {_session_name(selected)!r}?", default=False):
-        return
+    # Issue #282: this used to be "Disconnect X?" followed by a
+    # mandatory-looking "Message ... (optional):" line prompt with no
+    # way back once the question was answered. Now a one-field draft
+    # screen -- `[M]essage` is optional and editable, `[D]isconnect`
+    # is the explicit act, and its confirm sits inside `save` for the
+    # same reason `_drain_screen` keeps its own: it ends someone
+    # else's session.
+    name = _session_name(selected)
+    draft: dict = {"message": None}
 
-    await write_prompt(session, "Message to show them before disconnecting (optional): ")
-    message_raw = (await session.read_line()).strip()
-    message = message_raw or None
+    async def save(draft: dict) -> bool | None:
+        message = draft["message"]
+        if not await prompt_yes_no(session, f"Disconnect {name!r} now?", default=False):
+            await session.write_line("Cancelled.")
+            return None
 
-    target_user_id: int | None = None
-    detail = f"peer address {selected.peer_address or 'unknown'}"
-    if selected.username is not None:
-        try:
-            target_user_id = (await lane.run(get_user_by_username, selected.username)).id
-        except AuthError:
-            pass  # account no longer exists -- log by peer address only
+        target_user_id: int | None = None
+        detail = f"peer address {selected.peer_address or 'unknown'}"
+        if selected.username is not None:
+            try:
+                target_user_id = (await lane.run(get_user_by_username, selected.username)).id
+            except AuthError:
+                pass  # account no longer exists -- log by peer address only
 
-    if message is not None:
-        await node_controls.session_registry.notify_one(
-            selected.session, colored(f"\r\n*** {sanitize_text(message)} ***", fg_color=ALERT_COLOR, bold=True)
+        if message is not None:
+            await node_controls.session_registry.notify_one(
+                selected.session, colored(f"\r\n*** {sanitize_text(message)} ***", fg_color=ALERT_COLOR, bold=True)
+            )
+
+        disconnected = await node_controls.session_registry.disconnect_one(selected.session)
+        if not disconnected:
+            await session.write_line(colored("That session is already gone.", fg_color=ERROR_COLOR))
+            return True
+
+        await lane.run(
+            record_action, actor=actor, action="disconnect_session",
+            target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
         )
+        await session.write_line(colored(f"{name!r} disconnected.", fg_color=SUCCESS_COLOR))
+        return True
 
-    disconnected = await node_controls.session_registry.disconnect_one(selected.session)
-    if not disconnected:
-        await session.write_line(colored("That session is already gone.", fg_color=ERROR_COLOR))
-        return
-
-    await lane.run(
-        record_action, actor=actor, action="disconnect_session",
-        target_user_id=target_user_id, detail=f"{detail}, message={message!r}",
-    )
-    await session.write_line(
-        colored(f"{_session_name(selected)!r} disconnected.", fg_color=SUCCESS_COLOR)
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    await edit_resource_draft(
+        session, lane,
+        title=f"Disconnect {name}",
+        fields=[
+            FieldSpec(
+                key="message", hotkey="m", menu_text=menu_key("M", "essage"), label="Message",
+                render=lambda d: sanitize_text(d["message"]) if d.get("message") else "(none)",
+                prompt=text_field("message"),
+                brief="Shown to them before the disconnect",
+                help="Optional. Delivered to that session just before its connection is closed.",
+            ),
+        ],
+        draft=draft, save=save,
+        save_menu_text=menu_key("D", "isconnect"), save_hotkey="d", back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=await lane.run(unicode_style_enabled, actor),
+        collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
+        accent_color=await lane.run(effective_accent_color_256),
+        header_color=await lane.run(effective_header_color_256),
     )
 
 
@@ -13193,34 +13226,92 @@ async def _draw_generic_category_menu(
 async def _create_category_screen(
     session: Session, lane: DatabaseLane, actor: User, *, create, list_top_level, error_type
 ) -> None:
-    await session.write("Name: ")
-    name = (await session.read_line()).strip()
-    if not name:
-        await session.write_line(colored("Cancelled: name cannot be blank.", fg_color=MUTED_COLOR))
-        return
-    await session.write("Description (optional): ")
-    description = (await session.read_line()).strip() or None
-    parent_category_id = None
-    if await prompt_yes_no(session, "Make this a sub-category of an existing one?", default=False):
-        parent = await pick_item(
-            session, await lane.run(list_top_level),
-            name_of=lambda c: c.name, stable_id_of=lambda c: c.id,
-            title="Parent category", empty_message="No top-level categories exist yet.",
-            redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
-            unicode_style=await lane.run(unicode_style_enabled, actor),
-            collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
-            accent_color=await lane.run(effective_accent_color_256),
-            header_color=await lane.run(effective_header_color_256),
+    """
+    Issue #282: the last create-wizard left in this module (boards,
+    areas, channels, doors, and Communities were all already
+    `edit_resource_draft` screens) -- name, then description, then
+    "Make this a sub-category?", with a blank name aborting outright.
+    Now the same draft-editor shape as its siblings: `[N]ame`,
+    `[D]escription`, `[P]arent` (a picker whose first entry is "no
+    parent"), `[S]ave`; nothing is created before Save, and a domain
+    rejection (duplicate name, ...) returns to the draft intact.
+    """
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
+    unicode_style = await lane.run(unicode_style_enabled, actor)
+    collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
+
+    draft: dict = {"name": "", "description": None, "parent": None}
+
+    async def _parent_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        # (name, category-or-None) pairs: a "no parent" entry leads the
+        # list so clearing a previously chosen parent is a pick like any
+        # other, and backing out of the picker keeps the draft as-is.
+        choices = [("(none -- a top-level category)", None)]
+        choices += [(category.name, category) for category in await lane.run(list_top_level)]
+        selected = await pick_item(
+            session, choices,
+            name_of=lambda item: item[0],
+            stable_id_of=lambda item: 0 if item[1] is None else item[1].id,
+            title="Parent category",
+            empty_message="No top-level categories exist yet.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=accent_color, header_color=header_color,
         )
-        parent_category_id = parent.id if parent is not None else None
-    try:
+        if selected is None:
+            return
+        draft["parent"] = selected[1]
+
+    fields = [
+        FieldSpec(
+            key="name", hotkey="n", menu_text=menu_key("N", "ame"), label="Name",
+            render=lambda d: sanitize_text(d["name"]) if d["name"] else "(blank)",
+            prompt=text_field("name", required=True),
+            brief="The category's name",
+            help="Shown wherever this category is listed. Required.",
+        ),
+        FieldSpec(
+            key="description", hotkey="d", menu_text=menu_key("D", "escription"), label="Description",
+            render=lambda d: sanitize_text(d["description"]) if d["description"] else "(none)",
+            prompt=text_field("description"),
+            brief="Optional one-line description",
+            help="Optional. Shown under the category name where there is room for it.",
+        ),
+        FieldSpec(
+            key="parent", hotkey="p", menu_text=menu_key("P", "arent"), label="Parent",
+            render=lambda d: sanitize_text(d["parent"].name) if d["parent"] is not None else "(none -- top-level)",
+            prompt=_parent_prompt,
+            brief="Nest under an existing category",
+            help=(
+                "Pick an existing top-level category to make this one its sub-category, or "
+                "the first entry to keep it top-level."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> object:
+        if not draft["name"]:
+            await session.write_line(colored("Name cannot be blank.", fg_color=MUTED_COLOR))
+            return None
+        parent = draft["parent"]
         category = await lane.run(
-            create, name, description=description, parent_category_id=parent_category_id, created_by=actor
+            create, draft["name"], description=draft["description"],
+            parent_category_id=parent.id if parent is not None else None, created_by=actor,
         )
-    except error_type as exc:
-        await session.write_line(colored(f"Could not create category: {exc}", fg_color=MUTED_COLOR))
-        return
-    await session.write_line(f"Created category {category.name!r}.")
+        await session.write_line(f"Created category {category.name!r}.")
+        return category
+
+    await edit_resource_draft(
+        session, lane,
+        title="Create category",
+        fields=fields, draft=draft, save=save, error_type=error_type,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=accent_color, header_color=header_color,
+    )
 
 
 async def _list_categories_screen(
@@ -13273,16 +13364,12 @@ async def _list_categories_screen(
 
 async def _pick_moderator_scope(
     session: Session, lane: DatabaseLane, *, redraw_in_place: bool, unicode_style: bool, collapsed: bool
-) -> tuple[str, int | None, str, int | None] | None:
-    """Returns `(object_type, object_id, human label, community_id)`,
-    or `None` if cancelled. `object_id=None` means a blanket grant
-    (design doc) -- `community_id` further narrows a blanket grant to
-    one Community's membership (design doc §16's Community-blanket
-    tier) instead of the whole node;
-    `community_id` is always `None` for a per-object grant (board/file
-    area/chat channel), since a specific object's own `community_id`
-    already answers that question without needing it duplicated on the
-    grant."""
+) -> tuple[str, int | None, str] | None:
+    """Returns `(object_type, object_id, human label)`, or `None` if
+    backed out. `object_id=None` means a blanket grant (design doc);
+    narrowing a blanket grant to one Community (design doc §16's
+    Community-blanket tier) is `_grant_moderator_screen`'s own
+    `[C]ommunity` field now (issue #282), not a question asked here."""
     # Dogfood-reported regression, same shape as picker.py's own nav-
     # trailer bug: this line used to be one hand-built, unclamped
     # concatenation -- 147 columns wide once all six options were
@@ -13316,7 +13403,7 @@ async def _pick_moderator_scope(
         )
         if board is None:
             return None
-        return "board", board.id, f"message board {board.name!r}", None
+        return "board", board.id, f"message board {board.name!r}"
     elif scope_key == "a":
         area = await pick_item(
             session, await lane.run(list_file_areas, order_by="alphabetical"),
@@ -13327,7 +13414,7 @@ async def _pick_moderator_scope(
         )
         if area is None:
             return None
-        return "file_area", area.id, f"file area {area.name!r}", None
+        return "file_area", area.id, f"file area {area.name!r}"
     elif scope_key == "n":
         channel = await pick_item(
             session, await lane.run(list_channels),
@@ -13338,7 +13425,7 @@ async def _pick_moderator_scope(
         )
         if channel is None:
             return None
-        return "channel", channel.id, f"chat channel {channel.name!r}", None
+        return "channel", channel.id, f"chat channel {channel.name!r}"
     elif scope_key == "x":
         object_type, label = "board", "all message boards (blanket)"
     elif scope_key == "y":
@@ -13346,150 +13433,257 @@ async def _pick_moderator_scope(
     elif scope_key == "z":
         object_type, label = "channel", "all chat channels (blanket)"
     else:
-        await session.write_line(colored("Not a valid scope -- cancelled.", fg_color=MUTED_COLOR))
+        await session.write_line(colored("Not a valid scope.", fg_color=MUTED_COLOR))
         return None
-
-    community_id = await _pick_optional_community_blanket_scope(
-        session, lane, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
-    )
-    if community_id is not None:
-        community = await lane.run(get_community, community_id)
-        label = f"{label} scoped to Community {community.name!r}"
-    return object_type, None, label, community_id
+    return object_type, None, label
 
 
-async def _pick_optional_community_blanket_scope(
-    session: Session, lane: DatabaseLane, *, redraw_in_place: bool, unicode_style: bool, collapsed: bool
-) -> int | None:
-    """The blanket-grant-scoping follow-up (design doc §16):
-    'Scope this blanket grant to one Community instead of the whole
-    node?' -- extends the existing X/Y/Z blanket keys rather than
-    adding new ones. Returns the chosen
-    Community's id, or `None` for an ordinary node-wide (local-)blanket
-    grant."""
-    if not await prompt_yes_no(
-        session, "Scope this blanket grant to one Community instead of the whole node?", default=False
-    ):
-        return None
-    selected = await pick_item(
-        session, await lane.run(list_communities),
-        name_of=lambda c: c.name,
-        stable_id_of=lambda c: c.id,
-        title="Community",
-        empty_message="No Communities exist yet.",
-        redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    return selected.id if selected is not None else None
+
+
+_MODERATOR_PRESETS = ["full", "limited"]
+
+
+def _moderator_preset_label(object_type: str | None, preset: str) -> str:
+    if object_type == "channel":
+        return "Full moderator (edit+moderate+manage members)" if preset == "full" else "Moderator only"
+    if object_type is None:
+        return "Full moderator" if preset == "full" else "Limited (approve/moderate only)"
+    return "Full moderator (edit+delete+approve)" if preset == "full" else "Approver only"
+
+
+def _moderator_preset_permissions(object_type: str, preset: str):
+    if object_type == "channel":
+        if preset == "full":
+            return ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
+        return ChannelPermission.MODERATE
+    if preset == "full":
+        return BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
+    return BoardPermission.APPROVE
 
 
 async def _grant_moderator_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
-    redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
+    """
+    Issue #282: this was a five-step chain (user picker, scope key,
+    optional "scope to one Community?" yes/no plus picker, preset key,
+    confirm) with no way back -- any invalid key cancelled the whole
+    thing back to the Content menu. Now one draft-editor screen:
+    `[U]ser`, `[O]n` (the scope: one board/area/channel, or a blanket
+    across all of one kind), `[C]ommunity` (narrows a blanket grant to
+    one Community's membership; not applicable to a per-object grant),
+    `[P]reset` (a one-keystroke cycle), and `[S]ave`. Nothing is granted
+    before Save, and the summary the editor keeps on screen is the
+    confirmation -- a grant is reversible from `[R]evoke`.
+    """
+    redraw_in_place, redraw_hint = await lane.run(_resolve_redraw_preference, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
-    target = await pick_item(
-        session, await lane.run(list_users),
-        name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
-        title="Grant moderator to which user?", empty_message="No registered users yet.",
-        redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
-    )
-    if target is None:
-        return
-    scope = await _pick_moderator_scope(
-        session, lane, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
-    )
-    if scope is None:
-        return
-    object_type, object_id, label, community_id = scope
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
 
-    if object_type == "channel":
-        await session.write_line("Preset:")
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('F', 'ull moderator (edit+moderate+manage members)'), menu_key('M', 'oderator only')], width=session.terminal_width)}: "
+    draft: dict = {
+        "user": None, "object_type": None, "object_id": None, "label": None,
+        "community": None, "preset": "full",
+    }
+
+    async def _user_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        selected = await pick_item(
+            session, await lane.run(list_users),
+            name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
+            title="Grant moderator to which user?", empty_message="No registered users yet.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=accent_color, header_color=header_color,
         )
-        preset_key = (await session.read_key()).lower()
-        await session.write_line("")
-        if preset_key == "f":
-            permissions = ChannelPermission.EDIT | ChannelPermission.MODERATE | ChannelPermission.MANAGE_MEMBERS
-            preset_label = "Full moderator"
-        elif preset_key == "m":
-            permissions = ChannelPermission.MODERATE
-            preset_label = "Moderator only"
-        else:
-            await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
-            return
-    else:
-        await session.write_line("Preset:")
-        await write_prompt(
-            session,
-            f"{action_bar([menu_key('F', 'ull moderator (edit+delete+approve)'), menu_key('A', 'pprover only')], width=session.terminal_width)}: "
+        if selected is not None:
+            draft["user"] = selected
+
+    async def _scope_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        scope = await _pick_moderator_scope(
+            session, lane, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
         )
-        preset_key = (await session.read_key()).lower()
-        await session.write_line("")
-        if preset_key == "f":
-            permissions = BoardPermission.EDIT | BoardPermission.DELETE | BoardPermission.APPROVE
-            preset_label = "Full moderator"
-        elif preset_key == "a":
-            permissions = BoardPermission.APPROVE
-            preset_label = "Approver only"
-        else:
-            await session.write_line(colored("Not a valid preset -- cancelled.", fg_color=MUTED_COLOR))
+        if scope is None:
             return
+        draft["object_type"], draft["object_id"], draft["label"] = scope
+        if draft["object_id"] is not None:
+            draft["community"] = None  # a specific object already belongs to its own Community
 
-    if not await prompt_yes_no(
-        session, f"Grant {preset_label!r} on {label} to {target.username!r}?", default=False
-    ):
-        await session.write_line("Cancelled.")
-        return
+    async def _community_prompt(session: Session, lane: DatabaseLane, draft: dict) -> None:
+        if draft["object_type"] is None or draft["object_id"] is not None:
+            await session.write_line(
+                colored(
+                    "Community scoping applies to blanket grants only -- choose a blanket scope under [O]n first.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+            return
+        choices = [("(whole node)", None)]
+        choices += [(community.name, community) for community in await lane.run(list_communities)]
+        selected = await pick_item(
+            session, choices,
+            name_of=lambda item: item[0],
+            stable_id_of=lambda item: 0 if item[1] is None else item[1].id,
+            title="Scope the blanket grant to which Community?",
+            empty_message="No Communities exist yet.",
+            redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+            accent_color=accent_color, header_color=header_color,
+        )
+        if selected is None:
+            return
+        draft["community"] = selected[1]
 
-    await lane.run(
-        grant_permissions,
-        target, object_type=object_type, object_id=object_id, permissions=permissions,
-        granted_by=actor, community_id=community_id,
+    def _community_render(d: dict) -> str:
+        if d["object_type"] is None:
+            return "(choose a scope first)"
+        if d["object_id"] is not None:
+            return "(n/a -- a specific object)"
+        return sanitize_text(d["community"].name) if d["community"] is not None else "(whole node)"
+
+    fields = [
+        FieldSpec(
+            key="user", hotkey="u", menu_text=menu_key("U", "ser"), label="User",
+            render=lambda d: sanitize_text(d["user"].username) if d["user"] is not None else "(not chosen)",
+            prompt=_user_prompt,
+            brief="Who receives the grant",
+            help="The account that will hold these moderator permissions.",
+        ),
+        FieldSpec(
+            key="label", hotkey="o", menu_text=menu_key("O", "n"), label="On",
+            render=lambda d: sanitize_text(d["label"]) if d["label"] else "(not chosen)",
+            prompt=_scope_prompt,
+            brief="One board/area/channel, or all of one kind",
+            help=(
+                "A specific message board, file area, or chat channel -- or a blanket grant across "
+                "every board, every area, or every channel on this node."
+            ),
+        ),
+        FieldSpec(
+            key="community", hotkey="c", menu_text=menu_key("C", "ommunity"), label="Community",
+            render=_community_render,
+            prompt=_community_prompt,
+            brief="Narrow a blanket grant to one Community",
+            help=(
+                "For a blanket grant only: limit it to the boards/areas/channels of one Community "
+                "instead of the whole node (design doc, Community-blanket tier)."
+            ),
+        ),
+        FieldSpec(
+            key="preset", hotkey="p", menu_text=menu_key("P", "reset"), label="Preset",
+            render=lambda d: _moderator_preset_label(d["object_type"], d["preset"]),
+            prompt=choice_field("preset", _MODERATOR_PRESETS),
+            step=choice_step("preset", _MODERATOR_PRESETS),
+            brief="Full moderator, or approve/moderate only",
+            help=(
+                "Full moderator can edit, delete/moderate, and (for boards/areas) approve or (for "
+                "channels) manage members. The limited preset only approves (boards/areas) or "
+                "only moderates (channels)."
+            ),
+        ),
+    ]
+
+    async def save(draft: dict) -> bool | None:
+        if draft["user"] is None or draft["object_type"] is None:
+            await session.write_line(
+                colored("Choose a [U]ser and a scope under [O]n first.", fg_color=MUTED_COLOR)
+            )
+            return None
+        community = draft["community"]
+        label = draft["label"]
+        if community is not None:
+            label = f"{label} scoped to Community {community.name!r}"
+        preset_label = _moderator_preset_label(draft["object_type"], draft["preset"])
+        await lane.run(
+            grant_permissions,
+            draft["user"], object_type=draft["object_type"], object_id=draft["object_id"],
+            permissions=_moderator_preset_permissions(draft["object_type"], draft["preset"]),
+            granted_by=actor, community_id=community.id if community is not None else None,
+        )
+        await session.write_line(f"Granted {preset_label} on {label} to {draft['user'].username!r}.")
+        return True
+
+    await edit_resource_draft(
+        session, lane,
+        title="Grant moderator",
+        fields=fields, draft=draft, save=save, error_type=ModeratorGrantError,
+        save_menu_text=menu_key("S", "ave"), back_menu_text=menu_key("B", "ack"),
+        description_level=await lane.run(menu_description_level, actor),
+        redraw_in_place=redraw_in_place, redraw_hint=redraw_hint,
+        unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=accent_color, header_color=header_color,
     )
-    await session.write_line(f"Granted {preset_label} on {label} to {target.username!r}.")
 
 
 async def _revoke_moderator_screen(session: Session, lane: DatabaseLane, actor: User) -> None:
+    """
+    Issue #282: revoking used to mean re-describing the grant from
+    memory -- user picker, scope key, object picker, then being told
+    "has no grant on ..." if the guess was wrong -- and nothing anywhere
+    listed what a user actually held. Now: pick the user, pick one of
+    their real grants (which is also the only place "who moderates
+    what" can be read), confirm, done.
+    """
     redraw_in_place = await lane.run(redraw_in_place_enabled, actor)
     unicode_style = await lane.run(unicode_style_enabled, actor)
     collapsed = await lane.run(breadcrumb_collapsed_enabled, actor)
+    accent_color = await lane.run(effective_accent_color_256)
+    header_color = await lane.run(effective_header_color_256)
     target = await pick_item(
         session, await lane.run(list_users),
         name_of=lambda u: u.username, stable_id_of=lambda u: u.id,
         title="Revoke moderator from which user?", empty_message="No registered users yet.",
         redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
-        accent_color=await lane.run(effective_accent_color_256),
-        header_color=await lane.run(effective_header_color_256),
+        accent_color=accent_color, header_color=header_color,
     )
     if target is None:
         return
-    scope = await _pick_moderator_scope(
-        session, lane, redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed
-    )
-    if scope is None:
-        return
-    object_type, object_id, label, community_id = scope
 
-    grant = await lane.run(
-        get_grant, target, object_type=object_type, object_id=object_id, community_id=community_id
-    )
-    if grant is None:
-        await session.write_line(colored(f"{target.username!r} has no grant on {label}.", fg_color=MUTED_COLOR))
+    def _load(db: Database) -> tuple[list, dict[tuple[str, int], str], dict[int, str]]:
+        grants = list_grants_for_user(db, target)
+        names: dict[tuple[str, int], str] = {}
+        names.update({("board", b.id): b.name for b in list_boards(db, order_by="alphabetical")})
+        names.update({("file_area", a.id): a.name for a in list_file_areas(db, order_by="alphabetical")})
+        names.update({("channel", c.id): c.name for c in list_channels(db)})
+        communities = {c.id: c.name for c in list_communities(db)}
+        return grants, names, communities
+
+    grants, names, communities = await lane.run(_load)
+    if not grants:
+        await session.write_line(colored(f"{target.username!r} has no moderator grants.", fg_color=MUTED_COLOR))
         return
 
+    kind_labels = {"board": "message board", "file_area": "file area", "channel": "chat channel"}
+    blanket_labels = {"board": "all message boards", "file_area": "all file areas", "channel": "all chat channels"}
+
+    def _grant_label(grant) -> str:
+        if grant.object_id is None:
+            label = f"{blanket_labels.get(grant.object_type, grant.object_type)} (blanket)"
+            if grant.community_id is not None:
+                label += f" scoped to Community {communities.get(grant.community_id, '#' + str(grant.community_id))!r}"
+            return label
+        name = names.get((grant.object_type, grant.object_id))
+        kind = kind_labels.get(grant.object_type, grant.object_type)
+        return f"{kind} {name!r}" if name is not None else f"{kind} #{grant.object_id} (deleted)"
+
+    def _grant_description(grant) -> str:
+        enum_type = ChannelPermission if grant.object_type == "channel" else BoardPermission
+        return ", ".join(flag.name.lower().replace("_", " ") for flag in enum_type if grant.permissions & int(flag))
+
+    selected = await pick_item(
+        session, grants,
+        name_of=_grant_label, stable_id_of=lambda g: g.id, description_of=_grant_description,
+        title=f"{target.username}'s moderator grants", empty_message="No grants.",
+        redraw_in_place=redraw_in_place, unicode_style=unicode_style, collapsed=collapsed,
+        accent_color=accent_color, header_color=header_color,
+    )
+    if selected is None:
+        return
+    label = _grant_label(selected)
     if not await prompt_yes_no(session, f"Revoke all permissions for {target.username!r} on {label}?", default=False):
         await session.write_line("Cancelled.")
         return
 
-    permission_enum = ChannelPermission if object_type == "channel" else BoardPermission
+    permission_enum = ChannelPermission if selected.object_type == "channel" else BoardPermission
     await lane.run(
         revoke_permissions,
-        target, object_type=object_type, object_id=object_id,
-        permissions=permission_enum(grant.permissions), revoked_by=actor, community_id=community_id,
+        target, object_type=selected.object_type, object_id=selected.object_id,
+        permissions=permission_enum(selected.permissions), revoked_by=actor, community_id=selected.community_id,
     )
-    await session.write_line(f"Revoked {target.username!r}'s grant on {label}.")
+    await session.write_line(f"Revoked the grant on {label} from {target.username!r}.")
