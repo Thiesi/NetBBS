@@ -119,6 +119,13 @@ The standing principle is:
 - **Fail clearly.** Administrative lockout, identity ambiguity, incompatible
   databases, protocol rejection, and resource exhaustion should not degrade
   silently.
+- **Scale safeguards to the operator model.** The managed netbbs.org DNS
+  service is a single instance run by the project, its occupancy is small,
+  and a stuck registration row is repaired by hand. Crash consistency
+  between two writes, sweep-timing races, cooldown-expiry races, and
+  capacity-cap races in its rename and recovery paths are not defects
+  unless a SysOp can trigger them from the UI; prefer a clear failure plus
+  manual recovery over another journal or lock.
 
 ## Environment
 
