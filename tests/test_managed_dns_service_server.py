@@ -276,7 +276,7 @@ def test_lost_rename_retry_refreshes_contact_before_the_next_sweep(db):
     assert replacement.contact_started_at == clock.now.isoformat()
 
 
-def test_lost_rename_retry_cannot_revive_an_abandoned_replacement_after_cooldown(db):
+def test_lost_rename_retry_after_cooldown_creates_a_fresh_replacement(db):
     now = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
     class Clock:
@@ -287,21 +287,59 @@ def test_lost_rename_retry_cannot_revive_an_abandoned_replacement_after_cooldown
         server = await _start_server(db, clock=Clock(), cooldown_seconds=60)
         try:
             original = await _register(server, name="old-name")
-            await _rename(server, credential=original["credential"], name="new-name")
+            _, first_replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
             mark_abandoned(
                 db, "new-name", released_at=(now - timedelta(seconds=60)).isoformat()
             )
-            return await _rename(
+            retried = await _rename(
                 server, credential=original["credential"], name="new-name"
+            )
+            return first_replacement, retried
+        finally:
+            await server.stop()
+
+    first_replacement, (status, body) = asyncio.run(scenario())
+
+    assert status == 201
+    assert body["status"] == "pending"
+    assert body["credential"] != first_replacement["credential"]
+    replacement = get_registration_by_name(db, "new-name")
+    assert replacement.status == "pending"
+    assert get_registration_by_credential_hash(
+        db, hash_credential(first_replacement["credential"])
+    ) is None
+    assert get_registration_by_credential_hash(
+        db, hash_credential(body["credential"])
+    ) == replacement
+
+
+def test_rename_claims_an_unrelated_target_immediately_after_its_cooldown(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, cooldown_seconds=30)
+        try:
+            original = await _register(
+                server, name="old-name", node_fingerprint="fp-original"
+            )
+            await _register(server, name="target-name", node_fingerprint="fp-other")
+            mark_abandoned(db, "target-name", released_at=clock.now.isoformat())
+            clock.now += timedelta(seconds=30)
+            return await _rename(
+                server, credential=original["credential"], name="target-name"
             )
         finally:
             await server.stop()
 
     status, body = asyncio.run(scenario())
+    replacement = get_registration_by_name(db, "target-name")
 
-    assert status == 409
-    assert "cooldown" in body["error"]
-    assert get_registration_by_name(db, "new-name").status == "abandoned"
+    assert status == 201
+    assert body["status"] == "pending"
+    assert replacement.node_fingerprint == "fp-original"
+    assert replacement.replaces_name == "old-name"
 
 
 def test_abandoned_rename_retry_obeys_the_active_registration_cap(db):
@@ -614,6 +652,40 @@ def test_cancel_rename_refuses_a_previous_name_after_its_cooldown_expires(db):
     assert "cooldown" in body["error"]
     assert get_registration_by_name(db, "old-name").status == "abandoned"
     assert get_registration_by_name(db, "new-name").status == "pending"
+
+
+def test_cancel_rename_refreshes_a_still_active_previous_name_before_sweep(db):
+    clock = _MutableClock(datetime(2026, 9, 3, tzinfo=timezone.utc))
+
+    async def scenario():
+        server = await _start_server(db, clock=clock, abandonment_seconds=60)
+        try:
+            original = await _register(server, name="old-name")
+            await _heartbeat(server, credential=original["credential"])
+            original_contact_started_at = get_registration_by_name(
+                db, "old-name"
+            ).contact_started_at
+            _, replacement = await _rename(
+                server, credential=original["credential"], name="new-name"
+            )
+            clock.now += timedelta(seconds=61)
+            cancelled = await _cancel_rename(
+                server, credential=replacement["credential"]
+            )
+            await server._sweep_once()
+            return original_contact_started_at, cancelled
+        finally:
+            await server.stop()
+
+    contact_started_at, (status, body) = asyncio.run(scenario())
+    previous = get_registration_by_name(db, "old-name")
+
+    assert status == 200
+    assert body["previous_name"] == "old-name"
+    assert get_registration_by_name(db, "new-name") is None
+    assert previous.status == "pending"
+    assert previous.last_contact_at == clock.now.isoformat()
+    assert previous.contact_started_at == contact_started_at
 
 
 def test_cancel_rename_reviving_an_abandoned_name_obeys_the_per_node_cap(db):

@@ -153,9 +153,18 @@ async def check_live_reachability(
                 colored(f"No linked node this board knows as {sanitize_text(node_prefix)!r}.", fg_color=MUTED_COLOR)
             )
         else:
-            shown = ", ".join(sanitize_text(_node_label(link_context, fp)) for fp in resolved[:5])
+            shown = ", ".join(
+                f"{sanitize_text(_node_label(link_context, fingerprint))} "
+                f"[{sanitize_text(fingerprint)}]"
+                for fingerprint in resolved[:5]
+            )
             await session.write_line(
-                colored(f"{sanitize_text(node_prefix)!r} matches more than one node ({shown}) -- use its DNS name.", fg_color=MUTED_COLOR)
+                colored(
+                    f"{sanitize_text(node_prefix)!r} matches more than one node. "
+                    f"Candidate technical identities: {shown}. Address the node as "
+                    "user@technical-identity.",
+                    fg_color=MUTED_COLOR,
+                )
             )
         return None
     fingerprint = resolved

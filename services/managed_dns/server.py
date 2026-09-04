@@ -548,6 +548,18 @@ class ManagedDnsServer:
                 # other node's credential; handle the requested target through
                 # the ordinary availability/admission path below.
                 existing_replacement = None
+            if (
+                existing_replacement is not None
+                and existing_replacement.status == "abandoned"
+                and existing_replacement.released_at is not None
+                and self._clock() - datetime.fromisoformat(existing_replacement.released_at)
+                >= timedelta(seconds=self._cooldown_seconds)
+            ):
+                # Recovery privilege has expired, but so has the reservation:
+                # remove it exactly as ordinary registration does and admit a
+                # fresh rename request through the normal limits below.
+                delete_registration(self._db, existing_replacement.name)
+                existing_replacement = None
             if existing_replacement is not None:
                 if existing_replacement.name != name:
                     return web.json_response({"error": "a rename is already pending"}, status=409)
@@ -585,8 +597,20 @@ class ManagedDnsServer:
                     },
                     status=201,
                 )
-            if get_registration_by_name(self._db, name) is not None:
-                return web.json_response({"error": f"{name!r} is already registered or reserved"}, status=409)
+            target = get_registration_by_name(self._db, name)
+            if target is not None:
+                cooldown_elapsed = (
+                    target.status in ("released", "abandoned")
+                    and target.released_at is not None
+                    and self._clock() - datetime.fromisoformat(target.released_at)
+                    >= timedelta(seconds=self._cooldown_seconds)
+                )
+                if cooldown_elapsed:
+                    delete_registration(self._db, target.name)
+                else:
+                    return web.json_response(
+                        {"error": f"{name!r} is already registered or reserved"}, status=409
+                    )
             if count_registrations(self._db, statuses=_ACTIVE_STATUSES) >= self._cumulative_cap:
                 return web.json_response(
                     {"error": "the managed-DNS service is at capacity -- try again later"}, status=503

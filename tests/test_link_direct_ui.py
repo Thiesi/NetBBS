@@ -203,6 +203,30 @@ def test_send_explains_unknown_and_ambiguous_nodes_and_off_link_nodes(tmp_path):
     rig.close()
 
 
+def test_ambiguous_live_node_guidance_shows_usable_technical_identities(tmp_path):
+    rig = _Rig(tmp_path)
+    candidates = []
+    for seed in ("shared-one", "shared-two"):
+        identity = bootstrap_node_identity(seed)
+        candidate = LinkNode(identity=identity)
+        rig.link_node.handle_hello(candidate.build_hello(
+            addresses=None,
+            outgoing_only=True,
+            created_at=utc_now_iso(),
+            friendly_name="Shared Node",
+            canonical_dns_name="shared.example.org",
+        ))
+        candidates.append(identity.fingerprint)
+
+    ok, text = _send(rig, "bob@shared.example.org", "hi")
+
+    assert not ok
+    assert "Candidate technical identities" in text
+    assert "user@technical-identity" in text
+    assert all(fingerprint in text for fingerprint in candidates)
+    rig.close()
+
+
 def test_deliverer_queues_for_an_online_recipient_and_drops_otherwise(tmp_path):
     rig = _Rig(tmp_path)
     bob = create_user(rig.db, "bob", password="pw", user_level=10)

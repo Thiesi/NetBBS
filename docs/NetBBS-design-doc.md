@@ -519,8 +519,12 @@ advanced/backward-compatible input. Friendly-name resolution must be unique;
 an ambiguous presentation name is refused with a request to use an unambiguous
 DNS name or the technical identity. DNS and friendly claims share that one
 namespace, so a reference matching one node's DNS claim and another node's
-friendly claim is ambiguous rather than silently preferring either. Friendly
-names are compared in one Unicode normalization form (NFC), so canonically
+friendly claim is ambiguous rather than silently preferring either. When
+ambiguity remains because friendly and DNS claims collide, the refusal
+shows each candidate's full technical identity; it never repeats the unusable
+advice to enter the already-ambiguous DNS claim. Fingerprints remain hidden in
+the ordinary unique-name path. Friendly names are compared in one Unicode
+normalization form (NFC), so canonically
 equivalent spellings are one name, never two claims. UI delimiters, invisible
 control/format characters, and the `Unnamed linked node` and `Unknown linked
 node` fallback labels are reserved and cannot be claimed as friendly names. A
@@ -2806,6 +2810,12 @@ Establishment and authority to influence policy are different roles:
 
 No role is inferred transitively. A vouch may help probation graduation but
 cannot create a trust anchor, reporter, attestation authority, or trust domain.
+When a SysOp selects a node by friendly or DNS name for one of these
+security-policy roles, the UI shows the resolved technical identity. If that
+fingerprint has an undismissed cryptographic-identity warning, the warning is
+shown and explicit confirmation of that technical identity defaults to no
+before policy can change. Entering the complete fingerprint already supplies
+that confirmation.
 
 Per identity and trust dimension, local state is `probationary`, `established`,
 `quarantined`, or `blocked`. Manual block has highest precedence, followed by
@@ -5762,7 +5772,8 @@ same ownership check before any provider deletion, including when the reissued
 previous row is already active. Rename retry likewise treats an existing
 `replaces_name` relationship as recoverable only when the replacement and
 currently authenticated registration have the same node fingerprint; reissue
-never transfers control of an old replacement credential. If its heartbeat becomes
+never transfers control of an old replacement credential. If its heartbeat
+becomes
 authoritatively inactive while the old
 name's heartbeat fails transiently, the node continues heartbeating the retained
 old credential on later passes rather than letting the still-live name expire.
@@ -5770,6 +5781,11 @@ A successful old-name heartbeat is also reconciled when the replacement
 heartbeat fails transiently: the replacement's cached state remains unchanged,
 while the old name's authoritative status and publication result are committed
 atomically.
+An inactive rename target whose cooldown has elapsed is deleted and admitted as
+a fresh replacement immediately, matching ordinary registration rather than
+waiting for the periodic sweep. Successful cancellation refreshes the retained
+previous registration's last-contact time even when it was still active; for a
+pending previous name this does not restart its original maturation window.
 
 ### Issue #219 — Reliable Link as default onboarding infrastructure
 

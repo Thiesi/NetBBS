@@ -565,14 +565,17 @@ async def _compose_mail(
             resolved = await lane.run(resolve_stored_peer_reference, node_reference)
             if isinstance(resolved, list):
                 if resolved:
-                    labels = ", ".join(
-                        (await lane.run(identity_for_fingerprint, fingerprint)).label
-                        for fingerprint in resolved[:5]
-                    )
+                    candidates = []
+                    for fingerprint in resolved[:5]:
+                        identity = await lane.run(identity_for_fingerprint, fingerprint)
+                        candidates.append(
+                            f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
+                        )
                     await session.write_line(
                         colored(
                             f"Could not send: {sanitize_text(node_reference)!r} matches more than one node "
-                            f"({sanitize_text(labels)}); use its DNS name.",
+                            f"({', '.join(candidates)}). Address the recipient as "
+                            "user@technical-identity.",
                             fg_color=ERROR_COLOR,
                         )
                     )

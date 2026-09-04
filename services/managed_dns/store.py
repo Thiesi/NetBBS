@@ -384,6 +384,15 @@ def cancel_pending_replacement(
                 "WHERE name = ? AND status = 'abandoned'",
                 (contact_at, contact_at, previous_name),
             )
+        else:
+            # Cancellation itself is authenticated contact for the retained
+            # old registration. Refresh liveness without restarting a pending
+            # row's maturation window or disturbing a matured publication.
+            db.connection.execute(
+                "UPDATE registrations SET last_contact_at = ? "
+                "WHERE name = ? AND status IN ('pending', 'matured')",
+                (contact_at, previous_name),
+            )
     return True
 
 

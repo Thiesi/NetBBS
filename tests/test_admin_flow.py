@@ -507,6 +507,61 @@ def test_sysop_menu_reaches_separate_attestation_authority_configuration(
     assert "Attestation authority changed and audited." in _written_text(session)
 
 
+def test_trust_configuration_requires_confirmation_for_a_reused_familiar_name(
+    db, lane, sysop,
+):
+    from netbbs.link.events import build_endpoint_descriptor
+    from netbbs.link.node_identity import bootstrap_node_identity
+    from netbbs.link.protocol import PeerRecord
+    from netbbs.link.store import save_peer
+
+    original = bootstrap_node_identity("original-familiar-node")
+    replacement = bootstrap_node_identity("replacement-familiar-node")
+
+    def save_profile(identity, *, friendly_name, created_at):
+        save_peer(
+            db,
+            PeerRecord(
+                fingerprint=identity.fingerprint,
+                root_public_key=bytes(identity.root.verify_key),
+                transitions=identity.transitions,
+                descriptor=build_endpoint_descriptor(
+                    signing_identity=identity.signing_key,
+                    subject_fingerprint=identity.fingerprint,
+                    addresses=None,
+                    outgoing_only=True,
+                    created_at=created_at,
+                    friendly_name=friendly_name,
+                ),
+            ),
+        )
+
+    save_profile(
+        original, friendly_name="Familiar Node",
+        created_at="2026-09-04T08:00:00+00:00",
+    )
+    save_profile(
+        original, friendly_name="Renamed Original",
+        created_at="2026-09-04T08:01:00+00:00",
+    )
+    save_profile(
+        replacement, friendly_name="Familiar Node",
+        created_at="2026-09-04T08:02:00+00:00",
+    )
+    session = FakeSession(
+        ["s", "p", "i", "a", "Familiar Node", "n", "b", "b", "b"]
+    )
+
+    _run(session, lane, sysop)
+
+    text = _written_text(session)
+    assert list_attestation_authorities(db) == []
+    assert f"Technical identity: {replacement.fingerprint}" in text
+    assert "different cryptographic identity" in text
+    assert "impersonation is possible" in text
+    assert "No trust policy change made." in text
+
+
 def test_sysop_menu_can_reject_remote_attestation_for_one_user(db, lane, sysop):
     subject = TrustSubject.user("remote-home", "opaque-user")
     register_subject(db, subject, first_accepted_at="2026-08-01T00:00:00.000000Z")

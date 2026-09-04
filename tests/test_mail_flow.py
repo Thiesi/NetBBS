@@ -770,6 +770,37 @@ def test_compose_rejects_a_link_address_for_a_node_never_seen(tmp_path):
     db.close()
 
 
+def test_compose_ambiguous_link_address_shows_usable_technical_identities(tmp_path):
+    db_path = tmp_path / "node.db"
+    db = Database(db_path)
+    alice = create_user(db, "alice", password="hunter2pw", user_level=10)
+    node_identity = bootstrap_node_identity("roanoke")
+    remote_identities = [
+        bootstrap_node_identity("farpoint-one"),
+        bootstrap_node_identity("farpoint-two"),
+    ]
+    link_context = None
+    for remote_identity in remote_identities:
+        link_context = _link_context_with_known_peer(
+            db, node_identity, remote_identity, friendly_name="Shared Node",
+        )
+    assert link_context is not None
+    session = FakeSession(
+        keys=["c", "s", "c", "b"],
+        lines=["bob@farpoint.example.org", "Hello", "Ambiguous route", ""],
+    )
+    lane = DatabaseLane(db_path)
+
+    asyncio.run(browse_mail(session, lane, alice, link_context=link_context))
+
+    text = _written_text(session)
+    assert "user@technical-identity" in text
+    assert all(identity.fingerprint in text for identity in remote_identities)
+    assert db.connection.execute("SELECT COUNT(*) FROM mail_messages").fetchone()[0] == 0
+    lane.close()
+    db.close()
+
+
 def test_compose_without_link_context_treats_an_at_sign_as_an_ordinary_username_lookup(tmp_path):
     db_path = tmp_path / "node.db"
     db = Database(db_path)

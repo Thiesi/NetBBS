@@ -3868,3 +3868,18 @@ exists; the new owner must never receive a rotated credential for that stale row
 Treat both rename sides' heartbeat outcomes independently: when the previous-name
 heartbeat succeeds but the primary times out, preserve the primary cache while
 atomically applying the old name's authoritative status and publication result.
+
+Presentation ambiguity must end in a usable address. When friendly and DNS
+claims still collide, show each candidate's full fingerprint and direct the
+caller to `user@technical-identity`; do not recommend the same ambiguous DNS
+claim. Trust-role selectors are a higher-impact boundary: when a presentation
+name resolves to a fingerprint with an undismissed security observation, show
+that technical identity and require a default-no confirmation before mutation.
+A complete fingerprint entered directly needs no second confirmation.
+
+Rename admission deletes a released or abandoned target as soon as its cooldown
+has elapsed, including an expired former replacement, then treats the attempt as
+a fresh rename subject to normal limits. Cancellation is authenticated contact
+for the retained previous registration: refresh `last_contact_at` even when that
+row is still pending or matured, while preserving a pending row's original
+`contact_started_at` so cancellation does not reset maturation progress.

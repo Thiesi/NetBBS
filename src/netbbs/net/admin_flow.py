@@ -186,8 +186,8 @@ from netbbs.link.files import LinkFilesError, is_area_linked, link_file_area
 from netbbs.link.protocol import PeerRecord
 from netbbs.link.node_profiles import (
     dismiss_identity_observation, identity_for_fingerprint, identity_for_peer,
-    is_node_fingerprint, list_identity_observations, name_key, own_canonical_dns_name,
-    resolve_stored_peer_reference,
+    is_node_fingerprint, latest_identity_observation, list_identity_observations,
+    name_key, own_canonical_dns_name, resolve_stored_peer_reference,
 )
 from netbbs.link.relay_mailbox import mailbox_sizes
 from netbbs.link.reliability import reliability_score
@@ -2278,10 +2278,50 @@ async def _resolve_admin_node_reference(
     """Resolve names for trust administration while retaining technical-id entry."""
     resolved = await lane.run(resolve_stored_peer_reference, reference)
     if isinstance(resolved, str):
+        entered_technical_identity = (
+            is_node_fingerprint(reference)
+            and reference.strip().lower() == resolved.lower()
+        )
+        if not entered_technical_identity:
+            identity = await lane.run(identity_for_fingerprint, resolved)
+            await session.write_line(
+                f"Resolved node: {sanitize_text(identity.label)}"
+            )
+            await session.write_line(
+                f"Technical identity: {sanitize_text(resolved)}"
+            )
+            observation = await lane.run(latest_identity_observation, resolved)
+            if observation is not None and observation.severity == "security":
+                await session.write_line(
+                    colored(
+                        "Caution: this familiar node name now has a different "
+                        "cryptographic identity. Recovery or replacement may be "
+                        "legitimate, but impersonation is possible.",
+                        fg_color=ERROR_COLOR,
+                        bold=True,
+                    )
+                )
+                if not await prompt_yes_no(
+                    session,
+                    f"Continue with technical identity {sanitize_text(resolved)}?",
+                    default=False,
+                ):
+                    await session.write_line("No trust policy change made.")
+                    return None
         return resolved
     if resolved:
+        candidates = []
+        for fingerprint in resolved[:5]:
+            identity = await lane.run(identity_for_fingerprint, fingerprint)
+            candidates.append(
+                f"{sanitize_text(identity.label)} [{sanitize_text(fingerprint)}]"
+            )
         await session.write_line(
-            colored("That friendly name matches multiple nodes; use the DNS name.", fg_color=ERROR_COLOR)
+            colored(
+                "That name matches multiple nodes. Enter one complete technical "
+                f"identity: {', '.join(candidates)}.",
+                fg_color=ERROR_COLOR,
+            )
         )
         return None
     # Trust administration can preconfigure an unseen node, but only from a
