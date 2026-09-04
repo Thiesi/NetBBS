@@ -305,7 +305,11 @@ class ShutdownConfig:
     # waits now share this one short, deliberately generic bound
     # instead -- not Link-specific despite the historical name of the
     # design-doc entry ("graceful drain of Link work") this field's
-    # value first existed for.
+    # value first existed for. A second real nine-minute hang (design
+    # doc §13.11, item 5) came from the listener-stop step instead:
+    # `TelnetServer.stop`/`SSHServer.stop` (and `TelnetSession.close`)
+    # now wait this same bound for a vanished client's connection to
+    # drop before aborting it.
     background_task_drain_seconds: float = 5.0
 
 

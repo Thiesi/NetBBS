@@ -195,10 +195,15 @@ Graceful shutdown: sending `SIGTERM` (what `systemctl stop`/`service
 exits cleanly — not an abrupt kill. A separate, much shorter
 `shutdown.background_task_drain_seconds` (5s default) then bounds how
 long teardown itself waits for each of a few internal background tasks
-to notice cancellation, worst case a few times that value, not
-`graceful_delay_seconds` again -- an *immediate* shutdown (Ctrl+C in an
-attended terminal) skips the warning wait entirely but still pays this
-smaller, unavoidable teardown cost. Give your supervisor's own stop
+to notice cancellation, and how long each listener waits for a
+connection whose client silently vanished (an asleep laptop, a dropped
+Wi-Fi link) before dropping it outright -- worst case a few times that
+value, not `graceful_delay_seconds` again -- an *immediate* shutdown
+(Ctrl+C in an attended terminal) skips the warning wait entirely but
+still pays this smaller, unavoidable teardown cost. Such vanished SSH
+clients are also detected on their own within about ninety seconds
+(transport keepalives), so they no longer hold a node slot until the
+operating system's own multi-minute TCP timeout. Give your supervisor's own stop
 timeout enough headroom above `graceful_delay_seconds` plus that
 worst case (the example systemd unit sets `TimeoutStopSec=90`).
 
