@@ -1246,34 +1246,48 @@ possible future follow-up, not required by this decision.
 
 ### 6.7 Self-update
 
-The updater uses explicit GitHub Releases over HTTPS rather than arbitrary
-branch HEAD. Current foundations include version comparison, release checking,
-safe archive extraction, persisted state, and database snapshot/restore
-primitives. Scheduled release checking exists; complete apply/re-exec and
-rollback orchestration still requires operational validation.
+Release discovery uses explicit GitHub Releases over HTTPS rather than an
+arbitrary branch HEAD. NetBBS checks once at startup and then daily by default;
+a SysOp can also check immediately from `[S]ettings` -> `[U]pdate`. Automatic
+checks only record their result. They do not download, install, or restart
+NetBBS, and they do not send an unsolicited in-session notification. The result
+is visible on the SysOp dashboard and update-settings screen. The
+operator-visible switch controls the startup/daily checks only; manual checks
+remain available when it is off.
 
-Before an update which may migrate the schema, snapshot the database so binary
-and schema can roll back together.
+The supported apply model is currently operator-driven:
 
-The intended apply model is:
+- create a complete backup with `python -m netbbs.backup create`;
+- stop the service through its supervisor, allowing the normal graceful drain;
+- install the selected wheel from the official GitHub release into the same
+  virtual environment, preserving the installation's extras;
+- start the service, at which point pending database migrations apply
+  automatically and startup integrity checks run;
+- if startup fails, reinstall the previous release and restore the pre-upgrade
+  backup so application code and database schema roll back together.
 
-- check at startup, manually, and on a daily schedule;
-- drain live sessions before a live-node restart;
-- replace the on-disk release and re-exec the process;
-- retain the previous release and restore it, together with the database
-  snapshot, after failed startup.
+`netbbs.selfupdate` also contains safe archive extraction, database snapshot,
+and pending/confirm/rollback primitives. They are tested in isolation but are
+not called by any command, menu, or node-lifecycle path. There is no automated
+apply, process re-exec, startup confirmation, or automated rollback today.
+
+The future automated apply target, which remains unimplemented, is to drain
+live sessions, stage the new release and a database snapshot, re-exec into the
+new release, retain the previous release until startup succeeds, and restore
+both the previous release and snapshot after failed startup. Wiring this target
+requires a separate design and operational-validation pass, particularly for
+ownership under systemd/rc.d.
 
 HTTPS and GitHub are currently the update trust boundary. Additional release
 signing is not required by the present design, though it remains a possible
 hardening step.
 
 GitHub Releases and tagged source are the only official NetBBS distribution
-and update channel. External package managers may supply dependencies, but a
-pkgsrc, apt, or other independently managed NetBBS package is not supported:
-it would duplicate ownership of installed application files and compete with
-the GitHub-based updater.
-
-The automatic check/apply policy must have an operator-visible off switch.
+and update channel. `pip` is used to install an official release wheel; it is
+not an independently maintained source of NetBBS packages. External package
+managers may supply dependencies, but a PyPI, pkgsrc, apt, or other independently
+managed NetBBS package is not supported because it would introduce a second
+owner and release channel for the installed application files.
 
 ---
 
@@ -3303,7 +3317,7 @@ future restore-time check) confirm what a
 given backup directory actually is before trusting it. Also records
 `last_backup_at`/`last_backup_path` into the live node's own `node_config`
 table (same key-value store `netbbs.selfupdate`'s update-check state already
-uses) — purely for a future read-only SysOp status line (`_system_menu`,
+uses) — for the read-only SysOp status line (`_system_menu`,
 alongside `[W]elcome`/`[U]pdate`/`[T]imestamp`/`[L]ink status`; letter `K`
 for "bacKup", since `B` is already every submenu's universal `[B]ack`), not
 required for restore itself.
@@ -3369,10 +3383,11 @@ including:
 - bounded diagnostic log retention without content logging (§13.11 — a new
   `link_diagnostic_log` table and `[D]iagnostic log` SysOp screen, warning-
   level-and-above only, age/row-bounded — implemented);
-- protocol/database upgrade and rollback compatibility (§13.11 — the
-  database half already done via `netbbs.selfupdate`; the wire-protocol
-  half, `netbbs_protocol` version-checked on receipt for the first time,
-  implemented);
+- protocol/database upgrade and rollback compatibility (§13.11 — database
+  upgrades use atomic migrations plus an operator-created pre-upgrade backup
+  for rollback; `netbbs.selfupdate`'s automated snapshot/rollback orchestration
+  remains unwired; the wire-protocol half, `netbbs_protocol` version-checked on
+  receipt for the first time, is implemented);
 - graceful drain of Link work during shutdown (§13.11 — `run_link_sync`
   finishes its current pass before stopping, including waking early from
   its own idle interval sleep rather than waiting it out, bounded by the
@@ -3919,9 +3934,8 @@ an unresolved marker rather than compounding the mess.
 **6. The rollback generation is not auto-deleted on success.** A completed
 restore leaves `.netbbs-restore-rollback-{token}` on disk holding the
 *previous* live state, not silently discarded -- matching this project's
-"never silently discard state a human might still need" stance (§13.5) and
-`netbbs.selfupdate`'s own "kept on disk, rotated out" precedent for a
-superseded release directory. The CLI prints its path; cleanup is an
+"never silently discard state a human might still need" stance (§13.5).
+The CLI prints its path; cleanup is an
 explicit operator/cron action (retention/rotation stays out of scope here,
 same as §13.4's own already-deferred list), not automatic.
 
@@ -4041,18 +4055,15 @@ version 1 is the only version that has ever existed; the point of this
 slice is having a real, tested gate *before* a version 2 ever needs one, not
 guessing at compatibility rules for a wire change nobody has designed.
 
-The **database** half of "protocol/database upgrade and rollback
-compatibility" turns out to already be done, confirmed by reading `netbbs.
-selfupdate`'s own module docstring rather than assumed: round 82/95/96
-already snapshot the database before applying an update's migration and
-roll back to that snapshot if the newly started version fails to come up
-cleanly. That same docstring is explicit about the boundary this slice
-closes: *"It knows nothing about NetBBS Link protocol/schema compatibility
--- that's explicitly deferred to whenever Phase 3 needs it."* Now is that
-moment; the wire-protocol check above is the answer, kept as its own
-concern in `netbbs.link.protocol` rather than folded into `netbbs.
-selfupdate`, which stays exactly as protocol-agnostic as its own docstring
-already declares.
+The database and protocol halves use separate compatibility mechanisms.
+Database migrations are atomic, a newer-than-supported schema is rejected at
+startup, and the supported operator procedure requires a complete pre-upgrade
+backup so code and schema can be restored together. `netbbs.selfupdate` has
+isolated snapshot and rollback primitives, but no production path invokes
+them around startup; automated database rollback is therefore not implemented.
+The wire-protocol check above is independently implemented in
+`netbbs.link.protocol`, where received envelopes are version-gated without
+coupling Link compatibility to release installation.
 
 **4. Graceful drain of Link work during shutdown.** `run_link_sync` accepts
 an optional `stop_event: asyncio.Event | None`, checked once at the top of
@@ -4658,9 +4669,9 @@ without losing data. `python -m netbbs --version` (issue #82) prints
 the release version and expected schema number together. Documented,
 not implemented: `netbbs.selfupdate`'s existing download/snapshot/
 rollback plumbing has no wired apply-and-restart command yet — a
-deliberate prior deferral (that module's own docstrings), not a gap
-this issue asked to close; the package-manager upgrade path is what's
-actually supported today.
+deliberate prior deferral, not a gap this issue asked to close; manually
+installing an official GitHub-release wheel into the node's virtual
+environment is what's actually supported today.
 
 ### Issue #74 — FTS index integrity checks and rebuild tooling — closed
 

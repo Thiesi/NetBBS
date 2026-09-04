@@ -511,8 +511,17 @@ error.
   caller would see right now), `[E]nable`/`[D]isable`, e`[X]`dit (opens
   the fullscreen ANSI-art editor, the same tool used for other ANSI
   content, with its own crash-recovery autosave).
-- `[U]pdate` — update-check settings; the console shows when the last
-  check ran and its outcome.
+- `[U]pdate` — release discovery and update-check settings. Scheduled checks
+  are on by default: the node checks at startup (unless an attempt occurred in
+  the preceding 15 minutes) and every 24 hours, records the outcome, and shows
+  it here and on the SysOp dashboard. They do not download, install, restart,
+  or pop up an unsolicited notification. This screen shows the running
+  version and recent history, can run an immediate manual check even when the
+  schedule is off, toggles startup/daily checks, and manages the optional
+  masked GitHub token used to raise the API rate limit. Deployment remains an
+  operator action: back up, stop the service, install the selected official
+  GitHub-release wheel with the existing extras, and start it again. See the
+  operator guide §6 for the full upgrade and rollback procedure.
 - `[T]imestamp format` — two independent, node-wide settings (not a
   per-account preference): display *format* (the shape of a rendered
   timestamp) and display *timezone* (which real instant it shows). Both

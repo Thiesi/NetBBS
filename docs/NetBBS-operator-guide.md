@@ -255,6 +255,29 @@ concurrent-writer conflict each look like.
 
 ## 6. Upgrading
 
+### 6a. Learning that a release exists
+
+By default, a running node checks the official GitHub Releases API once on
+startup and then every 24 hours. A restart within 15 minutes of the last
+attempt skips the startup request. These checks only record an outcome; they do
+not download or apply anything and do not interrupt a logged-in SysOp with a
+notification.
+
+The recorded outcome appears on the SysOp dashboard. `[S]ettings` ->
+`[U]pdate` shows the running version, the last result, recent check history,
+and whether scheduled checks are enabled. From there a SysOp can check
+immediately, turn startup/daily checks on or off, and set, replace, or clear an
+optional fine-grained GitHub token for a higher API rate limit. A manual check
+still works when scheduled checks are off. The same update screen is available
+through the standalone `python -m netbbs.admin` console when the node is
+stopped.
+
+A SysOp may instead follow the official GitHub Releases page directly and
+choose a particular published release. In either case, discovering a release
+and deploying it are separate actions.
+
+### 6b. Deploying a selected release
+
 1. **Back up first**, unconditionally (§5) — this is the rollback path
    if anything goes wrong.
 2. Stop the service (`systemctl stop netbbs` / `service netbbs stop`).
@@ -299,15 +322,14 @@ above, now self-inflicted by rolling back). Restoring the step-1 backup
 is the supported way back, not attempting to run old code against an
 already-migrated database.
 
-`netbbs.selfupdate` also has real, unit-tested plumbing for a
-git-checkout-style deployment to check GitHub Releases and download/
-extract a new tarball on its own (visible today as the SysOp menu's
-manual "check for updates" action) — but the actual *apply and restart*
-half of that flow (`prepare_update`/`confirm_update`/`roll_back_update`)
-is intentionally not yet wired into any command or menu action. That is
-a deliberately deferred, higher-stakes decision (see that module's own
-docstrings), not an oversight; the GitHub-release wheel installation
-above is the currently supported upgrade path.
+`netbbs.selfupdate` contains unit-tested release-checking, safe tarball
+extraction, database-snapshot, and pending/confirm/rollback primitives. Only
+release checking is connected to the SysOp menu and node lifecycle. Nothing
+currently calls the download/prepare/confirm/rollback path from a command,
+menu, or live node, and there is no implemented process re-exec. This is a
+deliberately deferred, higher-stakes decision, not an oversight; the official
+GitHub-release wheel installation above is the currently supported upgrade
+path.
 
 ## 7. Uninstalling
 

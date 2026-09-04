@@ -2643,8 +2643,7 @@ manual-copy workflow the packaged version exists to make unnecessary.
 
 ### Self-update: checking is wired up, applying is not (issue #82)
 
-`netbbs.selfupdate` has real, fully unit-tested plumbing for a
-git-checkout-style deployment to check GitHub Releases
+`netbbs.selfupdate` has real, fully unit-tested plumbing to check GitHub Releases
 (`check_latest_release`/`is_newer`) and download/extract a new release
 tarball with a DB-snapshot-before-migration safety net and a pending/
 confirm/rollback state machine (`prepare_update`/`confirm_update`/

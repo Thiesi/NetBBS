@@ -300,5 +300,6 @@ enough to remember what happened and when. At the end, convert it into:
   the right scale for this exercise, not an attempt to stress-test
   capacity.
 - Wiring up `netbbs.selfupdate`'s unwired apply/rollback mechanism
-  (see the operator guide's own note on this, issue #82) — the upgrade
-  step above uses the actually-supported package-manager path.
+  (see the operator guide's own note on this, issue #82). This drill used the
+  explicitly recorded git-checkout deviation above; the supported production
+  path remains manual installation of an official GitHub-release wheel.
