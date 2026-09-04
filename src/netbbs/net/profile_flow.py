@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from netbbs.attestation import (
     AttestationError,
@@ -836,14 +837,27 @@ def _signature_draft_path(db: Database, user: User) -> Path:
 
 async def _identity_details_screen(session: Session, lane: DatabaseLane, user: User) -> None:
     """
-    Self-reported `display_name`/`location`/`birthdate` plus the general
-    "verified" badge visibility toggle (design doc §18) -- a separate
-    screen from `_edit_profile`'s own bio/fullscreen-editor options
-    rather than crowding four more fields onto that one menu. Each of
-    `[D]isplay name`/`[L]ocation`/`[A]ge/birthdate` combines editing the
-    value and setting its visibility into one action (unlike bio's
-    separate edit/visibility actions) specifically to avoid needing
-    eight top-level options for three fields.
+    Self-reported `display_name`/`location`/`birthdate`, each with its
+    own visibility toggle, plus the SysOp-verified side: the general
+    "verified" badge visibility toggle and the per-attribute Link
+    sharing toggles (design doc §18) -- a separate screen from
+    `_edit_profile`'s own bio/fullscreen-editor options rather than
+    crowding nine more fields onto that one menu.
+
+    Issue #282: the three self-reported fields used to combine "edit
+    the value" and "set its visibility" into one two-prompt chain (a
+    `read_line` with blank = keep, then an unconditional `prompt_yes_no
+    ("Show it publicly?", default=False)` whose answer was always
+    written). Pressing Enter twice just to look at a field silently set
+    it private. Each value prompt now writes only its own value, and
+    visibility is its own instant `live_choice_field` toggle, the same
+    shape `_edit_profile`'s `bio`/`bio_visible` pair already uses.
+    Likewise, Link sharing used to be a sub-screen that toggled *off*
+    silently but asked a yes/no before toggling *on*; both directions
+    are now the same one-keystroke toggle, and an attribute no SysOp has
+    verified yet simply reports that instead of offering anything.
+    Sections group the self-reported and verified halves so the screen
+    paginates cleanly on a 24-row terminal.
     """
     description_level = await lane.run(menu_description_level, user)
     redraw_in_place = await lane.run(redraw_in_place_enabled, user)
@@ -870,17 +884,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             session, f"\r\nDisplay name [{current or '(not set)'}] -- new value (blank to keep): "
         )
         new_value = (await session.read_line()).strip()
-        if new_value:
-            try:
-                await lane.run(set_display_name, user, new_value)
-            except ProfileFieldError as exc:
-                await session.write_line(colored(f"Could not save display name: {exc}", fg_color=MUTED_COLOR))
-                return
-            draft["display_name"] = new_value
-            await session.write_line("Display name updated.")
-        visible = await prompt_yes_no(session, "Show it publicly?", default=False)
-        await lane.run(set_display_name_visible, user, visible)
-        draft["display_name_visible"] = visible
+        if not new_value:
+            return
+        try:
+            await lane.run(set_display_name, user, new_value)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save display name: {exc}", fg_color=MUTED_COLOR))
+            return
+        draft["display_name"] = new_value
+        await session.write_line("Display name updated.")
 
     async def _location_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["location"]
@@ -888,17 +900,15 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             session, f"\r\nLocation [{current or '(not set)'}] -- new value (blank to keep): "
         )
         new_value = (await session.read_line()).strip()
-        if new_value:
-            try:
-                await lane.run(set_location, user, new_value)
-            except ProfileFieldError as exc:
-                await session.write_line(colored(f"Could not save location: {exc}", fg_color=MUTED_COLOR))
-                return
-            draft["location"] = new_value
-            await session.write_line("Location updated.")
-        visible = await prompt_yes_no(session, "Show it publicly?", default=False)
-        await lane.run(set_location_visible, user, visible)
-        draft["location_visible"] = visible
+        if not new_value:
+            return
+        try:
+            await lane.run(set_location, user, new_value)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save location: {exc}", fg_color=MUTED_COLOR))
+            return
+        draft["location"] = new_value
+        await session.write_line("Location updated.")
 
     async def _birthdate_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
         current = draft["birthdate"]
@@ -908,42 +918,91 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             "-- new value as YYYY-MM-DD (blank to keep): "
         )
         raw = (await session.read_line()).strip()
-        if raw:
-            try:
-                new_birthdate = date.fromisoformat(raw)
-            except ValueError:
-                await session.write_line(colored("Not a valid date (expected YYYY-MM-DD).", fg_color=MUTED_COLOR))
-                return
-            try:
-                await lane.run(set_birthdate, user, new_birthdate)
-            except ProfileFieldError as exc:
-                await session.write_line(colored(f"Could not save birthdate: {exc}", fg_color=MUTED_COLOR))
-                return
-            draft["birthdate"] = new_birthdate
-            await session.write_line("Birthdate updated.")
-        visible = await prompt_yes_no(session, "Show it publicly?", default=False)
-        await lane.run(set_birthdate_visible, user, visible)
-        draft["birthdate_visible"] = visible
+        if not raw:
+            return
+        try:
+            new_birthdate = date.fromisoformat(raw)
+        except ValueError:
+            await session.write_line(colored("Not a valid date (expected YYYY-MM-DD).", fg_color=MUTED_COLOR))
+            return
+        try:
+            await lane.run(set_birthdate, user, new_birthdate)
+        except ProfileFieldError as exc:
+            await session.write_line(colored(f"Could not save birthdate: {exc}", fg_color=MUTED_COLOR))
+            return
+        draft["birthdate"] = new_birthdate
+        await session.write_line("Birthdate updated.")
 
-    async def _remote_attestation_prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
-        await _remote_attestation_visibility_screen(session, lane, user)
-        draft["age_attestation"] = await lane.run(get_attestation, user, "age")
-        draft["name_attestation"] = await lane.run(get_attestation, user, "name")
+    def _link_share_toggle(attribute: str) -> Callable[[Session, DatabaseLane, Draft], Awaitable[None]]:
+        # One keystroke flips `link_visible` either way -- but only the
+        # state the caller is actually looking at. The attestation is
+        # re-read before acting; if a SysOp re-attested (which clears
+        # `link_visible`) or revoked it since the screen was drawn, the
+        # keypress refreshes and reports that instead of toggling, so a
+        # press meant to switch a displayed "on" off can never enable
+        # sharing of a replacement attestation the caller hasn't seen
+        # (Codex review, PR #284).
+        key = f"{attribute}_attestation"
+
+        def _toggle_if_unchanged(db: Database, shown):
+            # Compare and mutate inside one lane call so the record the
+            # caller saw is the record that gets toggled -- a re-attest
+            # or removal landing between a separate read and write
+            # could otherwise enable sharing of an unseen replacement
+            # (Codex review, PR #284, second round).
+            current = get_attestation(db, user, attribute)
+            if current is None or current != shown:
+                return False, current
+            try:
+                return True, set_attestation_link_visible(db, user, attribute, not current.link_visible)
+            except AttestationError:
+                return False, get_attestation(db, user, attribute)
+
+        async def prompt(session: Session, lane: DatabaseLane, draft: Draft) -> None:
+            shown = draft.get(key)
+            toggled, attestation = await lane.run(_toggle_if_unchanged, shown)
+            draft[key] = attestation
+            if toggled:
+                return
+            if attestation is None:
+                await session.write_line(
+                    colored(
+                        f"No {attribute} attestation exists -- nothing to share until a SysOp verifies it."
+                        if shown is None
+                        else f"The {attribute} attestation was removed since this screen was drawn -- nothing to share now.",
+                        fg_color=MUTED_COLOR,
+                    )
+                )
+                return
+            await session.write_line(
+                colored(
+                    f"The {attribute} attestation changed since this screen was drawn -- refreshed, "
+                    "not toggled. Press again to change sharing for the current one.",
+                    fg_color=MUTED_COLOR,
+                )
+            )
+
+        return prompt
+
+    def _link_share_render(attribute: str) -> Callable[[Draft], str]:
+        key = f"{attribute}_attestation"
+
+        def render(d: Draft) -> str:
+            attestation = d[key]
+            if attestation is None:
+                return "(not verified)"
+            return "on" if attestation.link_visible else "off"
+
+        return render
+
+    def _visibility_render(key: str) -> Callable[[Draft], str]:
+        return lambda d: "public" if d[key] else "private"
 
     def _birthdate_render(d: Draft) -> str:
         birthdate = d["birthdate"]
-        visibility = "public" if d["birthdate_visible"] else "private"
         if birthdate is None:
-            return f"(not set) ({visibility})"
-        return f"{birthdate.isoformat()} (age {compute_age(birthdate)}) ({visibility})"
-
-    def _shared_render(d: Draft) -> str:
-        shared = [
-            attribute for attribute, attestation in
-            (("age", d["age_attestation"]), ("name", d["name_attestation"]))
-            if attestation is not None and attestation.link_visible
-        ]
-        return ", ".join(shared) if shared else "off"
+            return "(not set)"
+        return f"{birthdate.isoformat()} (age {compute_age(birthdate)})"
 
     def _preamble(d: Draft) -> str:
         age_attestation, name_attestation = d["age_attestation"], d["name_attestation"]
@@ -952,35 +1011,58 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         parts = [attr for attr, att in (("age", age_attestation), ("name", name_attestation)) if att is not None]
         return colored(f"Verified: {', '.join(parts)}", fg_color=accent)
 
+    visibility_help = (
+        "Whether other callers can see this value at all. Private hides it everywhere "
+        "except from a SysOp. The value itself is kept either way."
+    )
     fields = [
         FieldSpec(
             key="display_name", hotkey="d", menu_text=menu_key("D", "isplay name"), label="Display name",
-            render=lambda d: (
-                f"{sanitize_text(d['display_name']) if d['display_name'] else '(not set)'} "
-                f"({'public' if d['display_name_visible'] else 'private'})"
-            ),
+            render=lambda d: sanitize_text(d["display_name"]) if d["display_name"] else "(not set)",
             prompt=_display_name_prompt,
             brief="Set your shown display name",
             help=(
-                "An alternate name shown alongside your username, only if you answer 'Show "
-                "it publicly?' yes when you set it. Self-reported and unverified -- distinct "
-                "from a SysOp-verified real name (see 'Verified' above, and the Verified "
-                "badge field below)."
+                "An alternate name shown alongside your username when its visibility below "
+                "is public. Self-reported and unverified -- distinct from a SysOp-verified "
+                "real name (see 'Verified' above, and the Verified badge field below)."
             ),
+            section="Self-reported",
+        ),
+        FieldSpec(
+            key="display_name_visible", hotkey="i",
+            menu_text=menu_key("i", "splay name visibility", prefix="D"), label="Display name visibility",
+            render=_visibility_render("display_name_visible"),
+            prompt=live_choice_field(
+                "display_name_visible", [False, True],
+                persist=lambda lane, v: lane.run(set_display_name_visible, user, v),
+            ),
+            brief="Toggle display name public/private",
+            help=visibility_help,
+            section="Self-reported",
         ),
         FieldSpec(
             key="location", hotkey="l", menu_text=menu_key("L", "ocation"), label="Location",
-            render=lambda d: (
-                f"{sanitize_text(d['location']) if d['location'] else '(not set)'} "
-                f"({'public' if d['location_visible'] else 'private'})"
-            ),
+            render=lambda d: sanitize_text(d["location"]) if d["location"] else "(not set)",
             prompt=_location_prompt,
             brief="Set your shown location",
             help=(
-                "Free-text location (city, region, whatever you want), shown publicly only "
-                "if you answer 'Show it publicly?' yes when you set it. Not validated or "
-                "verified -- purely self-reported."
+                "Free-text location (city, region, whatever you want), shown to other callers "
+                "only when its visibility below is public. Not validated or verified -- purely "
+                "self-reported."
             ),
+            section="Self-reported",
+        ),
+        FieldSpec(
+            key="location_visible", hotkey="o",
+            menu_text=menu_key("o", "cation visibility", prefix="L"), label="Location visibility",
+            render=_visibility_render("location_visible"),
+            prompt=live_choice_field(
+                "location_visible", [False, True],
+                persist=lambda lane, v: lane.run(set_location_visible, user, v),
+            ),
+            brief="Toggle location public/private",
+            help=visibility_help,
+            section="Self-reported",
         ),
         FieldSpec(
             key="birthdate", hotkey="a", menu_text=menu_key("A", "ge/birthdate"), label="Birthdate",
@@ -990,14 +1072,27 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
             help=(
                 "Used to compute your age, which some boards/areas/channels require a "
                 "minimum age to post or join. That age gate is checked against this value "
-                "even if you keep it private -- 'Show it publicly?' only controls whether "
+                "even if you keep it private -- the visibility below only controls whether "
                 "*other callers* can see your birthdate/age, not whether age gates apply."
             ),
+            section="Self-reported",
+        ),
+        FieldSpec(
+            key="birthdate_visible", hotkey="g",
+            menu_text=menu_key("g", "e visibility", prefix="A"), label="Age visibility",
+            render=_visibility_render("birthdate_visible"),
+            prompt=live_choice_field(
+                "birthdate_visible", [False, True],
+                persist=lambda lane, v: lane.run(set_birthdate_visible, user, v),
+            ),
+            brief="Toggle birthdate/age public/private",
+            help=visibility_help,
+            section="Self-reported",
         ),
         FieldSpec(
             key="verified_badge_visible", hotkey="v", menu_text=menu_key("V", "erified badge visibility"),
             label="Verified badge",
-            render=lambda d: "public" if d["verified_badge_visible"] else "private",
+            render=_visibility_render("verified_badge_visible"),
             prompt=live_choice_field(
                 "verified_badge_visible", [False, True],
                 persist=lambda lane, v: lane.run(set_verified_badge_visible, user, v),
@@ -1008,19 +1103,35 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
                 "callers, once a SysOp has actually verified something. Has no effect until "
                 "something is verified -- see 'Verified' at the top of this screen."
             ),
+            section="SysOp-verified",
         ),
         FieldSpec(
-            key="link_sharing", hotkey="r", menu_text=menu_key("R", "emote Link sharing"),
-            label="Link attestation sharing",
-            render=_shared_render,
-            prompt=_remote_attestation_prompt,
-            brief="Share attestations over Link",
+            key="age_attestation", hotkey="s", menu_text=menu_key("S", "hare age over Link"),
+            label="Share verified age over Link",
+            render=_link_share_render("age"),
+            prompt=_link_share_toggle("age"),
+            brief="Toggle sharing your verified age",
             help=(
-                "Whether your SysOp-verified age/name attestations are shared with linked "
-                "nodes over NetBBS Link, so a remote node's trust/vouch policy can see them "
-                "too. Off by default -- this node's own verification of you isn't shared "
-                "elsewhere unless you opt in."
+                "Whether your SysOp-verified age is shared with linked nodes over NetBBS "
+                "Link, so a remote node's trust/vouch policy can see it too. Off by default "
+                "-- this node's own verification of you isn't shared elsewhere unless you "
+                "opt in, and a fresh verification switches it off again."
             ),
+            section="SysOp-verified",
+        ),
+        FieldSpec(
+            key="name_attestation", hotkey="h", menu_text=menu_key("h", "are name over Link", prefix="S"),
+            label="Share verified name over Link",
+            render=_link_share_render("name"),
+            prompt=_link_share_toggle("name"),
+            brief="Toggle sharing your verified name",
+            help=(
+                "Whether your SysOp-verified real name is shared with linked nodes over "
+                "NetBBS Link, so a remote node's trust/vouch policy can see it too. Off by "
+                "default -- this node's own verification of you isn't shared elsewhere "
+                "unless you opt in, and a fresh verification switches it off again."
+            ),
+            section="SysOp-verified",
         ),
     ]
 
@@ -1038,36 +1149,6 @@ async def _identity_details_screen(session: Session, lane: DatabaseLane, user: U
         accent_color=accent,
         header_color=header,
     )
-
-
-async def _remote_attestation_visibility_screen(
-    session: Session, lane: DatabaseLane, user: User
-) -> None:
-    await session.write_line("Share which attestation with explicitly trusted remote nodes?")
-    await session.write_line(
-        action_bar([menu_key("A", "ge"), menu_key("N", "ame"), menu_key("B", "ack")], width=session.terminal_width)
-    )
-    await session.write("Choice: ")
-    attribute = {"a": "age", "n": "name"}.get((await session.read_key()).lower())
-    if attribute is None:
-        return
-    attestation = await lane.run(get_attestation, user, attribute)
-    if attestation is None:
-        await session.write_line(colored(f"No {attribute} attestation exists.", fg_color=ERROR_COLOR))
-        return
-    if attestation.link_visible:
-        await lane.run(set_attestation_link_visible, user, attribute, False)
-        await session.write_line(colored(f"{attribute.title()} attestation Link sharing disabled.", fg_color=SUCCESS_COLOR))
-        return
-    if await prompt_yes_no(
-        session,
-        f"Allow this verified {attribute} value to be sent over NetBBS Link?",
-        default=False,
-    ):
-        await lane.run(set_attestation_link_visible, user, attribute, True)
-        await session.write_line(colored(f"{attribute.title()} attestation Link sharing enabled.", fg_color=SUCCESS_COLOR))
-    else:
-        await session.write_line(colored("Sharing remains disabled.", fg_color=MUTED_COLOR))
 
 
 # -- identity attestation: the [V]erify main-menu screen (design doc §18) --
