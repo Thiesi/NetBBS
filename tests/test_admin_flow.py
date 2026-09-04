@@ -853,7 +853,7 @@ def test_audit_log_lists_actions_across_every_user_and_shows_full_detail(db, lan
         db, actor=sysop, action="promote", target_user_id=alice.id, detail="user_level 10 -> 50"
     )
 
-    session = FakeSession(["o", "a", "y", "0", "1", "b", "b"])
+    session = FakeSession(["o", "a", "0", "1", "b", "b"])
     _run(session, lane, sysop)
 
     text = _written_text(session)
@@ -882,7 +882,7 @@ def test_audit_log_timestamp_uses_the_display_format_not_raw_storage_precision(d
 
     record_action(db, actor=sysop, action="promote", detail="user_level 10 -> 50")
 
-    session = FakeSession(["o", "a", "y", "0", "1", "b", "b"])
+    session = FakeSession(["o", "a", "0", "1", "b", "b"])
     _run(session, lane, sysop)
     text = _written_text(session)
     assert ".Z" not in text and "Z  promote" not in text  # raw storage suffix never leaks through
@@ -6768,7 +6768,7 @@ def test_diagnostic_log_screen_lists_and_shows_entry_detail(db, lane, sysop):
     )
     db.connection.commit()
 
-    session = FakeSession(["s", "d", "y", "0", "1", "b", "b"])  # "y" keeps the newest-first default
+    session = FakeSession(["s", "d", "0", "1", "b", "b"])
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
     text = _written_text(session)
@@ -6778,8 +6778,9 @@ def test_diagnostic_log_screen_lists_and_shows_entry_detail(db, lane, sysop):
 
 
 def test_diagnostic_log_screen_order_toggle_reverses_display_order(db, lane, sysop):
-    """Issue #101a: declining "newest first?" shows the oldest entry
-    first instead -- the only other order the toggle offers."""
+    """Issue #101a's order toggle, now the picker's own [O]rder key
+    (issue #282): one press flips the newest-first default to oldest
+    first, with nothing asked on entry."""
     link_context = _link_context()
     for i in range(2):
         db.connection.execute(
@@ -6789,14 +6790,23 @@ def test_diagnostic_log_screen_order_toggle_reverses_display_order(db, lane, sys
         )
     db.connection.commit()
 
-    session = FakeSession(["s", "d", "n", "b", "b", "b"])  # "n" -> oldest first
+    session = FakeSession(["s", "d", "o", "b", "b", "b"])  # "o" -> oldest first
     asyncio.run(admin_menu(session, lane, sysop, link_context=link_context))
 
-    text = _written_text(session)
-    # The oldest entry ("failure 0") must appear before the newest
-    # ("failure 1") in the rendered list -- proves the toggle actually
-    # reordered the displayed rows, not just relabeled them.
-    assert text.index("failure 0") < text.index("failure 1")
+    text = _visible(_written_text(session))
+    assert "Show newest first?" not in text
+    # Newest-first on entry, nothing asked: the first render's rows
+    # (everything before its own "Sort: newest first" trailer) show the
+    # newest entry ("failure 1") first ...
+    first_trailer = text.index("Sort: newest first")
+    first_render = text[:first_trailer]
+    assert first_render.index("failure 1") < first_render.index("failure 0")
+    # ... then after [O]rder the redrawn rows show the oldest entry
+    # ("failure 0") first -- proves the toggle actually reordered the
+    # displayed rows, not just relabeled them.
+    second_render = text[first_trailer:]
+    assert "Sort: oldest first" in second_render
+    assert second_render.index("failure 0") < second_render.index("failure 1")
 
 
 def test_diagnostic_log_screen_colors_level_by_severity(db, lane, sysop):

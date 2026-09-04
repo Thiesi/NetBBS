@@ -4993,14 +4993,13 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
     take on an entry here, unlike `[O]utbox` -- purely "what has this
     node's own Link activity been complaining about lately."
 
-    Issue #101: order is a simple per-visit toggle (asked once, up
-    front, via the same `prompt_yes_no` convention used throughout this
-    module for a binary choice, and only once there's actually something
-    to reorder) rather than a live in-list hotkey -- `pick_item`'s own
-    key dispatch (N/P/S/G/B/digits) has no room for a caller-defined
-    extra command, and a full custom picker (the shape
-    `_pick_target_user`'s multi-mode sort/visibility toggle needed) would
-    be disproportionate for what is, here, a single boolean.
+    Issue #101 first made the order a per-visit toggle asked up front
+    ("Show newest first?") because `pick_item`'s own key dispatch had
+    no room for a caller command; issue #282 moved it onto the picker's
+    existing `[O]rder` hook instead (`on_sort` flips between newest-
+    and oldest-first, `sort_label` shows which is current), so the list
+    opens newest-first with nothing to answer, and the order can be
+    flipped in place as often as wanted.
     """
     await session.write_line(
         colored("\r\nDiagnostic log:", fg_color=await lane.run(effective_header_color_256), bold=True)
@@ -5010,17 +5009,22 @@ async def _diagnostic_log_screen(session: Session, lane: DatabaseLane, actor: Us
         await session.write_line(colored("Nothing logged yet.", fg_color=MUTED_COLOR))
         return
 
-    ascending = not await prompt_yes_no(session, "Show newest first?", default=True)
-    order_label = "oldest first" if ascending else "most recent first"
-    if ascending:
-        entries = list(reversed(entries))
+    newest_first = list(entries)
+    order = {"ascending": False}
+
+    async def _flip_order() -> list:
+        order["ascending"] = not order["ascending"]
+        return list(reversed(newest_first)) if order["ascending"] else list(newest_first)
+
     selected = await pick_item(
-        session, entries,
+        session, newest_first,
         name_of=lambda entry: f"{entry.created_at}  {entry.level}",
         stable_id_of=lambda entry: entry.id,
         description_of=lambda entry: sanitize_text(entry.message),
-        title=f"Diagnostic log ({order_label})",
+        title="Diagnostic log",
         empty_message="Nothing logged yet.",
+        on_sort=_flip_order,
+        sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
@@ -5045,8 +5049,9 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
     a SysOp investigating "did anything bad happen on this node
     recently" had no way to ask that without already knowing who or
     what to check). Mirrors `_diagnostic_log_screen`'s own shape
-    (bounded list, newest-first toggle, pick an entry for its full
-    detail) since both are "here's what's been logged lately" screens.
+    (bounded list, newest-first with the picker's own `[O]rder` flipping
+    it, pick an entry for its full detail) since both are "here's what's
+    been logged lately" screens.
     """
     await session.write_line(
         colored("\r\nAudit log:", fg_color=await lane.run(effective_header_color_256), bold=True)
@@ -5056,10 +5061,12 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
         await session.write_line(colored("Nothing logged yet.", fg_color=MUTED_COLOR))
         return
 
-    ascending = not await prompt_yes_no(session, "Show newest first?", default=True)
-    order_label = "oldest first" if ascending else "most recent first"
-    if ascending:
-        entries = list(reversed(entries))
+    newest_first = list(entries)
+    order = {"ascending": False}
+
+    async def _flip_order() -> list:
+        order["ascending"] = not order["ascending"]
+        return list(reversed(newest_first)) if order["ascending"] else list(newest_first)
 
     def _resolve_names(db: Database) -> dict[int, str]:
         ids = {entry.actor_user_id for entry in entries if entry.actor_user_id is not None}
@@ -5131,8 +5138,10 @@ async def _audit_log_screen(session: Session, lane: DatabaseLane, actor: User) -
         stable_id_of=lambda entry: entry.id,
         description_of=_row_description,
         name_segments_of=_row_name_segments,
-        title=f"Audit log ({order_label})",
+        title="Audit log",
         empty_message="Nothing logged yet.",
+        on_sort=_flip_order,
+        sort_label=lambda: "oldest first" if order["ascending"] else "newest first",
         redraw_in_place=await lane.run(redraw_in_place_enabled, actor),
         unicode_style=await lane.run(unicode_style_enabled, actor),
         collapsed=await lane.run(breadcrumb_collapsed_enabled, actor),
